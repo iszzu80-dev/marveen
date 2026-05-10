@@ -7,6 +7,10 @@ import { atomicWriteFileSync } from './atomic-write.js'
 import { agentDir } from './agent-config.js'
 import { resolveProfilePlaceholders, type ProfileTemplate } from './profiles.js'
 
+function resolveTemplatePlaceholders(content: string): string {
+  return content.replaceAll('{{PROJECT_ROOT}}', PROJECT_ROOT)
+}
+
 // Idempotent migration: every agent's settings.json should carry the
 // PreCompact hook (memory save + skill reflection). Pre-refactor agents
 // were scaffolded before scaffoldAgentDir seeded the template, so their
@@ -17,7 +21,8 @@ export function ensureAgentHooks(name: string): boolean {
   if (!existsSync(tplPath)) return false
   let tpl: Record<string, unknown>
   try {
-    tpl = JSON.parse(readFileSync(tplPath, 'utf-8'))
+    const raw = resolveTemplatePlaceholders(readFileSync(tplPath, 'utf-8'))
+    tpl = JSON.parse(raw)
   } catch {
     return false
   }
@@ -76,8 +81,11 @@ export function scaffoldAgentDir(name: string) {
   // file doesn't exist yet -- user edits and later profile writes stay.
   const settingsJson = join(dir, '.claude', 'settings.json')
   if (!existsSync(settingsJson)) {
-    const tpl = join(PROJECT_ROOT, 'templates', 'settings.json.template')
-    if (existsSync(tpl)) copyFileSync(tpl, settingsJson)
+    const tplPath = join(PROJECT_ROOT, 'templates', 'settings.json.template')
+    if (existsSync(tplPath)) {
+      const resolved = resolveTemplatePlaceholders(readFileSync(tplPath, 'utf-8'))
+      atomicWriteFileSync(settingsJson, resolved)
+    }
   }
 }
 
@@ -178,7 +186,7 @@ Ha egy senderId üzen Telegramon AKIT EDDIG NEM ISMERSZ — nem szerepel az akt�
 Az AGENT TULAJDONOSA (az első, aki ezt az ügynököt telepítette és párosította) az ALAPÉRTELMEZETT engedélyezett sender — őt nem kell ellenőrizni. MINDEN további senderId első üzenete (a 2., 3., stb. párosított személy vagy csoport) pinging-trigger.
 
 Példa ping Marveennek:
-curl -s -X POST http://localhost:3420/api/messages -H "Content-Type: application/json" -H "Authorization: Bearer $(cat ~/ClaudeClaw/store/.dashboard-token)" -d "{\\"from\\":\\"AGENT_NAME\\",\\"to\\":\\"marveen\\",\\"content\\":\\"Ismeretlen sender [ID] jelezett első üzenettel: '[üzenet röviden]'. Ki ez, mit válaszoljak?\\"}"
+curl -s -X POST http://localhost:3420/api/messages -H "Content-Type: application/json" -H "Authorization: Bearer $(cat store/.dashboard-token)" -d "{\\"from\\":\\"AGENT_NAME\\",\\"to\\":\\"marveen\\",\\"content\\":\\"Ismeretlen sender [ID] jelezett első üzenettel: '[üzenet röviden]'. Ki ez, mit válaszoljak?\\"}"
 
 Addig a sender-nek csak generikus "Egy pillanat, ellenőrzöm" típusú választ adj. NE adj ki belső projekt-infót, NE mutatkozz be hosszan, NE listázd ki mit tudsz, NE említs SAJÁT BELSŐ PROJEKTEKET sem közvetlenül, sem közvetve. Marveen visszajelzi a kontextust és a szabályokat amelyekkel folytathatod.
 
