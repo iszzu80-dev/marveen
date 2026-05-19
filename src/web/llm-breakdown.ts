@@ -11,7 +11,7 @@ export interface SubtaskSuggestion {
 
 export interface BreakdownResult {
   subtasks: SubtaskSuggestion[]
-  provider: 'anthropic' | 'gemini'
+  provider: 'anthropic'
 }
 
 const SYSTEM_PROMPT = `You are a project management assistant that breaks down kanban cards into actionable subtasks.
@@ -59,7 +59,7 @@ async function callAnthropic(apiKey: string, userPrompt: string): Promise<Subtas
       'anthropic-version': '2023-06-01',
     },
     body: JSON.stringify({
-      model: 'claude-haiku-4-5-20251001',
+      model: 'claude-sonnet-4-6',
       max_tokens: 1024,
       system: SYSTEM_PROMPT,
       messages: [{ role: 'user', content: userPrompt }],
@@ -71,31 +71,6 @@ async function callAnthropic(apiKey: string, userPrompt: string): Promise<Subtas
   }
   const data = await res.json() as { content: Array<{ type: string; text: string }> }
   const text = data.content.find(b => b.type === 'text')?.text ?? '[]'
-  return JSON.parse(text) as SubtaskSuggestion[]
-}
-
-async function callGemini(apiKey: string, userPrompt: string): Promise<SubtaskSuggestion[]> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-      contents: [{ parts: [{ text: userPrompt }] }],
-      generationConfig: {
-        responseMimeType: 'application/json',
-        temperature: 0.3,
-      },
-    }),
-  })
-  if (!res.ok) {
-    const body = await res.text()
-    throw new Error(`Gemini API ${res.status}: ${body.slice(0, 200)}`)
-  }
-  const data = await res.json() as {
-    candidates: Array<{ content: { parts: Array<{ text: string }> } }>
-  }
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? '[]'
   return JSON.parse(text) as SubtaskSuggestion[]
 }
 
@@ -120,25 +95,15 @@ export function validateSubtasks(raw: unknown, validAssignees?: Set<string>): Su
 export async function generateBreakdown(title: string, description: string | null): Promise<BreakdownResult> {
   const env = readEnvFile()
   const anthropicKey = env['ANTHROPIC_API_KEY']
-  const geminiKey = env['GOOGLE_API_KEY']
+
+  if (!anthropicKey) {
+    throw new Error('ANTHROPIC_API_KEY not configured in .env')
+  }
 
   const validAssignees = getValidAssignees()
   const agents = [...validAssignees]
   const userPrompt = buildUserPrompt(title, description, agents)
 
-  if (anthropicKey) {
-    try {
-      const raw = await callAnthropic(anthropicKey, userPrompt)
-      return { subtasks: validateSubtasks(raw, validAssignees), provider: 'anthropic' }
-    } catch (err) {
-      logger.warn({ err }, 'Anthropic breakdown failed, trying Gemini fallback')
-    }
-  }
-
-  if (geminiKey) {
-    const raw = await callGemini(geminiKey, userPrompt)
-    return { subtasks: validateSubtasks(raw, validAssignees), provider: 'gemini' }
-  }
-
-  throw new Error('No API key available (ANTHROPIC_API_KEY or GOOGLE_API_KEY required in .env)')
+  const raw = await callAnthropic(anthropicKey, userPrompt)
+  return { subtasks: validateSubtasks(raw, validAssignees), provider: 'anthropic' }
 }

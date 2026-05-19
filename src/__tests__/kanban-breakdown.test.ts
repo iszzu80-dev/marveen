@@ -183,6 +183,14 @@ describe('validateSubtasks (from llm-breakdown)', () => {
   })
 })
 
+describe('generateBreakdown missing key', () => {
+  it('throws when ANTHROPIC_API_KEY is not set', async () => {
+    const { generateBreakdown } = await import('../web/llm-breakdown.js')
+    await expect(generateBreakdown('Test card', 'Some description'))
+      .rejects.toThrow('ANTHROPIC_API_KEY not configured')
+  })
+})
+
 describe('breakdown route regex patterns', () => {
   it('matches breakdown path', () => {
     const re = /^\/api\/kanban\/([^/]+)\/breakdown$/
