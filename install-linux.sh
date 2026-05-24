@@ -20,10 +20,42 @@ NC='\033[0m'
 
 ok() { echo -e "  ${GREEN}✓${NC} $*"; }
 warn() { echo -e "  ${ORANGE}!${NC} $*"; }
+
+INSTALL_STEP="init"
+
+offer_claude_fallback() {
+  local step="$1" err_msg="$2"
+  if ! command -v claude &>/dev/null; then
+    return
+  fi
+  echo ""
+  echo -e "${ORANGE}Claude Code elerheto a gepen.${NC}"
+  local prompt="Marveen installer failed at step '${step}'. Error: ${err_msg}. OS: $(lsb_release -ds 2>/dev/null || cat /etc/os-release 2>/dev/null | head -1 || echo Linux). Node: $(node -v 2>/dev/null || echo missing). Dir: ${INSTALL_DIR}. Diagnose and suggest fixes."
+  if [ -t 0 ]; then
+    read -p "  Megnyissam Claude Code-ot a hiba diagnosztizalasahoz? (i/n) [n]: " OPEN_CLAUDE
+    OPEN_CLAUDE=${OPEN_CLAUDE:-n}
+    if [ "$OPEN_CLAUDE" = "i" ]; then
+      claude --prompt "$prompt"
+      return
+    fi
+  fi
+  echo -e "  ${DIM}Futtasd manualisan:${NC}"
+  echo -e "  ${DIM}claude --prompt \"$(echo "$prompt" | sed 's/"/\\"/g')\"${NC}"
+}
+
 fail() {
   echo -e "  ${RED}✗${NC} $*"
+  offer_claude_fallback "$INSTALL_STEP" "$*"
   exit 1
 }
+
+on_error() {
+  echo ""
+  echo -e "${RED}Varatlan hiba a(z) '${INSTALL_STEP}' lepesben (sor: $1).${NC}"
+  offer_claude_fallback "$INSTALL_STEP" "Unexpected error at line $1"
+  exit 1
+}
+trap 'on_error $LINENO' ERR
 
 # Ha a <marker> szoveg nem talalhato az rc fajlban, hozzaadja a <sort>.
 # Mindket fajlt kezeli (.bashrc, .zshrc) ha leteznek.
@@ -61,6 +93,7 @@ echo ""
 echo -e "${DIM}  Telepito wizard - Linux (Ubuntu/Debian)${NC}"
 echo ""
 
+INSTALL_STEP="prerequisites"
 # ─────────────────────────────────────────────
 # [1/7] Elofeltetelek
 # ─────────────────────────────────────────────
@@ -114,6 +147,7 @@ ok "python3 $(python3 --version | awk '{print $2}')"
 ok "tmux $(tmux -V | awk '{print $2}')"
 ok "unzip" $(unzip -v | awk 'NR==1 {print $2}')
 
+INSTALL_STEP="claude-bun-install"
 # ─────────────────────────────────────────────
 # [2/7] Claude Code + Bun telepitese
 # ─────────────────────────────────────────────
@@ -178,6 +212,7 @@ fi
 ensure_in_rc 'BUN_INSTALL' 'export BUN_INSTALL="$HOME/.bun"'
 ensure_in_rc '.bun/bin' 'export PATH="$BUN_INSTALL/bin:$PATH"'
 
+INSTALL_STEP="claude-auth"
 # ─────────────────────────────────────────────
 # [3/7] Claude bejelentkezes
 # ─────────────────────────────────────────────
@@ -285,6 +320,7 @@ except Exception:
 PYEOF
 echo -e "  ${GREEN}✓${NC} Claude Code first-run beallitas kesz"
 
+INSTALL_STEP="personal-info"
 # ─────────────────────────────────────────────
 # [4/7] Szemelyes beallitasok
 # ─────────────────────────────────────────────
@@ -354,6 +390,7 @@ if [ "$MAIN_AGENT_ID" != "marveen" ]; then
   echo -e "  ${DIM}Ügynök belső azonosító: ${MAIN_AGENT_ID}${NC}"
 fi
 
+INSTALL_STEP="npm-install"
 # ─────────────────────────────────────────────
 # [5/7] Fuggosegek telepitese + konfiguracic
 # ─────────────────────────────────────────────
@@ -367,6 +404,7 @@ if ! (npm ci --loglevel warn 2>/dev/null || npm install --loglevel warn); then
 fi
 ok "npm csomagok telepitve"
 
+INSTALL_STEP="typescript-build"
 echo -e "  TypeScript forditas..."
 if ! npm run build --loglevel warn; then
   fail "TypeScript forditas sikertelen. Ellenorizd a hibauzeneteket fentebb."
@@ -377,6 +415,7 @@ mkdir -p "$INSTALL_DIR/store"
 mkdir -p "$INSTALL_DIR/agents"
 ok "Konyvtarak letrehozva"
 
+INSTALL_STEP="configuration"
 # .env letrehozasa
 echo ""
 echo -e "${BOLD}  Konfiguracio letrehozasa...${NC}"
@@ -609,6 +648,7 @@ if [ -d "$SEED_SKILLS_DIR" ]; then
   fi
 fi
 
+INSTALL_STEP="ollama-whisper"
 # ─────────────────────────────────────────────
 # [6/7] Ollama + Whisper
 # ─────────────────────────────────────────────
@@ -694,6 +734,7 @@ else
   fi
 fi
 
+INSTALL_STEP="systemd"
 # ─────────────────────────────────────────────
 # [7/7] Automatikus inditas (systemd)
 # ─────────────────────────────────────────────

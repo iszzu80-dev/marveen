@@ -13,6 +13,44 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 INSTALL_DIR="$(cd "$(dirname "$0")" && pwd)"
+INSTALL_STEP="init"
+
+ok() { echo -e "  ${GREEN}✓${NC} $*"; }
+warn() { echo -e "  ${ORANGE}!${NC} $*"; }
+
+offer_claude_fallback() {
+  local step="$1" err_msg="$2"
+  if ! command -v claude &>/dev/null; then
+    return
+  fi
+  echo ""
+  echo -e "${ORANGE}Claude Code elérhető a gépen.${NC}"
+  local prompt="Marveen installer failed at step '${step}'. Error: ${err_msg}. OS: macOS $(sw_vers -productVersion 2>/dev/null || echo unknown). Node: $(node -v 2>/dev/null || echo missing). Dir: ${INSTALL_DIR}. Diagnose and suggest fixes."
+  if [ -t 0 ]; then
+    read -p "  Megnyissam Claude Code-ot a hiba diagnosztizálásához? (i/n) [n]: " OPEN_CLAUDE
+    OPEN_CLAUDE=${OPEN_CLAUDE:-n}
+    if [ "$OPEN_CLAUDE" = "i" ]; then
+      claude --prompt "$prompt"
+      return
+    fi
+  fi
+  echo -e "  ${DIM}Futtasd manuálisan:${NC}"
+  echo -e "  ${DIM}claude --prompt \"$(echo "$prompt" | sed 's/"/\\"/g')\"${NC}"
+}
+
+fail() {
+  echo -e "  ${RED}✗${NC} $*"
+  offer_claude_fallback "$INSTALL_STEP" "$*"
+  exit 1
+}
+
+on_error() {
+  echo ""
+  echo -e "${RED}Varatlan hiba a(z) '${INSTALL_STEP}' lepesben (sor: $1).${NC}"
+  offer_claude_fallback "$INSTALL_STEP" "Unexpected error at line $1"
+  exit 1
+}
+trap 'on_error $LINENO' ERR
 
 clear
 echo ""
@@ -24,6 +62,7 @@ echo -e "${DIM}  Telepito wizard - macOS${NC}"
 echo ""
 
 # Step 1: Check prerequisites
+INSTALL_STEP="prerequisites"
 echo -e "${BOLD}[1/7] Elofeltetelek ellenorzese...${NC}"
 
 check_cmd() {
@@ -65,8 +104,7 @@ if [ "$MISSING" -eq 1 ]; then
       eval "$(/usr/local/bin/brew shellenv)"
     fi
     if ! command -v brew &>/dev/null; then
-      echo -e "${RED}Homebrew telepítése sikertelen. Telepitsd manualisan (https://brew.sh) es futtasd ujra az installert.${NC}"
-      exit 1
+      fail "Homebrew telepitese sikertelen. Telepitsd manualisan (https://brew.sh) es futtasd ujra az installert."
     fi
   fi
   command -v node &>/dev/null || brew install node@22
@@ -99,12 +137,12 @@ if ! command -v claude &>/dev/null; then
   if [ "$INSTALL_CLAUDE" = "i" ]; then
     npm install -g @anthropic-ai/claude-code
   else
-    echo -e "${RED}Claude Code CLI szükséges a futtatáshoz.${NC}"
-    exit 1
+    fail "Claude Code CLI szukseges a futtatashoz. Telepitsd: npm install -g @anthropic-ai/claude-code"
   fi
 fi
 echo -e "  ${GREEN}✓${NC} Claude Code CLI"
 
+INSTALL_STEP="claude-setup"
 # Step 2: Claude Code first-run flags (BEFORE auth login)
 #
 # Reason: ha a `claude auth login` browser-flow megakad (timeout, Ctrl+C,
@@ -151,6 +189,7 @@ except Exception:
 PYEOF
 echo -e "  ${GREEN}✓${NC} Claude Code first-run flags pre-set"
 
+INSTALL_STEP="claude-auth"
 # Step 2b: Claude authentication (kept tolerant -- ha megakad, folytatjuk)
 echo ""
 echo -e "${BOLD}[2/7] Claude bejelentkezes${NC}"
@@ -170,6 +209,7 @@ if [ "$DO_AUTH" = "i" ]; then
 fi
 echo -e "  ${GREEN}✓${NC} Claude Code first-run beállítás kész"
 
+INSTALL_STEP="personal-info"
 # Step 3: Personal info
 echo ""
 echo -e "${BOLD}[3/7] Személyes beállítások${NC}"
@@ -178,6 +218,7 @@ read -p "  Mi a neved? " OWNER_NAME
 # It will be set automatically during the Telegram pairing flow.
 CHAT_ID="0"
 
+INSTALL_STEP="channel-setup"
 # Step 4: Channel provider setup
 echo ""
 echo -e "${BOLD}[4/7] Csatorna beállítás${NC}"
@@ -280,23 +321,24 @@ if [ "$MAIN_AGENT_ID" != "marveen" ]; then
 fi
 
 # Step 5: Install dependencies
+INSTALL_STEP="npm-install"
 echo ""
 echo -e "${BOLD}[5/7] Függőségek telepítése...${NC}"
 cd "$INSTALL_DIR"
 if ! npm install --loglevel warn; then
-  echo -e "  ${RED}✗${NC} npm install sikertelen. Ellenorizd a hibauzeneteket fentebb."
-  exit 1
+  fail "npm install sikertelen. Ellenorizd a hibauzeneteket fentebb."
 fi
-echo -e "  ${GREEN}✓${NC} npm csomagok telepítve"
+ok "npm csomagok telepítve"
 
 # Build TypeScript
+INSTALL_STEP="typescript-build"
 echo -e "  Forditas..."
 if ! npm run build --loglevel warn; then
-  echo -e "  ${RED}✗${NC} TypeScript forditas sikertelen. Ellenorizd a hibauzeneteket fentebb."
-  exit 1
+  fail "TypeScript forditas sikertelen. Ellenorizd a hibauzeneteket fentebb."
 fi
-echo -e "  ${GREEN}✓${NC} TypeScript leforditva"
+ok "TypeScript leforditva"
 
+INSTALL_STEP="configuration"
 # Step 6: Configuration
 echo ""
 echo -e "${BOLD}[6/7] Konfiguráció létrehozása...${NC}"
@@ -610,6 +652,7 @@ else
   echo -e "  ${DIM}Kihagyva. Később: ollama pull qwen3.5:9b${NC}"
 fi
 
+INSTALL_STEP="launchagent"
 # Step 7: LaunchAgent setup
 echo ""
 echo -e "${BOLD}[7/7] Automatikus indítás beállítása...${NC}"
