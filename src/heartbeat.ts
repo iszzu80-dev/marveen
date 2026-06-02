@@ -175,6 +175,47 @@ function ensureHeartbeatWorkerCwd(): void {
       const credPath = join(HEARTBEAT_CONFIG_DIR, '.credentials.json')
       writeFileSync(credPath, credentialsJson, { mode: 0o600 })
     }
+
+    // MCP-server bridge: Claude Code stores PROJECT-scoped MCP server
+    // configs in ~/.claude.json under the `projects[<cwd>]` map. The
+    // 2026-06-02 14:00 hb-fire ran with an empty .claude.json (Claude
+    // Code generated a fresh one in CLAUDE_CONFIG_DIR), so the sub-agent
+    // saw zero user-level MCPs -- Gmail OAuth lost, Calendar fell back to
+    // the wrong default account (Szabi 14:27 report).
+    //
+    // Copy the real ~/.claude.json into the isolated config dir AND
+    // duplicate the `projects[PROJECT_ROOT]` entry under
+    // `projects[HEARTBEAT_AGENT_CWD]` so the sub-agent inherits Marveen's
+    // server-gmail-autoauth-mcp + server-google-calendar-mcp config from
+    // its own cwd key. Channel-plugin isolation stays in force because
+    // enabledPlugins is governed by the CLAUDE_CONFIG_DIR settings.json
+    // (which we still write with all channel plugins = false), NOT by
+    // .claude.json.
+    try {
+      const homeClaudeJsonPath = join(homedir(), '.claude.json')
+      if (existsSync(homeClaudeJsonPath)) {
+        const raw = readFileSync(homeClaudeJsonPath, 'utf-8')
+        const parsed = JSON.parse(raw) as Record<string, unknown>
+        if (parsed && typeof parsed === 'object') {
+          const projects = (parsed as { projects?: Record<string, unknown> }).projects
+          if (projects && typeof projects === 'object' && projects[PROJECT_ROOT] && !projects[HEARTBEAT_AGENT_CWD]) {
+            projects[HEARTBEAT_AGENT_CWD] = projects[PROJECT_ROOT]
+          }
+          const heartbeatClaudeJsonPath = join(HEARTBEAT_CONFIG_DIR, '.claude.json')
+          writeFileSync(heartbeatClaudeJsonPath, JSON.stringify(parsed, null, 2) + '\n', { mode: 0o600 })
+        }
+      }
+    } catch (err) {
+      logger.warn({ err }, 'Heartbeat: failed to materialise .claude.json into isolated config dir (sub-agent will lack project MCPs)')
+    }
+
+    // Dashboard-hide sentinel: Szabi 2026-06-02 asked that this technical
+    // worker NOT show up as a real agent on the dashboard. listAgentNames()
+    // filters out any subdir of agents/ that contains this sentinel file.
+    const sentinelPath = join(HEARTBEAT_AGENT_CWD, '.hidden-from-dashboard')
+    if (!existsSync(sentinelPath)) {
+      writeFileSync(sentinelPath, '')
+    }
   } catch (err) {
     logger.warn({ err, cwd: HEARTBEAT_AGENT_CWD }, 'Heartbeat: failed to ensure isolated worker cwd, falling back to PROJECT_ROOT')
   }
