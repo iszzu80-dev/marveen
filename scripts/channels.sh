@@ -137,6 +137,12 @@ if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
   $TMUX set-environment -g ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY" 2>/dev/null || true
 fi
 
+# Hybrid channel-coordinator model: the native plugin stays the PRIMARY inbound
+# path (it always polls getUpdates here -- never outbound-only). The standalone
+# marveen-channel-coordinator only BACKFILLS while this session's plugin is
+# down, so there is never a second concurrent poller in steady state. Nothing to
+# set here: the coordinator gates itself on native liveness.
+
 # Tmux session indítás
 #
 # Always start a fresh conversation. --continue is intentionally omitted:

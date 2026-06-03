@@ -79,8 +79,12 @@ import {
   sendPromptToSession,
   capturePane,
 } from '../agent-process.js'
-import { readActiveModelFromProjectDir } from '../active-model.js'
+import { addDesiredAgent, removeDesiredAgent } from '../agent-desired-state.js'
+import { readActiveModelFromProjectDir, readContextTokensFromProjectDir } from '../active-model.js'
 import { detectPaneState } from '../../pane-state.js'
+import { detectReauthNeeded } from '../reauth-detect.js'
+import { readAutoRestartConfig, writeAutoRestartConfig } from '../auto-restart-store.js'
+import type { AutoRestartConfig } from '../../auto-restart.js'
 import { attemptChannelMcpReconnect } from '../channel-mcp-reconnect.js'
 import { getChannelHealth } from '../channel-health-monitor.js'
 import {
@@ -266,6 +270,14 @@ interface AgentSummary {
   running: boolean
   session?: string
   hasAvatar: boolean
+  autoRestart: AutoRestartConfig
+  /** Live context size in tokens (input+cache_read+cache_creation of the last
+   *  turn), or null when not running / no transcript yet. */
+  contextTokens: number | null
+  /** True when the running session's pane shows a login/401 auth failure --
+   *  drives the dashboard "reauth needed" badge + one-click /login button. */
+  needsReauth: boolean
+  reauthReason?: string
 }
 
 interface AgentDetail extends AgentSummary {
@@ -290,6 +302,10 @@ function getAgentSummary(name: string): AgentSummary {
   const proc = getAgentProcessInfo(name)
   const runningSince = proc.running ? getAgentRunningSince(name) : null
 
+  // Reauth badge: only meaningful for a running session (a stopped agent has
+  // no pane to inspect). One capture-pane per running agent on the list poll.
+  const reauth = proc.running ? detectReauthNeeded(capturePane(agentSessionName(name))) : { needsReauth: false }
+
   return {
     name,
     displayName: readAgentDisplayName(name),
@@ -307,6 +323,10 @@ function getAgentSummary(name: string): AgentSummary {
     running: proc.running,
     session: proc.session,
     hasAvatar: findAvatarForAgent(name) !== null,
+    autoRestart: readAutoRestartConfig(name),
+    contextTokens: proc.running ? readContextTokensFromProjectDir(dir, readAgentClaudeConfigDir(name) ?? undefined) : null,
+    needsReauth: reauth.needsReauth,
+    reauthReason: reauth.reason,
   }
 }
 
@@ -755,6 +775,22 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     return true
   }
 
+  // PUT /api/agents/:name/auto-restart -- set the per-agent auto-restart config.
+  // Accepts the main orchestrator id too (auto-restart applies to it as well).
+  // The body is normalized server-side, so a partial/garbled payload is coerced
+  // to a safe config rather than rejected.
+  const autoRestartMatch = path.match(/^\/api\/agents\/([^/]+)\/auto-restart$/)
+  if (autoRestartMatch && method === 'PUT') {
+    const name = decodeURIComponent(autoRestartMatch[1])
+    if (name !== MAIN_AGENT_ID && !existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
+    const body = await readBody(req)
+    let data: unknown
+    try { data = JSON.parse(body.toString()) } catch { json(res, { error: 'invalid JSON' }, 400); return true }
+    const saved = writeAutoRestartConfig(name, data)
+    json(res, { ok: true, autoRestart: saved })
+    return true
+  }
+
   if (path === '/api/team/graph' && method === 'GET') {
     const nodes: Array<{
       id: string
@@ -1157,6 +1193,9 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const name = decodeURIComponent(startMatch[1])
     if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
     const result = startAgentProcess(name)
+    // Record operator intent so the monitor keeps this agent up across shared
+    // tmux-server restarts / reboots (see agent-desired-state.ts).
+    if (result.ok || result.error === 'Agent is already running') addDesiredAgent(name)
     if (result.ok) { json(res, { ok: true }); return true }
     json(res, { error: result.error }, 400)
     return true
@@ -1166,6 +1205,8 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   if (stopMatch && method === 'POST') {
     const name = decodeURIComponent(stopMatch[1])
     const result = stopAgentProcess(name)
+    // Explicit stop clears intent so the monitor will not resurrect it.
+    removeDesiredAgent(name)
     if (result.ok) { json(res, { ok: true }); return true }
     json(res, { error: result.error }, 400)
     return true

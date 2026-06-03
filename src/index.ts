@@ -9,7 +9,7 @@ import {
 import { join } from 'node:path'
 import { execFileSync, execSync } from 'node:child_process'
 import type { Server as HttpServer } from 'node:http'
-import { STORE_DIR, PID_FILENAME, WEB_PORT, ALLOWED_CHAT_ID, MAIN_AGENT_ID } from './config.js'
+import { STORE_DIR, PID_FILENAME, WEB_PORT, ALLOWED_CHAT_ID, MAIN_AGENT_ID, RESPAWN_ENABLED } from './config.js'
 import { initDatabase } from './db.js'
 import { runDecaySweep, runDailyDigest } from './memory.js'
 import { initHeartbeat, stopHeartbeat } from './heartbeat.js'
@@ -439,15 +439,22 @@ async function main(): Promise<void> {
   // isolation-chain attempt). We keep the native module imported so other
   // code paths that reference its exports still compile, but we do NOT
   // start its scheduler.
-  ensureHeartbeatAgent()
-  logger.info({ agent: HEARTBEAT_AGENT_NAME }, 'Heartbeat agent scaffold ensured (channel-less, dashboard-hidden)')
-  const heartbeatStart = startAgentProcess(HEARTBEAT_AGENT_NAME)
-  if (heartbeatStart.ok) {
-    logger.info({ agent: HEARTBEAT_AGENT_NAME }, 'Heartbeat agent started')
-  } else if (heartbeatStart.error === 'Agent is already running') {
-    logger.info({ agent: HEARTBEAT_AGENT_NAME }, 'Heartbeat agent already running')
+  // Only the respawn host runs the heartbeat sub-agent. On a gated-off machine
+  // (e.g. a dev box) we must not spawn it -- otherwise it would fight the
+  // production host over the channel, exactly what RESPAWN_ENABLED prevents.
+  if (RESPAWN_ENABLED) {
+    ensureHeartbeatAgent()
+    logger.info({ agent: HEARTBEAT_AGENT_NAME }, 'Heartbeat agent scaffold ensured (channel-less, dashboard-hidden)')
+    const heartbeatStart = startAgentProcess(HEARTBEAT_AGENT_NAME)
+    if (heartbeatStart.ok) {
+      logger.info({ agent: HEARTBEAT_AGENT_NAME }, 'Heartbeat agent started')
+    } else if (heartbeatStart.error === 'Agent is already running') {
+      logger.info({ agent: HEARTBEAT_AGENT_NAME }, 'Heartbeat agent already running')
+    } else {
+      logger.warn({ error: heartbeatStart.error }, 'Heartbeat agent failed to start (legacy native heartbeat is NOT a fallback any more)')
+    }
   } else {
-    logger.warn({ error: heartbeatStart.error }, 'Heartbeat agent failed to start (legacy native heartbeat is NOT a fallback any more)')
+    logger.info('Heartbeat agent boot-start skipped (respawn disabled on this host)')
   }
 
   // Discord-only: ensure the operator-configured DISCORD_CHANNEL_ID is
