@@ -86,7 +86,8 @@ function switchPage(pageId) {
   if (pageId === 'vault') loadVaultPage()
   if (pageId === 'autonomy') loadAutonomy()
   if (pageId === 'updates') loadUpdates()
-  if (pageId === 'team') { loadTeamGraph(); loadTeamMessages(); populateMsgComposeTargets() }
+  if (pageId === 'team') { loadTeamGraph() }
+  if (pageId === 'messages') loadMessagesPage()
   if (pageId === 'tokenUsage') loadTokenUsage()
   if (pageId === 'ideas') loadIdeasPage()
 }
@@ -7126,56 +7127,6 @@ const MSG_STATUS_META = {
   done: { label: 'kész', cls: 'badge-active' },
   failed: { label: 'hibás', cls: 'badge-paused' },
 }
-let msgComposeReady = false
-
-async function loadTeamMessages() {
-  const list = document.getElementById('teamMessageList')
-  if (!list) return
-  const filter = document.getElementById('msgFilter')?.value || ''
-  try {
-    const q = filter ? `?status=${encodeURIComponent(filter)}&limit=50` : '?limit=50'
-    const res = await fetch('/api/messages' + q)
-    if (!res.ok) throw new Error('HTTP ' + res.status)
-    const msgs = await res.json()
-    if (!Array.isArray(msgs) || msgs.length === 0) {
-      list.innerHTML = '<p class="activity-empty">Nincs üzenet.</p>'
-      return
-    }
-    list.innerHTML = msgs.map(m => {
-      const meta = MSG_STATUS_META[m.status] || { label: m.status || '-', cls: 'badge' }
-      const when = m.created_at ? new Date(m.created_at * 1000).toLocaleString('hu-HU') : ''
-      return `<div class="team-message">
-        <div class="team-message-head">
-          <span class="team-message-route">${escapeHtml(m.from_agent)} &rarr; ${escapeHtml(m.to_agent)}</span>
-          <span class="badge ${meta.cls}">${escapeHtml(meta.label)}</span>
-        </div>
-        <div class="team-message-body">${escapeHtml(m.content)}</div>
-        <div class="team-message-time">${escapeHtml(when)}</div>
-      </div>`
-    }).join('')
-  } catch (e) {
-    list.innerHTML = '<p class="activity-empty">Nem sikerült betölteni az üzeneteket: ' + escapeHtml(String(e.message || e)) + '</p>'
-  }
-}
-
-async function populateMsgComposeTargets() {
-  const sel = document.getElementById('msgComposeTo')
-  if (!sel || msgComposeReady) return
-  try {
-    const res = await fetch('/api/schedules/agents')
-    if (!res.ok) return
-    const agents = await res.json()
-    sel.innerHTML = ''
-    for (const a of agents) {
-      const opt = document.createElement('option')
-      opt.value = a.name
-      opt.textContent = a.label || a.name
-      sel.appendChild(opt)
-    }
-    msgComposeReady = true
-  } catch { /* leave empty; send will warn */ }
-}
-
 async function resolveOwnerName() {
   try {
     const res = await fetch('/api/kanban/assignees')
@@ -7188,33 +7139,187 @@ async function resolveOwnerName() {
   return 'owner'
 }
 
-async function sendComposeMessage() {
-  const to = document.getElementById('msgComposeTo').value
-  const content = document.getElementById('msgComposeContent').value.trim()
-  if (!to) { showToast('Válassz címzett ügynököt'); return }
-  if (!content) { document.getElementById('msgComposeContent').focus(); return }
-  const btn = document.getElementById('msgComposeSend')
-  btn.disabled = true
+// === Messages page ===
+const KNOWN_AGENT_AVATARS = new Set(['boni','deeper','iris','marveen','samu','zara'])
+let chatSelectedAgent = null
+
+function chatAvatarHtml(agentName, size = 32) {
+  const lower = agentName.toLowerCase()
+  const hasAvatar = KNOWN_AGENT_AVATARS.has(lower)
+  if (hasAvatar) {
+    return `<img class="chat-avatar" src="/avatars/${lower}-ref.png" width="${size}" height="${size}" alt="${escapeHtml(agentName)}" onerror="this.style.display='none'">`
+  }
+  // Monogram fallback
+  const letter = agentName.charAt(0).toUpperCase()
+  const colors = ['#d97757','#00C2A8','#818cf8','#22c55e','#f59e0b','#ec4899']
+  const color = colors[agentName.split('').reduce((a,c)=>a+c.charCodeAt(0),0) % colors.length]
+  return `<div class="chat-avatar chat-avatar-mono" style="width:${size}px;height:${size}px;background:${color};font-size:${Math.round(size*0.4)}px">${letter}</div>`
+}
+
+async function loadMessagesPage() {
+  await loadChatAgentList()
+}
+
+async function loadChatAgentList() {
+  const sidebar = document.getElementById('chatAgentList')
+  if (!sidebar) return
+  try {
+    // Get all messages (limit 200) and group by other-party
+    const res = await fetch('/api/messages?limit=200')
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const msgs = await res.json()
+
+    // Group: for each message, the "other party" from marveen's perspective
+    const threads = new Map() // agentName -> {lastMsg, count, unread}
+    for (const m of msgs) {
+      const other = m.from_agent === 'marveen' ? m.to_agent : m.from_agent
+      if (!threads.has(other)) threads.set(other, { lastMsg: m, count: 0 })
+      threads.get(other).count++
+    }
+
+    if (threads.size === 0) {
+      sidebar.innerHTML = '<div class="chat-sidebar-empty">Nincs üzenet.</div>'
+      return
+    }
+
+    sidebar.innerHTML = Array.from(threads.entries()).map(([name, info]) => {
+      const m = info.lastMsg
+      const when = m.created_at ? new Date(m.created_at * 1000).toLocaleTimeString('hu-HU', {hour:'2-digit',minute:'2-digit'}) : ''
+      const preview = (m.content || '').replace(/\n/g,' ').slice(0, 60)
+      const isSelected = name === chatSelectedAgent ? ' selected' : ''
+      return `<div class="chat-agent-item${isSelected}" data-agent="${escapeHtml(name)}">
+        <div class="chat-agent-avatar">${chatAvatarHtml(name, 40)}</div>
+        <div class="chat-agent-info">
+          <div class="chat-agent-name">${escapeHtml(name)}</div>
+          <div class="chat-agent-preview">${escapeHtml(preview)}</div>
+        </div>
+        <div class="chat-agent-time">${when}</div>
+      </div>`
+    }).join('')
+
+    // Bind clicks
+    sidebar.querySelectorAll('.chat-agent-item').forEach(el => {
+      el.addEventListener('click', () => {
+        sidebar.querySelectorAll('.chat-agent-item').forEach(x => x.classList.remove('selected'))
+        el.classList.add('selected')
+        chatSelectedAgent = el.dataset.agent
+        loadChatThread(chatSelectedAgent)
+      })
+    })
+
+    // Auto-select first if none
+    if (!chatSelectedAgent) {
+      const first = sidebar.querySelector('.chat-agent-item')
+      if (first) first.click()
+    }
+  } catch (e) {
+    sidebar.innerHTML = `<div class="chat-sidebar-empty">Hiba: ${escapeHtml(String(e.message||e))}</div>`
+  }
+}
+
+async function loadChatThread(agentName) {
+  const panel = document.getElementById('chatThreadPanel')
+  if (!panel) return
+
+  panel.innerHTML = `
+    <div class="chat-thread-header">
+      ${chatAvatarHtml(agentName, 32)}
+      <span class="chat-thread-title">${escapeHtml(agentName)}</span>
+      <button class="btn-secondary btn-compact" style="margin-left:auto" onclick="loadChatThread('${escapeHtml(agentName)}')">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+      </button>
+    </div>
+    <div class="chat-bubbles" id="chatBubbles">Betöltés...</div>
+    <div class="chat-compose">
+      <div class="chat-compose-row">
+        <textarea id="chatComposeText" class="chat-compose-input" rows="2" placeholder="Üzenet ${escapeHtml(agentName)}-nek..."></textarea>
+        <button class="btn-primary chat-send-btn" id="chatSendBtn">Küldés</button>
+      </div>
+    </div>
+  `
+
+  document.getElementById('chatSendBtn')?.addEventListener('click', () => sendChatMessage(agentName))
+  document.getElementById('chatComposeText')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendChatMessage(agentName) }
+  })
+
+  try {
+    const res = await fetch(`/api/messages?agent=${encodeURIComponent(agentName)}&limit=50`)
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const msgs = await res.json()
+    renderChatBubbles(msgs, agentName)
+  } catch (e) {
+    const bubbles = document.getElementById('chatBubbles')
+    if (bubbles) bubbles.innerHTML = `<p class="activity-empty">Hiba: ${escapeHtml(String(e.message||e))}</p>`
+  }
+}
+
+function renderChatBubbles(msgs, agentName) {
+  const container = document.getElementById('chatBubbles')
+  if (!container) return
+
+  if (!msgs || msgs.length === 0) {
+    container.innerHTML = '<p class="activity-empty">Nincs üzenet ebben a szálban.</p>'
+    return
+  }
+
+  // Sort oldest first
+  const sorted = [...msgs].sort((a,b) => (a.created_at||0) - (b.created_at||0))
+
+  container.innerHTML = sorted.map(m => {
+    const isOutgoing = m.from_agent === 'marveen'
+    const senderName = isOutgoing ? 'marveen' : m.from_agent
+    const when = m.created_at ? new Date(m.created_at * 1000).toLocaleString('hu-HU', {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : ''
+    const statusMeta = MSG_STATUS_META[m.status] || { label: m.status || '', cls: 'badge' }
+
+    return `<div class="chat-bubble-row ${isOutgoing ? 'outgoing' : 'incoming'}">
+      ${!isOutgoing ? `<div class="chat-bubble-avatar">${chatAvatarHtml(senderName, 28)}</div>` : ''}
+      <div class="chat-bubble ${isOutgoing ? 'bubble-out' : 'bubble-in'}">
+        <div class="bubble-meta">
+          ${!isOutgoing ? `<span class="bubble-sender">${escapeHtml(senderName)}</span>` : ''}
+          <span class="bubble-id-chip">#${m.id}</span>
+          <span class="badge ${statusMeta.cls}" style="font-size:10px">${escapeHtml(statusMeta.label)}</span>
+        </div>
+        <div class="bubble-text">${escapeHtml(m.content || '')}</div>
+        <div class="bubble-time">${when}</div>
+      </div>
+      ${isOutgoing ? `<div class="chat-bubble-avatar">${chatAvatarHtml('marveen', 28)}</div>` : ''}
+    </div>`
+  }).join('')
+
+  // Scroll to bottom
+  container.scrollTop = container.scrollHeight
+}
+
+async function sendChatMessage(toAgent) {
+  const textarea = document.getElementById('chatComposeText')
+  const btn = document.getElementById('chatSendBtn')
+  const content = textarea?.value?.trim()
+  if (!content) { textarea?.focus(); return }
+  if (btn) btn.disabled = true
   try {
     const from = await resolveOwnerName()
     const res = await fetch('/api/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ from, to, content }),
+      body: JSON.stringify({ from, to: toAgent, content }),
     })
     if (!res.ok) { const err = await res.json(); throw new Error(err.error || 'Hiba') }
-    document.getElementById('msgComposeContent').value = ''
+    if (textarea) textarea.value = ''
     showToast('Üzenet elküldve')
-    loadTeamMessages()
+    await loadChatThread(toAgent)
+    await loadChatAgentList()
   } catch (e) {
     showToast('Hiba: ' + (e.message || e))
   } finally {
-    btn.disabled = false
+    if (btn) btn.disabled = false
   }
 }
 
-document.getElementById('msgFilter')?.addEventListener('change', loadTeamMessages)
-document.getElementById('msgComposeSend')?.addEventListener('click', sendComposeMessage)
+document.getElementById('chatRefreshBtn')?.addEventListener('click', () => {
+  loadChatAgentList()
+  if (chatSelectedAgent) loadChatThread(chatSelectedAgent)
+})
 
 function renderTeamEditor(agent, allAgents) {
   const team = agent.team || { role: 'member', reportsTo: null, delegatesTo: [], autoDelegation: false, trustFrom: [] }
