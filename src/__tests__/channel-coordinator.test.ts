@@ -15,6 +15,7 @@ import {
   neutralizeChannelTags,
   buildHandoffContent,
   transientBackoffMs,
+  inNative409Cooldown,
 } from '../channel-coordinator.js'
 import { decideNativeChannelDown } from '../channel-coordinator/liveness.js'
 
@@ -247,6 +248,29 @@ describe('backoff', () => {
       expect(d).toBeGreaterThanOrEqual(0)
       expect(d).toBeLessThanOrEqual(60_000) // cap
     }
+  })
+})
+
+// ---- 409 cooldown hysteresis --------------------------------------------
+// A 409 from getUpdates proves the native poller owns the slot, so we trust
+// native-is-up for a window and refuse to re-enter BACKFILLING even if the
+// liveness probe flaps to a false-negative. Breaks the 342x flap loop.
+describe('inNative409Cooldown', () => {
+  it('is_active_before_the_confirmed_until_deadline', () => {
+    expect(inNative409Cooldown(1_000_000, 999_999)).toBe(true)
+  })
+
+  it('expires_at_the_deadline', () => {
+    expect(inNative409Cooldown(1_000_000, 1_000_000)).toBe(false)
+  })
+
+  it('is_inactive_after_the_deadline', () => {
+    expect(inNative409Cooldown(1_000_000, 1_000_001)).toBe(false)
+  })
+
+  it('is_inactive_when_never_set (zero deadline)', () => {
+    // module default is 0; any positive now is past it -> no cooldown
+    expect(inNative409Cooldown(0, 12_345)).toBe(false)
   })
 })
 

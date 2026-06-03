@@ -67,6 +67,30 @@ const DOWN_DEBOUNCE = 2
 const BACKOFF_BASE_MS = 1000
 const BACKOFF_CAP_MS = 60_000
 
+// 409-cooldown: a 409 from getUpdates is AUTHORITATIVE proof the native poller
+// is alive (it holds the token's getUpdates slot), even when the liveness probe
+// reads DOWN -- which happens when the native bun poller is reparented (not a
+// child of the resolved claude pid) and bot.pid is absent, so hasChannelPluginAlive
+// false-negatives. Without this, the coordinator flapped ~every 13s (DOWN ->
+// backfill -> 409 -> yield -> DOWN ...), 342x in 2.3h, churning the token with
+// 409s (2026-06-03 incident). On a 409 we briefly refuse to re-enter BACKFILLING,
+// overriding the flaky probe. If the native genuinely goes down, getUpdates
+// SUCCEEDS (no 409) so no cooldown is set and normal backfill resumes.
+//
+// COOLDOWN LENGTH -- the real root-cause fix is the detached-claude reap
+// (channel-poller-reap.ts), which removes the orphan that made the probe
+// false-negative in the first place. With the probe accurate, this cooldown is
+// only belt-and-suspenders against a TRANSIENT blip (e.g. a process-tree race
+// while the native itself respawns). So we keep it SHORT: long enough to absorb
+// such a transient and break any residual flap (flap period was ~13.5s), but
+// short enough that a GENUINE native death is re-covered quickly. A long
+// suppression would be a self-inflicted coverage gap -- this coordinator exists
+// precisely to cover multi-minute native-down windows, and during the cooldown
+// it backfills nothing. (No message LOSS even at the upper bound: native's
+// recovery resumes getUpdates from its persisted offset, and Telegram retains
+// updates ~24h; the cooldown only delays low-latency coverage.)
+const NATIVE_409_COOLDOWN_MS = 90 * 1000
+
 // The coordinator keeps its OWN state dir, separate from the plugin's
 // ~/.claude/channels/telegram. Sharing it would let the plugin's orphan-PID
 // watchdog SIGTERM our process (it kills "stale" pids in its bot.pid).
@@ -77,6 +101,14 @@ type State = 'idle' | 'backfilling'
 let state: State = 'idle'
 let downStreak = 0
 let stopping = false
+// Epoch-ms until which a recent 409 has confirmed the native poller is up; while
+// in this window we suppress BACKFILLING regardless of the liveness probe.
+let nativeConfirmedUpUntil = 0
+
+// Pure: are we inside the post-409 "native confirmed up" cooldown?
+export function inNative409Cooldown(confirmedUpUntilMs: number, nowMs: number): boolean {
+  return nowMs < confirmedUpUntilMs
+}
 
 // ---- token --------------------------------------------------------------
 
@@ -276,8 +308,10 @@ async function runLoop(token: string): Promise<void> {
 
     if (state === 'idle') {
       // Watch the native channel. Debounce DOWN readings so a momentary blip
-      // (process-tree race, restart) does not flip us into polling.
-      const down = probeNativeChannelDown(SESSION, PROVIDER)
+      // (process-tree race, restart) does not flip us into polling. A recent
+      // 409 overrides a DOWN reading: it proved the native poller is up, so we
+      // distrust the (flaky) liveness probe until the cooldown expires.
+      const down = probeNativeChannelDown(SESSION, PROVIDER) && !inNative409Cooldown(nativeConfirmedUpUntil, Date.now())
       downStreak = down ? downStreak + 1 : 0
       if (downStreak >= DOWN_DEBOUNCE) {
         try {
@@ -291,9 +325,11 @@ async function runLoop(token: string): Promise<void> {
           logger.warn({ session: SESSION, seededHighWater: hw }, 'channel-coordinator: native channel DOWN, entering BACKFILLING')
         } catch (err) {
           if (err instanceof TelegramApiError && err.kind === 'fatal') { await fatalExit(err) }
-          // A 409 on the seed means the native is in fact polling -> stay idle.
+          // A 409 on the seed means the native is in fact polling -> stay idle
+          // AND start the cooldown so a flaky DOWN probe can't immediately retry.
           if (err instanceof TelegramApiError && err.kind === 'conflict') {
-            logger.info('channel-coordinator: high-water seed 409 -- native is polling, staying idle')
+            nativeConfirmedUpUntil = Date.now() + NATIVE_409_COOLDOWN_MS
+            logger.info({ cooldownMs: NATIVE_409_COOLDOWN_MS }, 'channel-coordinator: high-water seed 409 -- native is polling, cooldown set, staying idle')
             downStreak = 0
           } else {
             logger.warn({ err: err instanceof Error ? err.message : String(err) }, 'channel-coordinator: high-water seed failed, retrying next tick')
@@ -322,9 +358,12 @@ async function runLoop(token: string): Promise<void> {
       if (err instanceof TelegramApiError && err.kind === 'fatal') { await fatalExit(err) }
       // 409 during backfill = the native grabbed the slot back. This is the
       // EXPECTED end-of-window signal, not an error: yield immediately, no
-      // storm machinery, no tight loop.
+      // storm machinery, no tight loop. Set the cooldown -- the 409 proves the
+      // native is up, so suppress re-entry even if the liveness probe keeps
+      // reading DOWN (reparented poller / missing bot.pid false-negative).
       if (err instanceof TelegramApiError && err.kind === 'conflict') {
-        logger.info('channel-coordinator: 409 during backfill -- native owns the slot again, yielding (-> idle)')
+        nativeConfirmedUpUntil = Date.now() + NATIVE_409_COOLDOWN_MS
+        logger.info({ cooldownMs: NATIVE_409_COOLDOWN_MS }, 'channel-coordinator: 409 during backfill -- native owns the slot again, cooldown set, yielding (-> idle)')
         state = 'idle'; downStreak = 0
         continue
       }
