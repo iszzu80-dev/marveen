@@ -993,6 +993,13 @@ After=network.target
 
 [Service]
 Type=simple
+# KillMode=process: the dashboard spawns sub-agent tmux sessions (claude
+# processes) that live in this unit's cgroup. With the default
+# control-group kill mode, every dashboard restart/deploy would SIGKILL
+# the whole cgroup and take all running agents down with it (only the
+# main agent survives via its own channels unit). process mode kills only
+# the node main process on stop/restart, leaving the agents running.
+KillMode=process
 WorkingDirectory=$INSTALL_DIR
 ExecStart=$NODE_PATH $INSTALL_DIR/dist/index.js
 Restart=on-failure
