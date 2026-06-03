@@ -73,11 +73,23 @@ const BACKOFF_CAP_MS = 60_000
 // child of the resolved claude pid) and bot.pid is absent, so hasChannelPluginAlive
 // false-negatives. Without this, the coordinator flapped ~every 13s (DOWN ->
 // backfill -> 409 -> yield -> DOWN ...), 342x in 2.3h, churning the token with
-// 409s (2026-06-03 incident). On a 409 we trust the native is up for this
-// window and refuse to re-enter BACKFILLING, overriding the flaky probe. If the
-// native genuinely goes down, getUpdates SUCCEEDS (no 409) so no cooldown is set
-// and normal backfill resumes.
-const NATIVE_409_COOLDOWN_MS = 5 * 60 * 1000
+// 409s (2026-06-03 incident). On a 409 we briefly refuse to re-enter BACKFILLING,
+// overriding the flaky probe. If the native genuinely goes down, getUpdates
+// SUCCEEDS (no 409) so no cooldown is set and normal backfill resumes.
+//
+// COOLDOWN LENGTH -- the real root-cause fix is the detached-claude reap
+// (channel-poller-reap.ts), which removes the orphan that made the probe
+// false-negative in the first place. With the probe accurate, this cooldown is
+// only belt-and-suspenders against a TRANSIENT blip (e.g. a process-tree race
+// while the native itself respawns). So we keep it SHORT: long enough to absorb
+// such a transient and break any residual flap (flap period was ~13.5s), but
+// short enough that a GENUINE native death is re-covered quickly. A long
+// suppression would be a self-inflicted coverage gap -- this coordinator exists
+// precisely to cover multi-minute native-down windows, and during the cooldown
+// it backfills nothing. (No message LOSS even at the upper bound: native's
+// recovery resumes getUpdates from its persisted offset, and Telegram retains
+// updates ~24h; the cooldown only delays low-latency coverage.)
+const NATIVE_409_COOLDOWN_MS = 90 * 1000
 
 // The coordinator keeps its OWN state dir, separate from the plugin's
 // ~/.claude/channels/telegram. Sharing it would let the plugin's orphan-PID
