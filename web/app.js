@@ -1470,16 +1470,7 @@ function renderAgents() {
         <span class="process-indicator" title="Fut: a fő asszisztens mindig a --channels session-ben fut. Ez a kártya fixen Fut állapotot mutat, nincs per-ágens tmux-ellenőrzés."><span class="process-dot running"></span>Fut</span>
         <span class="tg-status" title="Online: a fő asszisztens csatornáját a --channels session kezeli, ezért fixen online (nincs külön token-ellenőrzés)."><span class="tg-dot connected"></span>Online</span>
       </div>
-      <div class="agent-card-actions">
-        <button class="btn-secondary btn-compact agent-terminal-btn" title="Terminal">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-          Terminal
-        </button>
-      </div>
     `
-    mCard.querySelector('.agent-terminal-btn')?.addEventListener('click', (e) => {
-      e.stopPropagation(); openTerminalModal('marveen')
-    })
     mCard.addEventListener('click', () => openMarveenDetail())
     agentsGrid.insertBefore(mCard, addBtn)
   }
