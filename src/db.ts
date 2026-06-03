@@ -29,20 +29,26 @@ function tightenDbPermissions(dbPath: string): void {
   }
 }
 
-export function initDatabase(): void {
-  mkdirSync(STORE_DIR, { recursive: true })
+// dbPathOverride is for tests: pass ':memory:' (or a temp path) to open an
+// isolated database instead of the real store/claudeclaw.db. The file-precreate
+// (openSync 'wx') and tightenDbPermissions steps are SKIPPED for an override --
+// they only make sense for a real on-disk store file, and ':memory:' has no path
+// to chmod. This keeps tests idempotent and stops them polluting the prod DB.
+export function initDatabase(dbPathOverride?: string): void {
+  const useOverride = dbPathOverride !== undefined
+  if (!useOverride) mkdirSync(STORE_DIR, { recursive: true })
   // Idempotent re-init: close a previous handle before opening a new one
   // so repeated calls (tests, hot-reload, recovery paths) do not leak
   // the old better-sqlite3 fd.
   if (db) {
     try { db.close() } catch { /* already closed */ }
   }
-  const dbPath = join(STORE_DIR, DB_FILENAME)
+  const dbPath = useOverride ? dbPathOverride! : join(STORE_DIR, DB_FILENAME)
   // Step 1: close the TOCTOU window on fresh installs. openSync with 'wx'
   // + 0o600 creates the file ONLY if it doesn't exist and sets the strict
   // mode atomically. better-sqlite3 then opens the existing file rather
-  // than creating one at the default umask.
-  if (!existsSync(dbPath)) {
+  // than creating one at the default umask. Skipped for a test override.
+  if (!useOverride && !existsSync(dbPath)) {
     try {
       closeSync(openSync(dbPath, 'wx', 0o600))
     } catch (err) {
@@ -56,7 +62,7 @@ export function initDatabase(): void {
   }
   db = new Database(dbPath)
   db.pragma('journal_mode = WAL')
-  tightenDbPermissions(dbPath)
+  if (!useOverride) tightenDbPermissions(dbPath)
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS sessions (

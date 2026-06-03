@@ -8,7 +8,8 @@ import {
 
 beforeAll(() => {
   process.env.NODE_ENV = 'test'
-  initDatabase()
+  // In-memory DB so the test is idempotent and never touches store/claudeclaw.db.
+  initDatabase(':memory:')
 })
 
 // Dashboard messages bug (2026-06-03): the old GET /api/messages?agent=X path
