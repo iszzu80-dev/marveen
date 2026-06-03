@@ -9374,7 +9374,7 @@ function openTerminalModal(agentName) {
   const term = new window.Terminal({
     theme: { background: '#1a1a1a', foreground: '#e8e4da' },
     fontFamily: 'JetBrains Mono, Menlo, monospace',
-    fontSize: 13,
+    fontSize: 12,
     cursorBlink: false,
     disableStdin: false,
     scrollback: 500,
@@ -9407,8 +9407,9 @@ function openTerminalModal(agentName) {
   sse.onerror = () => term.write('\r\n[stream hiba vagy leállva]\r\n')
   terminalSSE = sse
 
-  // Input: regular chars
+  // Input: regular chars only (escape sequences handled by onKey to avoid double-firing)
   term.onData(data => {
+    if (data.startsWith('\x1b') || data === '\r' || data === '\n' || data === '\x7f') return
     fetch(`/api/agents/${encodeURIComponent(agentName)}/keys`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ keys: data }),
