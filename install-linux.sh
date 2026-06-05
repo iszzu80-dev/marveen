@@ -35,12 +35,14 @@ offer_claude_fallback() {
     read -p "  Megnyissam Claude Code-ot a hiba diagnosztizalasahoz? (i/n) [n]: " OPEN_CLAUDE
     OPEN_CLAUDE=${OPEN_CLAUDE:-n}
     if [ "$OPEN_CLAUDE" = "i" ]; then
-      claude --prompt "$prompt"
+      # `claude` az inicialis promptot pozicionalis argumentumkent veszi.
+      # A regi `--prompt` flag mar nem letezik (unknown option '--prompt').
+      claude "$prompt"
       return
     fi
   fi
   echo -e "  ${DIM}Futtasd manualisan:${NC}"
-  echo -e "  ${DIM}claude --prompt \"$(echo "$prompt" | sed 's/"/\\"/g')\"${NC}"
+  echo -e "  ${DIM}claude \"$(echo "$prompt" | sed 's/"/\\"/g')\"${NC}"
 }
 
 fail() {
@@ -205,6 +207,33 @@ ok "pipx" $(pipx --version)
 ok "python3 $(python3 --version | awk '{print $2}')"
 ok "tmux $(tmux -V | awk '{print $2}')"
 ok "unzip" $(unzip -v | awk 'NR==1 {print $2}')
+
+# ─────────────────────────────────────────────
+# Repo bootstrap
+# ─────────────────────────────────────────────
+# Ha a scriptet onmagaban toltottek le (curl|bash, `bash install-linux.sh`
+# a home-bol, vagy a Windows/WSL wrapper /tmp-be menti), akkor a repo NINCS
+# a gepen -> a kesobbi `npm install`, template-masolas es dist build mind egy
+# package.json nelkuli mappaban futna (ENOENT: /root/package.json). Ilyenkor
+# klonozzuk a repot egy stabil helyre es ujrafuttatjuk magunkat onnan.
+# git itt mar garantaltan telepitve van (lasd fentebb a [1/7] lepest).
+if [ ! -f "$INSTALL_DIR/package.json" ]; then
+  warn "A telepito a repon kivulrol fut (nincs package.json itt: $INSTALL_DIR)."
+  TARGET_DIR="$HOME/marveen"
+  if [ -f "$TARGET_DIR/package.json" ]; then
+    ok "Meglevo checkout: $TARGET_DIR -- frissites..."
+    git -C "$TARGET_DIR" pull --ff-only 2>/dev/null || warn "git pull kihagyva (helyi valtozasok lehetnek)."
+  else
+    echo -e "  Repo klonozasa -> ${TARGET_DIR} ..."
+    # A repo default branch-e a develop, de a publikus telepito main-rol fut
+    # (a Windows/WSL wrapper is main-rol fetcheli a scriptet) -> pineljuk a main-t.
+    git clone --depth 1 --branch main https://github.com/Szotasz/marveen.git "$TARGET_DIR" \
+      || fail "git clone sikertelen: https://github.com/Szotasz/marveen.git (main branch)"
+    ok "Repo klonozva: $TARGET_DIR"
+  fi
+  echo -e "  Telepito ujrainditasa a checkoutbol..."
+  exec bash "$TARGET_DIR/install-linux.sh"
+fi
 
 INSTALL_STEP="claude-bun-install"
 # ─────────────────────────────────────────────
@@ -1052,27 +1081,55 @@ if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "${XDG_RUNTIME_DIR}/bus" ]; th
   export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
 fi
 
-# 3. daemon-reload + enable
-systemctl --user daemon-reload
-systemctl --user enable "${DASH_UNIT}" "${CHAN_UNIT}" "${MORN_UNIT}.timer" 2>/dev/null || true
-ok "systemd unitok generalva es engedelyezve"
-
-# 4. Inditás
-systemctl --user start "${DASH_UNIT}" "${CHAN_UNIT}" 2>/dev/null || true
-
-# 5. Allapotellenorzes (rovid varakozas utan)
-sleep 2
+# 3. Inditás -- systemd ha elerheto, kulonben kozvetlen nohup (mint start.sh).
+#    WSL / konteneren / user-session nelkuli VPS-en a `systemctl --user` NEM
+#    mukodik. A korabbi kod ott csak `... start ... || true`-t hivott fallback
+#    nelkul -> a Telegram bridge SOHA nem indult el, es a parositasnal a bot
+#    nemanak tunt ("hiaba irunk a botnak, nem jon semmi"). A direct-launch ag
+#    ezt zarja be; a systemd unitok a helyukon maradnak, ha kesobb elerheto.
 SVCFAIL=0
-for svc in "${DASH_UNIT}" "${CHAN_UNIT}"; do
-  if systemctl --user is-active --quiet "$svc" 2>/dev/null; then
-    ok "$svc fut"
+if pidof systemd >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1; then
+  systemctl --user daemon-reload
+  systemctl --user enable "${DASH_UNIT}" "${CHAN_UNIT}" "${MORN_UNIT}.timer" 2>/dev/null || true
+  ok "systemd unitok generalva es engedelyezve"
+  systemctl --user start "${DASH_UNIT}" "${CHAN_UNIT}" 2>/dev/null || true
+  sleep 2
+  for svc in "${DASH_UNIT}" "${CHAN_UNIT}"; do
+    if systemctl --user is-active --quiet "$svc" 2>/dev/null; then
+      ok "$svc fut"
+    else
+      echo -e "  ${RED}✗${NC} $svc nem indult el"
+      echo -e "  ${DIM}Log: journalctl --user -u $svc -n 20${NC}"
+      SVCFAIL=1
+    fi
+  done
+  [ "$SVCFAIL" -eq 0 ] && ok "Mindket szolgaltatas fut"
+else
+  warn "systemd --user nem elerheto (WSL / konteneren / VPS user-session nelkul) -- kozvetlen inditas."
+  mkdir -p "$INSTALL_DIR/store"
+  # Root VPS/container: claude refuses --dangerously-skip-permissions as uid 0,
+  # which would kill the agent tmux sessions the dashboard spawns. Opt into the
+  # sandbox escape hatch so first boot works (start.sh/channels.sh do the same).
+  [ "$(id -u)" = "0" ] && export IS_SANDBOX=1
+  nohup "$NODE_PATH" "$INSTALL_DIR/dist/index.js" >"$INSTALL_DIR/store/dashboard.log" 2>&1 &
+  echo $! >"$INSTALL_DIR/store/dashboard.pid"
+  nohup bash "$INSTALL_DIR/scripts/channels.sh" >"$INSTALL_DIR/store/channels.log" 2>&1 &
+  echo $! >"$INSTALL_DIR/store/channels.pid"
+  sleep 3
+  if kill -0 "$(cat "$INSTALL_DIR/store/dashboard.pid" 2>/dev/null)" 2>/dev/null; then
+    ok "Dashboard fut (nohup, pid $(cat "$INSTALL_DIR/store/dashboard.pid"))"
   else
-    echo -e "  ${RED}✗${NC} $svc nem indult el"
-    echo -e "  ${DIM}Log: journalctl --user -u $svc -n 20${NC}"
+    echo -e "  ${RED}✗${NC} Dashboard nem indult el -- log: $INSTALL_DIR/store/dashboard.log"
     SVCFAIL=1
   fi
-done
-[ "$SVCFAIL" -eq 0 ] && ok "Mindket szolgaltatas fut"
+  if kill -0 "$(cat "$INSTALL_DIR/store/channels.pid" 2>/dev/null)" 2>/dev/null; then
+    ok "Channels (Telegram bridge) fut (nohup, pid $(cat "$INSTALL_DIR/store/channels.pid"))"
+  else
+    echo -e "  ${RED}✗${NC} Channels nem indult el -- log: $INSTALL_DIR/store/channels.log"
+    SVCFAIL=1
+  fi
+  echo -e "  ${DIM}Ujrainditas kesobb: ./scripts/start.sh${NC}"
+fi
 
 # Ellenorzes
 sleep 3
