@@ -77,6 +77,13 @@ unset TMUX
 
 export PATH="/opt/homebrew/bin:$HOME/.bun/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 
+# Root VPS / container: Claude Code refuses --dangerously-skip-permissions when
+# running as uid 0 ("cannot be used with root/sudo privileges"), so the tmux
+# claude session below dies instantly and the bot never comes online. On a
+# root-only host there is no non-root user to drop to, so opt into the
+# documented sandbox escape hatch. Harmless for non-root (guarded by uid check).
+[ "$(id -u)" = "0" ] && export IS_SANDBOX=1
+
 CLAUDE="$(command -v claude)"
 TMUX="$(command -v tmux)"
 [ -z "$CLAUDE" ] && echo "ERROR: claude not found on PATH" >&2 && exit 1

@@ -1107,6 +1107,10 @@ if pidof systemd >/dev/null 2>&1 && systemctl --user status >/dev/null 2>&1; the
 else
   warn "systemd --user nem elerheto (WSL / konteneren / VPS user-session nelkul) -- kozvetlen inditas."
   mkdir -p "$INSTALL_DIR/store"
+  # Root VPS/container: claude refuses --dangerously-skip-permissions as uid 0,
+  # which would kill the agent tmux sessions the dashboard spawns. Opt into the
+  # sandbox escape hatch so first boot works (start.sh/channels.sh do the same).
+  [ "$(id -u)" = "0" ] && export IS_SANDBOX=1
   nohup "$NODE_PATH" "$INSTALL_DIR/dist/index.js" >"$INSTALL_DIR/store/dashboard.log" 2>&1 &
   echo $! >"$INSTALL_DIR/store/dashboard.pid"
   nohup bash "$INSTALL_DIR/scripts/channels.sh" >"$INSTALL_DIR/store/channels.log" 2>&1 &
