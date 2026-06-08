@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { PROJECT_ROOT, OWNER_NAME, MAIN_AGENT_ID, BOT_NAME, CHANNEL_PROVIDER } from '../config.js'
+import { PROJECT_ROOT, OWNER_NAME, MAIN_AGENT_ID, BOT_NAME, CHANNEL_PROVIDER, WEB_PORT } from '../config.js'
 import { channelStateDir } from '../channel-provider.js'
 import { runAgent } from '../agent.js'
 import { atomicWriteFileSync } from './atomic-write.js'
@@ -19,6 +19,7 @@ export function resolveTemplatePlaceholders(content: string): string {
     .replaceAll('{{MAIN_AGENT_ID}}', MAIN_AGENT_ID)
     .replaceAll('{{BOT_NAME}}', BOT_NAME)
     .replaceAll('{{OWNER_NAME}}', OWNER_NAME)
+    .replaceAll('{{WEB_PORT}}', String(WEB_PORT))
 }
 
 // Idempotent migration: every agent's settings.json should carry the
