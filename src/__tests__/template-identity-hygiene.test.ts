@@ -24,7 +24,7 @@ const TEMPLATE_DIRS = ['scheduled-tasks', 'templates', 'seed-scheduled-tasks', '
 
 // The identity placeholders the runtime seed (resolveTemplatePlaceholders)
 // substitutes, kept in sync with the install scripts' sed substitutions.
-const KNOWN_PLACEHOLDERS = ['PROJECT_ROOT', 'INSTALL_DIR', 'MAIN_AGENT_ID', 'BOT_NAME', 'OWNER_NAME']
+const KNOWN_PLACEHOLDERS = ['PROJECT_ROOT', 'INSTALL_DIR', 'MAIN_AGENT_ID', 'BOT_NAME', 'OWNER_NAME', 'WEB_PORT']
 
 // An absolute macOS/Linux home path embeds a real username. The trailing
 // slash is optional so a bare literal like "/Users/bob" at end of value is
