@@ -302,7 +302,19 @@ export async function runViaWorker(message: string, timeoutMs: number): Promise<
     for (const p of [outPath, donePath]) { try { rmSync(p, { force: true }) } catch { /* none */ } }
 
     clearWorkerContext()
-    sendPromptToSession(WORKER_SESSION, buildWorkerPrompt(message, outPath, donePath))
+    // sendPromptToSession verifies the submit (#303). On 'parked' the text was
+    // typed but the Enter never landed and the buffer was rolled back -- re-inject
+    // up to a small cap so one swallowed Enter does not cost the whole timeout.
+    const wp = buildWorkerPrompt(message, outPath, donePath)
+    let submitted = sendPromptToSession(WORKER_SESSION, wp) === 'submitted'
+    for (let i = 0; !submitted && i < 2; i++) {
+      logger.warn({ session: WORKER_SESSION, attempt: i + 1 }, 'agent-worker: prompt parked, re-injecting')
+      submitted = sendPromptToSession(WORKER_SESSION, wp) === 'submitted'
+    }
+    if (!submitted) {
+      logger.warn('agent-worker: prompt would not submit (parked) after retries; failing request')
+      return { text: null, error: 'worker prompt would not submit (parked)' }
+    }
 
     const start = Date.now()
     try {
