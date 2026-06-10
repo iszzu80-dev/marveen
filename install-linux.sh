@@ -928,21 +928,6 @@ ollama_pull() {
 # nomic-embed-text (szemantikus memoria, kotelozo)
 ollama_pull "nomic-embed-text" "~274 MB"
 
-# Opcionalis lokalis LLM
-echo ""
-echo -e "${DIM}  Az agensek lokalis modellel is futtathatoak (adatbiztonság, nincs felho).${NC}"
-echo -e "${DIM}  Elerheto modellek:${NC}"
-echo -e "${DIM}    1. qwen3.5:9b  (~6 GB)  - gyors, jo minoseg${NC}"
-echo -e "${DIM}    2. gemma4:31b (~19 GB) - legjobb lokalis minoseg${NC}"
-echo -e "${DIM}    3. Kihagyas   (kesobb: ollama pull <modell>)${NC}"
-read -p "  Melyiket toltse le? (1/2/3) [3]: " LLM_CHOICE
-LLM_CHOICE=${LLM_CHOICE:-3}
-case "$LLM_CHOICE" in
-1) ollama_pull "qwen3.5:9b" "~6 GB" ;;
-2) ollama_pull "gemma4:31b" "~19 GB" ;;
-*) echo -e "  ${DIM}Kihagyva. Kesobb: ollama pull qwen3.5:9b${NC}" ;;
-esac
-
 # --- Whisper (opcionalis) ---
 echo ""
 echo -e "  Whisper telepites (beszed -> szoveg leirat, opcionalis)..."
