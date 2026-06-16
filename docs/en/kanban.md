@@ -54,6 +54,55 @@ Key behaviours in the card editor on the web dashboard (`http://localhost:3420`)
 - **Delete subtask:** each subtask row shows a Delete button with a confirmation dialog. The button is hidden when the parent is `done`.
 - **Parent assignment editing:** in the subtask detail view (`planned` and `waiting` status only), a dropdown lets you change or detach the parent task. It appears in the card properties row, full-width.
 
+### Stuck cards -- visual indicators
+
+Every non-done card automatically shows a visual warning when it hasn't moved for a while:
+
+**Left-side coloured stripe** -- visible at a glance:
+
+| Colour | What it means |
+|--------|--------------|
+| Yellow | Unchanged for 1 day -- worth keeping an eye on |
+| Orange | Unchanged for 3 days -- will soon need attention |
+| Red (pulsing) | Unchanged for 1 week -- stuck, needs immediate attention |
+
+**Hourglass + day counter** (top-right corner) -- e.g. `⏳ 4d` = hasn't moved in 4 days. Hover to see the exact timestamp of the last change.
+
+Cards in `done` status show no indicators -- only active tasks age.
+
+**What to watch for:** if you see many red or orange cards on the board, check them in order: either the task is stuck (the agent didn't receive it or got blocked), or it should be closed or deleted.
+
+### Card aging -- technical details
+
+The dashboard computes an aging level for every non-done card based on the `updated_at` unix timestamp.
+
+**Three tiers, both indicators shown simultaneously:**
+
+| Tier | Default threshold | Left stripe + badge |
+|------|------------------|---------------------|
+| `warn` | 24 h | yellow |
+| `caution` | 72 h | orange |
+| `critical` | 168 h (7 days) | red, pulsing |
+
+**Display:**
+- Left 3px stripe (`border-left`) — overrides the priority border, uses `--card-aging-color` CSS custom property.
+- Top-right `⏳ Xd` / `⏳ Xh` badge — hover tooltip shows the exact last-modified timestamp.
+- At critical tier, a subtle CSS `animation: aging-pulse` plays on the badge.
+- `done` cards show no indicator.
+
+**Configuration (`.env`):**
+
+```
+KANBAN_AGING_WARN_H=24
+KANBAN_AGING_CAUTION_H=72
+KANBAN_AGING_CRITICAL_H=168
+KANBAN_AGING_WARN_COLOR=#c9a000
+KANBAN_AGING_CAUTION_COLOR=#d46b00
+KANBAN_AGING_CRITICAL_COLOR=#c53030
+```
+
+Config flow: `src/config.ts` → `/api/marveen` (`kanbanAging` key) → `window._marveen.kanbanAging` (frontend). The frontend is static (`web/app.js`, no build step) — a server HUP is sufficient to pick up threshold changes.
+
 ---
 
 ## Related documents
