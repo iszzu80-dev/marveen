@@ -83,8 +83,39 @@ export const SERVICE_ID = env['SERVICE_ID'] ?? MAIN_AGENT_ID
 export const WEB_PORT = parseInt(env['WEB_PORT'] ?? '3420', 10)
 
 export const WEB_HOST = env['WEB_HOST'] ?? '127.0.0.1'
+
+// Kanban card aging visual thresholds (hours since last update) and colours.
+// Override per-install via .env; defaults match the design spec (24/72/168h).
+export const KANBAN_AGING_WARN_H = parseInt(env['KANBAN_AGING_WARN_H'] ?? '24', 10)
+export const KANBAN_AGING_CAUTION_H = parseInt(env['KANBAN_AGING_CAUTION_H'] ?? '72', 10)
+export const KANBAN_AGING_CRITICAL_H = parseInt(env['KANBAN_AGING_CRITICAL_H'] ?? '168', 10)
+export const KANBAN_AGING_WARN_COLOR = env['KANBAN_AGING_WARN_COLOR'] ?? '#c9a000'
+export const KANBAN_AGING_CAUTION_COLOR = env['KANBAN_AGING_CAUTION_COLOR'] ?? '#d46b00'
+export const KANBAN_AGING_CRITICAL_COLOR = env['KANBAN_AGING_CRITICAL_COLOR'] ?? '#c53030'
+// Kanban WIP limits per column (0 = unlimited). Override via .env.
+export const KANBAN_WIP_PLANNED = parseInt(env['KANBAN_WIP_PLANNED'] ?? '0', 10)
+export const KANBAN_WIP_IN_PROGRESS = parseInt(env['KANBAN_WIP_IN_PROGRESS'] ?? '0', 10)
+export const KANBAN_WIP_WAITING = parseInt(env['KANBAN_WIP_WAITING'] ?? '0', 10)
+export const KANBAN_WIP_DONE = parseInt(env['KANBAN_WIP_DONE'] ?? '0', 10)
+// Utilisation % at which the badge turns yellow (default 80)
+export const KANBAN_WIP_WARN_PCT = parseInt(env['KANBAN_WIP_WARN_PCT'] ?? '80', 10)
+// Badge colours for each utilisation tier
+export const KANBAN_WIP_OK_COLOR = env['KANBAN_WIP_OK_COLOR'] ?? '#6b7280'
+export const KANBAN_WIP_WARN_COLOR = env['KANBAN_WIP_WARN_COLOR'] ?? '#c9a000'
+export const KANBAN_WIP_FULL_COLOR = env['KANBAN_WIP_FULL_COLOR'] ?? '#d46b00'
+export const KANBAN_WIP_OVER_COLOR = env['KANBAN_WIP_OVER_COLOR'] ?? '#c53030'
 export const DASHBOARD_PUBLIC_URL = env['DASHBOARD_PUBLIC_URL'] ?? ''
 export const OLLAMA_URL = env['OLLAMA_URL'] ?? 'http://localhost:11434'
+
+// Kanban swimlanes: which field the board groups by on first load. Invalid
+// values silently fall back to 'none' (flat board) rather than breaking the
+// grouping logic on the frontend.
+const rawKanbanSwimlaneDefaultGroup = env['KANBAN_SWIMLANE_DEFAULT_GROUP'] ?? 'none'
+export const KANBAN_SWIMLANE_DEFAULT_GROUP =
+  rawKanbanSwimlaneDefaultGroup === 'assignee' || rawKanbanSwimlaneDefaultGroup === 'priority'
+    ? rawKanbanSwimlaneDefaultGroup
+    : 'none'
+export const KANBAN_SWIMLANE_SEPARATOR_COLOR = env['KANBAN_SWIMLANE_SEPARATOR_COLOR'] ?? ''
 
 export const CHANNEL_PROVIDER: ChannelProviderType = getProviderType(env['CHANNEL_PROVIDER'])
 export const CHANNEL_TOKEN = getChannelToken(CHANNEL_PROVIDER, env)

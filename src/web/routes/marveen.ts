@@ -1,6 +1,13 @@
 import { existsSync, unlinkSync, copyFileSync, writeFileSync } from 'node:fs'
 import { join, extname } from 'node:path'
-import { PROJECT_ROOT, OWNER_NAME, BOT_NAME, BRAND_NAME, MAIN_AGENT_ID, CHANNEL_PROVIDER } from '../../config.js'
+import {
+  PROJECT_ROOT, OWNER_NAME, BOT_NAME, BRAND_NAME, MAIN_AGENT_ID, CHANNEL_PROVIDER,
+  KANBAN_AGING_WARN_H, KANBAN_AGING_CAUTION_H, KANBAN_AGING_CRITICAL_H,
+  KANBAN_AGING_WARN_COLOR, KANBAN_AGING_CAUTION_COLOR, KANBAN_AGING_CRITICAL_COLOR,
+  KANBAN_WIP_PLANNED, KANBAN_WIP_IN_PROGRESS, KANBAN_WIP_WAITING, KANBAN_WIP_DONE,
+  KANBAN_WIP_WARN_PCT, KANBAN_WIP_OK_COLOR, KANBAN_WIP_WARN_COLOR, KANBAN_WIP_FULL_COLOR, KANBAN_WIP_OVER_COLOR,
+  KANBAN_SWIMLANE_DEFAULT_GROUP, KANBAN_SWIMLANE_SEPARATOR_COLOR,
+} from '../../config.js'
 import { readMarveenTelegramConfig, readMarveenDiscordConfig, readMarveenSlackConfig, sendMarveenAvatarChange } from '../telegram.js'
 import { hardRestartMarveenChannels } from '../channel-monitor.js'
 import { readFileOr } from '../agent-config.js'
@@ -86,6 +93,31 @@ export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promi
       // CHANNEL_PROVIDER env-jébe pinneljük, hogy a UI ne hardcode-olt
       // 'telegram'-mal induljon.
       channelProvider: CHANNEL_PROVIDER,
+      kanbanAging: {
+        warnH: KANBAN_AGING_WARN_H,
+        cautionH: KANBAN_AGING_CAUTION_H,
+        criticalH: KANBAN_AGING_CRITICAL_H,
+        warnColor: KANBAN_AGING_WARN_COLOR,
+        cautionColor: KANBAN_AGING_CAUTION_COLOR,
+        criticalColor: KANBAN_AGING_CRITICAL_COLOR,
+      },
+      kanbanWip: {
+        limits: {
+          planned: KANBAN_WIP_PLANNED,
+          in_progress: KANBAN_WIP_IN_PROGRESS,
+          waiting: KANBAN_WIP_WAITING,
+          done: KANBAN_WIP_DONE,
+        },
+        warnPct: KANBAN_WIP_WARN_PCT,
+        okColor: KANBAN_WIP_OK_COLOR,
+        warnColor: KANBAN_WIP_WARN_COLOR,
+        fullColor: KANBAN_WIP_FULL_COLOR,
+        overColor: KANBAN_WIP_OVER_COLOR,
+      },
+      kanbanSwimlanes: {
+        defaultGroup: KANBAN_SWIMLANE_DEFAULT_GROUP,
+        separatorColor: KANBAN_SWIMLANE_SEPARATOR_COLOR || null,
+      },
     })
     return true
   }

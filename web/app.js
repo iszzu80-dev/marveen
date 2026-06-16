@@ -256,6 +256,15 @@ let kanbanProjectFilter = ''
 // Matched case-insensitively against card.assignee so a casing mismatch
 // (e.g. card "gorcsevivan" vs list "GorcsevIvan") still filters correctly.
 let kanbanAssigneeFilter = ''
+// Swimlane grouping: 'none' (flat board, default) | 'assignee' | 'priority'.
+// The initial value is pulled from window._marveen.kanbanSwimlanes.defaultGroup
+// the first time loadKanban() runs (see kanbanGroupByInitialized below), then
+// fully user-controlled via the toolbar dropdown.
+let kanbanGroupBy = 'none'
+let kanbanGroupByInitialized = false
+// Which swimlane keys (assignee name or priority value) are collapsed. Lives
+// for the page session only -- intentionally not persisted across reloads.
+const kanbanCollapsedLanes = new Set()
 
 const cardModalOverlay = document.getElementById('cardModalOverlay')
 const cardDetailOverlay = document.getElementById('cardDetailOverlay')
@@ -280,6 +289,31 @@ document.querySelectorAll('.kanban-add-btn').forEach((btn) => {
 
 async function loadKanban() {
   try {
+    // Ensure the marveen config (kanbanAging + kanbanWip + kanbanSwimlanes) is
+    // loaded even if the user opens the Kanban page first, before the Agents
+    // page populated it.
+    if (!window._marveen?.kanbanAging || !window._marveen?.kanbanWip || !window._marveen?.kanbanSwimlanes) {
+      try {
+        const mr = await fetch('/api/marveen')
+        if (mr.ok) window._marveen = { ...(window._marveen || {}), ...(await mr.json()) }
+      } catch { /* ignore -- aging/WIP/swimlanes just won't render until _marveen loads */ }
+    }
+    if (!kanbanGroupByInitialized) {
+      kanbanGroupByInitialized = true
+      // A user's own past choice (saved to localStorage) wins over the
+      // server-configured default, so switching the grouping sticks across
+      // page reloads instead of resetting every time.
+      const stored = localStorage.getItem('marveen.kanbanGroupBy')
+      const defaultGroup = window._marveen?.kanbanSwimlanes?.defaultGroup
+      const initialGroup = (stored === 'assignee' || stored === 'priority' || stored === 'none')
+        ? stored
+        : (defaultGroup === 'assignee' || defaultGroup === 'priority' ? defaultGroup : 'none')
+      if (initialGroup !== 'none') {
+        kanbanGroupBy = initialGroup
+        const sel = document.getElementById('kanbanGroupBy')
+        if (sel) sel.value = initialGroup
+      }
+    }
     const [cardsRes, assigneesRes, projectsRes] = await Promise.all([
       fetch('/api/kanban'),
       fetch('/api/kanban/assignees'),
@@ -296,6 +330,12 @@ async function loadKanban() {
     console.error('Kanban betöltés hiba:', err)
   }
 }
+
+document.getElementById('kanbanGroupBy').addEventListener('change', (e) => {
+  kanbanGroupBy = e.target.value
+  localStorage.setItem('marveen.kanbanGroupBy', kanbanGroupBy)
+  renderKanban()
+})
 
 function populateProjectFilter() {
   const sel = document.getElementById('kanbanProjectFilter')
@@ -445,27 +485,197 @@ function renderKanban() {
     if (grouped[card.status]) grouped[card.status].push(card)
   }
 
-  for (const [status, cards] of Object.entries(grouped)) {
-    const col = document.querySelector(`.kanban-col-body[data-status="${status}"]`)
-    col.innerHTML = ''
-    cards.sort((a, b) => a.sort_order - b.sort_order)
-
-    for (const card of cards) {
-      const embeddedChildren = kanbanCards
-        .filter(c => c.parent_id === card.id && embeddedSubtaskIds.has(c.id))
-        .sort((a, b) => a.sort_order - b.sort_order)
-      col.appendChild(createCardEl(card, embeddedChildren))
-    }
-  }
-
   // Update counts (embedded subtasks don't count as separate cards)
   document.getElementById('countPlanned').textContent = grouped.planned.length
   document.getElementById('countInProgress').textContent = grouped.in_progress.length
   document.getElementById('countWaiting').textContent = grouped.waiting.length
   document.getElementById('countDone').textContent = grouped.done.length
 
-  // Badge: only count subtasks that are in a different column (not embedded here)
+  const flatBoard = document.getElementById('kanbanBoard')
+  const swimlaneBoard = document.getElementById('kanbanSwimlaneBoard')
+
+  if (kanbanGroupBy === 'none') {
+    swimlaneBoard.hidden = true
+    flatBoard.hidden = false
+    for (const [status, cards] of Object.entries(grouped)) {
+      const col = document.querySelector(`#kanbanBoard .kanban-col-body[data-status="${status}"]`)
+      col.innerHTML = ''
+      cards.sort((a, b) => a.sort_order - b.sort_order)
+
+      for (const card of cards) {
+        const embeddedChildren = kanbanCards
+          .filter(c => c.parent_id === card.id && embeddedSubtaskIds.has(c.id))
+          .sort((a, b) => a.sort_order - b.sort_order)
+        col.appendChild(createCardEl(card, embeddedChildren))
+      }
+    }
+    // Badge: only count subtasks that are in a different column (not embedded here)
+    updateSubtaskBadges(embeddedSubtaskIds)
+  } else {
+    flatBoard.hidden = true
+    swimlaneBoard.hidden = false
+    renderSwimlaneBoard(grouped, embeddedSubtaskIds)
+  }
+}
+
+const KANBAN_STATUS_DEFS = [
+  { status: 'planned', title: 'Tervezett' },
+  { status: 'in_progress', title: 'Folyamatban' },
+  { status: 'waiting', title: 'Várakozik' },
+  { status: 'done', title: 'Kész' },
+]
+const KANBAN_PRIORITY_LABELS = { urgent: 'Sürgős', high: 'Magas', normal: 'Normál', low: 'Alacsony' }
+const KANBAN_PRIORITY_ORDER = ['urgent', 'high', 'normal', 'low']
+
+// Which swimlane a card belongs to under the current grouping. Returns a
+// stable string key: the matched assignee's canonical name, '__unassigned__'
+// for cards with no/unmatched assignee, or the priority value.
+function kanbanSwimlaneKeyFor(card) {
+  if (kanbanGroupBy === 'priority') return card.priority || 'normal'
+  const raw = card.assignee ? String(card.assignee).trim() : ''
+  if (!raw) return '__unassigned__'
+  const match = kanbanAssignees.find(a => a.name.toLowerCase() === raw.toLowerCase())
+  return match ? match.name : raw
+}
+
+// Display metadata (label + avatar styling) for a swimlane key.
+function kanbanSwimlaneMeta(key) {
+  if (kanbanGroupBy === 'priority') {
+    const label = KANBAN_PRIORITY_LABELS[key] || key
+    return { label, avatarClass: `priority-${key}`, avatarChar: '' }
+  }
+  if (key === '__unassigned__') return { label: 'Nincs hozzárendelve', avatarClass: 'unknown', avatarChar: '?' }
+  const match = kanbanAssignees.find(a => a.name === key)
+  const label = match ? (match.displayName || match.name) : key
+  return { label, avatarClass: match ? match.type : 'unknown', avatarChar: (label[0] || '?').toUpperCase() }
+}
+
+function renderSwimlaneBoard(grouped, embeddedSubtaskIds) {
+  const board = document.getElementById('kanbanSwimlaneBoard')
+  board.innerHTML = ''
+
+  const presentKeys = new Set()
+  for (const cards of Object.values(grouped)) {
+    for (const c of cards) presentKeys.add(kanbanSwimlaneKeyFor(c))
+  }
+
+  const canonicalOrder = kanbanGroupBy === 'priority'
+    ? KANBAN_PRIORITY_ORDER
+    : [...kanbanAssignees.map(a => a.name), '__unassigned__']
+  const orderedKeys = canonicalOrder.filter(k => presentKeys.has(k))
+  const leftoverKeys = [...presentKeys].filter(k => !orderedKeys.includes(k)).sort((a, b) => a.localeCompare(b))
+  const keys = [...orderedKeys, ...leftoverKeys]
+
+  const separatorColor = window._marveen?.kanbanSwimlanes?.separatorColor
+
+  for (const key of keys) {
+    const meta = kanbanSwimlaneMeta(key)
+    const collapsed = kanbanCollapsedLanes.has(key)
+
+    const laneCardsByStatus = {}
+    let totalCount = 0
+    for (const def of KANBAN_STATUS_DEFS) {
+      const cards = grouped[def.status].filter(c => kanbanSwimlaneKeyFor(c) === key)
+      laneCardsByStatus[def.status] = cards
+      totalCount += cards.length
+    }
+
+    const lane = document.createElement('div')
+    lane.className = 'kanban-swimlane' + (collapsed ? ' collapsed' : '')
+    lane.dataset.group = key
+    if (separatorColor) lane.style.borderBottomColor = separatorColor
+
+    const header = document.createElement('div')
+    header.className = 'kanban-swimlane-header'
+    header.innerHTML = `
+      <span class="kanban-swimlane-avatar ${meta.avatarClass}">${escapeHtml(meta.avatarChar)}</span>
+      <span class="kanban-swimlane-name">${escapeHtml(meta.label)}</span>
+      <span class="kanban-swimlane-count">${totalCount}</span>
+      <button class="kanban-swimlane-toggle" type="button" aria-expanded="${!collapsed}" title="${collapsed ? 'Kibontás' : 'Összecsukás'}">${collapsed ? '▶' : '▼'}</button>
+    `
+    header.querySelector('.kanban-swimlane-toggle').addEventListener('click', (e) => {
+      e.stopPropagation()
+      if (kanbanCollapsedLanes.has(key)) kanbanCollapsedLanes.delete(key)
+      else kanbanCollapsedLanes.add(key)
+      renderKanban()
+    })
+    lane.appendChild(header)
+
+    const body = document.createElement('div')
+    body.className = 'kanban-swimlane-body'
+    for (const def of KANBAN_STATUS_DEFS) {
+      const col = document.createElement('div')
+      col.className = 'kanban-swimlane-col'
+
+      const colHeader = document.createElement('div')
+      colHeader.className = 'kanban-swimlane-col-header'
+      colHeader.textContent = def.title
+
+      const colBody = document.createElement('div')
+      colBody.className = 'kanban-col-body kanban-swimlane-col-body'
+      colBody.dataset.status = def.status
+
+      const cards = laneCardsByStatus[def.status].sort((a, b) => a.sort_order - b.sort_order)
+      for (const card of cards) {
+        const embeddedChildren = kanbanCards
+          .filter(c => c.parent_id === card.id && embeddedSubtaskIds.has(c.id))
+          .sort((a, b) => a.sort_order - b.sort_order)
+        colBody.appendChild(createCardEl(card, embeddedChildren))
+      }
+      wireKanbanColumnDnD(colBody)
+
+      col.appendChild(colHeader)
+      col.appendChild(colBody)
+      body.appendChild(col)
+    }
+    lane.appendChild(body)
+    board.appendChild(lane)
+  }
+
   updateSubtaskBadges(embeddedSubtaskIds)
+
+  // WIP limit badges: update column-header count spans with "count/limit" when configured
+  updateWipBadges(grouped)
+}
+
+// Map column status keys to their count-span IDs
+const WIP_COUNT_IDS = {
+  planned: 'countPlanned',
+  in_progress: 'countInProgress',
+  waiting: 'countWaiting',
+  done: 'countDone',
+}
+
+function updateWipBadges(grouped) {
+  const cfg = window._marveen?.kanbanWip
+  for (const [status, cards] of Object.entries(grouped)) {
+    const el = document.getElementById(WIP_COUNT_IDS[status])
+    if (!el) continue
+    const limit = cfg?.limits?.[status] || 0
+    if (!limit) {
+      // No limit configured: restore plain count and clear WIP styling
+      el.textContent = cards.length
+      delete el.dataset.wip
+      el.style.color = ''
+      el.style.borderColor = ''
+      continue
+    }
+    const count = cards.length
+    el.textContent = `${count}/${limit}`
+    let state, color
+    if (count > limit) {
+      state = 'over'; color = cfg.overColor
+    } else if (count === limit) {
+      state = 'full'; color = cfg.fullColor
+    } else if ((count / limit) * 100 >= cfg.warnPct) {
+      state = 'warn'; color = cfg.warnColor
+    } else {
+      state = 'ok'; color = cfg.okColor
+    }
+    el.dataset.wip = state
+    el.style.color = color
+    el.style.borderColor = color
+  }
 }
 
 function updateSubtaskBadges(embeddedSubtaskIds) {
@@ -530,6 +740,31 @@ function createCardEl(card, embeddedChildren = []) {
     ? `<span class="kanban-card-seq" style="font-family:monospace;font-size:11px;color:var(--muted);margin-right:5px">#${card.seq}</span>`
     : ''
 
+  // Card aging: left stripe + top-right badge based on hours since last update.
+  // Skipped for done cards. Config thresholds and colours come from window._marveen.kanbanAging.
+  let agingBadgeHtml = ''
+  const agingCfg = window._marveen?.kanbanAging
+  if (agingCfg && card.updated_at && card.status !== 'done') {
+    const hoursOld = (Date.now() / 1000 - card.updated_at) / 3600
+    let agingLevel = null
+    let agingColor = null
+    if (hoursOld >= agingCfg.criticalH) {
+      agingLevel = 'critical'; agingColor = agingCfg.criticalColor
+    } else if (hoursOld >= agingCfg.cautionH) {
+      agingLevel = 'caution'; agingColor = agingCfg.cautionColor
+    } else if (hoursOld >= agingCfg.warnH) {
+      agingLevel = 'warn'; agingColor = agingCfg.warnColor
+    }
+    if (agingLevel) {
+      const days = Math.floor(hoursOld / 24)
+      const ageLabel = days >= 1 ? `${days}d` : `${Math.floor(hoursOld)}h`
+      const exact = new Date(card.updated_at * 1000).toLocaleString('hu-HU')
+      agingBadgeHtml = `<span class="kanban-card-aging-badge kanban-card-aging-${agingLevel}" style="color:${agingColor}" title="Utoljára módosítva: ${exact}">⏳ ${ageLabel}</span>`
+      el.dataset.aging = agingLevel
+      el.style.setProperty('--card-aging-color', agingColor)
+    }
+  }
+
   // Embedded subtasks: rendered as mini-cards below a divider when the subtask
   // shares the same column as this parent card.
   let embeddedHtml = ''
@@ -552,6 +787,7 @@ function createCardEl(card, embeddedChildren = []) {
     <div class="kanban-card-actions">
       <button class="card-breakdown-btn" title="AI szétbont" aria-label="AI szétbont">⚡</button>
     </div>
+    ${agingBadgeHtml}
     <div class="kanban-subtask-badge" style="display:none"></div>
     ${embeddedHtml}
   `
@@ -586,7 +822,11 @@ function createCardEl(card, embeddedChildren = []) {
 }
 
 // === Drag & Drop ===
-columns.forEach((col) => {
+// Wires the drag/drop handlers for one column-body element. Used for the
+// 4 static flat-board columns at load time, and again for every swimlane
+// column-body created dynamically in renderSwimlaneBoard (those elements
+// don't exist yet when this module first runs).
+function wireKanbanColumnDnD(col) {
   col.addEventListener('dragover', (e) => {
     e.preventDefault()
     e.dataTransfer.dropEffect = 'move'
@@ -629,7 +869,8 @@ columns.forEach((col) => {
       showToast('Hiba az áthelyezés során')
     }
   })
-})
+}
+columns.forEach(wireKanbanColumnDnD)
 
 function getDragAfterElement(col, y) {
   const els = [...col.querySelectorAll('.kanban-card:not(.dragging)')]
@@ -814,6 +1055,41 @@ async function showCardDetail(card) {
 
   document.getElementById('cardDetailDesc').textContent = card.description || ''
 
+  // #115: Parent meta row — dropdown replaces the old read-only display; shown only when editable
+  const parentMetaItem = document.getElementById('parentMetaItem')
+  const parentSelect = document.getElementById('parentSelect')
+  const canModifyParent = card.status === 'planned' || card.status === 'waiting'
+  if (card.parent_id && canModifyParent) {
+    // Build the parent-select dropdown: null option + all top-level non-done tasks
+    parentSelect.innerHTML = '<option value="">Üres (nincs szülő)</option>'
+    const availableParents = kanbanCards.filter(c =>
+      !c.parent_id && c.id !== card.id && !c.archived_at &&
+      (c.status === 'planned' || c.status === 'in_progress' || c.status === 'waiting')
+    )
+    for (const p of availableParents) {
+      const opt = document.createElement('option')
+      opt.value = p.id
+      const fullLabel = (p.seq != null ? `#${p.seq} ` : '') + p.title
+      opt.title = fullLabel
+      opt.textContent = fullLabel.length > 33 ? fullLabel.slice(0, 32) + '…' : fullLabel
+      if (p.id === card.parent_id) opt.selected = true
+      parentSelect.appendChild(opt)
+    }
+    parentSelect.onchange = async () => {
+      const newParentId = parentSelect.value || null
+      const label = newParentId ? 'Szülő módosítva' : 'Szülő leválasztva'
+      const r = await fetch(`/api/kanban/${encodeURIComponent(card.id)}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...card, parent_id: newParentId }),
+      })
+      if (r.ok) { card.parent_id = newParentId; showToast(label); loadKanban(); showCardDetail(card) }
+      else showToast('Hiba a mentésnél')
+    }
+    parentMetaItem.style.display = ''
+  } else {
+    parentMetaItem.style.display = 'none'
+  }
+
   // Load comments
   try {
     const res = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/comments`)
@@ -840,7 +1116,7 @@ async function showCardDetail(card) {
   // (Resolution of the #254/#241 overlap: keep #241's type-resolved default
   // over #254's hard-coded "Gábor" -- same deployment-agnostic reasoning.)
   const defaultCommentAuthor =
-    (kanbanAssignees.find((a) => a.type === 'bot') || kanbanAssignees[0] || {}).name || ''
+    (kanbanAssignees.find((a) => a.type === 'owner') || kanbanAssignees[0] || {}).name || ''
   populateAssigneeSelect('commentAuthor', defaultCommentAuthor)
 
   // Add comment
@@ -913,29 +1189,81 @@ async function showCardDetail(card) {
     }
   }
 
-  // Load children (subtasks)
+  // Load children (subtasks) — only top-level tasks have children (no subtask of subtask)
   try {
     const childRes = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/children`)
     const children = await childRes.json()
     const section = document.getElementById('cardChildrenSection')
     const list = document.getElementById('cardChildrenList')
-    if (children.length > 0) {
+    const addSubtaskSection = document.getElementById('cardAddSubtaskSection')
+    const isTask = !card.parent_id
+
+    // #113: Show add-subtask form only for top-level tasks that are not done
+    if (isTask && card.status !== 'done') {
+      addSubtaskSection.style.display = ''
+      const titleInput = document.getElementById('newSubtaskTitle')
+      titleInput.value = ''
+      document.getElementById('addSubtaskBtn').onclick = async () => {
+        const title = titleInput.value.trim()
+        if (!title) { titleInput.focus(); return }
+        try {
+          const r = await fetch('/api/kanban', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title, parent_id: card.id, status: card.status, priority: card.priority, project: card.project || null, assignee: null }),
+          })
+          if (!r.ok) { showToast('Hiba az alfeladat létrehozásakor'); return }
+          showToast('Alfeladat létrehozva')
+          loadKanban()
+          showCardDetail(card)
+        } catch { showToast('Hiba az alfeladat létrehozásakor') }
+      }
+    } else {
+      addSubtaskSection.style.display = 'none'
+    }
+
+    const statusLabelsShort = { planned: 'Tervezett', in_progress: 'Folyamatban', waiting: 'Vár', done: 'Kész' }
+    if (children.length > 0 || isTask) {
       section.style.display = ''
       list.innerHTML = ''
-      const statusLabelsShort = { planned: 'Tervezett', in_progress: 'Folyamatban', waiting: 'Vár', done: 'Kész' }
+      // #114: Delete button per subtask — only shown when the parent card is not done
+      const canDeleteChild = card.status !== 'done'
       for (const ch of children) {
         const div = document.createElement('div')
         div.className = 'comment-item'
-        div.style.cursor = 'pointer'
-        div.innerHTML = `<div><strong>${escapeHtml(ch.title)}</strong> <span style="color:var(--text-muted)">[${statusLabelsShort[ch.status] || ch.status}]</span></div>
-          <div style="font-size:0.85em; color:var(--text-muted)">${ch.assignee ? escapeHtml(ch.assignee) : ''} ${ch.description ? '-- ' + escapeHtml(ch.description).slice(0, 80) : ''}</div>`
-        div.onclick = () => { closeModal(cardDetailOverlay); showCardDetail(ch) }
+        div.style.cssText = 'cursor:pointer; display:flex; justify-content:space-between; align-items:center; gap:8px'
+        const info = document.createElement('div')
+        info.style.flex = '1'
+        info.innerHTML = `<div><strong>${escapeHtml(ch.title)}</strong> <span style="color:var(--text-muted)">[${statusLabelsShort[ch.status] || ch.status}]</span></div>
+          <div style="font-size:0.85em;color:var(--text-muted)">${ch.assignee ? escapeHtml(ch.assignee) : ''}${ch.description ? ' -- ' + escapeHtml(ch.description).slice(0, 80) : ''}</div>`
+        info.onclick = () => { closeModal(cardDetailOverlay); showCardDetail(ch) }
+        div.appendChild(info)
+        if (canDeleteChild) {
+          const delBtn = document.createElement('button')
+          delBtn.className = 'btn-danger btn-compact'
+          delBtn.style.flexShrink = '0'
+          delBtn.textContent = 'Törlés'
+          delBtn.onclick = async (e) => {
+            e.stopPropagation()
+            if (!confirm(`Biztosan törlöd az alfeladatot: "${ch.title}"?`)) return
+            try {
+              const r = await fetch(`/api/kanban/${encodeURIComponent(ch.id)}`, { method: 'DELETE' })
+              if (!r.ok) { showToast('Hiba a törlés során'); return }
+              showToast('Alfeladat törölve')
+              loadKanban()
+              showCardDetail(card)
+            } catch { showToast('Hiba a törlés során') }
+          }
+          div.appendChild(delBtn)
+        }
         list.appendChild(div)
       }
     } else {
       section.style.display = 'none'
     }
-  } catch { document.getElementById('cardChildrenSection').style.display = 'none' }
+  } catch {
+    document.getElementById('cardChildrenSection').style.display = 'none'
+    document.getElementById('cardAddSubtaskSection').style.display = 'none'
+  }
 
   // Breakdown button
   document.getElementById('cardBreakdownBtn').onclick = async () => {
@@ -3782,11 +4110,21 @@ function renderPendingRetries(container, rows) {
   })
 }
 
-function renderScheduleList(tasks) {
-  scheduleList.innerHTML = ''
-  scheduleEmpty.hidden = tasks.length > 0
+// Classify a cron expression into a cadence bucket for grouping the list.
+function cronCadence(cron) {
+  const p = (cron || '').trim().split(/\s+/)
+  if (p.length < 5) return { order: 5, label: 'Egyéb / egyedi' }
+  const [min, hour, , mon, dow] = p
+  const dom = p[2]
+  if (mon !== '*' || dom !== '*') return { order: 3, label: 'Havonta vagy ritkábban' }
+  if (dow !== '*' && dow !== '1-5') return { order: 2, label: 'Hetente' }
+  const multiDaily = /[\/,\-]/.test(min) || /[\/,\-]/.test(hour)
+  if (multiDaily) return { order: 0, label: 'Óránként vagy sűrűbben' }
+  return { order: 1, label: 'Naponta' }
+}
+const CADENCE_ICON = { 0: '⚡', 1: '☀️', 2: '📅', 3: '🗓️', 5: '•' }
 
-  for (const task of tasks) {
+function makeScheduleRow(task) {
     const row = document.createElement('div')
     row.className = 'schedule-row'
     const agent = scheduleAgents.find(a => a.name === task.agent) || { name: task.agent || mainAgentId(), avatar: '/api/marveen/avatar', label: task.agent || mainAgentId() }
@@ -3865,7 +4203,26 @@ function renderScheduleList(tasks) {
       openScheduleRunHistory(task.name)
     })
 
-    scheduleList.appendChild(row)
+    return row
+}
+
+function renderScheduleList(tasks) {
+  scheduleList.innerHTML = ''
+  scheduleEmpty.hidden = tasks.length > 0
+  const groups = new Map()
+  for (const task of tasks) {
+    const c = cronCadence(task.schedule)
+    if (!groups.has(c.order)) groups.set(c.order, { label: c.label, tasks: [] })
+    groups.get(c.order).tasks.push(task)
+  }
+  for (const o of [0, 1, 2, 3, 5]) {
+    const g = groups.get(o)
+    if (!g) continue
+    const header = document.createElement('div')
+    header.className = 'schedule-section'
+    header.innerHTML = `<span class="schedule-section-icon">${CADENCE_ICON[o] || ''}</span><span class="schedule-section-label">${escapeHtml(g.label)}</span><span class="schedule-section-count">${g.tasks.length}</span>`
+    scheduleList.appendChild(header)
+    for (const task of g.tasks) scheduleList.appendChild(makeScheduleRow(task))
   }
 }
 

@@ -185,6 +185,12 @@
         <select id="kanbanProjectFilter" style="font-size:13px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg);min-width:140px;">
           <option value="">Mind</option>
         </select>
+        <label for="kanbanGroupBy" style="font-size:13px;color:var(--muted);white-space:nowrap;margin-left:8px;">Csoportosítás:</label>
+        <select id="kanbanGroupBy" style="font-size:13px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--fg);min-width:140px;">
+          <option value="none">Nincs</option>
+          <option value="assignee">Felelős szerint</option>
+          <option value="priority">Prioritás szerint</option>
+        </select>
       </div>
       <div class="kanban-board" id="kanbanBoard">
         <div class="kanban-col" data-status="planned">
@@ -219,6 +225,7 @@
           <div class="kanban-col-body" data-status="done"></div>
         </div>
       </div>
+      <div class="kanban-board kanban-swimlane-board" id="kanbanSwimlaneBoard" hidden></div>
     </div>
 
     <!-- === Agents Page === -->
@@ -1226,6 +1233,10 @@
       </div>
       <div class="modal-body">
         <div class="card-detail-meta" id="cardDetailMeta"></div>
+        <div class="meta-item" id="parentMetaItem" style="display:none">
+          <span class="meta-label">Szülő</span>
+          <select id="parentSelect" style="flex:1; width:100%; padding:5px 8px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:13px" title="Szülő feladat módosítása"></select>
+        </div>
         <div class="card-detail-desc" id="cardDetailDesc"></div>
         <div class="card-detail-comments">
           <h4>Megjegyzések</h4>
@@ -1243,9 +1254,16 @@
             </div>
           </div>
         </div>
+
         <div id="cardChildrenSection" style="display:none; margin-top:12px">
           <h4>Subtask-ok</h4>
           <div id="cardChildrenList" class="comments-list"></div>
+          <div id="cardAddSubtaskSection" style="display:none; margin-top:8px">
+            <div class="form-row" style="gap:8px; align-items:center">
+              <input type="text" id="newSubtaskTitle" placeholder="Új alfeladat neve..." style="flex:1; padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:13px">
+              <button class="btn-primary btn-compact" id="addSubtaskBtn">Hozzáadás</button>
+            </div>
+          </div>
         </div>
         <div class="detail-actions" style="gap:8px">
           <button class="btn-secondary" id="cardBreakdownBtn">⚡ AI szétbont</button>
