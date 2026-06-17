@@ -100,6 +100,7 @@ function switchPage(pageId) {
   if (pageId === 'bgTasks') loadBgTasksPage()
   if (pageId === 'vault') loadVaultPage()
   if (pageId === 'autonomy') loadAutonomy()
+  if (pageId === 'settings') loadSettings()
   if (pageId === 'updates') loadUpdates()
   if (pageId === 'team') { loadTeamGraph() }
   if (pageId === 'messages') loadMessagesPage()
@@ -298,15 +299,16 @@ document.querySelectorAll('.kanban-add-btn').forEach((btn) => {
 
 async function loadKanban() {
   try {
-    // Ensure the marveen config (kanbanAging + kanbanWip + kanbanSwimlanes) is
-    // loaded even if the user opens the Kanban page first, before the Agents
-    // page populated it.
-    if (!window._marveen?.kanbanAging || !window._marveen?.kanbanWip || !window._marveen?.kanbanSwimlanes || !window._marveen?.kanbanLabels) {
-      try {
-        const mr = await fetch('/api/marveen')
-        if (mr.ok) window._marveen = { ...(window._marveen || {}), ...(await mr.json()) }
-      } catch { /* ignore -- aging/WIP/swimlanes just won't render until _marveen loads */ }
-    }
+    // Always refresh the marveen config so values changed on the Settings page
+    // (e.g. WIP limits) show up on the board on the next Kanban open, without a
+    // hard reload. The full /api/marveen payload includes kanbanAging, kanbanWip,
+    // kanbanSwimlanes and kanbanLabels, so the labels (from the labels feature)
+    // stay populated too. Also covers opening the Kanban page first, before the
+    // Agents page populated window._marveen.
+    try {
+      const mr = await fetch('/api/marveen')
+      if (mr.ok) window._marveen = { ...(window._marveen || {}), ...(await mr.json()) }
+    } catch { /* ignore -- aging/WIP/swimlanes/labels just won't render until _marveen loads */ }
     if (!kanbanGroupByInitialized) {
       kanbanGroupByInitialized = true
       // A user's own past choice (saved to localStorage) wins over the
@@ -598,6 +600,10 @@ function renderKanban() {
     }
     // Badge: only count subtasks that are in a different column (not embedded here)
     updateSubtaskBadges(embeddedSubtaskIds)
+    // WIP limit badges (count/limit + colour) on the flat board too -- previously
+    // only the swimlane view updated these, so a configured limit never showed
+    // on the default flat board.
+    updateWipBadges(grouped)
   } else {
     flatBoard.hidden = true
     swimlaneBoard.hidden = false
@@ -9352,6 +9358,166 @@ async function setAutonomyLevel(key, level) {
     loadAutonomy()
   } catch {
     showToast('Hiba a mentésnél')
+  }
+}
+
+// ============================================================
+// === Settings (central config registry) ===
+// ============================================================
+
+document.getElementById('refreshSettingsBtn').addEventListener('click', loadSettings)
+
+// Human label for a registry "module" -- falls back to a capitalised key for
+// any future module the UI doesn't know about yet, so adding a registry
+// entry never requires a frontend change just to render a sane heading.
+const SETTINGS_MODULE_LABELS = { kanban: 'Kanban' }
+function settingsModuleLabel(mod) {
+  return SETTINGS_MODULE_LABELS[mod] || (mod.charAt(0).toUpperCase() + mod.slice(1))
+}
+
+async function loadSettings() {
+  const container = document.getElementById('settingsGroups')
+  container.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Betöltés...</p>'
+
+  try {
+    const res = await fetch('/api/settings')
+    if (!res.ok) throw new Error('fetch failed')
+    const { settings } = await res.json()
+
+    const byModule = new Map()
+    for (const s of settings) {
+      if (!byModule.has(s.module)) byModule.set(s.module, [])
+      byModule.get(s.module).push(s)
+    }
+
+    container.innerHTML = ''
+    if (byModule.size === 0) {
+      container.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Nincs regisztrált beállítás.</p>'
+      return
+    }
+
+    for (const [mod, defs] of byModule) {
+      const group = document.createElement('div')
+      group.className = 'settings-group'
+
+      const heading = document.createElement('h3')
+      heading.className = 'settings-group-title'
+      heading.textContent = settingsModuleLabel(mod)
+      group.appendChild(heading)
+
+      for (const def of defs) {
+        group.appendChild(buildSettingRow(def))
+      }
+      container.appendChild(group)
+    }
+  } catch (err) {
+    container.innerHTML = '<p style="color:var(--danger)">Nem sikerült betölteni a beállításokat.</p>'
+  }
+}
+
+function buildSettingRow(def) {
+  const row = document.createElement('div')
+  row.className = 'settings-row'
+
+  const info = document.createElement('div')
+  info.className = 'settings-row-info'
+
+  const title = document.createElement('div')
+  title.className = 'settings-row-key'
+  title.textContent = def.key
+  if (def.requiresRestart) {
+    const badge = document.createElement('span')
+    badge.className = 'settings-restart-badge'
+    badge.textContent = 'Újraindítást igényel'
+    title.appendChild(badge)
+  }
+  info.appendChild(title)
+
+  const desc = document.createElement('div')
+  desc.className = 'settings-row-desc'
+  desc.textContent = def.description
+  info.appendChild(desc)
+
+  const meta = document.createElement('div')
+  meta.className = 'settings-row-meta'
+  const metaParts = []
+  if (Array.isArray(def.valueSet) && def.valueSet.length) metaParts.push('Lehetséges értékek: ' + def.valueSet.join(', '))
+  if (def.type === 'int' && (def.min !== undefined || def.max !== undefined)) {
+    metaParts.push('Tartomány: ' + (def.min ?? '–') + '–' + (def.max ?? '–'))
+  }
+  if (def.type === 'color') metaParts.push('Formátum: #rrggbb')
+  metaParts.push('Alapérték: ' + def.default)
+  meta.textContent = metaParts.join(' · ')
+  info.appendChild(meta)
+
+  row.appendChild(info)
+
+  const editor = document.createElement('div')
+  editor.className = 'settings-row-editor'
+
+  let valueInput
+  if (Array.isArray(def.valueSet) && def.valueSet.length) {
+    valueInput = document.createElement('select')
+    valueInput.className = 'input'
+    for (const opt of def.valueSet) {
+      const o = document.createElement('option')
+      o.value = opt
+      o.textContent = opt
+      valueInput.appendChild(o)
+    }
+    valueInput.value = String(def.value)
+  } else if (def.type === 'color') {
+    valueInput = document.createElement('input')
+    valueInput.type = 'color'
+    valueInput.className = 'settings-color-input'
+    valueInput.value = def.value
+  } else if (def.type === 'int') {
+    valueInput = document.createElement('input')
+    valueInput.type = 'number'
+    valueInput.className = 'input'
+    if (def.min !== undefined) valueInput.min = def.min
+    if (def.max !== undefined) valueInput.max = def.max
+    valueInput.value = def.value
+  } else {
+    valueInput = document.createElement('input')
+    valueInput.type = 'text'
+    valueInput.className = 'input'
+    valueInput.value = def.value
+  }
+  editor.appendChild(valueInput)
+
+  const saveBtn = document.createElement('button')
+  saveBtn.className = 'btn-primary btn-compact'
+  saveBtn.textContent = 'Mentés'
+  editor.appendChild(saveBtn)
+
+  const errorEl = document.createElement('div')
+  errorEl.className = 'settings-row-error'
+  editor.appendChild(errorEl)
+
+  saveBtn.addEventListener('click', () => saveSetting(def.key, valueInput, errorEl, def.type))
+
+  row.appendChild(editor)
+  return row
+}
+
+async function saveSetting(key, inputEl, errorEl, type) {
+  errorEl.textContent = ''
+  const raw = type === 'int' ? Number(inputEl.value) : inputEl.value
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, value: raw }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      errorEl.textContent = data.error || 'Hiba a mentésnél'
+      return
+    }
+    showToast(data.requiresRestart ? 'Mentve -- újraindítás szükséges az életbe lépéshez' : 'Mentve')
+  } catch {
+    errorEl.textContent = 'Hiba a mentésnél (kapcsolat)'
   }
 }
 
