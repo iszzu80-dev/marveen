@@ -47,13 +47,77 @@ function mainAgentId() {
       localStorage.removeItem(TOKEN_KEY)
       if (!window.__marveenAuthPrompted) {
         window.__marveenAuthPrompted = true
-        alert(
-          'Dashboard authentication failed. Check the server log for the access URL ' +
-          '(look for "Dashboard access URL" with ?token=...), then reopen it in your browser.'
-        )
+        // An installed (home-screen) PWA has its own localStorage, separate from
+        // Safari's, and the manifest start_url has no ?token=, so the very first
+        // standalone launch is token-less and 401s. There is no address bar to
+        // paste a ?token= URL into either. Offer an in-app paste field that
+        // writes the token to the app's own storage, then reload.
+        const isStandalone = window.navigator.standalone === true ||
+          (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)
+        if (isStandalone) {
+          showStandaloneTokenPrompt(TOKEN_KEY)
+        } else {
+          alert(
+            'Dashboard authentication failed. Check the server log for the access URL ' +
+            '(look for "Dashboard access URL" with ?token=...), then reopen it in your browser.'
+          )
+        }
       }
     }
     return res
+  }
+
+  // Full-screen, one-time token paste for installed PWAs (see the 401 handler).
+  // The user pastes the access token (the value after ?token= in the server's
+  // startup URL, or from the dashboard Settings / mobile-login QR); it is saved
+  // to this app instance's localStorage and the page reloads authenticated.
+  function showStandaloneTokenPrompt(tokenKey) {
+    if (document.getElementById('mv-token-overlay')) return
+    const overlay = document.createElement('div')
+    overlay.id = 'mv-token-overlay'
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:99999;background:#1a1917;color:#faf9f5;' +
+      'display:flex;align-items:center;justify-content:center;padding:24px;' +
+      'font-family:system-ui,-apple-system,sans-serif'
+    overlay.innerHTML =
+      '<div style="max-width:420px;width:100%;display:flex;flex-direction:column;gap:14px">' +
+        '<h2 style="margin:0;font-size:18px;text-align:center">Hozzáférés szükséges</h2>' +
+        '<p style="margin:0;font-size:14px;opacity:0.8;line-height:1.5;text-align:center">' +
+          'A home-screen app saját tárhelye még üres. Illeszd be a dashboard access tokent ' +
+          '(a szerver indítási URL-jében a ?token= utáni rész, vagy a Beállítások / mobil-login QR), ' +
+          'és elmentődik ehhez az apphoz.</p>' +
+        '<textarea id="mv-token-input" rows="3" autocapitalize="off" autocorrect="off" spellcheck="false" ' +
+          'style="width:100%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid #555;' +
+          'background:#0f0e0d;color:#faf9f5;font-size:14px;font-family:monospace" placeholder="token..."></textarea>' +
+        '<button id="mv-token-save" style="padding:12px;border:0;border-radius:8px;background:#10b981;' +
+          'color:#fff;font-size:15px;font-weight:600">Mentés és újratöltés</button>' +
+        '<div id="mv-token-err" style="color:#f87171;font-size:13px;min-height:16px;text-align:center"></div>' +
+      '</div>'
+    document.body.appendChild(overlay)
+    const input = overlay.querySelector('#mv-token-input')
+    const errEl = overlay.querySelector('#mv-token-err')
+    const submit = () => {
+      const raw = (input.value || '').trim()
+      if (!raw) { errEl.textContent = 'Üres token.'; return }
+      // Accept either a bare token or the whole startup URL (the user often
+      // pastes the full https://host/?token=... link). Pull just the token out.
+      let token = raw
+      if (raw.includes('token=')) {
+        let extracted = null
+        try { extracted = new URL(raw).searchParams.get('token') } catch { /* not a full URL */ }
+        if (!extracted) {
+          // covers ?token=, &token=, and the hash form (/#...?token=...)
+          const m = raw.match(/[?&#]token=([^&#\s]+)/)
+          if (m) extracted = m[1]
+        }
+        if (extracted) { try { token = decodeURIComponent(extracted) } catch { token = extracted } }
+      }
+      token = token.trim()
+      if (!token) { errEl.textContent = 'Üres token.'; return }
+      localStorage.setItem(tokenKey, token)
+      window.location.reload()
+    }
+    overlay.querySelector('#mv-token-save').addEventListener('click', submit)
+    setTimeout(() => input.focus(), 50)
   }
 })()
 
@@ -76,7 +140,14 @@ themeToggle.addEventListener('click', () => {
 const navLinks = document.querySelectorAll('.sb-link[data-page], .nav-link[data-page]')
 const pages = document.querySelectorAll('.page')
 
+function confirmSettingsLeave() {
+  if (settingsDirty.size === 0) return true
+  return window.confirm('Nem mentett beállítások maradnak. Biztosan el akarsz navigálni?')
+}
+
 function switchPage(pageId) {
+  // Guard unsaved settings before leaving the settings page
+  if (!document.getElementById('settingsPage').hidden && pageId !== 'settings' && !confirmSettingsLeave()) return
   pages.forEach((p) => (p.hidden = p.id !== pageId + 'Page'))
   navLinks.forEach((l) => l.classList.toggle('active', l.dataset.page === pageId))
   // Kanban needs full-width layout (overrides main's max-width: 1200px)
@@ -100,11 +171,14 @@ function switchPage(pageId) {
   if (pageId === 'bgTasks') loadBgTasksPage()
   if (pageId === 'vault') loadVaultPage()
   if (pageId === 'autonomy') loadAutonomy()
+  if (pageId === 'settings') loadSettings()
   if (pageId === 'updates') loadUpdates()
   if (pageId === 'team') { loadTeamGraph() }
   if (pageId === 'messages') loadMessagesPage()
   if (pageId === 'tokenUsage') loadTokenUsage()
   if (pageId === 'ideas') loadIdeasPage()
+  if (pageId === 'archived') loadArchivedPage()
+  if (pageId === 'naplo') loadNaplo()
 }
 
 // Mobile off-canvas sidebar toggle. No-op visual effect on desktop (the
@@ -250,6 +324,15 @@ function renderActivity(entries) {
 let kanbanCards = []
 let kanbanAssignees = []
 let kanbanProjects = []
+// Label registry (id/name/color), independent of which cards currently carry
+// which labels -- card.labels (embedded by GET /api/kanban) holds that link.
+let kanbanAllLabels = []
+// Active label-filter ids -- the quick-filter chip row AND the per-card
+// footer label pills both toggle this same set (two entry points, one
+// filter dimension). OR-combined within itself (any active label matches),
+// AND-combined with the existing project/assignee filters. Persisted in
+// localStorage alongside the swimlane groupBy choice.
+let kanbanLabelFilter = new Set()
 let kanbanProjectFilter = ''
 // Assignee filter for the kanban board. '' = show all. Set via the
 // assignee dropdown / "Csak Gábor" toggle injected by setupAssigneeFilter().
@@ -289,15 +372,16 @@ document.querySelectorAll('.kanban-add-btn').forEach((btn) => {
 
 async function loadKanban() {
   try {
-    // Ensure the marveen config (kanbanAging + kanbanWip + kanbanSwimlanes) is
-    // loaded even if the user opens the Kanban page first, before the Agents
-    // page populated it.
-    if (!window._marveen?.kanbanAging || !window._marveen?.kanbanWip || !window._marveen?.kanbanSwimlanes) {
-      try {
-        const mr = await fetch('/api/marveen')
-        if (mr.ok) window._marveen = { ...(window._marveen || {}), ...(await mr.json()) }
-      } catch { /* ignore -- aging/WIP/swimlanes just won't render until _marveen loads */ }
-    }
+    // Always refresh the marveen config so values changed on the Settings page
+    // (e.g. WIP limits) show up on the board on the next Kanban open, without a
+    // hard reload. The full /api/marveen payload includes kanbanAging, kanbanWip,
+    // kanbanSwimlanes and kanbanLabels, so the labels (from the labels feature)
+    // stay populated too. Also covers opening the Kanban page first, before the
+    // Agents page populated window._marveen.
+    try {
+      const mr = await fetch('/api/marveen')
+      if (mr.ok) window._marveen = { ...(window._marveen || {}), ...(await mr.json()) }
+    } catch { /* ignore -- aging/WIP/swimlanes/labels just won't render until _marveen loads */ }
     if (!kanbanGroupByInitialized) {
       kanbanGroupByInitialized = true
       // A user's own past choice (saved to localStorage) wins over the
@@ -313,15 +397,23 @@ async function loadKanban() {
         const sel = document.getElementById('kanbanGroupBy')
         if (sel) sel.value = initialGroup
       }
+      // Active label-filter selection, restored the same way as the groupBy
+      // choice -- a fresh page load should not lose the filters set up.
+      try {
+        const storedLabels = JSON.parse(localStorage.getItem('marveen.kanbanLabelFilter') || '[]')
+        if (Array.isArray(storedLabels)) kanbanLabelFilter = new Set(storedLabels)
+      } catch { /* ignore malformed storage */ }
     }
-    const [cardsRes, assigneesRes, projectsRes] = await Promise.all([
+    const [cardsRes, assigneesRes, projectsRes, labelsRes] = await Promise.all([
       fetch('/api/kanban'),
       fetch('/api/kanban/assignees'),
       fetch('/api/kanban-projects'),
+      fetch('/api/kanban/labels'),
     ])
     kanbanCards = await cardsRes.json()
     kanbanAssignees = await assigneesRes.json()
     kanbanProjects = await projectsRes.json()
+    kanbanAllLabels = await labelsRes.json()
     populateProjectFilter()
     populateProjectSuggestions()
     setupAssigneeFilter()
@@ -454,15 +546,85 @@ function setupAssigneeFilter() {
   syncOwnerFilterBtn()
 }
 
+// Project + assignee + label filters, independent of the priority quick-filter
+// Project + assignee filters only -- the baseline the label quick-filter
+// chip counts are computed against, independent of which labels are
+// currently active, so a chip's count stays meaningful whether it's the one
+// being toggled or not.
+function kanbanCardMatchesBaseFilters(card) {
+  if (kanbanProjectFilter && (card.project || '') !== kanbanProjectFilter) return false
+  const assigneeFilter = kanbanAssigneeFilter.toLowerCase()
+  if (assigneeFilter && String(card.assignee || '').trim().toLowerCase() !== assigneeFilter) return false
+  return true
+}
+
+// The label-filter dimension itself: a card matches when no label filter is
+// active, or when it carries at least one of the active labels (OR within
+// the dimension).
+function kanbanCardMatchesLabelFilter(card) {
+  if (kanbanLabelFilter.size === 0) return true
+  const cardLabelIds = (card.labels || []).map((l) => l.id)
+  return cardLabelIds.some((id) => kanbanLabelFilter.has(id))
+}
+
+// Shared by both the header quick-filter chips and the per-card footer label
+// pills -- one filter dimension, two entry points into the same toggle.
+function toggleKanbanLabelFilter(labelId) {
+  if (kanbanLabelFilter.has(labelId)) kanbanLabelFilter.delete(labelId)
+  else kanbanLabelFilter.add(labelId)
+  persistKanbanFilters()
+  renderKanban()
+}
+
+function clearKanbanQuickFilters() {
+  kanbanLabelFilter.clear()
+  persistKanbanFilters()
+  renderKanban()
+}
+
+function persistKanbanFilters() {
+  localStorage.setItem('marveen.kanbanLabelFilter', JSON.stringify([...kanbanLabelFilter]))
+}
+
+// Quick-filter chip row: one chip per defined label (not per priority), tinted
+// with that label's own colour. Clicking toggles the same kanbanLabelFilter
+// set the footer pills use.
+function renderKanbanQuickFilters() {
+  const row = document.getElementById('kanbanQuickFilters')
+  if (!row) return
+  row.innerHTML = ''
+  for (const label of kanbanAllLabels) {
+    const count = kanbanCards.filter((c) =>
+      kanbanCardMatchesBaseFilters(c) && (c.labels || []).some((l) => l.id === label.id)
+    ).length
+    const active = kanbanLabelFilter.has(label.id)
+    const chip = document.createElement('span')
+    chip.className = 'kanban-quick-filter-chip' + (active ? ' active' : '')
+    chip.dataset.labelId = label.id
+    chip.style.setProperty('--chip-color', label.color)
+    chip.innerHTML = `#${escapeHtml(label.name)} <span class="kanban-quick-filter-count">${count}</span>${active ? '<span class="kanban-quick-filter-clear">&times;</span>' : ''}`
+    chip.addEventListener('click', () => toggleKanbanLabelFilter(label.id))
+    row.appendChild(chip)
+  }
+  if (kanbanLabelFilter.size > 0) {
+    const clearAll = document.createElement('button')
+    clearAll.className = 'kanban-quick-filter-clear-all'
+    clearAll.textContent = 'Szűrők törlése'
+    clearAll.addEventListener('click', clearKanbanQuickFilters)
+    row.appendChild(clearAll)
+  }
+}
+
 function renderKanban() {
   const cardById = new Map(kanbanCards.map(c => [c.id, c]))
-  const assigneeFilter = kanbanAssigneeFilter.toLowerCase()
+
+  renderKanbanQuickFilters()
 
   // Determine which top-level cards are visible under current filters.
   const visibleCardIds = new Set()
   for (const card of kanbanCards) {
-    if (kanbanProjectFilter && (card.project || '') !== kanbanProjectFilter) continue
-    if (assigneeFilter && String(card.assignee || '').trim().toLowerCase() !== assigneeFilter) continue
+    if (!kanbanCardMatchesBaseFilters(card)) continue
+    if (!kanbanCardMatchesLabelFilter(card)) continue
     visibleCardIds.add(card.id)
   }
 
@@ -511,6 +673,10 @@ function renderKanban() {
     }
     // Badge: only count subtasks that are in a different column (not embedded here)
     updateSubtaskBadges(embeddedSubtaskIds)
+    // WIP limit badges (count/limit + colour) on the flat board too -- previously
+    // only the swimlane view updated these, so a configured limit never showed
+    // on the default flat board.
+    updateWipBadges(grouped)
   } else {
     flatBoard.hidden = true
     swimlaneBoard.hidden = false
@@ -736,6 +902,22 @@ function createCardEl(card, embeddedChildren = []) {
     ? `<span class="kanban-card-project">${escapeHtml(card.project)}</span>`
     : ''
 
+  // Label footer pills: at most 3 shown + a "+N" overflow indicator. Each pill
+  // (except the overflow one) toggles that label into the active label-filter
+  // when clicked, mirroring the priority quick-filter chips above the board.
+  let labelsHtml = ''
+  if (Array.isArray(card.labels) && card.labels.length > 0) {
+    const shown = card.labels.slice(0, 3)
+    const overflow = card.labels.length - shown.length
+    const pills = shown.map((l) =>
+      `<span class="kanban-card-label-pill" data-label-id="${escapeHtml(l.id)}" style="--label-color:${escapeHtml(l.color)}" title="Szűrés: #${escapeHtml(l.name)}">#${escapeHtml(l.name)}</span>`
+    ).join('')
+    const overflowHtml = overflow > 0
+      ? `<span class="kanban-card-label-pill kanban-card-label-overflow" title="${overflow} további címke">+${overflow}</span>`
+      : ''
+    labelsHtml = `<div class="kanban-card-labels">${pills}${overflowHtml}</div>`
+  }
+
   const seqHtml = card.seq != null
     ? `<span class="kanban-card-seq" style="font-family:monospace;font-size:11px;color:var(--muted);margin-right:5px">#${card.seq}</span>`
     : ''
@@ -784,6 +966,7 @@ function createCardEl(card, embeddedChildren = []) {
     ${projectHtml}
     <div class="kanban-card-title">${seqHtml}${escapeHtml(card.title)}</div>
     <div class="kanban-card-footer">${assigneeHtml}${dueHtml}</div>
+    ${labelsHtml}
     <div class="kanban-card-actions">
       <button class="card-breakdown-btn" title="AI szétbont" aria-label="AI szétbont">⚡</button>
     </div>
@@ -796,6 +979,14 @@ function createCardEl(card, embeddedChildren = []) {
   el.querySelector('.card-breakdown-btn').addEventListener('click', (e) => {
     e.stopPropagation()
     triggerBreakdown(card)
+  })
+
+  // Label pills -> toggle that label into the active filter (don't open detail)
+  el.querySelectorAll('.kanban-card-label-pill[data-label-id]').forEach((pillEl) => {
+    pillEl.addEventListener('click', (e) => {
+      e.stopPropagation()
+      toggleKanbanLabelFilter(pillEl.dataset.labelId)
+    })
   })
 
   // Click on embedded subtask -> open that subtask's detail (don't bubble to parent)
@@ -960,6 +1151,106 @@ document.getElementById('saveCardBtn').addEventListener('click', async () => {
   }
 })
 
+// === Card labels (in the detail modal) ===
+// Always re-fetches the card's own labels via the dedicated endpoint instead
+// of trusting card.labels -- callers that pass a card object sourced from
+// /api/kanban/:id/children (subtask list) don't have labels embedded, only
+// the bulk board listing (/api/kanban) does.
+async function renderCardLabelsSection(card) {
+  const listEl = document.getElementById('cardLabelList')
+  const addSelect = document.getElementById('cardLabelAdd')
+  const newBtn = document.getElementById('cardLabelNewBtn')
+  const newForm = document.getElementById('cardLabelNewForm')
+  const newNameInput = document.getElementById('cardLabelNewName')
+  const newColorsEl = document.getElementById('cardLabelNewColors')
+  const newSaveBtn = document.getElementById('cardLabelNewSaveBtn')
+
+  let attached = []
+  try {
+    attached = await (await fetch(`/api/kanban/${encodeURIComponent(card.id)}/labels`)).json()
+  } catch { /* leave empty -- pill list just stays blank */ }
+
+  listEl.innerHTML = ''
+  for (const label of attached) {
+    const pill = document.createElement('span')
+    pill.className = 'label-pill'
+    pill.style.setProperty('--label-color', label.color)
+    pill.innerHTML = `#${escapeHtml(label.name)} <button class="label-pill-remove" title="Címke eltávolítása" aria-label="Címke eltávolítása">&times;</button>`
+    pill.querySelector('.label-pill-remove').addEventListener('click', async () => {
+      try {
+        await fetch(`/api/kanban/${encodeURIComponent(card.id)}/labels/${encodeURIComponent(label.id)}`, { method: 'DELETE' })
+        renderCardLabelsSection(card)
+        loadKanban()
+      } catch { showToast('Hiba a címke eltávolításakor') }
+    })
+    listEl.appendChild(pill)
+  }
+
+  const attachedIds = new Set(attached.map((l) => l.id))
+  addSelect.innerHTML = '<option value="">-- Meglévő címke hozzáadása --</option>'
+  for (const label of kanbanAllLabels) {
+    if (attachedIds.has(label.id)) continue
+    const opt = document.createElement('option')
+    opt.value = label.id
+    opt.textContent = label.name
+    addSelect.appendChild(opt)
+  }
+  addSelect.onchange = async () => {
+    const labelId = addSelect.value
+    if (!labelId) return
+    try {
+      await fetch(`/api/kanban/${encodeURIComponent(card.id)}/labels`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ labelId }),
+      })
+      renderCardLabelsSection(card)
+      loadKanban()
+    } catch { showToast('Hiba a címke hozzáadásakor') }
+  }
+
+  newForm.style.display = 'none'
+  newBtn.onclick = () => {
+    newForm.style.display = newForm.style.display === 'none' ? '' : 'none'
+    newNameInput.value = ''
+  }
+
+  const palette = window._marveen?.kanbanLabels?.colors || ['#64748b']
+  newColorsEl.innerHTML = ''
+  let selectedColor = palette[0]
+  palette.forEach((color, i) => {
+    const sw = document.createElement('span')
+    sw.className = 'label-color-swatch' + (i === 0 ? ' selected' : '')
+    sw.style.background = color
+    sw.addEventListener('click', () => {
+      selectedColor = color
+      newColorsEl.querySelectorAll('.label-color-swatch').forEach((s) => s.classList.remove('selected'))
+      sw.classList.add('selected')
+    })
+    newColorsEl.appendChild(sw)
+  })
+
+  newSaveBtn.onclick = async () => {
+    const name = newNameInput.value.trim()
+    if (!name) { newNameInput.focus(); return }
+    try {
+      const r = await fetch('/api/kanban/labels', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, color: selectedColor }),
+      })
+      if (!r.ok) { showToast('Hiba a címke létrehozásakor'); return }
+      const newLabel = await r.json()
+      kanbanAllLabels.push(newLabel)
+      await fetch(`/api/kanban/${encodeURIComponent(card.id)}/labels`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ labelId: newLabel.id }),
+      })
+      newForm.style.display = 'none'
+      renderCardLabelsSection(card)
+      loadKanban()
+    } catch { showToast('Hiba a címke létrehozásakor') }
+  }
+}
+
 // === Card detail ===
 async function showCardDetail(card) {
   // Running number (#N) in the title bar, plus the stable hex id in the meta.
@@ -1054,6 +1345,8 @@ async function showCardDetail(card) {
   })
 
   document.getElementById('cardDetailDesc').textContent = card.description || ''
+
+  renderCardLabelsSection(card)
 
   // #115: Parent meta row — dropdown replaces the old read-only display; shown only when editable
   const parentMetaItem = document.getElementById('parentMetaItem')
@@ -1278,6 +1571,8 @@ async function showCardDetail(card) {
       breakdownCardId = card.id
       breakdownSubtasks = data.subtasks
       showBreakdownModal(data.subtasks, card)
+      const dodSec = document.getElementById('breakdownDoDSection')
+      if (dodSec) dodSec.style.display = 'none'
     } catch (err) {
       showToast('Breakdown hiba')
     } finally {
@@ -1363,10 +1658,11 @@ document.getElementById('breakdownAcceptBtn').addEventListener('click', async ()
   if (accepted.length === 0) { showToast('Válassz legalább egy alfeladatot'); return }
   try {
     if (breakdownMode === 'idea') {
+      const successCriteria = document.getElementById('breakdownSuccessCriteria')?.value.trim() || undefined
       const res = await fetch(`/api/ideas/${encodeURIComponent(breakdownIdeaId)}/promote-breakdown`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ subtasks: accepted }),
+        body: JSON.stringify({ subtasks: accepted, success_criteria: successCriteria }),
       })
       const data = await res.json()
       if (!res.ok) { showToast(data.error || 'Hiba'); return }
@@ -1934,6 +2230,12 @@ function renderAgents() {
   if (window._marveen) {
     const m = window._marveen
     const displayName = m.name || 'Marveen'
+    // The model is no longer hardcoded: /api/marveen reports the configured
+    // model (readActiveModelFromProjectDir). Mirror the sub-agent card, which
+    // uses the model value as both the badge label and class. Fall back to
+    // 'opus' only before /api/marveen has resolved (or on a legacy backend).
+    const mainModelLabel = m.model || 'opus'
+    const mainModelClass = m.model || 'opus'
     const mCard = document.createElement('div')
     mCard.className = 'agent-card marveen-card'
     mCard.innerHTML = `
@@ -1945,7 +2247,7 @@ function renderAgents() {
         </div>
       </div>
       <div class="agent-card-footer">
-        <span class="agent-model-badge opus">opus</span>
+        <span class="agent-model-badge ${escapeHtml(mainModelClass)}">${escapeHtml(mainModelLabel)}</span>
         <span class="process-indicator" title="Fut: a fő asszisztens mindig a --channels session-ben fut. Ez a kártya fixen Fut állapotot mutat, nincs per-ágens tmux-ellenőrzés."><span class="process-dot running"></span>Fut</span>
         <span class="tg-status" title="Online: a fő asszisztens csatornáját a --channels session kezeli, ezért fixen online (nincs külön token-ellenőrzés)."><span class="tg-dot connected"></span>Online</span>
       </div>
@@ -7982,7 +8284,11 @@ async function loadMessagesPage() {
 }
 
 const CHAT_SYSTEM_AGENTS = new Set(['heartbeat','telegram-coordinator','channel-coordinator'])
-const CHAT_OWNER_AGENT = 'Szabolcs' // pinned to top; display label overridden
+// The owner's own message thread is pinned to the top and labelled "<name> (te)".
+// The owner display name comes from the backend (OWNER_NAME via /api/marveen ->
+// window._marveen.ownerName), not a hardcoded literal, so a renamed install
+// recognizes its real owner. Empty until _marveen resolves (no false match).
+function chatOwnerName() { return window._marveen?.ownerName || '' }
 
 function chatLastSeenKey(agentName) { return 'chat_last_seen_' + agentName }
 function chatGetLastSeen(agentName) { return parseInt(localStorage.getItem(chatLastSeenKey(agentName)) || '0', 10) }
@@ -7990,7 +8296,8 @@ function chatMarkSeen(agentName, maxId) {
   if (maxId > chatGetLastSeen(agentName)) localStorage.setItem(chatLastSeenKey(agentName), String(maxId))
 }
 function chatIsUnread(agentName, threadInfo) {
-  if (agentName !== CHAT_OWNER_AGENT) return false
+  const owner = chatOwnerName()
+  if (!owner || agentName !== owner) return false
   if (!threadInfo?.lastMsg) return false
   return threadInfo.lastMsg.id > chatGetLastSeen(agentName)
 }
@@ -8024,7 +8331,7 @@ async function loadChatAgentList() {
     for (const t of threads) {
       if (t.agent) threadIndex.set(t.agent, { lastMsg: t.lastMessage, count: t.count || 0 })
     }
-    // Also include thread agents not in fleet (e.g. Szabolcs/owner direct msgs)
+    // Also include thread agents not in fleet (e.g. the owner's own direct msgs)
     for (const t of threads) {
       if (t.agent && !fleetNames.includes(t.agent) && !CHAT_SYSTEM_AGENTS.has(t.agent)) {
         fleetNames.push(t.agent)
@@ -8032,9 +8339,10 @@ async function loadChatAgentList() {
     }
 
     // Sort: owner pinned first, then agents with messages by recency, rest alphabetical
+    const owner = chatOwnerName()
     const sorted = [...fleetNames].sort((a, b) => {
-      if (a === CHAT_OWNER_AGENT) return -1
-      if (b === CHAT_OWNER_AGENT) return 1
+      if (owner && a === owner) return -1
+      if (owner && b === owner) return 1
       const aHas = threadIndex.has(a), bHas = threadIndex.has(b)
       if (aHas && !bHas) return -1
       if (!aHas && bHas) return 1
@@ -8054,7 +8362,7 @@ async function loadChatAgentList() {
       const isSelected = name === chatSelectedAgent ? ' selected' : ''
       const dimmed = info ? '' : ' style="opacity:0.5"'
       const unread = chatIsUnread(name, info)
-      const displayName = name === CHAT_OWNER_AGENT ? 'Szabolcs (te)' : name
+      const displayName = owner && name === owner ? owner + ' (te)' : name
       return `<div class="chat-agent-item${isSelected}${unread ? ' unread' : ''}" data-agent="${escapeHtml(name)}"${dimmed}>
         <div class="chat-agent-avatar">${chatAvatarHtml(name, 40)}</div>
         <div class="chat-agent-info">
@@ -8097,7 +8405,8 @@ async function loadChatThread(agentName) {
   chatThreadState.hasMore = true
   chatThreadState.loading = false
 
-  const threadDisplayName = agentName === CHAT_OWNER_AGENT ? 'Szabolcs (te)' : agentName
+  const owner = chatOwnerName()
+  const threadDisplayName = owner && agentName === owner ? owner + ' (te)' : agentName
 
   panel.innerHTML = `
     <div class="chat-thread-header">
@@ -9141,6 +9450,231 @@ async function setAutonomyLevel(key, level) {
   }
 }
 
+// ============================================================
+// === Settings (central config registry) ===
+// ============================================================
+
+document.getElementById('refreshSettingsBtn').addEventListener('click', loadSettings)
+window.addEventListener('beforeunload', (e) => {
+  if (settingsDirty.size > 0) { e.preventDefault(); e.returnValue = '' }
+})
+
+// Human label for a registry "module" -- falls back to a capitalised key for
+// any future module the UI doesn't know about yet, so adding a registry
+// entry never requires a frontend change just to render a sane heading.
+const SETTINGS_MODULE_LABELS = { kanban: 'Kanban', system: 'Rendszer', heartbeat: 'Heartbeat', ideabox: 'Ötletláda' }
+function settingsModuleLabel(mod) {
+  return SETTINGS_MODULE_LABELS[mod] || (mod.charAt(0).toUpperCase() + mod.slice(1))
+}
+
+// Track dirty state: key -> { input, originalValue, type, errorEl }
+const settingsDirty = new Map()
+
+function updateSettingsSaveBar() {
+  const bar = document.getElementById('settingsSaveBar')
+  const countEl = document.getElementById('settingsDirtyCount')
+  if (!bar) return
+  const n = settingsDirty.size
+  bar.style.display = n > 0 ? 'flex' : 'none'
+  if (countEl) countEl.textContent = n === 1 ? '1 módosított beállítás' : `${n} módosított beállítás`
+}
+
+function markSettingDirty(key, input, originalValue, type, errorEl) {
+  const currentVal = type === 'color' ? input.value : input.value
+  if (currentVal === String(originalValue)) {
+    settingsDirty.delete(key)
+  } else {
+    settingsDirty.set(key, { input, originalValue, type, errorEl })
+  }
+  updateSettingsSaveBar()
+}
+
+async function loadSettings() {
+  const container = document.getElementById('settingsGroups')
+  container.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Betöltés...</p>'
+  settingsDirty.clear()
+  updateSettingsSaveBar()
+
+  try {
+    const res = await fetch('/api/settings')
+    if (!res.ok) throw new Error('fetch failed')
+    const { settings } = await res.json()
+
+    const byModule = new Map()
+    for (const s of settings) {
+      if (!byModule.has(s.module)) byModule.set(s.module, [])
+      byModule.get(s.module).push(s)
+    }
+
+    container.innerHTML = ''
+    if (byModule.size === 0) {
+      container.innerHTML = '<p style="color:var(--text-muted);font-size:13px">Nincs regisztrált beállítás.</p>'
+      return
+    }
+
+    for (const [mod, defs] of byModule) {
+      const group = document.createElement('div')
+      group.className = 'settings-group'
+
+      const heading = document.createElement('h3')
+      heading.className = 'settings-group-title'
+      heading.textContent = settingsModuleLabel(mod)
+      group.appendChild(heading)
+
+      for (const def of defs) {
+        group.appendChild(buildSettingRow(def))
+      }
+      container.appendChild(group)
+    }
+  } catch (err) {
+    container.innerHTML = '<p style="color:var(--danger)">Nem sikerült betölteni a beállításokat.</p>'
+  }
+}
+
+function buildSettingRow(def) {
+  const row = document.createElement('div')
+  row.className = 'settings-row'
+
+  const info = document.createElement('div')
+  info.className = 'settings-row-info'
+
+  const title = document.createElement('div')
+  title.className = 'settings-row-key'
+  title.textContent = def.key
+  if (def.requiresRestart) {
+    const badge = document.createElement('span')
+    badge.className = 'settings-restart-badge'
+    badge.textContent = 'Újraindítást igényel'
+    title.appendChild(badge)
+  }
+  info.appendChild(title)
+
+  const desc = document.createElement('div')
+  desc.className = 'settings-row-desc'
+  desc.textContent = def.description
+  info.appendChild(desc)
+
+  const meta = document.createElement('div')
+  meta.className = 'settings-row-meta'
+  const metaParts = []
+  if (Array.isArray(def.valueSet) && def.valueSet.length) metaParts.push('Lehetséges értékek: ' + def.valueSet.join(', '))
+  if (def.type === 'int' && (def.min !== undefined || def.max !== undefined)) {
+    metaParts.push('Tartomány: ' + (def.min ?? '–') + '–' + (def.max ?? '–'))
+  }
+  if (def.type === 'color') metaParts.push('Formátum: #rrggbb')
+  metaParts.push('Alapérték: ' + def.default)
+  meta.textContent = metaParts.join(' · ')
+  info.appendChild(meta)
+
+  row.appendChild(info)
+
+  const editor = document.createElement('div')
+  editor.className = 'settings-row-editor'
+
+  const originalValue = String(def.value)
+  let valueInput
+  if (Array.isArray(def.valueSet) && def.valueSet.length) {
+    valueInput = document.createElement('select')
+    valueInput.className = 'input'
+    for (const opt of def.valueSet) {
+      const o = document.createElement('option')
+      o.value = opt
+      o.textContent = opt
+      valueInput.appendChild(o)
+    }
+    valueInput.value = originalValue
+  } else if (def.type === 'color') {
+    valueInput = document.createElement('input')
+    valueInput.type = 'color'
+    valueInput.className = 'settings-color-input'
+    valueInput.value = def.value
+  } else if (def.type === 'int') {
+    valueInput = document.createElement('input')
+    valueInput.type = 'number'
+    valueInput.className = 'input'
+    if (def.min !== undefined) valueInput.min = def.min
+    if (def.max !== undefined) valueInput.max = def.max
+    valueInput.value = def.value
+  } else {
+    valueInput = document.createElement('input')
+    valueInput.type = 'text'
+    valueInput.className = 'input'
+    valueInput.value = def.value
+  }
+  valueInput.dataset.settingKey = def.key
+  valueInput.dataset.settingType = def.type
+  valueInput.dataset.originalValue = originalValue
+  editor.appendChild(valueInput)
+
+  const errorEl = document.createElement('div')
+  errorEl.className = 'settings-row-error'
+  editor.appendChild(errorEl)
+
+  valueInput.addEventListener('input', () => markSettingDirty(def.key, valueInput, originalValue, def.type, errorEl))
+  valueInput.addEventListener('change', () => markSettingDirty(def.key, valueInput, originalValue, def.type, errorEl))
+
+  row.appendChild(editor)
+  return row
+}
+
+async function saveAllSettings() {
+  if (settingsDirty.size === 0) return
+  const btn = document.getElementById('settingsSaveAllBtn')
+  if (btn) { btn.disabled = true; btn.textContent = 'Mentés...' }
+
+  const errors = []
+  let needsRestart = false
+
+  for (const [key, { input, type, errorEl }] of settingsDirty) {
+    errorEl.textContent = ''
+    const raw = type === 'int' ? Number(input.value) : input.value
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, value: raw }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        errorEl.textContent = data.error || 'Hiba'
+        errors.push(`${key}: ${data.error || 'hiba'}`)
+      } else {
+        input.dataset.originalValue = String(raw)
+        if (data.requiresRestart) needsRestart = true
+      }
+    } catch {
+      errorEl.textContent = 'Kapcsolati hiba'
+      errors.push(`${key}: kapcsolati hiba`)
+    }
+  }
+
+  // Remove successfully saved keys from dirty map
+  for (const [key, { input }] of settingsDirty) {
+    if (String(input.value) === input.dataset.originalValue) settingsDirty.delete(key)
+  }
+  updateSettingsSaveBar()
+
+  if (btn) { btn.disabled = false; btn.textContent = 'Mentés' }
+  if (errors.length) {
+    showToast('Néhány beállítás nem mentődött el', 'error')
+  } else {
+    showToast(needsRestart ? 'Mentve -- újraindítás szükséges az életbe lépéshez' : 'Mentve')
+  }
+}
+
+function resetAllSettings() {
+  for (const [key, { input, originalValue }] of settingsDirty) {
+    input.value = originalValue
+    const errorEl = document.querySelector(`[data-setting-key="${key}"]`)?.closest('.settings-row')?.querySelector('.settings-row-error')
+    if (errorEl) errorEl.textContent = ''
+  }
+  settingsDirty.clear()
+  updateSettingsSaveBar()
+}
+
+document.getElementById('settingsSaveAllBtn')?.addEventListener('click', saveAllSettings)
+document.getElementById('settingsResetBtn')?.addEventListener('click', resetAllSettings)
+
 // === connectors.hu install banner ===
 ;(function () {
   const DISMISSED_KEY = 'cxhu_banner_dismissed'
@@ -9945,17 +10479,20 @@ window.addEventListener('resize', () => {
 let ideas = []
 let ideasPromoteId = null
 let ideaEditId = null
+let ideaDetailId = null
 const STATUS_COLORS = { new: 'var(--accent)', reviewed: '#f59e0b', kanban: '#22c55e', rejected: '#ef4444' }
 const STATUS_LABELS = { new: 'Új', reviewed: 'Átnézve', kanban: 'Kanbanban', rejected: 'Elutasítva' }
 
 async function loadIdeasPage() {
-  const statusFilter = document.getElementById('ideaStatusFilter')?.value || ''
+  const statusFilter = document.getElementById('ideaStatusFilter')?.value ?? 'active'
   const categoryFilter = document.getElementById('ideaCategoryFilter')?.value || ''
   const params = new URLSearchParams()
-  if (statusFilter) params.set('status', statusFilter)
+  // 'active' = new+reviewed, fetched unfiltered then narrowed client-side
+  if (statusFilter && statusFilter !== 'active') params.set('status', statusFilter)
   if (categoryFilter) params.set('category', categoryFilter)
   const [ideasRes, catsRes] = await Promise.all([fetch('/api/ideas?' + params), fetch('/api/ideas/categories')])
   ideas = await ideasRes.json()
+  if (statusFilter === 'active') ideas = ideas.filter(i => i.status === 'new' || i.status === 'reviewed')
   const cats = await catsRes.json()
   const catSel = document.getElementById('ideaCategoryFilter')
   if (catSel) {
@@ -9995,16 +10532,26 @@ function renderIdeasList() {
     </div>`).join('')
 }
 
+function ideaScoreBadge(idea) {
+  if (!idea.impact || !idea.effort) return ''
+  const score = idea.impact - idea.effort
+  const color = score > 0 ? '#22c55e' : score < 0 ? '#ef4444' : 'var(--text-muted)'
+  return `<span style="font-size:11px;color:${color};border:1px solid ${color};border-radius:4px;padding:2px 5px" title="Impact ${idea.impact} - Effort ${idea.effort}">I${idea.impact}·E${idea.effort}</span>`
+}
+
 function renderIdeaCard(idea) {
   const statusColor = STATUS_COLORS[idea.status] || 'var(--text-muted)'
   const statusLabel = STATUS_LABELS[idea.status] || idea.status
-  const desc = idea.description ? `<div style="font-size:12px;color:var(--text-muted);margin-top:4px">${escapeHtml(idea.description)}</div>` : ''
-  return `<div class="card" style="padding:12px 16px;margin-bottom:4px">
+  const desc = idea.description ? `<div style="font-size:12px;color:var(--text-muted);margin-top:4px">${escapeHtml(idea.description.slice(0, 120))}${idea.description.length > 120 ? '…' : ''}</div>` : ''
+  const staleBadge = idea.stale ? `<span style="font-size:11px;background:#92400e22;color:#d97706;border:1px solid #d97706;border-radius:4px;padding:2px 5px" title="Régi ötlet, nézd át!">⏰ Elavult</span>` : ''
+  return `<div class="card" style="padding:12px 16px;margin-bottom:4px${idea.stale ? ';border-left:3px solid #d97706' : ''}">
     <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">
-      <div style="flex:1">
-        <div style="display:flex;align-items:center;gap:8px">
-          <span style="font-weight:600;font-size:14px">${escapeHtml(idea.title)}</span>
+      <div style="flex:1;min-width:0">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span class="idea-title-link" style="font-weight:600;font-size:14px;cursor:pointer" onclick="openIdeaDetail('${idea.id}')">${escapeHtml(idea.title)}</span>
           <span style="font-size:11px;color:${statusColor};padding:2px 6px;border:1px solid ${statusColor};border-radius:4px">${statusLabel}</span>
+          ${ideaScoreBadge(idea)}
+          ${staleBadge}
         </div>
         ${desc}
       </div>
@@ -10036,13 +10583,24 @@ function openIdeaEdit(id) {
   document.getElementById('ideaTitleInput').value = idea.title
   document.getElementById('ideaDescInput').value = idea.description || ''
   document.getElementById('ideaCategoryInput').value = idea.category
+  document.getElementById('ideaImpactInput').value = idea.impact ?? ''
+  document.getElementById('ideaEffortInput').value = idea.effort ?? ''
   openModal(document.getElementById('ideaModalOverlay'))
 }
 
 async function saveIdea() {
   const title = document.getElementById('ideaTitleInput').value.trim()
   if (!title) { showToast('Cím kötelező', 'error'); return }
-  const body = { title, description: document.getElementById('ideaDescInput').value.trim() || undefined, category: document.getElementById('ideaCategoryInput').value, source: 'manual' }
+  const impactRaw = document.getElementById('ideaImpactInput').value
+  const effortRaw = document.getElementById('ideaEffortInput').value
+  const body = {
+    title,
+    description: document.getElementById('ideaDescInput').value.trim() || undefined,
+    category: document.getElementById('ideaCategoryInput').value,
+    source: 'manual',
+    impact: impactRaw ? parseInt(impactRaw) : null,
+    effort: effortRaw ? parseInt(effortRaw) : null,
+  }
   if (ideaEditId) {
     await fetch(`/api/ideas/${ideaEditId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
   } else {
@@ -10057,6 +10615,112 @@ async function deleteIdeaItem(id) {
   await fetch(`/api/ideas/${id}`, { method: 'DELETE' })
   loadIdeasPage()
 }
+
+// --- Idea detail modal (comments + impact/effort view) ---
+
+async function openIdeaDetail(id) {
+  const idea = ideas.find(i => i.id === id)
+  if (!idea) return
+  ideaDetailId = id
+  const statusLabel = STATUS_LABELS[idea.status] || idea.status
+  document.getElementById('ideaDetailTitle').textContent = idea.title
+  document.getElementById('ideaDetailMeta').textContent = `${idea.category} · ${statusLabel}`
+  document.getElementById('ideaDetailDesc').textContent = idea.description || '(nincs leírás)'
+  document.getElementById('ideaDetailImpact').value = idea.impact ?? ''
+  document.getElementById('ideaDetailEffort').value = idea.effort ?? ''
+  updateDetailScoreChip()
+  document.getElementById('ideaCommentsList').innerHTML = ''
+  document.getElementById('ideaCommentContent').value = ''
+  openModal(document.getElementById('ideaDetailOverlay'))
+  await loadIdeaComments(id)
+}
+
+function updateDetailScoreChip() {
+  const chip = document.getElementById('ideaDetailScoreChip')
+  if (!chip) return
+  const impact = Number(document.getElementById('ideaDetailImpact').value) || 0
+  const effort = Number(document.getElementById('ideaDetailEffort').value) || 0
+  if (!impact && !effort) { chip.textContent = ''; return }
+  if (!impact || !effort) { chip.textContent = ''; return }
+  const score = impact - effort
+  const color = score > 0 ? '#22c55e' : score < 0 ? '#ef4444' : 'var(--text-muted)'
+  chip.innerHTML = `<span class="idea-score-chip" style="border-color:${color};color:${color}">Pont: <strong>${score >= 0 ? '+' : ''}${score}</strong></span>`
+}
+
+document.getElementById('ideaDetailImpact')?.addEventListener('change', updateDetailScoreChip)
+document.getElementById('ideaDetailEffort')?.addEventListener('change', updateDetailScoreChip)
+
+document.getElementById('ideaDetailScoreSave')?.addEventListener('click', async () => {
+  if (!ideaDetailId) return
+  const impact = document.getElementById('ideaDetailImpact').value
+  const effort = document.getElementById('ideaDetailEffort').value
+  try {
+    const res = await fetch(`/api/ideas/${encodeURIComponent(ideaDetailId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        impact: impact ? Number(impact) : null,
+        effort: effort ? Number(effort) : null,
+      }),
+    })
+    if (!res.ok) { showToast('Mentés hiba', 'error'); return }
+    // update local cache so card chip refreshes on close
+    const idea = ideas.find(i => i.id === ideaDetailId)
+    if (idea) {
+      idea.impact = impact ? Number(impact) : null
+      idea.effort = effort ? Number(effort) : null
+    }
+    updateDetailScoreChip()
+    showToast('Pontozás mentve')
+    renderIdeasList()
+  } catch { showToast('Mentés hiba', 'error') }
+})
+
+async function loadIdeaComments(id) {
+  const list = document.getElementById('ideaCommentsList')
+  try {
+    const res = await fetch(`/api/ideas/${encodeURIComponent(id)}/comments`)
+    const data = await res.json()
+    if (!data.comments || !data.comments.length) {
+      list.innerHTML = '<div style="color:var(--text-muted);font-size:12px;padding:6px 0">Nincs megjegyzés</div>'
+      return
+    }
+    list.innerHTML = ''
+    for (const c of data.comments) {
+      const date = new Date(c.created_at * 1000).toLocaleString('hu-HU', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      const div = document.createElement('div')
+      div.className = 'comment-item'
+      div.innerHTML = `<div style="display:flex;align-items:baseline;gap:6px;margin-bottom:4px"><span class="comment-author">${escapeHtml(c.author)}</span><span class="comment-date">${date}</span></div><div class="comment-body">${escapeHtml(c.content)}</div>`
+      list.appendChild(div)
+    }
+  } catch {
+    list.innerHTML = '<div style="color:var(--danger);font-size:12px">Hiba a megjegyzések betöltésekor</div>'
+  }
+}
+
+document.getElementById('ideaCommentSubmit')?.addEventListener('click', async () => {
+  if (!ideaDetailId) return
+  const content = document.getElementById('ideaCommentContent').value.trim()
+  if (!content) { document.getElementById('ideaCommentContent').focus(); return }
+  try {
+    const res = await fetch(`/api/ideas/${encodeURIComponent(ideaDetailId)}/comments`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    })
+    if (!res.ok) { showToast('Megjegyzés mentés hiba', 'error'); return }
+    document.getElementById('ideaCommentContent').value = ''
+    await loadIdeaComments(ideaDetailId)
+  } catch { showToast('Megjegyzés mentés hiba', 'error') }
+})
+
+document.getElementById('ideaDetailClose')?.addEventListener('click', () => closeModal(document.getElementById('ideaDetailOverlay')))
+document.getElementById('ideaDetailCloseBtn')?.addEventListener('click', () => closeModal(document.getElementById('ideaDetailOverlay')))
+document.getElementById('ideaDetailEditBtn')?.addEventListener('click', () => {
+  if (!ideaDetailId) return
+  closeModal(document.getElementById('ideaDetailOverlay'))
+  openIdeaEdit(ideaDetailId)
+})
 
 function openIdeaPromote(id) {
   ideasPromoteId = id
@@ -10102,6 +10766,9 @@ async function openIdeaBreakdown(id) {
     breakdownIdeaId = id
     breakdownSubtasks = data.subtasks
     showBreakdownModal(data.subtasks, { title: idea.title })
+    // Show DoD field only in idea mode
+    const dodSection = document.getElementById('breakdownDoDSection')
+    if (dodSection) { dodSection.style.display = ''; document.getElementById('breakdownSuccessCriteria').value = '' }
   } catch {
     showToast('Breakdown hiba')
   }
@@ -10269,8 +10936,11 @@ document.getElementById('terminalClose')?.addEventListener('click', () => {
 // Telegram messages, the agent's replies, and (optionally) its notes/actions.
 // Solves what the raw terminal can't: a readable, searchable review of what
 // actually happened -- also the support view for customer-hosted Marveens.
+const CONVERSATION_PAGE_SIZE = 400
 let conversationEntries = []
 let conversationAgentName = null
+let conversationHasOlder = false
+let conversationLoadingOlder = false
 
 async function openConversationModal(agentName, displayName) {
   const overlay = document.getElementById('conversationOverlay')
@@ -10284,18 +10954,51 @@ async function openConversationModal(agentName, displayName) {
   await loadConversation()
 }
 
+// Latest page (offset=0); resets the loaded window.
 async function loadConversation() {
   const container = document.getElementById('conversationContainer')
   const token = localStorage.getItem('marveen-dashboard-token') || ''
   try {
-    const r = await fetch(`/api/agents/${encodeURIComponent(conversationAgentName)}/conversation?limit=600`, {
+    const r = await fetch(`/api/agents/${encodeURIComponent(conversationAgentName)}/conversation?limit=${CONVERSATION_PAGE_SIZE}&offset=0`, {
       headers: { 'Authorization': 'Bearer ' + token },
     })
     const d = await r.json()
     conversationEntries = Array.isArray(d.entries) ? d.entries : []
+    conversationHasOlder = !!d.hasOlder
     renderConversation()
   } catch {
     if (container) container.innerHTML = '<div class="conversation-empty">Nem sikerült betölteni a beszélgetést.</div>'
+  }
+}
+
+// Page further back: fetch the window of entries immediately before the oldest
+// loaded one and PREPEND it, keeping the scroll position so the view does not
+// jump. Lets the operator read history beyond the on-screen window (and beyond
+// the old fixed cap).
+async function loadOlderConversation() {
+  if (conversationLoadingOlder || !conversationHasOlder) return
+  conversationLoadingOlder = true
+  const btn = document.getElementById('conversationLoadOlder')
+  if (btn) { btn.disabled = true; btn.textContent = 'Betöltés…' }
+  const token = localStorage.getItem('marveen-dashboard-token') || ''
+  try {
+    const offset = conversationEntries.length
+    const r = await fetch(`/api/agents/${encodeURIComponent(conversationAgentName)}/conversation?limit=${CONVERSATION_PAGE_SIZE}&offset=${offset}`, {
+      headers: { 'Authorization': 'Bearer ' + token },
+    })
+    const d = await r.json()
+    const older = Array.isArray(d.entries) ? d.entries : []
+    conversationHasOlder = !!d.hasOlder
+    if (older.length) {
+      conversationEntries = older.concat(conversationEntries)
+      renderConversation({ preserveScroll: true })
+    } else {
+      renderConversation()
+    }
+  } catch {
+    if (btn) { btn.disabled = false; btn.textContent = 'Korábbiak betöltése' }
+  } finally {
+    conversationLoadingOlder = false
   }
 }
 
@@ -10306,17 +11009,33 @@ function fmtConvTs(ts) {
   } catch { return '' }
 }
 
-function renderConversation() {
+function renderConversation(opts = {}) {
   const container = document.getElementById('conversationContainer')
   if (!container) return
+  const prevH = container.scrollHeight
+  const prevTop = container.scrollTop
   const q = (document.getElementById('conversationSearch')?.value || '').toLowerCase().trim()
   const showActions = document.getElementById('conversationShowActions')?.checked
   let list = conversationEntries
   if (!showActions) list = list.filter(e => e.kind === 'in' || e.kind === 'out')
   if (q) list = list.filter(e => (e.text || '').toLowerCase().includes(q))
-  if (!list.length) { container.innerHTML = '<div class="conversation-empty">Nincs megjeleníthető üzenet.</div>'; return }
-  container.innerHTML = list.map(renderConvEntry).join('')
-  container.scrollTop = container.scrollHeight
+  // "Korábbiak betöltése" sits at the top so the operator can page further back;
+  // shown whenever the server still has older entries beyond the loaded window.
+  const olderBtn = conversationHasOlder
+    ? '<button id="conversationLoadOlder" class="conv-load-older">Korábbiak betöltése</button>'
+    : ''
+  if (!list.length) {
+    container.innerHTML = olderBtn || '<div class="conversation-empty">Nincs megjeleníthető üzenet.</div>'
+  } else {
+    container.innerHTML = olderBtn + list.map(renderConvEntry).join('')
+  }
+  document.getElementById('conversationLoadOlder')?.addEventListener('click', loadOlderConversation)
+  if (opts.preserveScroll) {
+    // After prepending older messages, keep the previously-visible ones in place.
+    container.scrollTop = prevTop + (container.scrollHeight - prevH)
+  } else {
+    container.scrollTop = container.scrollHeight
+  }
 }
 
 function renderConvEntry(e) {
@@ -10571,4 +11290,322 @@ function downloadMarkdown(name, content) {
   btn.addEventListener('click', () => { render(); openModal(overlay) })
   if (closeBtn) closeBtn.addEventListener('click', () => closeModal(overlay))
   overlay.addEventListener('click', (e) => { if (e.target === overlay) closeModal(overlay) })
+})()
+
+// === Archivalt kartyak ===
+;(() => {
+  let archivedInit = false
+
+  const STATUS_LABELS = { planned: 'Tervezett', in_progress: 'Folyamatban', waiting: 'Várakozik', done: 'Kész' }
+  const STATUS_COLORS = { planned: '#6b7280', in_progress: '#3b82f6', waiting: '#f59e0b', done: '#10b981' }
+  const PRIORITY_LABELS = { low: 'Alacsony', normal: 'Normál', high: 'Magas', urgent: 'Sürgős' }
+  const PRIORITY_COLORS = { low: '#9ca3af', normal: '#6b7280', high: '#f59e0b', urgent: '#ef4444' }
+
+  function fmtDate(unix) {
+    if (!unix) return ''
+    return new Date(unix * 1000).toLocaleString('hu-HU', { dateStyle: 'short', timeStyle: 'short' })
+  }
+
+  // Render an archived card with the same visual language as the live board:
+  // project pill + #seq title + colored rounded priority/label chips, wrapped in
+  // the .kanban-card frame. The whole card opens a read-only detail modal on
+  // click; the restore button stops propagation so it doesn't also open it.
+  function renderArchivedCard(card) {
+    const prioColor = PRIORITY_COLORS[card.priority] || '#6b7280'
+    const prioLabel = PRIORITY_LABELS[card.priority] || card.priority
+    const seqHtml = card.seq != null
+      ? `<span class="kanban-card-seq" style="font-family:monospace;font-size:11px;color:var(--text-muted);margin-right:5px">#${card.seq}</span>`
+      : ''
+    const projectHtml = card.project
+      ? `<span class="kanban-card-project">${esc(card.project)}</span>`
+      : ''
+    let labelsHtml = ''
+    if (Array.isArray(card.labels) && card.labels.length > 0) {
+      const pills = card.labels
+        .map(l => `<span class="kanban-card-label-pill" style="--label-color:${esc(l.color)}">#${esc(l.name)}</span>`)
+        .join('')
+      labelsHtml = `<div class="kanban-card-labels">${pills}</div>`
+    }
+    const prioPill = `<span class="archived-prio-pill" style="--prio-color:${prioColor}">${prioLabel}</span>`
+    return `<div class="kanban-card archived-card" data-id="${esc(card.id)}" data-priority="${esc(card.priority)}">
+      ${projectHtml}
+      <div class="kanban-card-title">${seqHtml}${esc(card.title)}</div>
+      <div class="kanban-card-footer">${prioPill}</div>
+      ${labelsHtml}
+      <div class="archived-card-foot">
+        <span class="archived-date">Archiválva: ${fmtDate(card.archived_at)}</span>
+        <button class="btn-secondary btn-compact archived-restore-btn" data-id="${esc(card.id)}" title="Visszaállítás a táblára" style="white-space:nowrap;flex-shrink:0;">Visszaállítás</button>
+      </div>
+    </div>`
+  }
+
+  // Read-only detail modal for an archived card: meta grid, labels, description,
+  // comments -- no editing affordances. Restore button mirrors the card button.
+  async function showArchivedDetail(card) {
+    const seqPrefix = card.seq != null ? `#${card.seq} ` : ''
+    document.getElementById('archivedDetailTitle').textContent = `${seqPrefix}${card.title}`
+    const meta = document.getElementById('archivedDetailMeta')
+    const idLabel = (card.seq != null ? `#${card.seq} · ` : '') + card.id
+    meta.innerHTML = `
+      <div class="meta-item"><span class="meta-label">Azonosító</span><span class="meta-value" style="font-family:monospace">${esc(idLabel)}</span></div>
+      <div class="meta-item"><span class="meta-label">Állapot</span><span class="meta-value">${STATUS_LABELS[card.status] || card.status}</span></div>
+      <div class="meta-item"><span class="meta-label">Felelős</span><span class="meta-value">${card.assignee ? esc(card.assignee) : '-- nincs --'}</span></div>
+      <div class="meta-item"><span class="meta-label">Prioritás</span><span class="meta-value">${PRIORITY_LABELS[card.priority] || card.priority}</span></div>
+      <div class="meta-item"><span class="meta-label">Projekt</span><span class="meta-value">${card.project ? esc(card.project) : '-- nincs --'}</span></div>
+      <div class="meta-item"><span class="meta-label">Archiválva</span><span class="meta-value">${fmtDate(card.archived_at)}</span></div>
+    `
+    const labelsWrap = document.getElementById('archivedDetailLabelsWrap')
+    const labelsBox = document.getElementById('archivedDetailLabels')
+    if (Array.isArray(card.labels) && card.labels.length > 0) {
+      labelsBox.innerHTML = card.labels
+        .map(l => `<span class="kanban-card-label-pill" style="--label-color:${esc(l.color)}">#${esc(l.name)}</span>`)
+        .join('')
+      labelsWrap.style.display = ''
+    } else {
+      labelsWrap.style.display = 'none'
+    }
+    document.getElementById('archivedDetailDesc').textContent = card.description || ''
+
+    const commentsWrap = document.getElementById('archivedDetailCommentsWrap')
+    const commentsBox = document.getElementById('archivedDetailComments')
+    commentsBox.innerHTML = ''
+    try {
+      const res = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/comments`)
+      const comments = res.ok ? await res.json() : []
+      if (Array.isArray(comments) && comments.length > 0) {
+        for (const c of comments) {
+          const date = new Date(c.created_at * 1000).toLocaleString('hu-HU')
+          const div = document.createElement('div')
+          div.className = 'comment-item'
+          div.innerHTML = `<div><span class="comment-author">${esc(c.author)}</span><span class="comment-date">${date}</span></div><div class="comment-body">${esc(c.content)}</div>`
+          commentsBox.appendChild(div)
+        }
+        commentsWrap.style.display = ''
+      } else {
+        commentsWrap.style.display = 'none'
+      }
+    } catch { commentsWrap.style.display = 'none' }
+
+    const restoreBtn = document.getElementById('archivedDetailRestoreBtn')
+    restoreBtn.disabled = false
+    restoreBtn.textContent = 'Visszaállítás a táblára'
+    restoreBtn.onclick = async () => {
+      restoreBtn.disabled = true
+      restoreBtn.textContent = '...'
+      try {
+        const resp = await fetch(`/api/kanban/${encodeURIComponent(card.id)}/unarchive`, { method: 'POST' })
+        if (resp.ok) {
+          closeModal(document.getElementById('archivedDetailOverlay'))
+          doArchivedSearch()
+        } else {
+          restoreBtn.disabled = false
+          restoreBtn.textContent = 'Visszaállítás a táblára'
+          showToast('Hiba a visszaállításnál.')
+        }
+      } catch {
+        restoreBtn.disabled = false
+        restoreBtn.textContent = 'Visszaállítás a táblára'
+      }
+    }
+    openModal(document.getElementById('archivedDetailOverlay'))
+  }
+
+  async function populateArchivedProjects() {
+    try {
+      const r = await fetch('/api/kanban-projects')
+      if (!r.ok) return
+      const projects = await r.json()
+      const sel = document.getElementById('archivedProject')
+      const cur = sel.value
+      sel.innerHTML = '<option value="">Minden projekt</option>'
+      for (const p of projects) {
+        const opt = document.createElement('option')
+        opt.value = p
+        opt.textContent = p
+        if (p === cur) opt.selected = true
+        sel.appendChild(opt)
+      }
+    } catch { /* best-effort */ }
+  }
+
+  async function doArchivedSearch() {
+    const list = document.getElementById('archivedList')
+    const summary = document.getElementById('archivedSummary')
+    list.className = ''
+    list.innerHTML = '<p class="naplo-empty">Betöltés...</p>'
+    summary.textContent = ''
+
+    const params = new URLSearchParams()
+    const q = document.getElementById('archivedQ').value.trim()
+    const project = document.getElementById('archivedProject').value
+    const from = document.getElementById('archivedFrom').value
+    const to = document.getElementById('archivedTo').value
+    if (q) params.set('q', q)
+    if (project) params.set('project', project)
+    if (from) params.set('from', Math.floor(new Date(from).getTime() / 1000))
+    if (to) params.set('to', Math.floor(new Date(to + 'T23:59:59').getTime() / 1000))
+
+    try {
+      const r = await fetch('/api/kanban/archived?' + params.toString())
+      if (!r.ok) { list.innerHTML = `<p class="naplo-empty error">Hiba: ${r.status}</p>`; return }
+      const data = await r.json()
+      const cards = data.cards || []
+      summary.textContent = `${cards.length} kártya (max ${data.limit})`
+      if (cards.length === 0) { list.innerHTML = '<p class="naplo-empty">Nincs archivált kártya.</p>'; return }
+      list.className = 'archived-grid'
+      list.innerHTML = cards.map(renderArchivedCard).join('')
+      const byId = new Map(cards.map(c => [c.id, c]))
+      // Whole card opens the read-only detail; restore button acts on its own.
+      list.querySelectorAll('.archived-card').forEach(el => {
+        el.addEventListener('click', () => {
+          const card = byId.get(el.dataset.id)
+          if (card) showArchivedDetail(card)
+        })
+      })
+      list.querySelectorAll('.archived-restore-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation()
+          const id = btn.dataset.id
+          btn.disabled = true
+          btn.textContent = '...'
+          try {
+            const resp = await fetch(`/api/kanban/${id}/unarchive`, { method: 'POST' })
+            if (resp.ok) {
+              const cardEl = btn.closest('.archived-card')
+              if (cardEl) cardEl.style.opacity = '0.4'
+              btn.textContent = 'Visszaállítva'
+            } else {
+              btn.disabled = false
+              btn.textContent = 'Visszaállítás'
+              showToast('Hiba a visszaállításnál.')
+            }
+          } catch {
+            btn.disabled = false
+            btn.textContent = 'Visszaállítás'
+          }
+        })
+      })
+    } catch (err) {
+      list.innerHTML = `<p class="naplo-empty error">Hálózati hiba: ${err.message}</p>`
+    }
+  }
+
+  function loadArchivedPage() {
+    if (!archivedInit) {
+      archivedInit = true
+      document.getElementById('archivedSearchBtn').addEventListener('click', doArchivedSearch)
+      document.getElementById('archivedRefreshBtn').addEventListener('click', doArchivedSearch)
+      document.getElementById('archivedQ').addEventListener('keydown', e => { if (e.key === 'Enter') doArchivedSearch() })
+      const adOverlay = document.getElementById('archivedDetailOverlay')
+      document.getElementById('archivedDetailClose').addEventListener('click', () => closeModal(adOverlay))
+      adOverlay.addEventListener('click', e => { if (e.target === adOverlay) closeModal(adOverlay) })
+    }
+    populateArchivedProjects()
+    doArchivedSearch()
+  }
+
+  window.loadArchivedPage = loadArchivedPage
+})()
+
+// === Naplo (Audit Timeline) ===
+;(() => {
+  let naploInitialized = false
+  let naploActiveSource = ''
+
+  const SOURCE_LABELS = { config: 'Config', idea: 'Ötletláda', store: 'Store', diary: 'Eseménynapló' }
+  const SOURCE_COLORS = { config: '#3b82f6', idea: '#10b981', store: '#f59e0b', diary: '#8b5cf6' }
+  const DIARY_ENTRY_LABELS = { log: 'Napló', memory: 'Emlék' }
+  const DIARY_ENTRY_COLORS = { log: '#6b7280', memory: '#a78bfa' }
+
+  function fmtTs(unix) {
+    return new Date(unix * 1000).toLocaleString('hu-HU', { dateStyle: 'short', timeStyle: 'short' })
+  }
+
+  function renderEntry(e) {
+    const sourceColor = SOURCE_COLORS[e.source] || '#6b7280'
+    const sourceLabel = SOURCE_LABELS[e.source] || e.source
+    const badge = `<span class="naplo-badge" style="background:${sourceColor}">${sourceLabel}</span>`
+    const ts = `<span class="naplo-ts">${fmtTs(e.created_at)}</span>`
+    let detail = ''
+    if (e.source === 'config') {
+      const oldV = e.old_value != null ? `<code>${esc(e.old_value)}</code>` : '<em>nincs</em>'
+      const newV = e.new_value != null ? `<code>${esc(e.new_value)}</code>` : '<em>nincs</em>'
+      detail = `<strong>${esc(e.key)}</strong> ${oldV} &rarr; ${newV} <span class="naplo-actor">${esc(e.actor || '')}</span>`
+    } else if (e.source === 'idea') {
+      const from = e.from_status ? `<code>${esc(e.from_status)}</code> &rarr; ` : ''
+      detail = `<strong>${esc(e.idea_id)}</strong> ${from}<code>${esc(e.to_status)}</code>`
+      if (e.note) detail += ` <span class="naplo-note">${esc(e.note)}</span>`
+      if (e.actor) detail += ` <span class="naplo-actor">${esc(e.actor)}</span>`
+    } else if (e.source === 'store') {
+      const sizeStr = e.file_size != null ? ` (${(e.file_size / 1024).toFixed(1)} KB)` : ''
+      const agentStr = e.agent ? ` <span class="naplo-actor">${esc(e.agent)}</span>` : ''
+      const sens = e.is_sensitive ? ' <span class="naplo-sensitive">sensitív</span>' : ''
+      detail = `<code>${esc(e.rel_path)}</code> <span class="naplo-event-type">${esc(e.event_type)}</span>${sizeStr}${agentStr}${sens}`
+    } else if (e.source === 'diary') {
+      const entryColor = DIARY_ENTRY_COLORS[e.entry_type] || '#6b7280'
+      const entryLabel = DIARY_ENTRY_LABELS[e.entry_type] || e.entry_type
+      const entryBadge = `<span class="naplo-badge" style="background:${entryColor};font-size:10px">${entryLabel}</span>`
+      const agentStr = e.agent_id ? ` <span class="naplo-actor">${esc(e.agent_id)}</span>` : ''
+      let contentSnippet = esc(e.content || '').replace(/\n/g, ' ').slice(0, 200)
+      if ((e.content || '').length > 200) contentSnippet += '…'
+      const keywordsStr = e.keywords ? `<div class="naplo-note" style="margin-top:2px">Kulcsszavak: ${esc(e.keywords)}</div>` : ''
+      const catStr = e.category ? ` <span class="naplo-event-type">${esc(e.category)}</span>` : ''
+      detail = `${entryBadge}${catStr}${agentStr}<div class="naplo-diary-content">${contentSnippet}</div>${keywordsStr}`
+    }
+    return `<div class="naplo-entry"><div class="naplo-entry-meta">${ts}${badge}</div><div class="naplo-entry-detail">${detail}</div></div>`
+  }
+
+  async function doNaplo() {
+    const timeline = document.getElementById('naplo-timeline')
+    const summary = document.getElementById('naplo-summary')
+    timeline.innerHTML = '<p class="naplo-empty">Betöltés...</p>'
+    summary.textContent = ''
+
+    const params = new URLSearchParams()
+    if (naploActiveSource) params.set('source', naploActiveSource)
+    const from = document.getElementById('naplo-from').value
+    const to = document.getElementById('naplo-to').value
+    const q = document.getElementById('naplo-q').value.trim()
+    const agentEl = document.getElementById('naplo-agent')
+    const agentVal = agentEl ? agentEl.value.trim() : ''
+    if (from) params.set('from', Math.floor(new Date(from).getTime() / 1000))
+    if (to)   params.set('to', Math.floor(new Date(to + 'T23:59:59').getTime() / 1000))
+    if (q)    params.set('q', q)
+    if (agentVal) params.set('agent', agentVal)
+    params.set('limit', '200')
+
+    try {
+      const res = await fetch('/api/audit-log?' + params.toString())
+      if (!res.ok) { timeline.innerHTML = `<p class="naplo-empty error">Hiba: ${res.status}</p>`; return }
+      const data = await res.json()
+      const entries = data.entries || []
+      summary.textContent = `${entries.length} bejegyzés`
+      if (entries.length === 0) { timeline.innerHTML = '<p class="naplo-empty">Nincs találat.</p>'; return }
+      timeline.innerHTML = entries.map(renderEntry).join('')
+    } catch (err) {
+      timeline.innerHTML = `<p class="naplo-empty error">Hálózati hiba: ${err.message}</p>`
+    }
+  }
+
+  function loadNaplo() {
+    if (!naploInitialized) {
+      naploInitialized = true
+      document.querySelectorAll('#naplo-source-tabs .naplo-tab').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('#naplo-source-tabs .naplo-tab').forEach((b) => b.classList.remove('active'))
+          btn.classList.add('active')
+          naploActiveSource = btn.dataset.source
+          const agentFilter = document.getElementById('naplo-agent-wrap')
+          if (agentFilter) agentFilter.style.display = naploActiveSource === 'diary' ? '' : 'none'
+          doNaplo()
+        })
+      })
+      document.getElementById('naplo-search-btn').addEventListener('click', doNaplo)
+      document.getElementById('naplo-q').addEventListener('keydown', (e) => { if (e.key === 'Enter') doNaplo() })
+      document.getElementById('naplo-refresh-btn').addEventListener('click', doNaplo)
+    }
+    doNaplo()
+  }
+
+  window.loadNaplo = loadNaplo
 })()

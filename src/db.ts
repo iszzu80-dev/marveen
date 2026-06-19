@@ -2,6 +2,7 @@ import Database from 'better-sqlite3'
 import { join } from 'node:path'
 import { existsSync, mkdirSync, readFileSync, renameSync, chmodSync, openSync, closeSync } from 'node:fs'
 import { STORE_DIR, DB_FILENAME, ALLOWED_CHAT_ID, OLLAMA_URL } from './config.js'
+import { getEffectiveSettingValue } from './settings-store.js'
 import { logger } from './logger.js'
 
 let db: Database.Database
@@ -326,6 +327,29 @@ export function initDatabase(dbPathOverride?: string): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_comments_card ON kanban_comments(card_id)`)
 
+  // --- Kanban labels (tags) -----------------------------------------------
+  // Labels are a separate registry (not hardcoded per-card strings) so the
+  // same label can be reused across many cards and recolored in one place.
+  // The colour itself is validated against the configured palette
+  // (KANBAN_LABEL_COLORS) at the route layer, not hardcoded here.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS labels (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      color TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS kanban_card_labels (
+      card_id TEXT NOT NULL,
+      label_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (card_id, label_id)
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_card_labels_label ON kanban_card_labels(label_id)`)
+
   // --- Agent Messages ---
   db.exec(`
     CREATE TABLE IF NOT EXISTS agent_messages (
@@ -471,6 +495,35 @@ export function initDatabase(dbPathOverride?: string): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_idea_box_status ON idea_box(status)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_idea_box_category ON idea_box(category)`)
+  // impact/effort scoring -- added after initial release; safe ALTER on existing DBs
+  try { db.exec('ALTER TABLE idea_box ADD COLUMN impact INTEGER') } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE idea_box ADD COLUMN effort INTEGER') } catch { /* already exists */ }
+
+  // --- Idea Comments ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS idea_comments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      idea_id TEXT NOT NULL,
+      author TEXT NOT NULL,
+      content TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_idea_comments_idea ON idea_comments(idea_id)`)
+
+  // --- Idea Status Log ---
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS idea_status_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      idea_id TEXT NOT NULL,
+      from_status TEXT,
+      to_status TEXT NOT NULL,
+      actor TEXT NOT NULL DEFAULT 'system',
+      note TEXT,
+      created_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_idea_status_log_idea ON idea_status_log(idea_id, created_at)`)
 
   // --- Tool Call Log (auto-recorder) ---
   db.exec(`
@@ -485,6 +538,42 @@ export function initDatabase(dbPathOverride?: string): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_tool_log_session ON tool_call_log(session_id, created_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_tool_log_ts ON tool_call_log(created_at)`)
+
+  // --- Config Change Log (audit trail for /api/settings writes) ---
+  // Background-only: no UI surfaces this table yet (product decision). For
+  // secret settings, callers must pass null for old_value/new_value -- this
+  // table only ever holds plaintext for non-secret registry entries.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS config_change_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      key TEXT NOT NULL,
+      old_value TEXT,
+      new_value TEXT,
+      actor TEXT NOT NULL DEFAULT 'unknown',
+      created_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_config_change_log_key ON config_change_log(key, created_at)`)
+
+  // --- Store File Audit (fs-watch events on store/) ---
+  // Records every write/rename in the store/ directory. Content is NEVER
+  // stored -- only path, event type and file size. Sensitive files
+  // (.dashboard-token, vault.json, .vault-key) are flagged so the UI can
+  // render them without leaking values.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS store_file_audit (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      rel_path TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      is_sensitive INTEGER NOT NULL DEFAULT 0,
+      file_size INTEGER,
+      agent TEXT,
+      created_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_store_file_audit_ts ON store_file_audit(created_at)`)
+  // Migration: add agent column to installs that created the table before this column existed.
+  try { db.exec(`ALTER TABLE store_file_audit ADD COLUMN agent TEXT`) } catch { /* column already exists */ }
 
   // One-shot migration from the old JSON file (which had a read-modify-write
   // race). Import rows if they exist, then rename the file so we don't keep
@@ -985,11 +1074,12 @@ export interface KanbanComment {
 }
 
 export function listKanbanCards(): KanbanCard[] {
-  const thirtyDaysAgo = Math.floor(Date.now() / 1000) - 30 * 86400
-  // Auto-archive done cards older than 30 days
+  const archiveDays = Number(getEffectiveSettingValue('KANBAN_ARCHIVE_DONE_DAYS'))
+  const archiveCutoff = Math.floor(Date.now() / 1000) - archiveDays * 86400
+  // Auto-archive done cards older than KANBAN_ARCHIVE_DONE_DAYS days
   db.prepare(
     "UPDATE kanban_cards SET archived_at = ? WHERE status = 'done' AND archived_at IS NULL AND updated_at < ?"
-  ).run(Math.floor(Date.now() / 1000), thirtyDaysAgo)
+  ).run(Math.floor(Date.now() / 1000), archiveCutoff)
   return db
     .prepare('SELECT rowid AS seq, * FROM kanban_cards WHERE archived_at IS NULL ORDER BY sort_order ASC')
     .all() as KanbanCard[]
@@ -1067,6 +1157,57 @@ export function archiveKanbanCard(id: string): boolean {
   return db.prepare('UPDATE kanban_cards SET archived_at=?, updated_at=? WHERE id=?').run(now, now, id).changes > 0
 }
 
+export function unarchiveKanbanCard(id: string): boolean {
+  const now = Math.floor(Date.now() / 1000)
+  return db.prepare('UPDATE kanban_cards SET archived_at=NULL, updated_at=? WHERE id=? AND archived_at IS NOT NULL').run(now, id).changes > 0
+}
+
+export interface ArchivedKanbanCard {
+  id: string
+  title: string
+  status: string
+  project: string | null
+  priority: string
+  assignee: string | null
+  archived_at: number
+  updated_at: number
+}
+
+export function listArchivedKanbanCards(opts: {
+  q?: string
+  project?: string
+  label?: string
+  from?: number
+  to?: number
+  limit: number
+}): ArchivedKanbanCard[] {
+  const { q, project, label, from, to, limit } = opts
+  let sql = `
+    SELECT DISTINCT kc.id, kc.title, kc.status, kc.project, kc.priority, kc.assignee, kc.archived_at, kc.updated_at
+    FROM kanban_cards kc
+  `
+  const params: unknown[] = []
+  if (label) {
+    sql += `
+      JOIN kanban_card_labels kcl ON kcl.card_id = kc.id
+      JOIN labels l ON l.id = kcl.label_id AND l.name = ?
+    `
+    params.push(label)
+  }
+  sql += ' WHERE kc.archived_at IS NOT NULL'
+  if (project) { sql += ' AND kc.project = ?'; params.push(project) }
+  if (from)    { sql += ' AND kc.archived_at >= ?'; params.push(from) }
+  if (to)      { sql += ' AND kc.archived_at <= ?'; params.push(to) }
+  if (q) {
+    sql += ' AND (kc.title LIKE ? OR kc.project LIKE ? OR kc.assignee LIKE ?)'
+    const like = `%${q}%`
+    params.push(like, like, like)
+  }
+  sql += ' ORDER BY kc.archived_at DESC LIMIT ?'
+  params.push(limit)
+  return db.prepare(sql).all(...params) as ArchivedKanbanCard[]
+}
+
 export function listKanbanProjects(): string[] {
   const rows = db.prepare(
     "SELECT DISTINCT project FROM kanban_cards WHERE project IS NOT NULL AND project != '' AND archived_at IS NULL ORDER BY project"
@@ -1075,19 +1216,22 @@ export function listKanbanProjects(): string[] {
 }
 
 export function deleteKanbanCard(id: string): boolean {
-  // Wrapped in a transaction to ensure atomicity: all three mutations
-  // succeed together or none of them do. Steps in FK-safe order:
+  // Wrapped in a transaction to ensure atomicity: all mutations succeed
+  // together or none of them do. Steps in FK-safe order:
   //   1. Delete comments that reference this card (FK: kanban_comments.card_id).
-  //   2. Null-out child cards that reference this card as their parent
+  //   2. Delete this card's label associations (FK: kanban_card_labels.card_id)
+  //      -- the labels themselves stay in the registry, only the link goes.
+  //   3. Null-out child cards that reference this card as their parent
   //      (FK: kanban_cards.parent_id). Setting parent_id = NULL keeps the
   //      children alive as root-level cards rather than leaving them with a
   //      dangling reference. FK enforcement is currently OFF by default
   //      (better-sqlite3 default), but the dangling parent_id is still a
   //      data bug -- orphaned children do not appear under any parent and
   //      are invisible in hierarchy views.
-  //   3. Delete the card itself.
+  //   4. Delete the card itself.
   return db.transaction((cardId: string) => {
     db.prepare('DELETE FROM kanban_comments WHERE card_id = ?').run(cardId)
+    db.prepare('DELETE FROM kanban_card_labels WHERE card_id = ?').run(cardId)
     db.prepare('UPDATE kanban_cards SET parent_id = NULL WHERE parent_id = ?').run(cardId)
     return db.prepare('DELETE FROM kanban_cards WHERE id = ?').run(cardId).changes > 0
   })(id) as boolean
@@ -1104,6 +1248,90 @@ export function addKanbanComment(cardId: string, author: string, content: string
   ).run(cardId, author, content, now)
   db.prepare('UPDATE kanban_cards SET updated_at = ? WHERE id = ?').run(now, cardId)
   return { id: Number(info.lastInsertRowid), card_id: cardId, author, content, created_at: now }
+}
+
+// --- Kanban labels (tags) ---
+
+export interface Label {
+  id: string
+  name: string
+  color: string
+  created_at: number
+}
+
+export function listLabels(): Label[] {
+  return db.prepare('SELECT * FROM labels ORDER BY name ASC').all() as Label[]
+}
+
+export function getLabel(id: string): Label | undefined {
+  return db.prepare('SELECT * FROM labels WHERE id = ?').get(id) as Label | undefined
+}
+
+export function createLabel(label: { id: string; name: string; color: string }): Label {
+  const now = Math.floor(Date.now() / 1000)
+  db.prepare(
+    'INSERT INTO labels (id, name, color, created_at) VALUES (?, ?, ?, ?)'
+  ).run(label.id, label.name, label.color, now)
+  return { ...label, created_at: now }
+}
+
+export function updateLabel(id: string, fields: Partial<Pick<Label, 'name' | 'color'>>): boolean {
+  const label = getLabel(id)
+  if (!label) return false
+  const f = { ...label, ...fields }
+  return db.prepare('UPDATE labels SET name=?, color=? WHERE id=?').run(f.name, f.color, id).changes > 0
+}
+
+export function deleteLabel(id: string): boolean {
+  // Transaction: drop every card<->label link before the label row itself,
+  // otherwise the join table keeps dangling references to a label that no
+  // longer exists (FK enforcement is off by default, but the orphan rows
+  // would still silently resurrect a "deleted" label in card detail views).
+  return db.transaction((labelId: string) => {
+    db.prepare('DELETE FROM kanban_card_labels WHERE label_id = ?').run(labelId)
+    return db.prepare('DELETE FROM labels WHERE id = ?').run(labelId).changes > 0
+  })(id) as boolean
+}
+
+export function addLabelToCard(cardId: string, labelId: string): void {
+  const now = Math.floor(Date.now() / 1000)
+  db.prepare(
+    'INSERT OR IGNORE INTO kanban_card_labels (card_id, label_id, created_at) VALUES (?, ?, ?)'
+  ).run(cardId, labelId, now)
+}
+
+export function removeLabelFromCard(cardId: string, labelId: string): boolean {
+  return db.prepare(
+    'DELETE FROM kanban_card_labels WHERE card_id = ? AND label_id = ?'
+  ).run(cardId, labelId).changes > 0
+}
+
+export function getLabelsForCard(cardId: string): Label[] {
+  return db.prepare(`
+    SELECT l.* FROM labels l
+    JOIN kanban_card_labels cl ON cl.label_id = l.id
+    WHERE cl.card_id = ?
+    ORDER BY l.name ASC
+  `).all(cardId) as Label[]
+}
+
+// Bulk variant for the board list view -- one JOIN query instead of an N+1
+// per-card lookup when rendering footer pills for every card at once.
+export function getLabelsForAllCards(): Map<string, Label[]> {
+  const rows = db.prepare(`
+    SELECT cl.card_id AS card_id, l.id AS id, l.name AS name, l.color AS color, l.created_at AS created_at
+    FROM kanban_card_labels cl
+    JOIN labels l ON l.id = cl.label_id
+    ORDER BY l.name ASC
+  `).all() as Array<Label & { card_id: string }>
+  const map = new Map<string, Label[]>()
+  for (const row of rows) {
+    const { card_id, ...label } = row
+    const list = map.get(card_id)
+    if (list) list.push(label)
+    else map.set(card_id, [label])
+  }
+  return map
 }
 
 // --- Heartbeat helpers ---
@@ -1589,6 +1817,8 @@ export interface IdeaBoxRow {
   status: 'new' | 'reviewed' | 'kanban' | 'rejected'
   source: string
   kanban_id: string | null
+  impact: number | null
+  effort: number | null
   created_at: number
   updated_at: number
 }
@@ -1605,12 +1835,12 @@ export function listIdeas(opts?: { status?: string; category?: string }): IdeaBo
 export function createIdea(idea: Omit<IdeaBoxRow, 'created_at' | 'updated_at'>): void {
   const now = Math.floor(Date.now() / 1000)
   db.prepare(
-    `INSERT INTO idea_box (id, title, description, category, status, source, kanban_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(idea.id, idea.title, idea.description ?? null, idea.category, idea.status, idea.source, idea.kanban_id ?? null, now, now)
+    `INSERT INTO idea_box (id, title, description, category, status, source, kanban_id, impact, effort, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(idea.id, idea.title, idea.description ?? null, idea.category, idea.status, idea.source, idea.kanban_id ?? null, idea.impact ?? null, idea.effort ?? null, now, now)
 }
 
-export function updateIdea(id: string, patch: Partial<Pick<IdeaBoxRow, 'title' | 'description' | 'category' | 'status' | 'kanban_id'>>): boolean {
+export function updateIdea(id: string, patch: Partial<Pick<IdeaBoxRow, 'title' | 'description' | 'category' | 'status' | 'kanban_id' | 'impact' | 'effort'>>): boolean {
   const now = Math.floor(Date.now() / 1000)
   const sets: string[] = ['updated_at = ?']
   const params: unknown[] = [now]
@@ -1619,6 +1849,8 @@ export function updateIdea(id: string, patch: Partial<Pick<IdeaBoxRow, 'title' |
   if (patch.category !== undefined) { sets.push('category = ?'); params.push(patch.category) }
   if (patch.status !== undefined) { sets.push('status = ?'); params.push(patch.status) }
   if (patch.kanban_id !== undefined) { sets.push('kanban_id = ?'); params.push(patch.kanban_id) }
+  if (patch.impact !== undefined) { sets.push('impact = ?'); params.push(patch.impact) }
+  if (patch.effort !== undefined) { sets.push('effort = ?'); params.push(patch.effort) }
   params.push(id)
   return db.prepare(`UPDATE idea_box SET ${sets.join(', ')} WHERE id = ?`).run(...params).changes > 0
 }
@@ -1629,6 +1861,69 @@ export function deleteIdea(id: string): boolean {
 
 export function listIdeaCategories(): string[] {
   return (db.prepare('SELECT DISTINCT category FROM idea_box ORDER BY category').all() as { category: string }[]).map(r => r.category)
+}
+
+// --- Idea Comments ---
+
+export interface IdeaComment {
+  id: number
+  idea_id: string
+  author: string
+  content: string
+  created_at: number
+}
+
+export function getIdeaComments(ideaId: string): IdeaComment[] {
+  return db.prepare('SELECT * FROM idea_comments WHERE idea_id = ? ORDER BY created_at ASC').all(ideaId) as IdeaComment[]
+}
+
+export function addIdeaComment(ideaId: string, author: string, content: string): IdeaComment {
+  const now = Math.floor(Date.now() / 1000)
+  const info = db.prepare(
+    'INSERT INTO idea_comments (idea_id, author, content, created_at) VALUES (?, ?, ?, ?)'
+  ).run(ideaId, author, content, now)
+  db.prepare('UPDATE idea_box SET updated_at = ? WHERE id = ?').run(now, ideaId)
+  return { id: Number(info.lastInsertRowid), idea_id: ideaId, author, content, created_at: now }
+}
+
+// --- Idea Status Log ---
+
+export interface IdeaStatusLogRow {
+  id: number
+  idea_id: string
+  from_status: string | null
+  to_status: string
+  actor: string
+  note: string | null
+  created_at: number
+}
+
+export function logIdeaStatusChange(
+  ideaId: string,
+  fromStatus: string | null,
+  toStatus: string,
+  actor: string,
+  note?: string,
+): void {
+  const now = Math.floor(Date.now() / 1000)
+  db.prepare(
+    'INSERT INTO idea_status_log (idea_id, from_status, to_status, actor, note, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+  ).run(ideaId, fromStatus ?? null, toStatus, actor, note ?? null, now)
+}
+
+export function getIdeaStatusLog(ideaId: string): IdeaStatusLogRow[] {
+  return db.prepare('SELECT * FROM idea_status_log WHERE idea_id = ? ORDER BY created_at ASC').all(ideaId) as IdeaStatusLogRow[]
+}
+
+// Revert a promoted idea back to 'reviewed' when its kanban card is deleted or archived.
+// Returns the idea id if a matching idea was found and reverted, null otherwise.
+export function revertIdeaFromKanban(kanbanId: string): string | null {
+  const idea = db.prepare("SELECT id, status FROM idea_box WHERE kanban_id = ? AND status = 'kanban'").get(kanbanId) as { id: string; status: string } | undefined
+  if (!idea) return null
+  const now = Math.floor(Date.now() / 1000)
+  db.prepare("UPDATE idea_box SET status = 'reviewed', kanban_id = NULL, updated_at = ? WHERE id = ?").run(now, idea.id)
+  logIdeaStatusChange(idea.id, 'kanban', 'reviewed', 'system', `Kanban card removed: ${kanbanId}`)
+  return idea.id
 }
 
 // --- Tool Call Log ---
@@ -1704,5 +1999,183 @@ export function analyzeWorkflowCandidates(sinceSecs = 3600, minToolCalls = 5, ga
 export function pruneToolCallLog(olderThanSecs = 86400): void {
   const cutoff = Math.floor(Date.now() / 1000) - olderThanSecs
   db.prepare('DELETE FROM tool_call_log WHERE created_at < ?').run(cutoff)
+}
+
+// --- Config Change Log ---
+// Pass null for oldValue/newValue when the registry entry is secret:true --
+// this keeps secret values out of the audit trail entirely rather than
+// relying on a UI to not display them.
+export function logConfigChange(
+  key: string,
+  oldValue: string | number | null,
+  newValue: string | number | null,
+  actor: string,
+): void {
+  const now = Math.floor(Date.now() / 1000)
+  db.prepare(
+    'INSERT INTO config_change_log (key, old_value, new_value, actor, created_at) VALUES (?, ?, ?, ?, ?)',
+  ).run(key, oldValue === null ? null : String(oldValue), newValue === null ? null : String(newValue), actor, now)
+}
+
+export interface ConfigChangeLogRow {
+  id: number
+  key: string
+  old_value: string | null
+  new_value: string | null
+  actor: string
+  created_at: number
+}
+
+export function getRecentConfigChanges(limit = 200): ConfigChangeLogRow[] {
+  // id DESC as a tiebreaker: created_at has 1-second resolution, so two
+  // saves in the same second would otherwise sort arbitrarily.
+  return db.prepare('SELECT * FROM config_change_log ORDER BY created_at DESC, id DESC LIMIT ?').all(limit) as ConfigChangeLogRow[]
+}
+
+// --- Store File Audit ---
+
+export interface StoreFileAuditRow {
+  id: number
+  rel_path: string
+  event_type: string
+  is_sensitive: number
+  file_size: number | null
+  agent: string | null
+  created_at: number
+}
+
+export function logStoreFileEvent(
+  relPath: string,
+  eventType: string,
+  isSensitive: number,
+  fileSize: number | null,
+  agent: string | null = null,
+): void {
+  const now = Math.floor(Date.now() / 1000)
+  db.prepare(
+    'INSERT INTO store_file_audit (rel_path, event_type, is_sensitive, file_size, agent, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+  ).run(relPath, eventType, isSensitive, fileSize, agent, now)
+}
+
+export function getRecentStoreFileEvents(limit = 200): StoreFileAuditRow[] {
+  return db.prepare('SELECT * FROM store_file_audit ORDER BY created_at DESC, id DESC LIMIT ?').all(limit) as StoreFileAuditRow[]
+}
+
+// --- Unified Audit Log Query ---
+
+export type AuditSource = 'config' | 'idea' | 'store' | 'diary'
+
+export interface AuditLogEntry {
+  id: number
+  source: AuditSource
+  created_at: number
+  actor?: string
+  // config
+  key?: string
+  old_value?: string | null
+  new_value?: string | null
+  // idea
+  idea_id?: string
+  from_status?: string | null
+  to_status?: string
+  note?: string | null
+  // store
+  rel_path?: string
+  event_type?: string
+  is_sensitive?: number
+  file_size?: number | null
+  // diary (daily_logs + memories)
+  agent_id?: string
+  content?: string
+  category?: string
+  keywords?: string
+  entry_type?: 'log' | 'memory'
+}
+
+export function queryAuditLog(opts: {
+  sources: AuditSource[]
+  from?: number
+  to?: number
+  q?: string
+  agent?: string
+  limit: number
+}): AuditLogEntry[] {
+  const { sources, from, to, q, agent, limit } = opts
+  const all: AuditSource[] = ['config', 'idea', 'store', 'diary']
+  const active = sources.length > 0 ? sources : all
+
+  const parts: AuditLogEntry[] = []
+
+  if (active.includes('config')) {
+    let sql = 'SELECT id, key, old_value, new_value, actor, created_at FROM config_change_log WHERE 1=1'
+    const params: unknown[] = []
+    if (from) { sql += ' AND created_at >= ?'; params.push(from) }
+    if (to)   { sql += ' AND created_at <= ?'; params.push(to) }
+    if (q)    { sql += ' AND (key LIKE ? OR old_value LIKE ? OR new_value LIKE ? OR actor LIKE ?)'; const p = `%${q}%`; params.push(p, p, p, p) }
+    sql += ' ORDER BY created_at DESC, id DESC LIMIT ?'; params.push(limit)
+    const rows = db.prepare(sql).all(...params) as ConfigChangeLogRow[]
+    for (const r of rows) parts.push({ ...r, source: 'config' })
+  }
+
+  if (active.includes('idea')) {
+    let sql = 'SELECT id, idea_id, from_status, to_status, actor, note, created_at FROM idea_status_log WHERE 1=1'
+    const params: unknown[] = []
+    if (from) { sql += ' AND created_at >= ?'; params.push(from) }
+    if (to)   { sql += ' AND created_at <= ?'; params.push(to) }
+    if (q)    { sql += ' AND (idea_id LIKE ? OR to_status LIKE ? OR note LIKE ? OR actor LIKE ?)'; const p = `%${q}%`; params.push(p, p, p, p) }
+    sql += ' ORDER BY created_at DESC, id DESC LIMIT ?'; params.push(limit)
+    const rows = db.prepare(sql).all(...params) as Array<{ id: number; idea_id: string; from_status: string | null; to_status: string; actor: string; note: string | null; created_at: number }>
+    for (const r of rows) parts.push({ ...r, source: 'idea' })
+  }
+
+  if (active.includes('store')) {
+    let sql = 'SELECT id, rel_path, event_type, is_sensitive, file_size, agent, created_at FROM store_file_audit WHERE 1=1'
+    const params: unknown[] = []
+    if (from) { sql += ' AND created_at >= ?'; params.push(from) }
+    if (to)   { sql += ' AND created_at <= ?'; params.push(to) }
+    if (agent) { sql += ' AND agent = ?'; params.push(agent) }
+    if (q)    { sql += ' AND (rel_path LIKE ? OR agent LIKE ?)'; const p = `%${q}%`; params.push(p, p) }
+    sql += ' ORDER BY created_at DESC, id DESC LIMIT ?'; params.push(limit)
+    const rows = db.prepare(sql).all(...params) as StoreFileAuditRow[]
+    for (const r of rows) parts.push({ ...r, source: 'store' })
+  }
+
+  if (active.includes('diary')) {
+    // daily_logs
+    let logSql = 'SELECT id, agent_id, content, created_at FROM daily_logs WHERE 1=1'
+    const logParams: unknown[] = []
+    if (from)  { logSql += ' AND created_at >= ?'; logParams.push(from) }
+    if (to)    { logSql += ' AND created_at <= ?'; logParams.push(to) }
+    if (agent) { logSql += ' AND agent_id = ?'; logParams.push(agent) }
+    if (q)     { logSql += ' AND content LIKE ?'; logParams.push(`%${q}%`) }
+    logSql += ' ORDER BY created_at DESC, id DESC LIMIT ?'; logParams.push(limit)
+    const logRows = db.prepare(logSql).all(...logParams) as Array<{ id: number; agent_id: string; content: string; created_at: number }>
+    for (const r of logRows) parts.push({ id: r.id, source: 'diary', created_at: r.created_at, agent_id: r.agent_id, content: r.content, entry_type: 'log' })
+
+    // memories
+    let memSql = 'SELECT id, agent_id, content, category, keywords, created_at FROM memories WHERE 1=1'
+    const memParams: unknown[] = []
+    if (from)  { memSql += ' AND created_at >= ?'; memParams.push(from) }
+    if (to)    { memSql += ' AND created_at <= ?'; memParams.push(to) }
+    if (agent) { memSql += ' AND agent_id = ?'; memParams.push(agent) }
+    if (q)     { memSql += ' AND (content LIKE ? OR keywords LIKE ?)'; memParams.push(`%${q}%`, `%${q}%`) }
+    memSql += ' ORDER BY created_at DESC, id DESC LIMIT ?'; memParams.push(limit)
+    const memRows = db.prepare(memSql).all(...memParams) as Array<{ id: number; agent_id: string; content: string; category: string; keywords: string | null; created_at: number }>
+    for (const r of memRows) parts.push({ id: r.id, source: 'diary', created_at: r.created_at, agent_id: r.agent_id, content: r.content, category: r.category, keywords: r.keywords ?? undefined, entry_type: 'memory' })
+  }
+
+  // Merge and sort by created_at DESC, then id DESC as tiebreaker
+  parts.sort((a, b) => b.created_at - a.created_at || (b.id ?? 0) - (a.id ?? 0))
+  return parts.slice(0, limit)
+}
+
+// Prune all three audit tables to AUDIT_LOG_RETENTION_DAYS. Called from the
+// daily decay sweep so old entries do not accumulate indefinitely.
+export function pruneAuditLogs(): void {
+  const retentionDays = Number(getEffectiveSettingValue('AUDIT_LOG_RETENTION_DAYS'))
+  const cutoff = Math.floor(Date.now() / 1000) - retentionDays * 86400
+  db.prepare('DELETE FROM config_change_log WHERE created_at < ?').run(cutoff)
+  db.prepare('DELETE FROM idea_status_log WHERE created_at < ?').run(cutoff)
+  db.prepare('DELETE FROM store_file_audit WHERE created_at < ?').run(cutoff)
 }
 

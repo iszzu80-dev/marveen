@@ -219,6 +219,88 @@ KANBAN_SWIMLANE_SEPARATOR_COLOR=           # empty = CSS default (var(--border))
 
 Data flow: `src/config.ts` → `/api/marveen` (`kanbanSwimlanes` key) → `window._marveen.kanbanSwimlanes` (frontend). The frontend is static, no build step -- a server restart is enough to pick up config changes.
 
+### Quick filters and labels
+
+Cards can carry coloured labels, which both visually group the board and let you filter with a single click.
+
+**Adding/removing a label**
+
+Open a card, and in the detail view's "Labels" section:
+
+- pick an existing label from the dropdown to attach it to the card,
+- or create a new label (name + a colour from the offered palette),
+- next to each attached label there's a button to remove it from the card.
+
+**What do the pills at the bottom of a card mean?**
+
+Each card shows up to 3 attached labels at the bottom as cool-toned "pills" (in `#label-name` form, in the label's own colour). If a card has more than 3 labels, the rest are shown as a "+N" badge. Clicking a pill immediately filters by it -- every other card carrying that same label also shows up in the filtered view.
+
+**Filtering with the header chip row**
+
+A chip appears in the toolbar above the board for every existing label, in its own colour, with a count (how many cards match the label given the other currently active filters). Clicking a chip activates it, narrowing the board to cards carrying that label. Multiple chips can be selected at once -- they combine with OR logic (a card matching any of the selected labels shows up). The × icon on an active chip removes that filter; the "Clear filters" button empties all active label filters at once.
+
+**How does it combine with other filters?**
+
+The label filter combines with the project and assignee filters using AND logic: a visible card must match the project filter, the assignee filter, AND at least one active label filter (if any are active). In swimlane view, lanes are built from the already-filtered card set, so the two features work together seamlessly.
+
+Your chosen label filters persist in the browser, so you don't have to re-select them every time you open the board.
+
+### Quick filters and labels -- technical details
+
+**Data model:**
+
+Labels live in their own registry (`labels` table: `id`, `name`, `color`, `created_at`), linked to cards through a join table (`kanban_card_labels`: `card_id`, `label_id`, `created_at`). This lets the same label appear on many cards and be recoloured/renamed in one place. Deleting a card or a label drops the join rows transactionally, so no orphaned associations are left behind.
+
+A label's colour is not free text: it must be one of the entries in the `KANBAN_LABEL_COLORS` configuration palette (validated server-side; an invalid or missing value falls back to the first palette colour). This keeps the colour assignment traceable to a single configurable source instead of a hardcoded mapping in the code.
+
+**API endpoints:**
+
+```
+GET    /api/kanban/labels              -- list all labels
+POST   /api/kanban/labels              -- create a label ({ name, color })
+PUT    /api/kanban/labels/:id          -- rename/recolour a label
+DELETE /api/kanban/labels/:id          -- delete a label (+ all its card associations)
+GET    /api/kanban/:id/labels          -- a card's labels
+POST   /api/kanban/:id/labels          -- attach a label to a card ({ labelId })
+DELETE /api/kanban/:id/labels/:labelId -- detach a label from a card
+```
+
+The board list endpoint (`GET /api/kanban`) embeds each card's `labels` array using a single bulk JOIN query (not an N+1 per-card lookup), so the footer pills get everything they need in one round trip.
+
+**Card editor (CRUD UI):**
+
+The card detail view's "Labels" section shows attached labels as removable pills, a dropdown adds an existing label, and an inline form creates a new one (name + palette swatch picker). A newly created label is attached to the open card immediately.
+
+**Label quick-filter chip row:**
+
+The toolbar above the board, right-aligned next to the project filter, shows one pill per defined label (from `/api/kanban/labels`), tinted in the label's own colour. Clicking a chip activates it (filled colour + × icon); multiple active chips combine with OR semantics -- this is the same `kanbanLabelFilter` set that the card footer pills also drive, just a second entry point into it. Each chip also shows a count: how many cards would match that label under the currently active project/assignee filters -- independent of whether the chip itself is active, so the number stays meaningful either way.
+
+**Label footer pills (on the card):**
+
+Each card's footer shows up to 3 of its attached labels as cold-toned pills (`#label-name`, in the label's own colour), with a non-clickable "+N" badge for the rest. Clicking a pill toggles that label into the same active label filter the header chip row uses.
+
+**Filter-combination semantics:**
+
+All filter dimensions combine with AND:
+
+```
+visible = project filter AND assignee filter AND (label1 OR label2 OR ...)
+```
+
+An empty label filter (no active label selected) doesn't narrow anything -- every card matches that dimension. The swimlane grouping renders from the already-filtered card set, so the quick filter and the swimlane view work together automatically, with no extra integration code. The "Clear filters" link in the toolbar (shown only when at least one label filter is active) empties the set.
+
+**Persistence:**
+
+The label filter is stored in `localStorage` (key `marveen.kanbanLabelFilter`, as a JSON array), the same way the swimlane grouping choice is -- it survives a page reload in that browser.
+
+**Configuration keys (`.env`):**
+
+```
+KANBAN_LABEL_COLORS=#3b82f6,#0ea5e9,#10b981,#14b8a6,#8b5cf6,#64748b  # selectable palette (cold tones)
+```
+
+Data flow: `src/config.ts` → `/api/marveen` (`kanbanLabels.colors` key) → `window._marveen.kanbanLabels` (frontend).
+
 ---
 
 ## Related documents

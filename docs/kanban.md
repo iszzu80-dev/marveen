@@ -219,3 +219,85 @@ KANBAN_SWIMLANE_SEPARATOR_COLOR=           # üres = CSS alapszín (var(--border
 ```
 
 Adatfolyam: `src/config.ts` → `/api/marveen` (`kanbanSwimlanes` kulcs) → `window._marveen.kanbanSwimlanes` (frontend). A frontend statikus, nincs build lépés -- szerver HUP elegendő a beállítások megváltoztatásához.
+
+### Gyors-szűrők és címkék
+
+A kártyák elláthatók színes címkékkel, amik egyrészt vizuálisan csoportosítják a táblát, másrészt egy kattintással szűrhetők.
+
+**Címke hozzáadása/levétele**
+
+Nyiss meg egy kártyát, és a részletező nézet "Címkék" szekciójában:
+
+- a legördülő menüből válassz egy meglévő címkét a kártyához rendeléshez,
+- vagy hozz létre új címkét (név + szín a felkínált palettából),
+- a hozzárendelt címkék mellett egy gombbal bármelyik levehető a kártyáról.
+
+**Mit jelentenek a kártyák alján a pillék?**
+
+Minden kártya alján legfeljebb 3 hozzárendelt címke jelenik meg hideg-tónusú "pilleként" (`#cimke-nev` formában, a címke saját színével). Ha egy kártyához 3-nál több címke van rendelve, a maradékot egy "+N" jelvény jelzi. Egy pillére kattintva azonnal rá is szűrhetsz -- a kártya összes többi, ugyanazzal a címkével ellátott kártyája is megjelenik a szűrt nézetben.
+
+**Szűrés a fejléc chip-sorával**
+
+A tábla feletti vezérlősorban minden létező címkéhez megjelenik egy chip, a saját színével és egy darabszámmal (hány kártyára illik a címke a jelenleg aktív többi szűrő mellett). Kattintásra a chip aktívvá válik, és csak az adott címkével ellátott kártyák látszanak. Több chip is kiválasztható egyszerre -- ezek "VAGY" kapcsolatban kombinálódnak (bármelyik kiválasztott címkével ellátott kártya megjelenik). Az × ikon egy aktív chipen levonja az adott szűrést, a "Szűrők törlése" gomb az összes aktív címke-szűrőt egyszerre üríti.
+
+**Hogyan kombinálódik a többi szűrővel?**
+
+A címke-szűrő a projekt- és felelős-szűrővel "ÉS" kapcsolatban van: a látható kártyáknak egyszerre meg kell felelniük a projekt-szűrőnek, a felelős-szűrőnek, ÉS legalább egy aktív címke-szűrőnek (ha van ilyen). Swimlane-nézetben a sávok már a megszűrt kártyahalmazból épülnek fel, így a két funkció zökkenőmentesen együttműködik.
+
+A választott címke-szűrők a böngésződben megmaradnak, nem kell minden megnyitásnál újra beállítani.
+
+### Gyors-szűrők és címkék -- technikai részletek
+
+**Adatmodell:**
+
+A címkék külön regiszterben élnek (`labels` tábla: `id`, `name`, `color`, `created_at`), és egy join táblán (`kanban_card_labels`: `card_id`, `label_id`, `created_at`) keresztül kapcsolódnak a kártyákhoz. Ez lehetővé teszi, hogy ugyanaz a címke több kártyán is szerepeljen, és egy helyen átszínezhető/átnevezhető legyen. Kártya vagy címke törlésekor a kapcsoló sorok tranzakcióban törlődnek, így nem marad árva join-bejegyzés.
+
+A címke színe nem szabad szöveg: a `KANBAN_LABEL_COLORS` konfigurációs paletta egyik eleme lehet csak (szerver-oldali validáció, érvénytelen vagy hiányzó érték esetén a paletta első színére esik vissza). Ez biztosítja, hogy a szín-hozzárendelés egyetlen konfigurálható forrásból ered, nem egy kódba ágyazott leképezésből.
+
+**API végpontok:**
+
+```
+GET    /api/kanban/labels              -- összes címke
+POST   /api/kanban/labels              -- új címke ({ name, color })
+PUT    /api/kanban/labels/:id          -- címke átnevezése/átszínezése
+DELETE /api/kanban/labels/:id          -- címke törlése (+ minden kártya-kapcsolat)
+GET    /api/kanban/:id/labels          -- egy kártya címkéi
+POST   /api/kanban/:id/labels          -- címke hozzáadása a kártyához ({ labelId })
+DELETE /api/kanban/:id/labels/:labelId -- címke levétele a kártyáról
+```
+
+A tábla-listázó `GET /api/kanban` minden kártyához becsomagolja a `labels` tömböt is, egyetlen bulk JOIN lekérdezéssel (nem N+1 kártyánkénti hívással), így a footer-pillek egyetlen körútból megkapják az adatot.
+
+**Kártya-szerkesztő (CRUD UI):**
+
+A kártya-részletező nézet "Címkék" szekciójában a hozzárendelt címkék eltávolítható pillékként jelennek meg, egy legördülő menü meglévő címkét ad hozzá, egy beágyazott form pedig új címkét hoz létre (név + paletta-színválasztó). A létrehozott címke azonnal hozzá is rendelődik a megnyitott kártyához.
+
+**Gyors-szűrő (címke) chip-sor:**
+
+A tábla feletti vezérlősorban, a projekt-szűrő mellett jobbra igazítva egy pill jelenik meg minden definiált címkéhez (`/api/kanban/labels` listából), a címke saját színével. Kattintásra a chip aktívvá válik (kitöltött szín + × ikon), és VAGY-kapcsolatban kombinálódik a többi aktív címke-chippel (több is kiválasztható egyszerre) -- ugyanaz a `kanbanLabelFilter` halmaz, amit a kártyák footer-pilljei is vezérelnek, csak két belépési ponttal. Minden chip mellett egy darabszám látható: hány kártya felelne meg ennek a címkének a JELENLEG aktív projekt/felelős szűrők mellett -- ez a szám független attól, hogy a chip maga aktív-e, így mindig informatív marad.
+
+**Címke footer-pillek (kártyán):**
+
+Minden kártya lábsorában megjelenik legfeljebb 3 hozzárendelt címke hideg-tónusú pilleként (`#címke-név` formátumban, a címke saját színével), a maradékot egy "+N" jelvény jelzi (nem kattintható). Egy konkrét pillére kattintás hozzáadja/leveszi az adott címkét az aktív címke-szűrőhöz -- ugyanazt a halmazt módosítva, amit a fejléc gyors-szűrő chip-sora is használ.
+
+**Szűrő-kombináció szemantikája:**
+
+Az összes szűrési dimenzió ÉS-kapcsolatban kombinálódik:
+
+```
+látható = projekt-szűrő ÉS felelős-szűrő ÉS (címke1 VAGY címke2 VAGY ...)
+```
+
+Egy üres címke-szűrő (nincs aktív címke kiválasztva) nem szűkít -- minden kártya megfelel ennek a dimenziónak. A swimlane-csoportosítás a már megszűrt kártyahalmazból dolgozik, így a gyors-szűrő és a swimlane-nézet automatikusan együttműködnek, külön integrációs kód nélkül. A vezérlősorban megjelenő "Szűrők törlése" gomb (csak akkor látható, ha legalább egy címke-szűrő aktív) üríti a halmazt.
+
+**Perzisztencia:**
+
+A címke-szűrő `localStorage`-ban tárolódik (`marveen.kanbanLabelFilter` kulcs, JSON-tömbként), ugyanazzal a mintával mint a swimlane-csoportosítás választása -- böngészőnkénti újratöltés után is megmarad.
+
+**Konfigurációs kulcsok (`.env`):**
+
+```
+KANBAN_LABEL_COLORS=#3b82f6,#0ea5e9,#10b981,#14b8a6,#8b5cf6,#64748b  # választható paletta (hideg tónusok)
+```
+
+Adatfolyam: `src/config.ts` → `/api/marveen` (`kanbanLabels.colors` kulcs) → `window._marveen.kanbanLabels` (frontend).
