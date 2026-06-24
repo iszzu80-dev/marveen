@@ -307,9 +307,16 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
     const isClaude = model.startsWith('claude-')
     const isDeepseek = model.startsWith('deepseek-')
     const isOllama = !isClaude && !isDeepseek
-    const ollamaEnv = isOllama ? `export ANTHROPIC_AUTH_TOKEN=ollama && export ANTHROPIC_BASE_URL=${OLLAMA_URL} && ` : ''
+    // ANTHROPIC_MODEL is REQUIRED for non-Claude models: the interactive TUI
+    // validates the `--model` flag against known Anthropic models and silently
+    // falls back to the built-in default (claude-opus-...) for an unrecognized
+    // value like `qwen3.6:27b` or `deepseek-v4-pro` -- which then errors against
+    // the custom ANTHROPIC_BASE_URL ("model does not exist"). The env var is
+    // authoritative and bypasses that validation. (`--print` honors --model, but
+    // the agents run the TUI.) Single-quoted so a `:` in the tag is shell-safe.
+    const ollamaEnv = isOllama ? `export ANTHROPIC_AUTH_TOKEN=ollama && export ANTHROPIC_BASE_URL=${OLLAMA_URL} && export ANTHROPIC_MODEL='${model}' && ` : ''
     const deepseekKey = isDeepseek ? (getSecret('DEEPSEEK_API_KEY') ?? '') : ''
-    const deepseekEnv = isDeepseek ? `export ANTHROPIC_AUTH_TOKEN="${deepseekKey}" && export ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic && ` : ''
+    const deepseekEnv = isDeepseek ? `export ANTHROPIC_AUTH_TOKEN="${deepseekKey}" && export ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic && export ANTHROPIC_MODEL='${model}' && ` : ''
     // When authMode is 'api', the agent uses its own ANTHROPIC_API_KEY from
     // the vault instead of the host's OAuth. The vault entry ID follows the
     // convention `agent-{name}-api-key`. We inject it as an env var so Claude
