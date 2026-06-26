@@ -146,14 +146,22 @@ export function decideStuckInputRestart(
 }
 
 // Busy-guard over the stuck-input restart decision (false-positive fix,
-// 2026-06-26). A parked <channel> block while the main agent is ACTIVELY
-// generating is NOT a wedge -- the TUI just can't submit inbound text mid-turn,
-// and it lands the moment the turn ends. Before this guard, #452's escalation
-// hard-restarted the main session every ~5min during normal long-running work,
-// destroying the live conversation. A genuine heartbeat-wedge reads idle/unknown
-// (not generating) with text parked, so it still escalates; the keepalive-
-// staleness watchdog backstops the rare truly-wedged-but-shows-busy case.
-// Reuses shouldDeferKeepaliveRespawn (single source of truth for "pane is busy").
+// 2026-06-26). #452 hard-restarted (respawn-pane / launchctl reload) the main
+// session as soon as a parked input survived ~4 soft-recovery ticks -- but a
+// parked inbound message is the NORMAL transient case: the channel plugin drops
+// it into the prompt box and the Claude TUI, in raw mode, frequently swallows
+// the auto-submit Enter, so the same text sits 'typing' across several ticks
+// until soft recovery (Enter / clear+re-inject) finally submits it. The hard
+// restart pre-empted that recovery with a sledgehammer that destroyed the live
+// conversation (~10 reloads in 12h, each losing context).
+//
+// Defer the restart whenever the pane is busy OR holds parked input it is still
+// actively recovering ('typing') -- give soft recovery time to submit instead
+// of nuking the session. A session that is genuinely DEAD (not even soft-
+// recovering) is still caught by the keepalive-staleness watchdog (~18min), the
+// pre-#452 backstop. This narrows the hard restart to unreadable/error panes and
+// leaves the routine parked-input case to the non-destructive soft path.
+// Reuses shouldDeferKeepaliveRespawn (single source of truth for busy/typing).
 export function applyStuckRestartBusyGuard(
   paneState: PaneState | null,
   decision: 'restart' | 'alert' | 'skip',
