@@ -145,6 +145,30 @@ export function decideStuckInputRestart(
   return 'restart'
 }
 
+// Busy-guard over the stuck-input restart decision (false-positive fix,
+// 2026-06-26). #452 hard-restarted (respawn-pane / launchctl reload) the main
+// session as soon as a parked input survived ~4 soft-recovery ticks -- but a
+// parked inbound message is the NORMAL transient case: the channel plugin drops
+// it into the prompt box and the Claude TUI, in raw mode, frequently swallows
+// the auto-submit Enter, so the same text sits 'typing' across several ticks
+// until soft recovery (Enter / clear+re-inject) finally submits it. The hard
+// restart pre-empted that recovery with a sledgehammer that destroyed the live
+// conversation (~10 reloads in 12h, each losing context).
+//
+// Defer the restart whenever the pane is busy OR holds parked input it is still
+// actively recovering ('typing') -- give soft recovery time to submit instead
+// of nuking the session. A session that is genuinely DEAD (not even soft-
+// recovering) is still caught by the keepalive-staleness watchdog (~18min), the
+// pre-#452 backstop. This narrows the hard restart to unreadable/error panes and
+// leaves the routine parked-input case to the non-destructive soft path.
+// Reuses shouldDeferKeepaliveRespawn (single source of truth for busy/typing).
+export function applyStuckRestartBusyGuard(
+  paneState: PaneState | null,
+  decision: 'restart' | 'alert' | 'skip',
+): 'restart' | 'alert' | 'skip' {
+  return shouldDeferKeepaliveRespawn(paneState) ? 'skip' : decision
+}
+
 // Session-agnostic stuck-input recovery: capture the pane, and if a channel
 // notification is parked at the ❯ prompt, get it SUBMITTED (Enter-first, then
 // clear + verbatim re-inject of the COMPLETE block). The gate fires ONLY for a
@@ -636,15 +660,25 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
   // A cleared input box ends the spell -> reset the escalation counter so the
   // next genuine wedge starts fresh (and a successful restart is not penalised).
   if (!parked) { stuckRestartCount = 0; return }
-  const action = decideStuckInputRestart(
+  // Busy-guard: never hard-restart while the main pane is actively generating --
+  // a parked <channel> block then is a busy session, not a wedge. See
+  // applyStuckRestartBusyGuard. detectPaneState reads 'unknown' for an
+  // unreadable pane and the guard fails-open on that, so a broken capture never
+  // blocks a genuine recovery.
+  const paneContent = capturePane(MAIN_CHANNELS_SESSION)
+  const paneState = paneContent != null ? detectPaneState(paneContent) : null
+  const action = applyStuckRestartBusyGuard(paneState, decideStuckInputRestart(
     parked, state.attempts, MAIN_STUCK_THRESHOLDS.maxAttempts,
     Date.now(), lastStuckRestartAt, stuckRestartCount,
     STUCK_RESTART_MIN_INTERVAL_MS, STUCK_RESTART_MAX_CONSECUTIVE,
-  )
+  ))
+  if (action === 'skip' && shouldDeferKeepaliveRespawn(paneState)) {
+    logger.info({ paneState, attempts: state.attempts }, 'Stuck-input restart deferred -- main pane is busy (working, not wedged)')
+  }
   if (action === 'skip') return
   if (action === 'alert') {
     logger.error({ session: MAIN_CHANNELS_SESSION }, 'Stuck main channel input survived max restart escalations -- manual intervention needed')
-    sendAlert(`⛔ A ${MAIN_CHANNELS_SESSION} bemenete beragadt es ${STUCK_RESTART_MAX_CONSECUTIVE} automatikus respawn-pane sem szabaditotta ki. Kezi beavatkozas kell (pl. systemctl --user restart ${SERVICE_ID}-channels).`)
+    sendAlert(`⛔ A ${MAIN_CHANNELS_SESSION} bemenete beragadt es ${STUCK_RESTART_MAX_CONSECUTIVE} automatikus respawn-pane sem szabaditotta ki. Kezi beavatkozas kell: inditsd ujra a ${SERVICE_ID}-channels szolgaltatast.`)
     stuckRestartCount++ // tick past the cap so the alert fires only once
     return
   }
