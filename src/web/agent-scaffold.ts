@@ -140,7 +140,10 @@ export function ensureAgentHooks(name: string): boolean {
 const STALENESS_HOOK_CMD = `python3 ${join(PROJECT_ROOT, 'scripts', 'hooks', 'staleness-guard.py')}`
 
 export function ensureAgentStalenessHook(name: string): boolean {
-  const settingsPath = join(agentDir(name), '.claude', 'settings.json')
+  // agentSettingsPath() maps MAIN_AGENT_ID to ~/.claude/settings.json; using
+  // agentDir() directly here would create a spurious agents/<main> dir and make
+  // the main agent show up as a phantom "down" agent on the dashboard.
+  const settingsPath = agentSettingsPath(name)
   let settings: Record<string, unknown> = {}
   if (existsSync(settingsPath)) {
     try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')) } catch { return false }
@@ -155,7 +158,8 @@ export function ensureAgentStalenessHook(name: string): boolean {
   ups.push({ hooks: [{ type: 'command', command: STALENESS_HOOK_CMD, timeout: 10 }] })
   hooks.UserPromptSubmit = ups
   settings.hooks = hooks
-  mkdirSync(join(agentDir(name), '.claude'), { recursive: true })
+  // Main agent's ~/.claude already exists; only sub-agent dirs need creating.
+  if (name !== MAIN_AGENT_ID) mkdirSync(join(agentDir(name), '.claude'), { recursive: true })
   atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2))
   return true
 }
