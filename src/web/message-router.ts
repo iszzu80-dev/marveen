@@ -25,6 +25,7 @@ import {
   sendPromptToSession,
   sessionExistsOnHost,
 } from './agent-process.js'
+import { recordDelivery } from './delivery-intent.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 
 // Channel-coordinator sources whose messages are real inbound user messages
@@ -178,6 +179,10 @@ export function startMessageRouter(): NodeJS.Timeout {
         // Inline preamble so a fresh session (post hard-restart) doesn't miss
         // the context that explains the tag semantics.
         sendPromptToSession(session, prefix + wrapped, host)
+        // Record what we just delivered so stuck-input recovery can later prove
+        // a parked box holds THIS message (and so is safe to re-submit) rather
+        // than external/stale text. Keyed on the exact bytes we typed.
+        recordDelivery(session, prefix + wrapped, msg.id)
         if (!markMessageDelivered(msg.id)) {
           logger.warn({ id: msg.id }, 'markMessageDelivered affected 0 rows (deleted concurrently?)')
         }

@@ -49,6 +49,9 @@ function facts(over: Partial<StuckInputActionFacts>): StuckInputActionFacts {
     truncatedPreamble: false,
     allowPlainReinject: false,
     hasPlainText: false,
+    // Secure default: plain text is unverified unless a test states it matches a
+    // recorded router delivery. The gate never submits unmatched plain text.
+    deliveryMatched: false,
     ...over,
   }
 }
@@ -68,9 +71,9 @@ describe('decideStuckInputAction (recovery-decision unit)', () => {
     expect(a).toBe('hold')
   })
 
-  it('multi-row sub-agent plain text -> re-inject plain, never enter', () => {
+  it('multi-row sub-agent plain text (verified delivery) -> re-inject plain, never enter', () => {
     const a = decideStuckInputAction(
-      facts({ rowCount: 2, allowPlainReinject: true, hasPlainText: true }),
+      facts({ rowCount: 2, allowPlainReinject: true, hasPlainText: true, deliveryMatched: true }),
     )
     expect(a).toBe('reinject-plain')
   })
@@ -98,6 +101,55 @@ describe('decideStuckInputAction (recovery-decision unit)', () => {
 
   it('single-row default (swallowed Enter) -> bare Enter', () => {
     expect(decideStuckInputAction(facts({ rowCount: 1, escalate: true }))).toBe('enter')
+  })
+})
+
+describe('decideStuckInputAction -- delivery-intent gate', () => {
+  it('UNVERIFIED plain text (no delivery match) -> hold, NEVER submit (sub-agent)', () => {
+    // A stray / stale / persistence-injected line in a sub-agent box that the
+    // router never delivered: must not be re-typed + submitted.
+    const a = decideStuckInputAction(
+      facts({ rowCount: 1, allowPlainReinject: true, hasPlainText: true, deliveryMatched: false, escalate: true }),
+    )
+    expect(a).toBe('hold')
+    expect(a).not.toBe('reinject-plain')
+    expect(a).not.toBe('enter')
+  })
+
+  it('UNVERIFIED plain text on MAIN (allowPlainReinject=false) -> hold, NOT bare-Enter submitted', () => {
+    // The MAIN box has no prompt-suggestion env-var; a stray here must not be
+    // submitted by the default bare Enter either.
+    const a = decideStuckInputAction(
+      facts({ rowCount: 1, allowPlainReinject: false, hasPlainText: true, deliveryMatched: false, escalate: true }),
+    )
+    expect(a).toBe('hold')
+    expect(a).not.toBe('enter')
+  })
+
+  it('VERIFIED plain text single-row (matched delivery) -> bare Enter submits it', () => {
+    const a = decideStuckInputAction(
+      facts({ rowCount: 1, allowPlainReinject: true, hasPlainText: true, deliveryMatched: true, escalate: false }),
+    )
+    expect(a).toBe('enter')
+  })
+
+  it('complete <channel> block IGNORES the gate (structural chat_id verification)', () => {
+    // A delivered Telegram message arrives via the plugin, not the router, so it
+    // is never in the registry (deliveryMatched=false) -- but a complete block is
+    // chat_id-verified and must still recover.
+    const a = decideStuckInputAction(
+      facts({ rowCount: 1, blockComplete: true, hasPlainText: true, deliveryMatched: false, escalate: true }),
+    )
+    expect(a).toBe('reinject-block')
+  })
+
+  it('truncated <channel> block keeps its own guard (gate does not turn it into hold prematurely)', () => {
+    // Single-row truncated block: existing harmless legacy Enter, not pre-empted
+    // by the gate (the gate excludes blockTruncated).
+    const a = decideStuckInputAction(
+      facts({ rowCount: 1, blockTruncated: true, hasPlainText: true, deliveryMatched: false, escalate: true }),
+    )
+    expect(a).toBe('enter')
   })
 })
 

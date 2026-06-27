@@ -5,8 +5,11 @@ import { isAgentRunning, captureParkedInputView, sendEnterToSession } from './ag
 import { resolveAgentSession } from './channel-mcp-reconnect.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { recoverStuckInputForSession, sendAlert } from './channel-monitor.js'
+import { matchDelivery } from './delivery-intent.js'
 import {
   stuckInputSignature,
+  parkedInputText,
+  parkedChannelInput,
   decideStuckInputRecovery,
   type StuckInputState,
   type StuckInputThresholds,
@@ -97,12 +100,28 @@ function bareEnterRecovery(label: string, session: string, host: string | null):
     watchState.set(session, next)
   }
 
-  if (recover) {
-    logger.info(
-      { label, session, attempt: next.attempts },
-      'stuck-input-watcher: parked input persisted past confirm window, sending recovery Enter',
-    )
-    sendEnterToSession(session, host)
+  if (recover && pane != null) {
+    // Delivery-intent gate: a bare Enter submits whatever is parked. Only submit
+    // a verified router delivery or a complete <channel> block (chat_id-safe);
+    // an unverified stray (external / stale / persistence-injected) is held,
+    // never submitted. The dim ghost is already stripped from `pane` (#468);
+    // this closes the residual non-dim stray on the bare-Enter path.
+    const plain = parkedInputText(pane)
+    const block = parkedChannelInput(pane)
+    const verified =
+      (plain != null && matchDelivery(session, plain).match) || block?.complete === true
+    if (verified) {
+      logger.info(
+        { label, session, attempt: next.attempts },
+        'stuck-input-watcher: parked input persisted past confirm window, sending recovery Enter',
+      )
+      sendEnterToSession(session, host)
+    } else {
+      logger.warn(
+        { label, session },
+        'stuck-input-watcher: parked text is not a verified delivery -- holding (no bare Enter)',
+      )
+    }
   } else if (next.parkedSig !== null && next.attempts >= THRESHOLDS.maxAttempts) {
     // Logged at most once per spell: the give-up is recorded on the tick
     // that spent the last attempt (attempts hits maxAttempts there), not

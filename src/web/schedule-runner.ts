@@ -37,6 +37,7 @@ import {
   capturePane,
   sendEnterToSession,
 } from './agent-process.js'
+import { recordDelivery } from './delivery-intent.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { sendTelegramMessage } from './telegram.js'
 import { runCommandTask } from './command-task.js'
@@ -180,6 +181,9 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
     // tick -- defeating the very purpose of forceSend (inject regardless, let
     // Claude Code queue it). All non-forceSend tasks keep the gate ON.
     sendPromptToSession(session, fullPrompt, host, { waitForIdle: !task.forceSend })
+    // Record the delivery so stuck-input recovery can verify a parked scheduled
+    // prompt is ours (and re-submit it) rather than holding it as unverified.
+    recordDelivery(session, fullPrompt, `scheduled-task:${task.name}`, now)
     scheduleLastRun.set(task.name, now)
     persistScheduleLastRun()
     appendTaskRun(task.name, agentName, 'fired')

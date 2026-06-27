@@ -30,6 +30,7 @@ import {
   type StuckInputState, type StuckInputThresholds, type StuckInputAction,
   type StuckInputActionFacts,
 } from '../pane-state.js'
+import { matchDelivery } from './delivery-intent.js'
 import { MAIN_CHANNELS_SESSION, MAIN_CHANNELS_PLIST } from './main-agent.js'
 import { notifyChannel } from '../notify.js'
 import { getProvider, channelStateDir, readChannelToken, type ChannelProviderType } from '../channel-provider.js'
@@ -208,6 +209,11 @@ export function recoverStuckInputForSession(
     // and corrupts the message) and prefers a chat_id-safe re-inject; the
     // truncation-guard (no verbatim re-inject of an incomplete <channel> block)
     // is preserved via blockTruncated.
+    // Plain parked text (presence, independent of allowPlainReinject) and
+    // whether it matches a verified router delivery into this session. The gate
+    // in decideStuckInputAction never submits unmatched plain text; the
+    // reinject-plain branch still ANDs allowPlainReinject so MAIN never re-types.
+    const plainText = parkedInputText(pane)
     const facts: StuckInputActionFacts = {
       escalate: attempt > MAIN_STUCK_ENTER_ATTEMPTS,
       rowCount: parkedInputRowCount(pane),
@@ -215,7 +221,8 @@ export function recoverStuckInputForSession(
       blockTruncated: block != null && !block.complete,
       truncatedPreamble: shouldClearTruncatedPreamble(pane),
       allowPlainReinject,
-      hasPlainText: allowPlainReinject && parkedInputText(pane) != null,
+      hasPlainText: plainText != null,
+      deliveryMatched: plainText != null && matchDelivery(session, plainText).match,
     }
     const action = decideStuckInputAction(facts)
     performStuckInputAction(session, action, pane, block, sig, attempt)

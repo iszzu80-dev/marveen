@@ -907,6 +907,20 @@ export function parkedInputText(pane: string): string | null {
   return flat.length > 0 ? flat : null
 }
 
+// Normalise a piece of DELIVERED content (what the message-router typed into a
+// session) into the same shape parkedInputText() produces from the captured
+// box, so the two can be compared by the delivery-intent gate. The router
+// delivers a multi-line block (preamble + tags + body); the TUI wraps it and a
+// capture collapses the wrap, so both sides must whitespace-collapse + trim.
+// Delivered content carries no `❯` prompt glyph (that is the box's, stripped by
+// parkedInputText), so we only collapse here. MUST stay in lockstep with
+// parkedInputText's normalisation -- a divergence would make legit deliveries
+// fail to match and silently stop being recovered (a delivery regression), so
+// the two are pinned together by a test.
+export function deliveryContentSignature(content: string): string {
+  return content.replace(/\s+/g, ' ').trim()
+}
+
 // How many VISUAL rows the live input box content occupies, ignoring the
 // bare prompt glyph and blank padding. The caller uses this to choose the
 // right submit keystroke: a MULTI-row parked input must NOT be submitted with
@@ -1085,6 +1099,13 @@ export interface StuckInputActionFacts {
   allowPlainReinject: boolean
   /** parkedInputText(pane) != null -- there is collapsed text to re-inject. */
   hasPlainText: boolean
+  /** Delivery-intent gate: the parked PLAIN text matches something the
+   * message-router verifiably delivered into this session (matchDelivery). When
+   * false, the plain text is NOT a known router delivery (external / stale /
+   * persistence-injected / a prior re-inject) and must never be auto-submitted.
+   * Computed only for the plain-text path; a complete <channel> block has its
+   * own structural (chat_id) verification and ignores this. */
+  deliveryMatched: boolean
 }
 
 /**
@@ -1109,7 +1130,19 @@ export function decideStuckInputAction(f: StuckInputActionFacts): StuckInputActi
   if (f.blockComplete) {
     return f.escalate || multiRow ? 'reinject-block' : 'enter'
   }
-  // Sub-agent non-channel parked text: clear + re-inject is safe (no human draft).
+  // DELIVERY-INTENT GATE: parked PLAIN text (not a complete or truncated
+  // <channel> block) is only safe to submit if it matches something the router
+  // actually delivered here. Unverified plain text -- external, stale, a
+  // persistence-injected stray, or a prior re-inject -- is NEVER submitted: hold
+  // so the caller redraws/clears and alerts once, surfacing a genuinely stuck
+  // (but unmatched) message instead of silently dropping it. A complete block
+  // (handled above) and a truncated block (handled below, chat_id-guarded)
+  // carry their own verification and are intentionally exempt.
+  if (f.hasPlainText && !f.deliveryMatched && !f.blockTruncated) {
+    return f.truncatedPreamble && f.escalate ? 'clear-preamble' : 'hold'
+  }
+  // Sub-agent non-channel parked text, verified as a router delivery: clear +
+  // re-inject is safe (no human draft, and provably ours).
   if (f.allowPlainReinject && f.hasPlainText && !f.blockTruncated) {
     return f.escalate || multiRow ? 'reinject-plain' : 'enter'
   }
