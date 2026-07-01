@@ -15,6 +15,7 @@ import {
   parkedInputText,
   parkedInputRowCount,
   submitLanded,
+  paneShowsContextSaturation,
 } from '../pane-state.js'
 
 // Realistic pane fixtures modelled on actual `tmux capture-pane -p`
@@ -1948,3 +1949,60 @@ describe('footer-less welcome-screen parked input', () => {
     expect(parkedInputRowCount(noBox)).toBe(0)
   })
 })
+
+describe('paneShowsContextSaturation', () => {
+  // Real capture shape observed live 2026-07-01 (Mason/Atlas/Cog/Pixel/
+  // Falcon/deliverylead, in that order over one night): an idle, ready-
+  // looking footer with the saturation banner one line above it.
+  const CTX_SAT_IDLE = [
+    '  some prior assistant output',
+    '',
+    '✻ Cooked for 3m 7s',
+    '                                                              100% context used',
+    SEP,
+    '❯ ',
+    SEP,
+    '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+  ].join('\n')
+
+  it('detects the saturation banner on an otherwise-idle pane', () => {
+    expect(paneLooksIdleFixtureCheck(CTX_SAT_IDLE)).toBe(true) // sanity: still reads as idle
+    expect(paneShowsContextSaturation(CTX_SAT_IDLE)).toBe(true)
+  })
+
+  it('is false on a normal idle pane', () => {
+    expect(paneShowsContextSaturation(IDLE_BYPASS)).toBe(false)
+    expect(paneShowsContextSaturation(IDLE_STRICT)).toBe(false)
+  })
+
+  it('is false on a normal busy pane (no false alarm mid-turn)', () => {
+    expect(paneShowsContextSaturation(BUSY_FULL_FOOTER)).toBe(false)
+  })
+
+  it('does NOT misfire on a scrollback quote of the same phrase (self-referential false-positive risk)', () => {
+    // e.g. a QA report or kanban comment that literally discusses
+    // context-saturation detection, scrolled well above the live footer.
+    const quoted = [
+      '  QA report: the watchdog now greps for "100% context used" in the footer.',
+      '  This is a scrollback quote, not the live indicator.',
+      ...Array.from({ length: 10 }, () => '  more scrollback padding'),
+      SEP,
+      '❯ ',
+      SEP,
+      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
+    ].join('\n')
+    expect(paneShowsContextSaturation(quoted)).toBe(false)
+  })
+
+  it('is false on empty/null-ish input', () => {
+    expect(paneShowsContextSaturation('')).toBe(false)
+    expect(paneShowsContextSaturation('   \n  ')).toBe(false)
+  })
+})
+
+// Local helper: reuse detectPaneState to assert the CTX_SAT fixture above is
+// a realistic "idle" capture (i.e. the bug this predicate exists to catch —
+// paneLooksIdle alone would say this session is fine to dispatch to).
+function paneLooksIdleFixtureCheck(capture: string): boolean {
+  return detectPaneState(capture) === 'idle'
+}

@@ -505,6 +505,31 @@ export function isReadyForPrompt(pane: string): boolean {
   return paneLooksIdle(pane)
 }
 
+// Context-saturation footer region: wider than LIVE_FOOTER_REGION_LINES
+// because the "100% context used" line renders one row above the
+// bypass-permissions footer (see observed captures 2026-07-01), so a
+// 5-line window would clip it on some terminal heights. Still scoped to
+// the tail, NOT the whole pane -- a scrollback quote of the same phrase
+// (a QA report, a kanban comment, THIS code discussing it) must not
+// misfire the same way a `esc to interrupt` scrollback quote would.
+const CTX_SAT_FOOTER_REGION_LINES = 8
+const CTX_SAT_RX = /100% context used|context (?:is |limit reached|window )?full\b|context limit|auto-?compact required/i
+
+/**
+ * True when the live footer region shows Claude Code's own context-
+ * saturation indicator. Distinct from paneLooksIdle: a saturated pane can
+ * otherwise present as perfectly idle (empty prompt, ready-looking footer)
+ * -- that combination is exactly the bug this predicate exists to catch
+ * (dispatch-guard.sh / context-watchdog, 2026-07-01: three agents hit
+ * 100% context back-to-back and kept silently accepting new tasks).
+ */
+export function paneShowsContextSaturation(capture: string): boolean {
+  if (!capture || !capture.trim()) return false
+  const lines = capture.split('\n')
+  const footerRegion = lines.slice(-CTX_SAT_FOOTER_REGION_LINES).join('\n')
+  return CTX_SAT_RX.test(footerRegion)
+}
+
 // Locate the live Claude Code input box and return its inner content as
 // one string. Bounded strictly to the region between the two most
 // recent BOX_SEP_RX separators above the idle footer, so a parked input

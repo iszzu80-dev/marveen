@@ -128,13 +128,28 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
   // will process it at the next idle slot. This prevents the infinite
   // retry loop observed when the target session stays busy for hours
   // (275 retries overnight in production).
+  //
+  // KNOWN GAP (2026-07-01, dispatch-guard rollout): forceSend's short-
+  // circuit ALSO bypasses the context-saturation check now folded into
+  // isSessionReadyForPrompt() (see pane-state.paneShowsContextSaturation).
+  // A forceSend task can still land on a 100%-context agent -- it will
+  // queue behind whatever the agent is doing, same as forceSend has always
+  // behaved for a busy session, but a saturated agent may never actually
+  // clear that queue on its own. Deliberately NOT closing this: forceSend's
+  // whole purpose is "always eventually land, never silently drop" (see the
+  // 275-retry incident above), and folding the CTX_SAT gate in here would
+  // reintroduce exactly that failure mode for whatever forceSend task hits
+  // it. No task in ~/.claude/scheduled-tasks currently sets forceSend=true
+  // (checked 2026-07-01) -- if one is added later, its author should
+  // manually consider whether dispatch-guard.sh's recovery should be
+  // wired in for that specific task instead of relying on this gate.
   if (!task.forceSend && !isSessionReadyForPrompt(session, host)) {
     logger.warn({ task: task.name, agent: agentName, session }, 'Schedule target session busy or has pending input, will retry')
     return 'busy'
   }
 
   if (task.forceSend) {
-    logger.info({ task: task.name, agent: agentName, session }, 'forceSend=true, bypassing busy-state check')
+    logger.info({ task: task.name, agent: agentName, session }, 'forceSend=true, bypassing busy-state check (including context-saturation gate -- see comment above)')
   }
 
   try {

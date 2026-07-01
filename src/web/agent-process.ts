@@ -1,8 +1,9 @@
 import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, lstatSync, symlinkSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { execSync, execFileSync } from 'node:child_process'
-import { OLLAMA_URL } from '../config.js'
+import { execSync, execFileSync, spawn } from 'node:child_process'
+import { openSync } from 'node:fs'
+import { OLLAMA_URL, PROJECT_ROOT } from '../config.js'
 import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import {
@@ -13,6 +14,7 @@ import {
   detectPaneState,
   parkedInputText,
   stripGhostSuggestion,
+  paneShowsContextSaturation,
 } from '../pane-state.js'
 import { agentDir, readAgentModel, readAgentClaudeConfigDir, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName, readAgentRemoteConfig, readAgentRemoteHost } from './agent-config.js'
 import {
@@ -1199,15 +1201,68 @@ export function captureParkedInputView(session: string, host: string | null = nu
 //      returns true. Cost on the ready path: ~250ms sleep plus a second
 //      tmux capture-pane round-trip (typically tens of ms). Busy pass
 //      through layer 1 and return immediately without the delay.
+// Dispatch guard (2026-07-01, tg-directed): a session can be `paneLooksIdle`
+// TRUE while ALSO showing "100% context used" -- an idle, empty-prompt,
+// ready-looking footer that will not actually do anything useful with a new
+// task. Observed live the same night on three agents in a row, each still
+// happily accepting new dispatches while saturated. isSessionReadyForPrompt
+// now refuses those sessions too, and fires the SAME recovery path a human
+// would run by hand (scripts/dispatch-guard.sh -- evidence capture, loop-
+// guard, fresh restart, recovery-context briefing) so the agent clears on
+// its own instead of the message sitting pending forever waiting on a human
+// to notice. Debounced per session so the frequent router/scheduler polling
+// does not spawn a new recovery process on every tick while one is already
+// running.
+const CTX_RECOVERY_DEBOUNCE_MS = 5 * 60_000
+const lastCtxRecoveryTrigger = new Map<string, number>()
+
+function maybeTriggerContextRecovery(session: string): void {
+  // Only sub-agent sessions follow the `agent-<name>` convention; the main
+  // channels session is handled by its own dedicated restart path and must
+  // never be auto-respawned from here.
+  const match = /^agent-(.+)$/.exec(session)
+  if (!match) return
+  const agentName = match[1]
+
+  const now = Date.now()
+  const last = lastCtxRecoveryTrigger.get(session) ?? 0
+  if (now - last < CTX_RECOVERY_DEBOUNCE_MS) return
+  lastCtxRecoveryTrigger.set(session, now)
+
+  const script = join(PROJECT_ROOT, 'scripts', 'dispatch-guard.sh')
+  const recoveryDir = join(STORE_DIR, 'recovery')
+  const logPath = join(recoveryDir, `${agentName}.auto-trigger.log`)
+  try {
+    mkdirSync(recoveryDir, { recursive: true })
+    const fd = openSync(logPath, 'a')
+    const child = spawn('bash', [script, agentName], {
+      detached: true,
+      stdio: ['ignore', fd, fd],
+    })
+    child.unref()
+    logger.warn({ session, agentName }, 'dispatch-guard: context saturation detected, auto-recovery triggered')
+  } catch (err) {
+    logger.warn({ err, session, agentName }, 'dispatch-guard: failed to spawn auto-recovery')
+  }
+}
+
 export function isSessionReadyForPrompt(session: string, host: string | null = null): boolean {
   const first = capturePane(session, host)
   if (first == null) return false
+  if (paneShowsContextSaturation(first)) {
+    if (host == null) maybeTriggerContextRecovery(session)
+    return false
+  }
   if (!paneLooksIdle(first)) return false
 
   try { execFileSync('/bin/sleep', [PANE_READY_CONFIRM_DELAY_S], { timeout: 2000 }) } catch { /* best effort */ }
 
   const second = capturePane(session, host)
   if (second == null) return false
+  if (paneShowsContextSaturation(second)) {
+    if (host == null) maybeTriggerContextRecovery(session)
+    return false
+  }
   return paneLooksIdle(second)
 }
 
