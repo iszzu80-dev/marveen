@@ -6,6 +6,7 @@ import {
   PROJECT_ROOT,
   MAIN_AGENT_ID,
   ALLOWED_CHAT_ID,
+  BOT_NAME,
 } from '../config.js'
 import {
   appendTaskRun,
@@ -159,7 +160,14 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
       // heartbeat prompts.
       prefix = `[Heartbeat: ${task.name}] `
     } else {
-      prefix = `[Utemezett feladat: ${task.name}] Az eredmenyt kuldd el Telegramon (chat_id: ${ALLOWED_CHAT_ID}, reply tool). `
+      // Target the RUNNING agent's own bound channel (chat_id: 0), NOT the
+      // global ALLOWED_CHAT_ID. The latter is the main/admin chat; injecting it
+      // here pointed every sub-agent's task result at the boss's chat instead of
+      // its own owner (e.g. attilamarveenja -> Papp Attila). chat_id: 0 is the
+      // established "bound channel" convention (template-identity-hygiene), so it
+      // resolves per-agent and stays correct for the main agent too. The
+      // system-level pending-retry alert below still uses ALLOWED_CHAT_ID.
+      prefix = `[Utemezett feladat: ${task.name}] Az eredmenyt kuldd el Telegramon (chat_id: 0, reply tool). `
     }
     // A scheduled task body is the agent's OWN task, authored by the operator
     // (SKILL.md on disk, or the bearer-gated /api/schedules editor -- both
@@ -290,7 +298,7 @@ function sendPendingRetryAlert(view: PendingRetryView, nowMs: number): void {
   const ageMinutes = Math.floor(view.ageMs / 60000)
   const firstAttempt = new Date(view.firstAttempt).toLocaleString('hu-HU')
   const text = [
-    `[Marveen scheduler] A(z) "${view.taskName}" (${view.agentName}) utemezett feladat ${ageMinutes} perce varakozik.`,
+    `[${BOT_NAME} scheduler] A(z) "${view.taskName}" (${view.agentName}) utemezett feladat ${ageMinutes} perce varakozik.`,
     `Elso probalkozas: ${firstAttempt}.`,
     'A rendszer tovabb probalkozik; a dashboard /Utemezesek oldalan visszavonhato.',
   ].join('\n')
