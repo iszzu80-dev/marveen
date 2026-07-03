@@ -13,6 +13,7 @@ import {
   detectPaneState,
   parkedInputText,
   stripGhostSuggestion,
+  paneShowsContextSaturation,
 } from '../pane-state.js'
 import { agentDir, listAgentNames, readAgentModel, readAgentClaudeConfigDir, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName, readAgentRemoteConfig, readAgentRemoteHost } from './agent-config.js'
 import {
@@ -1260,15 +1261,29 @@ export function captureParkedInputView(session: string, host: string | null = nu
 //      returns true. Cost on the ready path: ~250ms sleep plus a second
 //      tmux capture-pane round-trip (typically tens of ms). Busy pass
 //      through layer 1 and return immediately without the delay.
+//
+// A saturated pane ("100% context used") is refused up front: it can present
+// as perfectly idle, so without this a new prompt would be dispatched into a
+// session that cannot act on it. We only log/audit the refusal here; how (or
+// whether) to recover the session is left to the caller / operator tooling, so
+// this predicate stays a pure, dependency-free readiness check.
 export function isSessionReadyForPrompt(session: string, host: string | null = null): boolean {
   const first = capturePane(session, host)
   if (first == null) return false
+  if (paneShowsContextSaturation(first)) {
+    logger.warn({ session }, 'dispatch: refusing prompt — session shows context saturation (100% context)')
+    return false
+  }
   if (!paneLooksIdle(first)) return false
 
   try { execFileSync('/bin/sleep', [PANE_READY_CONFIRM_DELAY_S], { timeout: 2000 }) } catch { /* best effort */ }
 
   const second = capturePane(session, host)
   if (second == null) return false
+  if (paneShowsContextSaturation(second)) {
+    logger.warn({ session }, 'dispatch: refusing prompt — session shows context saturation (100% context)')
+    return false
+  }
   return paneLooksIdle(second)
 }
 

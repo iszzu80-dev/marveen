@@ -160,6 +160,12 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
   // will process it at the next idle slot. This prevents the infinite
   // retry loop observed when the target session stays busy for hours
   // (275 retries overnight in production).
+  //
+  // KNOWN FOLLOW-UP: forceSend also bypasses the context-saturation refusal
+  // now folded into isSessionReadyForPrompt(). A forceSend task can therefore
+  // still land on a 100%-context session. Left open deliberately -- forceSend's
+  // contract is "always eventually land, never silently drop", and a saturated
+  // session needs a separate delivery policy, tracked as future work.
   if (!task.forceSend && !isSessionReadyForPrompt(session, host)) {
     logger.warn({ task: task.name, agent: agentName, session }, 'Schedule target session busy or has pending input, will retry')
     return 'busy'
