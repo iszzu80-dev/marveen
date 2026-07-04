@@ -6,6 +6,7 @@ import { createInterface } from 'node:readline'
 import { getDb } from '../db.js'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
+import { deriveProvider } from '../costops/pricing.js'
 
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects')
 
@@ -77,6 +78,9 @@ interface ParsedCall {
   cacheCreationTokens: number
   contentPreview: string
   toolName: string | null
+  /** CostOps v0.2: model id from the transcript (message.model), e.g.
+   *  'claude-opus-4-8'. null on older transcripts without it. Forward-only. */
+  model?: string | null
   /** The API message id (msg_...). One assistant turn that calls a tool is
    *  written to the transcript as SEVERAL `assistant` lines sharing this id --
    *  a text block (tool_name=null) plus one line per tool_use block -- and EACH
@@ -114,6 +118,7 @@ export function collapseByMessageId(calls: ParsedCall[]): ParsedCall[] {
     ex.cacheCreationTokens = Math.max(ex.cacheCreationTokens, c.cacheCreationTokens)
     if (!ex.toolName && c.toolName) ex.toolName = c.toolName
     if (!ex.contentPreview && c.contentPreview) ex.contentPreview = c.contentPreview
+    if (!ex.model && c.model) ex.model = c.model
   }
   return out
 }
@@ -183,6 +188,7 @@ async function parseJsonlFile(
       cacheCreationTokens: (u.cache_creation_input_tokens || 0),
       contentPreview: preview,
       toolName,
+      model: obj.message?.model || null,
       messageId: obj.message?.id || null,
     })
   }
@@ -202,8 +208,8 @@ export async function collectTokenUsage(): Promise<{ inserted: number; files: nu
   const setCursor = db.prepare('INSERT OR REPLACE INTO token_usage_cursors (file_path, last_line, last_size) VALUES (?, ?, ?)')
   const insertCall = db.prepare(`
     INSERT OR IGNORE INTO token_usage (agent, session_id, timestamp, input_tokens, output_tokens,
-      cache_read_tokens, cache_creation_tokens, content_preview, tool_name)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      cache_read_tokens, cache_creation_tokens, content_preview, tool_name, model, provider, model_source)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `)
 
   for (const source of sources) {
@@ -228,6 +234,9 @@ export async function collectTokenUsage(): Promise<{ inserted: number; files: nu
                 c.inputTokens, c.outputTokens,
                 c.cacheReadTokens, c.cacheCreationTokens,
                 c.contentPreview || null, c.toolName,
+                c.model || null,
+                c.model ? deriveProvider(c.model) : null,
+                c.model ? 'transcript' : null,
               )
             }
             setCursor.run(file, linesRead, fileSize)

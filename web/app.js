@@ -286,6 +286,7 @@ function switchPage(pageId) {
   if (pageId === 'team') { loadTeamGraph() }
   if (pageId === 'messages') loadMessagesPage()
   if (pageId === 'tokenUsage') loadTokenUsage()
+  if (pageId === 'costs') loadCosts()
   if (pageId === 'ideas') loadIdeasPage()
   if (pageId === 'archived') loadArchivedPage()
   if (pageId === 'naplo') loadNaplo()
@@ -10217,6 +10218,93 @@ function tuGetTimeRange() {
   if (period === '7d') return { from: now - 7 * 86400, to: now }
   if (period === '30d') return { from: now - 30 * 86400, to: now }
   return { from: undefined, to: undefined }
+}
+
+// --- CostOps v0.1: read-only monthly cost summary ---
+async function loadCosts() {
+  const body = document.getElementById('costsBody')
+  if (!body) return
+  let s
+  try {
+    const res = await fetch('/api/costs/summary')
+    if (!res.ok) { body.innerHTML = '<p style="color:#c00;">Hiba a költség-összesítő betöltésekor.</p>'; return }
+    s = await res.json()
+  } catch (e) {
+    body.innerHTML = '<p style="color:#c00;">Hálózati hiba.</p>'
+    return
+  }
+  const cur = s.currency || 'HUF'
+  const fmt = (n) => (Number(n) || 0).toLocaleString('hu-HU') + ' ' + cur
+  const pct = (n) => (Math.round((Number(n) || 0) * 1000) / 10) + '%'
+  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+
+  const b = s.budget
+  const budgetColor = !b ? '#888' : b.status === 'hard' ? '#c0392b' : b.status === 'warning' ? '#e67e22' : '#27ae60'
+  const budgetHtml = b
+    ? `<div><b>${esc(b.id)}</b>: ${fmt(s.current_spend)} / ${fmt(b.amount)}
+        <span style="color:${budgetColor};font-weight:600;">(${pct(b.used_pct)}, ${esc(b.status)})</span>
+        <div style="background:#eee;border-radius:6px;height:10px;overflow:hidden;max-width:360px;margin-top:4px;">
+          <div style="background:${budgetColor};height:100%;width:${Math.min(100, (Number(b.used_pct) || 0) * 100)}%;"></div>
+        </div>
+        <span style="font-size:0.8em;color:#888;">forecast: ${pct(b.forecast_pct)} · jelzés-only, semmilyen automatikus művelet</span></div>`
+    : '<p style="color:#888;">Nincs aktív budget (állíts be amount &gt; 0 értéket a store/costops-config.json-ban).</p>'
+
+  const topSrc = (s.top_sources || []).map(t => `<tr><td>${esc(t.name)}</td><td style="text-align:right;">${fmt(t.spend)}</td></tr>`).join('') || '<tr><td colspan="2" style="color:#888;">nincs adat</td></tr>'
+  const allSrc = (s.all_sources || []).map(t => `<tr><td>${esc(t.name)}</td><td style="color:#888;">${esc(t.source_type)}</td><td style="color:#888;">${esc(t.provider)}</td><td style="color:#888;">${esc(t.confidence)}</td><td style="text-align:right;">${fmt(t.spend)}</td></tr>`).join('') || '<tr><td colspan="5" style="color:#888;">nincs konfigurált forrás</td></tr>'
+  const conf = Object.entries(s.confidence_breakdown || {}).map(([k, v]) => `<tr><td>${esc(k)}</td><td style="text-align:right;">${fmt(v)}</td></tr>`).join('') || '<tr><td colspan="2" style="color:#888;">-</td></tr>'
+  const tu = s.token_usage || {}
+  const cfgWarn = (s.config_present === false)
+    ? '<p style="color:#e67e22;">Nincs store/costops-config.json — üres összesítő. Másold a store/costops-config.json.example-t és töltsd ki.</p>'
+    : (s.config_errors && s.config_errors.length ? `<p style="color:#e67e22;">Config figyelmeztetések: ${esc(s.config_errors.join('; '))}</p>` : '')
+
+  const card = (title, inner) => `<div style="border:1px solid #e2e2e2;border-radius:10px;padding:14px 16px;margin-bottom:14px;"><h3 style="margin:0 0 8px;font-size:1em;">${title}</h3>${inner}</div>`
+
+  body.innerHTML = `
+    ${cfgWarn}
+    <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:14px;">
+      <div style="flex:1;min-width:160px;border:1px solid #e2e2e2;border-radius:10px;padding:14px 16px;">
+        <div style="color:#888;font-size:0.85em;">${esc(s.month)} spend</div>
+        <div style="font-size:1.6em;font-weight:700;">${fmt(s.current_spend)}</div>
+      </div>
+      <div style="flex:1;min-width:160px;border:1px solid #e2e2e2;border-radius:10px;padding:14px 16px;">
+        <div style="color:#888;font-size:0.85em;">forecast hó végére</div>
+        <div style="font-size:1.6em;font-weight:700;">${fmt(s.forecast_month_end)}</div>
+      </div>
+    </div>
+    ${card('Budget', budgetHtml)}
+    ${card('Top források (top 5 spend szerint)', `<table style="width:100%;max-width:420px;border-collapse:collapse;">${topSrc}</table>`)}
+    ${card('Összes költségforrás (' + ((s.all_sources || []).length) + ')', `<table style="width:100%;max-width:640px;border-collapse:collapse;">
+      <tr style="color:#888;font-size:0.8em;text-align:left;"><th style="text-align:left;">Forrás</th><th style="text-align:left;">Típus</th><th style="text-align:left;">Provider</th><th style="text-align:left;">Confidence</th><th style="text-align:right;">Havi</th></tr>
+      ${allSrc}
+    </table>`)}
+    ${card('Confidence bontás', `<table style="width:100%;max-width:420px;border-collapse:collapse;">${conf}</table>`)}
+    ${card('Fixed/manual vs provider vs estimate', `<table style="width:100%;max-width:420px;border-collapse:collapse;">
+      <tr><td>fixed/manual</td><td style="text-align:right;">${fmt(s.breakdown ? s.breakdown.fixed_manual : 0)}</td></tr>
+      <tr><td>provider</td><td style="text-align:right;">${fmt(s.breakdown ? s.breakdown.provider : 0)}</td></tr>
+      <tr><td>estimate</td><td style="text-align:right;">${fmt(s.breakdown ? s.breakdown.estimate : 0)}</td></tr>
+    </table>`)}
+    ${card('Token aktivitás (' + esc(s.month) + ')', `
+      <div style="font-size:0.85em;color:#888;margin-bottom:6px;">volumen — v0.1-ben NEM forintosítva (nincs model oszlop; token→cost a v0.2-ben)</div>
+      <table style="width:100%;max-width:420px;border-collapse:collapse;">
+        <tr><td>hívások</td><td style="text-align:right;">${(Number(tu.calls) || 0).toLocaleString('hu-HU')}</td></tr>
+        <tr><td>ágensek</td><td style="text-align:right;">${(Number(tu.agents) || 0)}</td></tr>
+        <tr><td>input tokens</td><td style="text-align:right;">${(Number(tu.input_tokens) || 0).toLocaleString('hu-HU')}</td></tr>
+        <tr><td>output tokens</td><td style="text-align:right;">${(Number(tu.output_tokens) || 0).toLocaleString('hu-HU')}</td></tr>
+      </table>`)}
+    ${(function(){
+      var t = s.token_cost_estimate; if (!t) return ''
+      var statusTxt = { no_pricing_config: 'nincs pricing config (store/costops-pricing.json)', loaded: 'pricing betöltve', partial: 'részleges (van unpriced model)' }[t.pricing_profile_status] || esc(t.pricing_profile_status)
+      var priced = (t.priced_by_model || []).map(function(m){ return '<tr><td>'+esc(m.model)+'</td><td style="color:#888;">'+esc(m.provider)+'</td><td style="text-align:right;">'+fmt(m.estimated_huf)+'</td></tr>' }).join('') || '<tr><td colspan="3" style="color:#888;">nincs árazott model</td></tr>'
+      var up = t.unpriced || {}
+      return card('Token költségbecslés (ESTIMATE, nem számla)', ''
+        + '<div style="font-size:0.85em;color:#e67e22;margin-bottom:8px;">Ez BECSLÉS a token_usage-ból, nem tényleges számla. Külön a fix/manuális spendtől. Status: '+statusTxt+'</div>'
+        + '<div style="margin-bottom:8px;"><b>Becsült token-költség:</b> '+fmt(t.total_estimated_huf)+' <span style="color:#888;">(confidence: '+esc(t.confidence)+')</span></div>'
+        + '<table style="width:100%;max-width:480px;border-collapse:collapse;"><tr style="color:#888;font-size:0.8em;text-align:left;"><th style="text-align:left;">Model</th><th style="text-align:left;">Provider</th><th style="text-align:right;">Becsült</th></tr>'+priced+'</table>'
+        + '<div style="font-size:0.8em;color:#888;margin-top:8px;">Unpriced: unknown-model '+((Number(up.unknown_model_tokens)||0).toLocaleString('hu-HU'))+' token, nincs-ár '+((Number(up.no_rate_tokens)||0).toLocaleString('hu-HU'))+' token (nincs cost számítva rájuk).</div>'
+        + '<div style="margin-top:8px;padding-top:8px;border-top:1px solid #eee;"><b>Becsült összes (fix + token):</b> '+fmt(s.estimated_total_with_token_cost)+' <span style="color:#888;font-size:0.85em;">(a fix spend + a token-becslés, világosan jelölve)</span></div>')
+    })()}
+    <p style="font-size:0.8em;color:#888;">generálva: ${new Date((Number(s.generated_at) || 0) * 1000).toLocaleString('hu-HU')}</p>
+  `
 }
 
 async function loadTokenUsage() {
