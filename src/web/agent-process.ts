@@ -1,8 +1,9 @@
 import { existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, lstatSync, symlinkSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { execSync, execFileSync } from 'node:child_process'
-import { OLLAMA_URL } from '../config.js'
+import { execSync, execFileSync, spawn } from 'node:child_process'
+import { openSync } from 'node:fs'
+import { OLLAMA_URL, PROJECT_ROOT } from '../config.js'
 import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import {
@@ -15,7 +16,7 @@ import {
   stripGhostSuggestion,
   paneShowsContextSaturation,
 } from '../pane-state.js'
-import { agentDir, listAgentNames, readAgentModel, readAgentClaudeConfigDir, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName, readAgentRemoteConfig, readAgentRemoteHost } from './agent-config.js'
+import { agentDir, readAgentModel, readAgentClaudeConfigDir, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName, readAgentRemoteConfig, readAgentRemoteHost } from './agent-config.js'
 import {
   buildTmuxInvocation,
   buildSshExec,
@@ -115,61 +116,6 @@ export function hasFleetOauthToken(): boolean {
   } catch {
     return false
   }
-}
-
-// H1 silent-degradation hardening (2026-06-30).
-//
-// When the fleet OAuth token is absent, channel sub-agents skip isolation and
-// fall back to the SHARED ~/.claude (the pre-isolation behaviour, gated in
-// startAgentProcess). ONE channel sub-agent on the shared dir is harmless -- it
-// owns the single plugin-install slot and poller. TWO OR MORE collide on that
-// slot, which is exactly the fleet outage isolation was built to end (only one
-// agent registers its plugin, the rest go deaf -- see
-// ensureIsolatedChannelConfigDir). Today that collision is logged at WARN only,
-// so it stays invisible until a bot silently stops answering.
-//
-// The decision is pure (token-absent AND more-than-one channel sub-agent) so it
-// is unit-tested without I/O, mirroring shouldSendDeferAlert. Token PRESENT ->
-// isolation works -> never alerts, regardless of agent count.
-export function shouldAlertSharedConfigCollision(
-  hasToken: boolean,
-  channelSubAgentCount: number,
-): boolean {
-  return !hasToken && channelSubAgentCount > 1
-}
-
-// Count of channel-HAVING sub-agents in the fleet (main agent excluded -- it
-// comes up via channels.sh and keeps the shared root by design). Uses the same
-// own-token signal as the launch path, so the count reflects which agents will
-// actually contend for the shared ~/.claude plugin slot.
-export function countChannelSubAgents(): number {
-  return listAgentNames().filter((n) => n !== MAIN_AGENT_ID && agentHasChannel(n)).length
-}
-
-// One operator alert per degradation episode: spamming on every spawn would
-// bury the signal. Cleared the moment the token reappears (isolation restored),
-// so a later token-loss re-alerts. Process-local, like defer-alert's dedup set.
-let sharedConfigCollisionAlerted = false
-
-export function resetSharedConfigCollisionAlert(): void {
-  sharedConfigCollisionAlerted = false
-}
-
-// Loud, owner-facing alert routed via notifyChannel (direct Bot API POST from
-// the dashboard process) -- NOT an inter-agent relay, which would itself need a
-// healthy channel agent to deliver. No-op unless the token is absent AND >1
-// channel sub-agent would share ~/.claude.
-function maybeAlertSharedConfigCollision(name: string): void {
-  const count = countChannelSubAgents()
-  if (!shouldAlertSharedConfigCollision(false, count) || sharedConfigCollisionAlerted) return
-  sharedConfigCollisionAlerted = true
-  logger.error(
-    { name, channelSubAgentCount: count },
-    'isolated-config: fleet OAuth token missing with multiple channel sub-agents -- shared ~/.claude plugin-slot collision, bots will go deaf',
-  )
-  void notifyChannel(
-    `⚠️ Flotta-figyelmeztetes: hianyzik a fleet OAuth token (store/.claude-oauth-token), de ${count} csatornas sub-agent fut. Izolacio nelkul mind a kozos ~/.claude-ot hasznalja, igy a plugin-slot utkozik es csak egy bot marad eleresheto (a tobbi elnemul). Javitas: futtasd a \`claude setup-token\`-t, mentsd a store/.claude-oauth-token fajlba, majd inditsd ujra az agenseket.`,
-  ).catch(() => { /* notifyChannel logs internally */ })
 }
 
 // Per-agent isolated CLAUDE_CONFIG_DIR provisioning (2026-06-26 fleet outage).
@@ -670,9 +616,6 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
     let oauthTokenEnv = ''
     if (!claudeConfigDir && hasChannel && name !== MAIN_AGENT_ID) {
       if (hasFleetOauthToken()) {
-        // Token present -> isolation works; any earlier degradation is resolved,
-        // so re-arm the one-shot alert for a future token loss.
-        resetSharedConfigCollisionAlert()
         const isolated = ensureIsolatedChannelConfigDir(name, agentProvider)
         if (isolated) {
           claudeConfigDir = isolated
@@ -683,9 +626,6 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
         }
       } else {
         logger.warn({ name }, 'isolated-config: no fleet OAuth token (store/.claude-oauth-token); keeping shared ~/.claude. Run `claude setup-token` and store it to enable per-agent isolation.')
-        // H1: the WARN above is silent. With >1 channel sub-agent sharing
-        // ~/.claude this is an active plugin-slot collision -> raise a loud alert.
-        maybeAlertSharedConfigCollision(name)
       }
     }
     const claudeConfigEnv = claudeConfigDir ? `export CLAUDE_CONFIG_DIR="${claudeConfigDir}" && ` : ''
@@ -1261,17 +1201,56 @@ export function captureParkedInputView(session: string, host: string | null = nu
 //      returns true. Cost on the ready path: ~250ms sleep plus a second
 //      tmux capture-pane round-trip (typically tens of ms). Busy pass
 //      through layer 1 and return immediately without the delay.
-//
-// A saturated pane ("100% context used") is refused up front: it can present
-// as perfectly idle, so without this a new prompt would be dispatched into a
-// session that cannot act on it. We only log/audit the refusal here; how (or
-// whether) to recover the session is left to the caller / operator tooling, so
-// this predicate stays a pure, dependency-free readiness check.
+// Dispatch guard (2026-07-01, tg-directed): a session can be `paneLooksIdle`
+// TRUE while ALSO showing "100% context used" -- an idle, empty-prompt,
+// ready-looking footer that will not actually do anything useful with a new
+// task. Observed live the same night on three agents in a row, each still
+// happily accepting new dispatches while saturated. isSessionReadyForPrompt
+// now refuses those sessions too, and fires the SAME recovery path a human
+// would run by hand (scripts/dispatch-guard.sh -- evidence capture, loop-
+// guard, fresh restart, recovery-context briefing) so the agent clears on
+// its own instead of the message sitting pending forever waiting on a human
+// to notice. Debounced per session so the frequent router/scheduler polling
+// does not spawn a new recovery process on every tick while one is already
+// running.
+const CTX_RECOVERY_DEBOUNCE_MS = 5 * 60_000
+const lastCtxRecoveryTrigger = new Map<string, number>()
+
+function maybeTriggerContextRecovery(session: string): void {
+  // Only sub-agent sessions follow the `agent-<name>` convention; the main
+  // channels session is handled by its own dedicated restart path and must
+  // never be auto-respawned from here.
+  const match = /^agent-(.+)$/.exec(session)
+  if (!match) return
+  const agentName = match[1]
+
+  const now = Date.now()
+  const last = lastCtxRecoveryTrigger.get(session) ?? 0
+  if (now - last < CTX_RECOVERY_DEBOUNCE_MS) return
+  lastCtxRecoveryTrigger.set(session, now)
+
+  const script = join(PROJECT_ROOT, 'scripts', 'dispatch-guard.sh')
+  const recoveryDir = join(STORE_DIR, 'recovery')
+  const logPath = join(recoveryDir, `${agentName}.auto-trigger.log`)
+  try {
+    mkdirSync(recoveryDir, { recursive: true })
+    const fd = openSync(logPath, 'a')
+    const child = spawn('bash', [script, agentName], {
+      detached: true,
+      stdio: ['ignore', fd, fd],
+    })
+    child.unref()
+    logger.warn({ session, agentName }, 'dispatch-guard: context saturation detected, auto-recovery triggered')
+  } catch (err) {
+    logger.warn({ err, session, agentName }, 'dispatch-guard: failed to spawn auto-recovery')
+  }
+}
+
 export function isSessionReadyForPrompt(session: string, host: string | null = null): boolean {
   const first = capturePane(session, host)
   if (first == null) return false
   if (paneShowsContextSaturation(first)) {
-    logger.warn({ session }, 'dispatch: refusing prompt — session shows context saturation (100% context)')
+    if (host == null) maybeTriggerContextRecovery(session)
     return false
   }
   if (!paneLooksIdle(first)) return false
@@ -1281,7 +1260,7 @@ export function isSessionReadyForPrompt(session: string, host: string | null = n
   const second = capturePane(session, host)
   if (second == null) return false
   if (paneShowsContextSaturation(second)) {
-    logger.warn({ session }, 'dispatch: refusing prompt — session shows context saturation (100% context)')
+    if (host == null) maybeTriggerContextRecovery(session)
     return false
   }
   return paneLooksIdle(second)

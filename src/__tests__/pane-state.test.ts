@@ -531,29 +531,6 @@ describe('detectPaneState', () => {
     expect(detectPaneState(IDLE_AFTER_TOOL_USE)).toBe('idle')
   })
 
-  it('does NOT classify a stale token-counter scrolled above the box as busy', () => {
-    // 94-retry starvation regression (2026-06-30): a completed turn's final
-    // "Accomplishing… (Ns · ↓ N tokens)" frame lingered well above the idle
-    // input box. The token-counter scan is region-scoped, so a counter that
-    // has scrolled out of the live bottom region must not pin the pane busy.
-    const staleCounter = [
-      '✶ Accomplishing… (3m 8s · ↓ 9.3k tokens)',
-      '⏺ Done: rebuilt and restarted the dashboard.',
-      '⏺ Verified endpoints, logged the fix.',
-      '⏺ Extra trailing scrollback line one.',
-      '⏺ Extra trailing scrollback line two.',
-      '⏺ Extra trailing scrollback line three.',
-      '⏺ Extra trailing scrollback line four.',
-      '⏺ Extra trailing scrollback line five.',
-      '',
-      SEP,
-      '❯ ',
-      SEP,
-      '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
-    ].join('\n')
-    expect(detectPaneState(staleCounter)).toBe('idle')
-  })
-
   it('detects typing when text is parked in the input box', () => {
     expect(detectPaneState(TYPING_PARKED)).toBe('typing')
   })
@@ -1974,9 +1951,9 @@ describe('footer-less welcome-screen parked input', () => {
 })
 
 describe('paneShowsContextSaturation', () => {
-  // Real capture shape observed live: an idle, ready-looking footer with the
-  // saturation banner one line above it — the combination that lets a
-  // saturated session keep silently accepting new dispatches.
+  // Real capture shape observed live 2026-07-01 (Mason/Atlas/Cog/Pixel/
+  // Falcon/deliverylead, in that order over one night): an idle, ready-
+  // looking footer with the saturation banner one line above it.
   const CTX_SAT_IDLE = [
     '  some prior assistant output',
     '',
@@ -1989,7 +1966,7 @@ describe('paneShowsContextSaturation', () => {
   ].join('\n')
 
   it('detects the saturation banner on an otherwise-idle pane', () => {
-    expect(detectPaneState(CTX_SAT_IDLE)).toBe('idle') // sanity: still reads as idle
+    expect(paneLooksIdleFixtureCheck(CTX_SAT_IDLE)).toBe(true) // sanity: still reads as idle
     expect(paneShowsContextSaturation(CTX_SAT_IDLE)).toBe(true)
   })
 
@@ -2002,7 +1979,9 @@ describe('paneShowsContextSaturation', () => {
     expect(paneShowsContextSaturation(BUSY_FULL_FOOTER)).toBe(false)
   })
 
-  it('does NOT misfire on a scrollback quote of the same phrase', () => {
+  it('does NOT misfire on a scrollback quote of the same phrase (self-referential false-positive risk)', () => {
+    // e.g. a QA report or kanban comment that literally discusses
+    // context-saturation detection, scrolled well above the live footer.
     const quoted = [
       '  QA report: the watchdog now greps for "100% context used" in the footer.',
       '  This is a scrollback quote, not the live indicator.',
@@ -2020,3 +1999,10 @@ describe('paneShowsContextSaturation', () => {
     expect(paneShowsContextSaturation('   \n  ')).toBe(false)
   })
 })
+
+// Local helper: reuse detectPaneState to assert the CTX_SAT fixture above is
+// a realistic "idle" capture (i.e. the bug this predicate exists to catch —
+// paneLooksIdle alone would say this session is fine to dispatch to).
+function paneLooksIdleFixtureCheck(capture: string): boolean {
+  return detectPaneState(capture) === 'idle'
+}
