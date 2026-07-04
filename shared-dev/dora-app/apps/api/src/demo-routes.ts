@@ -40,11 +40,10 @@ export async function registerDemoRoutes(app: FastifyInstance, pool: Pool): Prom
     const apiKey = `demo-key-${uuidv4()}`;
     const expiresAt = new Date(Date.now() + DEMO_TTL_DAYS * 24 * 3600 * 1000).toISOString();
 
+    // tenants(id, name) only -- no api_key/metadata columns in the base schema
     await pool.query(
-      `INSERT INTO tenants (id, name, api_key, metadata_json, created_at)
-       VALUES ($1, $2, $3, $4::jsonb, now())`,
-      [demoId, DEMO_SEED.tenantName, apiKey,
-       JSON.stringify({ demo: true, expiresAt, securityClass: DEMO_SEED.securityClass })],
+      `INSERT INTO tenants (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`,
+      [demoId, DEMO_SEED.tenantName],
     );
 
     await pool.query(

@@ -34,13 +34,23 @@ export async function registerInterviewRoutes(app: FastifyInstance, pool: Pool):
     if (!body.sessionId || body.value === undefined) {
       return reply.code(400).send({ error: 'sessionId + value kötelező.' });
     }
+    // Normalize value: JSON numbers/booleans become strings so option matching is safe.
+    const rawValue = body.value;
+    const value: string | string[] = Array.isArray(rawValue)
+      ? (rawValue as unknown[]).map((v) => String(v))
+      : String(rawValue);
     try {
-      const result = await svc.answer(body.sessionId, tenantId, body.value as string | string[]);
+      const result = await svc.answer(body.sessionId, tenantId, value);
+      // When eligibility completes and system_scope auto-starts, result.session is the NEW
+      // system_scope session (in_progress). The outcome carries the eligibility result.
+      const autoStarted = result.outcome?.nextMode != null;
       return reply.send({
-        completed: result.session.status === 'completed',
+        completed: !autoStarted && result.session.status === 'completed',
         sessionId: result.session.id,
         nextQuestion: result.nextQuestion ?? null,
         outcome: result.outcome ?? null,
+        // Explicit signal to the frontend that a new mode session has been auto-created.
+        autoStartedMode: autoStarted ? result.outcome!.nextMode : null,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

@@ -10,8 +10,21 @@ export async function buildServer() {
     ? new Pool({ connectionString: process.env.DATABASE_URL })
     : null;
 
-  // TODO: register auth middleware (tenant API key → req.tenantId)
-  // Platform middleware (KMS, S3, audit-log) wired here.
+  // Simple auth: Bearer token = tenantId (demo-grade, no API key table).
+  // For the DORA demo env the tenant creates their workspace via POST /api/dora/demo which
+  // returns demoTenantId; that ID is used directly as the Bearer token for subsequent calls.
+  // Public endpoints (POST /api/dora/demo, GET /health) skip auth.
+  const PUBLIC_PATHS = new Set(['/api/dora/demo', '/health']);
+  app.addHook('preHandler', async (req, reply) => {
+    if (PUBLIC_PATHS.has(req.url.split('?')[0]!)) return;
+    const auth = req.headers.authorization ?? '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+    if (!token) {
+      reply.code(401).send({ error: 'Authorization Bearer token szükséges.' });
+      return;
+    }
+    (req as unknown as { tenantId: string }).tenantId = token;
+  });
 
   if (pool) {
     await registerInterviewRoutes(app, pool);
