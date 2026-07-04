@@ -330,6 +330,21 @@ export function initDatabase(dbPathOverride?: string): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_comments_card ON kanban_comments(card_id)`)
 
+  // Status-change audit trail: one row per real status transition so the board
+  // can answer "who moved this card, when, from/to status". Written by
+  // moveKanbanCard only when the status actually changes.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS kanban_card_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      card_id TEXT NOT NULL,
+      from_status TEXT,
+      to_status TEXT NOT NULL,
+      actor TEXT,
+      created_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_kanban_events_card ON kanban_card_events(card_id, created_at)`)
+
   // --- Kanban labels (tags) -----------------------------------------------
   // Labels are a separate registry (not hardcoded per-card strings) so the
   // same label can be reused across many cards and recolored in one place.
@@ -1141,11 +1156,20 @@ export function getChildCards(parentId: string): KanbanCard[] {
   return db.prepare('SELECT * FROM kanban_cards WHERE parent_id = ? AND archived_at IS NULL ORDER BY sort_order ASC').all(parentId) as KanbanCard[]
 }
 
-export function moveKanbanCard(id: string, status: KanbanCard['status'], sortOrder: number): boolean {
+export function moveKanbanCard(id: string, status: KanbanCard['status'], sortOrder: number, actor?: string): boolean {
   const now = Math.floor(Date.now() / 1000)
-  return db.prepare(
+  // Read the previous status first so we only record an audit event on a real
+  // status transition (not a pure sort_order reorder within the same column).
+  const prev = (db.prepare('SELECT status FROM kanban_cards WHERE id=?').get(id) as { status: string } | undefined)?.status
+  const changed = db.prepare(
     'UPDATE kanban_cards SET status=?, sort_order=?, updated_at=? WHERE id=?'
   ).run(status, sortOrder, now, id).changes > 0
+  if (changed && prev !== undefined && prev !== status) {
+    db.prepare(
+      'INSERT INTO kanban_card_events (card_id, from_status, to_status, actor, created_at) VALUES (?, ?, ?, ?, ?)'
+    ).run(id, prev, status, actor ?? null, now)
+  }
+  return changed
 }
 
 // Stamp the once-only kanban -> agent dispatch guard. Returns false if the
@@ -1242,6 +1266,19 @@ export function deleteKanbanCard(id: string): boolean {
 
 export function getKanbanComments(cardId: string): KanbanComment[] {
   return db.prepare('SELECT * FROM kanban_comments WHERE card_id = ? ORDER BY created_at ASC').all(cardId) as KanbanComment[]
+}
+
+export interface KanbanCardEvent {
+  id: number
+  card_id: string
+  from_status: string | null
+  to_status: string
+  actor: string | null
+  created_at: number
+}
+
+export function getKanbanCardEvents(cardId: string): KanbanCardEvent[] {
+  return db.prepare('SELECT * FROM kanban_card_events WHERE card_id = ? ORDER BY created_at ASC, id ASC').all(cardId) as KanbanCardEvent[]
 }
 
 // Lookup a kanban card's `seq` (its sqlite rowid) by the 8-char hex id stored
