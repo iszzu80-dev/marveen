@@ -660,6 +660,9 @@ export function initDatabase(dbPathOverride?: string): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_import_runs_provider ON import_runs(provider, started_at)`)
+  // v0.5: sanitized per-run detail (service_count, plan breakdown, not_covered) as JSON.
+  // NO raw service/account IDs -- the breakdown carries only type/plan labels + counts.
+  try { db.exec(`ALTER TABLE import_runs ADD COLUMN detail_json TEXT`) } catch { /* already exists */ }
 
   // One-shot migration from the old JSON file (which had a read-modify-write
   // race). Import rows if they exist, then rename the file so we don't keep
