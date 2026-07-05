@@ -10319,6 +10319,22 @@ async function loadCosts() {
         + '<table style="width:100%;max-width:640px;border-collapse:collapse;margin-bottom:10px;"><tr style="color:#888;font-size:0.8em;text-align:left;"><th style="text-align:left;">Provider</th><th style="text-align:left;">Collector</th><th style="text-align:left;">Állapot</th><th style="text-align:right;">Import</th><th style="text-align:left;">Utolsó sync</th></tr>'+syncRows+'</table>'
         + (rec.length ? '<div style="font-size:0.85em;color:#888;margin:6px 0;">Estimate vs Actual:</div><table style="width:100%;max-width:640px;border-collapse:collapse;"><tr style="color:#888;font-size:0.8em;text-align:left;"><th style="text-align:left;">Forrás</th><th style="text-align:right;">Estimate</th><th style="text-align:right;">Actual</th><th style="text-align:right;">Eltérés</th><th style="text-align:left;">Headline</th></tr>'+recRows+'</table>' : ''))
     })()}
+    ${(function(){
+      var rp = s.render_plan
+      if (!rp) return ''
+      var vColor = rp.variance > 0 ? '#c0392b' : (rp.variance < 0 ? '#27ae60' : '#888')
+      var vLabel = rp.variance > 0 ? 'a plan-becslés MAGASABB a manuálnál' : (rp.variance < 0 ? 'a plan-becslés ALACSONYABB a manuálnál' : 'egyezik')
+      var nc = (rp.not_covered || []).map(function(x){ return '<li>'+esc(x)+'</li>' }).join('')
+      return card('Render infra -- plan-alapú becslés (v0.3, advisory)', ''
+        + '<div style="font-size:0.85em;color:#888;margin-bottom:8px;">Ez NEM számla, hanem a Render service-plánokból számolt <b>alsó becslés</b> (provider_plan_estimate). NEM része a headline spendnek, és nem írja felül a manual estimate-et.</div>'
+        + '<table style="width:100%;max-width:520px;border-collapse:collapse;margin-bottom:10px;">'
+        + '<tr><td>Manual render estimate</td><td style="text-align:right;">'+fmt(rp.manual_estimate)+' '+esc(rp.currency)+'</td></tr>'
+        + '<tr><td>Render plan-alapú becslés</td><td style="text-align:right;">'+fmt(rp.plan_estimate_total)+' '+esc(rp.currency)+'</td></tr>'
+        + '<tr style="font-weight:bold;"><td>Eltérés (variance)</td><td style="text-align:right;color:'+vColor+';">'+fmt(rp.variance)+' '+esc(rp.currency)+'</td></tr>'
+        + '</table>'
+        + '<div style="font-size:0.8em;color:'+vColor+';margin-bottom:8px;">'+esc(vLabel)+'</div>'
+        + '<details style="font-size:0.82em;color:#888;"><summary style="cursor:pointer;">Nem fedett költségek (potenciális alulszámolás)</summary><ul style="margin:6px 0 0 18px;">'+nc+'</ul></details>')
+    })()}
     <p style="font-size:0.8em;color:#888;">generálva: ${new Date((Number(s.generated_at) || 0) * 1000).toLocaleString('hu-HU')}</p>
   `
 }
