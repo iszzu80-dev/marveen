@@ -126,9 +126,22 @@ manual/estimate rows, and with a strict secrets-in-Vault-only posture.
   `provider_sync[]` (last run per provider: status, freshness, stale/failed marker).
 - **Dashboard**: a "Provider sync + estimate vs actual" section (empty until a run).
 
+- **Dry-run mode** (`dryRunCollector` in `runner.ts`): a safety layer that runs
+  fetch + normalize EXACTLY like a real import but persists **no** `provider_api`
+  cost line. It returns the planned normalized lines, their `dedup_key`s, a
+  `wouldImportCount`, and a **sanitized response shape** (`describeShape` -- types,
+  object keys and array lengths ONLY, never a scalar value, so no secret / account
+  id / invoice ref / raw datum can travel in it). Its only optional write is a
+  `status='dry_run'`, `imported_count=0` audit row in `import_runs` (no cost, no
+  secret, no raw); pass `recordRun:false` to persist nothing at all. This is the
+  gate before any real import: preview the shape and the planned lines first.
+
 **Vault**: real Admin keys go into `src/web/vault.ts` via the secure handover, never
 into config/log/transcript/dashboard-response. PR1 creates NO real secret and makes
-NO live call. A live dry-run is a separate, explicitly-approved step. Full design:
+NO live call. The order is strict: (1) dry-run mode committed + green, (2) Anthropic
+read-only Admin key entered in the Vault UI (`costops.anthropic_admin_key`), (3) a
+dry-run against the live report (shows shape + planned lines, writes nothing), (4) a
+separate explicit GO before the first real import. Full design:
 `audits/costops-v0.3-provider-api-collectors-plan.md`.
 
 ## Known limitations
