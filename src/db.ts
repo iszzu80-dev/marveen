@@ -593,6 +593,64 @@ export function initDatabase(dbPathOverride?: string): void {
   // Migration: add agent column to installs that created the table before this column existed.
   try { db.exec(`ALTER TABLE store_file_audit ADD COLUMN agent TEXT`) } catch { /* column already exists */ }
 
+  // --- CostOps (local cost ledger) ---
+  // Read-mostly, FOCUS-inspired. cost_sources = provider/subscription origin,
+  // cost_line_items = individual charge rows (estimate or provider-sourced),
+  // budgets = display-only warning thresholds. No secrets/account IDs stored raw.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cost_sources (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      source_type TEXT NOT NULL,
+      account_ref TEXT,
+      currency TEXT NOT NULL DEFAULT 'HUF',
+      active INTEGER NOT NULL DEFAULT 1,
+      notes TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cost_line_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_id TEXT NOT NULL REFERENCES cost_sources(id),
+      charge_period_start INTEGER NOT NULL,
+      charge_period_end INTEGER NOT NULL,
+      charge_category TEXT NOT NULL,
+      service_name TEXT,
+      usage_type TEXT,
+      consumed_quantity REAL,
+      consumed_unit TEXT,
+      billed_cost REAL NOT NULL,
+      effective_cost REAL,
+      currency TEXT NOT NULL DEFAULT 'HUF',
+      confidence TEXT NOT NULL,
+      data_freshness INTEGER NOT NULL,
+      source_ref TEXT,
+      dedup_key TEXT UNIQUE,
+      created_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_cost_line_items_period ON cost_line_items(charge_period_start, charge_period_end)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_cost_line_items_source ON cost_line_items(source_id)`)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS budgets (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      scope TEXT NOT NULL DEFAULT 'global',
+      scope_ref TEXT,
+      period TEXT NOT NULL DEFAULT 'monthly',
+      amount REAL NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'HUF',
+      warning_threshold REAL NOT NULL DEFAULT 0.8,
+      hard_threshold REAL NOT NULL DEFAULT 1.0,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `)
+
   // --- Vault SSH Keys (shared pool) ---
   db.exec(`
     CREATE TABLE IF NOT EXISTS vault_ssh_keys (
