@@ -12617,6 +12617,19 @@ function tuGetTimeRange() {
 }
 
 // --- CostOps v0.1: read-only monthly cost summary ---
+window.costopsSyncNow = async function () {
+  const btn = document.getElementById('costsSyncBtn')
+  if (btn) { btn.disabled = true; btn.textContent = 'Sync fut...' }
+  try {
+    const r = await fetch('/api/costs/sync?provider=render', { method: 'POST', headers: authHeaders() })
+    const d = await r.json().catch(() => ({}))
+    if (btn) btn.textContent = d && d.ok ? ('Sync ok (' + (d.service_count || 0) + ' service)') : ('Sync hiba: ' + ((d && d.error) || r.status))
+  } catch (e) {
+    if (btn) btn.textContent = 'Sync hiba'
+  }
+  setTimeout(() => { if (typeof loadCosts === 'function') loadCosts() }, 1200)
+}
+
 async function loadCosts() {
   const body = document.getElementById('costsBody')
   if (!body) return
@@ -12668,6 +12681,9 @@ async function loadCosts() {
 
   body.innerHTML = `
     ${cfgWarn}
+    <div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
+      <button id="costsSyncBtn" onclick="costopsSyncNow()" style="background:#2d6cdf;color:#fff;border:none;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:0.85em;">🔄 Render sync now</button>
+    </div>
     <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:14px;">
       <div style="flex:1;min-width:170px;border:2px solid #2d6cdf;border-radius:10px;padding:14px 16px;">
         <div style="color:#2d6cdf;font-size:0.85em;font-weight:600;">${esc(s.month)} OPERATIONAL spend</div>
@@ -12723,17 +12739,19 @@ async function loadCosts() {
     ${(function(){
       var sync = s.provider_sync || [], rec = s.reconcile || []
       if (!sync.length && !rec.length) return card('Provider sync (v0.3)', '<div style="color:#888;font-size:0.85em;">Nincs provider-collector futás még. A provider API actual import a v0.3 külön jóváhagyott dry-run után jön; addig csak manual/estimate.</div>')
+      var ageStr = function(sec){ if(sec==null) return '-'; var h=Math.round(sec/3600); return h<24?(h+'ó'):(Math.round(h/24)+'n'); }
       var syncRows = sync.map(function(p){
-        var badge = p.status !== 'ok' ? '<span style="color:#c0392b;">sync failed ('+esc(p.error_code||p.status)+')</span>' : (p.stale ? '<span style="color:#e67e22;">stale</span>' : '<span style="color:#27ae60;">ok</span>')
-        return '<tr><td>'+esc(p.provider)+'</td><td style="color:#888;">'+esc(p.collector_name)+'</td><td>'+badge+'</td><td style="text-align:right;">'+(Number(p.imported_count)||0)+' sor</td><td style="color:#888;font-size:0.85em;">'+(p.last_sync?new Date(p.last_sync*1000).toLocaleString('hu-HU'):'-')+'</td></tr>'
-      }).join('') || '<tr><td colspan="5" style="color:#888;">nincs sync</td></tr>'
+        var badge = p.status === 'failed' ? '<span style="color:#c0392b;">failed ('+esc(p.error_code||'')+')</span>' : (p.status === 'stale' ? '<span style="color:#e67e22;">stale</span>' : (p.status === 'no_data' ? '<span style="color:#888;">no_data</span>' : '<span style="color:#27ae60;">ok</span>'))
+        var cov = p.previous_period_coverage ? '✓' : '—'
+        return '<tr><td>'+esc(p.provider)+'</td><td>'+badge+'</td><td style="text-align:right;">'+(Number(p.imported_count)||0)+'</td><td style="color:#888;font-size:0.85em;">'+ageStr(p.data_age_secs)+'</td><td style="color:#888;font-size:0.82em;">'+(p.last_success?new Date(p.last_success*1000).toLocaleString('hu-HU'):'-')+'</td><td style="color:#888;font-size:0.82em;">'+(p.last_failed?new Date(p.last_failed*1000).toLocaleString('hu-HU'):'-')+'</td><td style="text-align:center;color:#888;">'+cov+'</td></tr>'
+      }).join('') || '<tr><td colspan="7" style="color:#888;">nincs sync</td></tr>'
       var recRows = rec.map(function(r){
         var vColor = r.variance > 0 ? '#c0392b' : (r.variance < 0 ? '#27ae60' : '#888')
         return '<tr><td>'+esc(r.source_id)+'</td><td style="text-align:right;">'+fmt(r.estimate)+'</td><td style="text-align:right;">'+fmt(r.actual)+'</td><td style="text-align:right;color:'+vColor+';">'+fmt(r.variance)+'</td><td style="color:#888;">'+esc(r.resolved_confidence)+'</td></tr>'
       }).join('')
-      return card('Provider sync + estimate vs actual (v0.3)', ''
-        + '<div style="font-size:0.85em;color:#888;margin-bottom:6px;">Provider API actual a manual/estimate MELLÉ; a headline spend a legmagasabb confidence-t használja (nincs dupla számolás).</div>'
-        + '<table style="width:100%;max-width:640px;border-collapse:collapse;margin-bottom:10px;"><tr style="color:#888;font-size:0.8em;text-align:left;"><th style="text-align:left;">Provider</th><th style="text-align:left;">Collector</th><th style="text-align:left;">Állapot</th><th style="text-align:right;">Import</th><th style="text-align:left;">Utolsó sync</th></tr>'+syncRows+'</table>'
+      return card('Provider sync / freshness (v0.5)', ''
+        + '<div style="font-size:0.85em;color:#888;margin-bottom:6px;">Provider API-derived a manual/estimate MELLÉ; az operational a provider-preferred értéket használja (nincs dupla számolás). Sync: 🔄 gomb fent, vagy napi 1x ütemezve.</div>'
+        + '<table style="width:100%;max-width:720px;border-collapse:collapse;margin-bottom:10px;"><tr style="color:#888;font-size:0.78em;text-align:left;"><th style="text-align:left;">Provider</th><th style="text-align:left;">Állapot</th><th style="text-align:right;">Import</th><th style="text-align:left;">Kor</th><th style="text-align:left;">Utolsó ok</th><th style="text-align:left;">Utolsó hiba</th><th style="text-align:center;">Előző hó</th></tr>'+syncRows+'</table>'
         + (rec.length ? '<div style="font-size:0.85em;color:#888;margin:6px 0;">Estimate vs Actual:</div><table style="width:100%;max-width:640px;border-collapse:collapse;"><tr style="color:#888;font-size:0.8em;text-align:left;"><th style="text-align:left;">Forrás</th><th style="text-align:right;">Estimate</th><th style="text-align:right;">Actual</th><th style="text-align:right;">Eltérés</th><th style="text-align:left;">Headline</th></tr>'+recRows+'</table>' : ''))
     })()}
     ${(function(){
@@ -12742,7 +12760,16 @@ async function loadCosts() {
       var vColor = rp.variance > 0 ? '#c0392b' : (rp.variance < 0 ? '#27ae60' : '#888')
       var vLabel = rp.variance > 0 ? 'a plan-becslés MAGASABB a manuálnál' : (rp.variance < 0 ? 'a plan-becslés ALACSONYABB a manuálnál' : 'egyezik')
       var nc = (rp.not_covered || []).map(function(x){ return '<li>'+esc(x)+'</li>' }).join('')
-      return card('Render infra -- plan-alapú becslés (v0.3, advisory)', ''
+      var det = rp.detail || null
+      var detailHtml = ''
+      if (det) {
+        var bp = Object.keys(det.by_type_plan || {}).map(function(k){ var b=det.by_type_plan[k]; return '<tr><td>'+esc(k)+'</td><td style="text-align:right;">'+(b.count||0)+'</td><td style="text-align:right;color:#888;">$'+(b.usd||0)+'</td></tr>' }).join('')
+        var flags = (det.undercount_flags || []).map(function(x){ return '<li>'+esc(x)+'</li>' }).join('')
+        detailHtml = '<div style="font-size:0.82em;color:#888;margin:8px 0 4px;">'+ (det.service_count||0) +' Render egység · utolsó sync: '+(rp.last_sync?new Date(rp.last_sync*1000).toLocaleString('hu-HU'):'-')+' · fx: '+(det.fx_usd_huf||0)+'</div>'
+          + '<table style="width:100%;max-width:420px;border-collapse:collapse;font-size:0.85em;"><tr style="color:#888;font-size:0.78em;text-align:left;"><th style="text-align:left;">Típus / plan</th><th style="text-align:right;">db</th><th style="text-align:right;">USD/hó</th></tr>'+bp+'</table>'
+          + (flags ? '<div style="font-size:0.78em;color:#e67e22;margin-top:4px;">Alulszámolás-jelzők:<ul style="margin:2px 0 0 18px;">'+flags+'</ul></div>' : '')
+      }
+      return card('Render infra -- plan-alapú becslés (v0.5, advisory)', ''
         + '<div style="font-size:0.85em;color:#888;margin-bottom:8px;">Ez NEM számla, hanem a Render service-plánokból számolt <b>alsó becslés</b> (provider_plan_estimate). NEM része a headline spendnek, és nem írja felül a manual estimate-et.</div>'
         + '<table style="width:100%;max-width:520px;border-collapse:collapse;margin-bottom:10px;">'
         + '<tr><td>Manual render estimate</td><td style="text-align:right;">'+fmt(rp.manual_estimate)+' '+esc(rp.currency)+'</td></tr>'
@@ -12750,7 +12777,8 @@ async function loadCosts() {
         + '<tr style="font-weight:bold;"><td>Eltérés (variance)</td><td style="text-align:right;color:'+vColor+';">'+fmt(rp.variance)+' '+esc(rp.currency)+'</td></tr>'
         + '</table>'
         + '<div style="font-size:0.8em;color:'+vColor+';margin-bottom:8px;">'+esc(vLabel)+'</div>'
-        + '<details style="font-size:0.82em;color:#888;"><summary style="cursor:pointer;">Nem fedett költségek (potenciális alulszámolás)</summary><ul style="margin:6px 0 0 18px;">'+nc+'</ul></details>')
+        + detailHtml
+        + '<details style="font-size:0.82em;color:#888;margin-top:8px;"><summary style="cursor:pointer;">Nem fedett költségek (potenciális alulszámolás)</summary><ul style="margin:6px 0 0 18px;">'+nc+'</ul></details>')
     })()}
     <p style="font-size:0.8em;color:#888;">generálva: ${new Date((Number(s.generated_at) || 0) * 1000).toLocaleString('hu-HU')}</p>
   `
