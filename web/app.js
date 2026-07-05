@@ -10795,16 +10795,16 @@ function tuGetTimeRange() {
   return { from: undefined, to: undefined }
 }
 
-// --- CostOps v0.1: read-only monthly cost summary ---
+// --- Költségek: API-first havi költség-összesítő ---
 window.costopsSyncNow = async function () {
   const btn = document.getElementById('costsSyncBtn')
-  if (btn) { btn.disabled = true; btn.textContent = 'Sync fut...' }
+  if (btn) { btn.disabled = true; btn.textContent = 'Frissítés...' }
   try {
     const r = await fetch('/api/costs/sync?provider=render', { method: 'POST', headers: authHeaders() })
     const d = await r.json().catch(() => ({}))
-    if (btn) btn.textContent = d && d.ok ? ('Sync ok (' + (d.service_count || 0) + ' service)') : ('Sync hiba: ' + ((d && d.error) || r.status))
+    if (btn) btn.textContent = d && d.ok ? 'Frissítve' : ('Hiba: ' + ((d && d.error) || r.status))
   } catch (e) {
-    if (btn) btn.textContent = 'Sync hiba'
+    if (btn) btn.textContent = 'Hiba'
   }
   setTimeout(() => { if (typeof loadCosts === 'function') loadCosts() }, 1200)
 }
@@ -10815,152 +10815,240 @@ async function loadCosts() {
   let s
   try {
     const res = await fetch('/api/costs/summary')
-    if (!res.ok) { body.innerHTML = '<p style="color:#c00;">Hiba a költség-összesítő betöltésekor.</p>'; return }
+    if (!res.ok) { body.innerHTML = '<p style="color:#c0392b;">Nem sikerült betölteni a költség-összesítőt.</p>'; return }
     s = await res.json()
   } catch (e) {
-    body.innerHTML = '<p style="color:#c00;">Hálózati hiba.</p>'
+    body.innerHTML = '<p style="color:#c0392b;">Hálózati hiba.</p>'
     return
   }
+
   const cur = s.currency || 'HUF'
+  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+  // Unified HUF format: "153 004 HUF" -- never doubles the currency suffix.
   const fmt = (n) => (Number(n) || 0).toLocaleString('hu-HU') + ' ' + cur
   const pct = (n) => (Math.round((Number(n) || 0) * 1000) / 10) + '%'
-  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+  const nowSec = Number(s.generated_at) || Math.floor(Date.now() / 1000)
+  const fmtDate = (unixSec) => {
+    if (!unixSec) return '—'
+    try { return new Date(unixSec * 1000).toLocaleString('hu-HU', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) } catch (e) { return '—' }
+  }
+  const ageState = (unixSec) => {
+    if (!unixSec) return 'nodata'
+    const age = nowSec - Number(unixSec)
+    if (age < 26 * 3600) return 'ok'
+    if (age < 8 * 86400) return 'stale'
+    return 'stale'
+  }
+  const relAge = (unixSec) => {
+    if (!unixSec) return '—'
+    const age = Math.max(0, nowSec - Number(unixSec))
+    if (age < 3600) return Math.max(1, Math.round(age / 60)) + ' perce'
+    if (age < 86400) return Math.round(age / 3600) + ' órája'
+    return Math.round(age / 86400) + ' napja'
+  }
 
-  const b = s.budget
-  const budgetColor = !b ? '#888' : b.status === 'hard' ? '#c0392b' : b.status === 'warning' ? '#e67e22' : '#27ae60'
-  const bOpPct = b ? (b.operational_used_pct != null ? b.operational_used_pct : b.used_pct) : 0
-  const budgetHtml = b
-    ? `<div><b>${esc(b.id)}</b> (operational): ${fmt(s.operational_spend)} / ${fmt(b.amount)}
-        <span style="color:${budgetColor};font-weight:600;">(${pct(bOpPct)}, ${esc(b.status)})</span>
-        <div style="background:#eee;border-radius:6px;height:10px;overflow:hidden;max-width:360px;margin-top:4px;">
-          <div style="background:${budgetColor};height:100%;width:${Math.min(100, (Number(bOpPct) || 0) * 100)}%;"></div>
-        </div>
-        <span style="font-size:0.8em;color:#888;">operational forecast: ${pct(b.operational_forecast_pct != null ? b.operational_forecast_pct : b.forecast_pct)} · jelzés-only, semmilyen automatikus művelet · (legacy manual used: ${pct(b.used_pct)})</span></div>`
-    : '<p style="color:#888;">Nincs aktív budget (állíts be amount &gt; 0 értéket a store/costops-config.json-ban).</p>'
+  // Data-quality badge (theme-safe rgba backgrounds).
+  const qBadge = (q) => {
+    const m = {
+      billing: ['Billing API', '#2ecc71', 'rgba(46,204,113,0.15)'],
+      plan: ['API plan estimate', '#5b9dff', 'rgba(45,108,223,0.16)'],
+      local: ['Local estimate', '#e0a800', 'rgba(224,168,0,0.16)'],
+      manual: ['Manual fallback', '#9aa0a6', 'rgba(150,150,150,0.16)'],
+    }[q] || ['—', '#9aa0a6', 'rgba(150,150,150,0.16)']
+    return '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.74em;font-weight:600;color:' + m[1] + ';background:' + m[2] + ';white-space:nowrap;">' + m[0] + '</span>'
+  }
+  const sBadge = (state) => {
+    const m = {
+      ok: ['friss', '#2ecc71', 'rgba(46,204,113,0.15)'],
+      stale: ['elavult', '#e0a800', 'rgba(224,168,0,0.16)'],
+      failed: ['hiba', '#e74c3c', 'rgba(231,76,60,0.16)'],
+      nodata: ['nincs adat', '#9aa0a6', 'rgba(150,150,150,0.16)'],
+    }[state] || ['nincs adat', '#9aa0a6', 'rgba(150,150,150,0.16)']
+    return '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.74em;font-weight:600;color:' + m[1] + ';background:' + m[2] + ';white-space:nowrap;">' + m[0] + '</span>'
+  }
+  // Map an internal confidence code to a user-facing data source + quality badge.
+  const sourceOf = (conf) => {
+    switch (conf) {
+      case 'provider_api':
+      case 'billing': return { src: 'Billing API', q: 'billing', note: 'számlaadat' }
+      case 'provider_plan_estimate': return { src: 'API plan estimate', q: 'plan', note: 'plan-alapú, nem számla' }
+      case 'local_token_estimate': return { src: 'Tokenbecslés', q: 'local', note: 'lokális tokenhasználatból' }
+      case 'estimate': return { src: 'Kézi becslés', q: 'manual', note: 'nincs API collector' }
+      case 'manual':
+      default: return { src: 'Kézi fallback', q: 'manual', note: 'nincs API collector' }
+    }
+  }
 
-  const topSrc = (s.top_sources || []).map(t => `<tr><td>${esc(t.name)}</td><td style="text-align:right;">${fmt(t.spend)}</td></tr>`).join('') || '<tr><td colspan="2" style="color:#888;">nincs adat</td></tr>'
-  const allSrc = (s.all_sources || []).map(t => `<tr><td>${esc(t.name)}</td><td style="color:#888;">${esc(t.source_type)}</td><td style="color:#888;">${esc(t.provider)}</td><td style="color:#888;">${esc(t.confidence)}</td><td style="text-align:right;">${fmt(t.spend)}</td></tr>`).join('') || '<tr><td colspan="5" style="color:#888;">nincs konfigurált forrás</td></tr>'
-  const conf = Object.entries(s.confidence_breakdown || {}).map(([k, v]) => `<tr><td>${esc(k)}</td><td style="text-align:right;">${fmt(v)}</td></tr>`).join('') || '<tr><td colspan="2" style="color:#888;">-</td></tr>'
-  const tu = s.token_usage || {}
-  const cfgWarn = (s.config_present === false)
-    ? '<p style="color:#e67e22;">Nincs store/costops-config.json — üres összesítő. Másold a store/costops-config.json.example-t és töltsd ki.</p>'
-    : (s.config_errors && s.config_errors.length ? `<p style="color:#e67e22;">Config figyelmeztetések: ${esc(s.config_errors.join('; '))}</p>` : '')
-
-  const card = (title, inner) => `<div style="border:1px solid #e2e2e2;border-radius:10px;padding:14px 16px;margin-bottom:14px;"><h3 style="margin:0 0 8px;font-size:1em;">${title}</h3>${inner}</div>`
+  const card = (title, inner, extraHead) => '<div style="border:1px solid var(--border,#e2e2e2);border-radius:12px;padding:16px;margin-bottom:16px;">'
+    + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;">'
+    + '<h3 style="margin:0;font-size:1em;">' + title + '</h3>' + (extraHead || '') + '</div>' + inner + '</div>'
+  const tableWrap = (inner) => '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch;">' + inner + '</div>'
 
   const opv = s.operational || {}
-  const provBrk = (opv.provider_breakdown || []).map(p => `<tr><td>${esc(p.provider)}</td><td style="color:#888;font-size:0.85em;">${esc(p.confidence)}</td><td style="text-align:right;">${fmt(p.spend)}</td></tr>`).join('') || '<tr><td colspan="3" style="color:#888;">nincs adat</td></tr>'
+  const b = s.budget
+  const rp = s.render_plan
+  const tce = s.token_cost_estimate
+
+  // ---- 1. Top summary cards ----
+  const freshTs = opv.data_freshness || (rp && rp.last_sync) || null
+  const budgetPct = b ? (b.operational_used_pct != null ? b.operational_used_pct : b.used_pct) : null
+  const budgetColor = !b ? '#9aa0a6' : b.status === 'hard' ? '#e74c3c' : b.status === 'warning' ? '#e0a800' : '#2ecc71'
+  const cards = []
+  cards.push('<div style="border:2px solid #2d6cdf;border-radius:12px;padding:16px;">'
+    + '<div style="color:#5b9dff;font-size:0.82em;font-weight:600;">Aktuális havi költés · ' + esc(s.month) + '</div>'
+    + '<div style="font-size:1.7em;font-weight:700;margin-top:4px;">' + fmt(s.operational_spend) + '</div>'
+    + '<div style="font-size:0.75em;color:var(--text-muted,#888);margin-top:2px;">ahol van API-adat, azt használjuk</div></div>')
+  cards.push('<div style="border:1px solid var(--border,#e2e2e2);border-radius:12px;padding:16px;">'
+    + '<div style="color:var(--text-muted,#888);font-size:0.82em;">Várható hó végi költés</div>'
+    + '<div style="font-size:1.7em;font-weight:700;margin-top:4px;">' + fmt(s.operational_forecast_month_end) + '</div>'
+    + '<div style="font-size:0.75em;color:var(--text-muted,#888);margin-top:2px;">a hónap eddigi ütemével számolva</div></div>')
+  cards.push('<div style="border:1px solid var(--border,#e2e2e2);border-radius:12px;padding:16px;">'
+    + '<div style="color:var(--text-muted,#888);font-size:0.82em;">Keret kihasználtság</div>'
+    + (b
+      ? '<div style="font-size:1.7em;font-weight:700;margin-top:4px;color:' + budgetColor + ';">' + pct(budgetPct) + '</div>'
+        + '<div style="background:rgba(150,150,150,0.2);border-radius:6px;height:8px;overflow:hidden;margin-top:6px;"><div style="background:' + budgetColor + ';height:100%;width:' + Math.min(100, (Number(budgetPct) || 0) * 100) + '%;"></div></div>'
+        + '<div style="font-size:0.75em;color:var(--text-muted,#888);margin-top:4px;">' + fmt(s.operational_spend) + ' / ' + fmt(b.amount) + ' · csak jelzés</div>'
+      : '<div style="font-size:1.1em;font-weight:600;margin-top:8px;color:var(--text-muted,#888);">nincs beállítva</div>')
+    + '</div>')
+  cards.push('<div style="border:1px solid var(--border,#e2e2e2);border-radius:12px;padding:16px;">'
+    + '<div style="color:var(--text-muted,#888);font-size:0.82em;">Adatfrissesség</div>'
+    + '<div style="font-size:1.25em;font-weight:600;margin-top:6px;">' + relAge(freshTs) + ' ' + sBadge(ageState(freshTs)) + '</div>'
+    + '<div style="font-size:0.75em;color:var(--text-muted,#888);margin-top:4px;">' + fmtDate(freshTs) + '</div></div>')
+
+  // ---- 2. Provider breakdown = main table ----
+  const brk = (opv.provider_breakdown || []).slice().sort((a, b2) => (Number(b2.spend) || 0) - (Number(a.spend) || 0))
+  const shown = brk.filter(p => (Number(p.spend) || 0) > 0)
+  const zeroCount = brk.length - shown.length
+  const provRows = shown.map(p => {
+    const so = sourceOf(p.confidence)
+    const isRender = p.provider === 'render'
+    const upd = isRender && rp ? rp.last_sync : opv.data_freshness
+    return '<tr style="border-top:1px solid var(--border,#eee);">'
+      + '<td style="padding:8px 10px 8px 0;font-weight:600;text-transform:capitalize;">' + esc(p.provider) + '</td>'
+      + '<td style="padding:8px 10px 8px 0;color:var(--text-muted,#888);">' + esc(so.src) + '</td>'
+      + '<td style="padding:8px 10px 8px 0;">' + qBadge(so.q) + '</td>'
+      + '<td style="padding:8px 10px 8px 0;text-align:right;white-space:nowrap;font-weight:600;">' + fmt(p.spend) + '</td>'
+      + '<td style="padding:8px 10px 8px 0;color:var(--text-muted,#888);font-size:0.85em;white-space:nowrap;">' + fmtDate(upd) + '</td>'
+      + '<td style="padding:8px 0;color:var(--text-muted,#888);font-size:0.85em;">' + esc(so.note) + '</td></tr>'
+  }).join('') || '<tr><td colspan="6" style="color:var(--text-muted,#888);padding:8px 0;">nincs adat</td></tr>'
+  const providerTable = card('Providerenkénti bontás',
+    tableWrap('<table style="width:100%;min-width:560px;border-collapse:collapse;font-size:0.92em;">'
+      + '<tr style="color:var(--text-muted,#888);font-size:0.78em;text-align:left;"><th style="text-align:left;padding-bottom:4px;">Provider</th><th style="text-align:left;">Adatforrás</th><th style="text-align:left;">Adat minősége</th><th style="text-align:right;">Havi összeg</th><th style="text-align:left;">Frissítve</th><th style="text-align:left;">Megjegyzés</th></tr>'
+      + provRows + '</table>')
+    + '<div style="font-size:0.78em;color:var(--text-muted,#888);margin-top:8px;">Becslésként csak azt jelöljük, amire nincs API-alapú adat. Kézi érték csak fallback.'
+    + (zeroCount > 0 ? ' (+' + zeroCount + ' provider 0 ' + cur + ')' : '') + '</div>')
+
+  // ---- 3. Render card (compact; plan estimate since no billing API) ----
+  let renderCard = ''
+  if (rp) {
+    const vColor = rp.variance > 0 ? '#e74c3c' : (rp.variance < 0 ? '#2ecc71' : '#9aa0a6')
+    const det = rp.detail || {}
+    const svcCount = det.service_count || 0
+    const bp = Object.keys(det.by_type_plan || {}).map(k => {
+      const x = det.by_type_plan[k]
+      return '<tr style="border-top:1px solid var(--border,#eee);"><td style="padding:4px 8px 4px 0;">' + esc(k) + '</td><td style="padding:4px 8px 4px 0;text-align:right;">' + (x.count || 0) + '</td><td style="padding:4px 0;text-align:right;color:var(--text-muted,#888);">$' + (x.usd || 0) + '</td></tr>'
+    }).join('')
+    const nc = (rp.not_covered || []).map(x => '<li>' + esc(x) + '</li>').join('')
+    const flags = (det.undercount_flags || []).map(x => '<li>' + esc(x) + '</li>').join('')
+    const syncBtn = '<button id="costsSyncBtn" onclick="costopsSyncNow()" style="background:#2d6cdf;color:#fff;border:none;border-radius:8px;padding:6px 12px;cursor:pointer;font-size:0.8em;">Render frissítés</button>'
+    renderCard = card('Render infrastruktúra ' + qBadge('plan'),
+      '<div style="font-size:0.82em;color:var(--text-muted,#888);margin-bottom:10px;">API plan estimate, nem számlaadat. A Render nem ad hivatalos billing/current-spend API-t, ezért a service-plánokból számolt havi becslést használjuk.</div>'
+      + tableWrap('<table style="width:100%;min-width:320px;border-collapse:collapse;">'
+        + '<tr><td style="padding:4px 0;">Plan-alapú havi összeg</td><td style="padding:4px 0;text-align:right;font-weight:700;">' + fmt(rp.plan_estimate_total) + '</td></tr>'
+        + '<tr><td style="padding:4px 0;color:var(--text-muted,#888);">Kézi fallback</td><td style="padding:4px 0;text-align:right;color:var(--text-muted,#888);">' + fmt(rp.manual_estimate) + '</td></tr>'
+        + '<tr><td style="padding:4px 0;">Eltérés</td><td style="padding:4px 0;text-align:right;color:' + vColor + ';font-weight:600;">' + fmt(rp.variance) + '</td></tr>'
+        + '<tr><td style="padding:4px 0;color:var(--text-muted,#888);">Szolgáltatások száma</td><td style="padding:4px 0;text-align:right;color:var(--text-muted,#888);">' + svcCount + '</td></tr>'
+        + '</table>')
+      + '<div style="font-size:0.78em;color:#e0a800;margin-top:8px;">Alulszámolhat: bandwidth, storage, adó, kreditek, seat-ek.</div>'
+      + '<details style="margin-top:10px;"><summary style="cursor:pointer;font-size:0.85em;color:var(--text-muted,#888);">Technikai részletek</summary>'
+      + '<div style="font-size:0.8em;color:var(--text-muted,#888);margin:8px 0 4px;">utolsó frissítés: ' + fmtDate(rp.last_sync) + (det.fx_usd_huf ? ' · árfolyam: ' + det.fx_usd_huf + ' HUF/USD' : '') + '</div>'
+      + (bp ? tableWrap('<table style="width:100%;min-width:280px;border-collapse:collapse;font-size:0.85em;"><tr style="color:var(--text-muted,#888);font-size:0.78em;text-align:left;"><th style="text-align:left;">Típus / plan</th><th style="text-align:right;">db</th><th style="text-align:right;">USD/hó</th></tr>' + bp + '</table>') : '')
+      + (flags ? '<div style="font-size:0.78em;color:#e0a800;margin-top:6px;">Alulszámolás-jelzők:<ul style="margin:2px 0 0 18px;">' + flags + '</ul></div>' : '')
+      + (nc ? '<div style="font-size:0.78em;color:var(--text-muted,#888);margin-top:6px;">Nem fedett költségek:<ul style="margin:2px 0 0 18px;">' + nc + '</ul></div>' : '')
+      + '</details>',
+      syncBtn)
+  }
+
+  // ---- 4. Token estimate (separate block) ----
+  let tokenCard = ''
+  if (tce) {
+    const up = tce.unpriced || {}
+    const unknownTok = Number(up.unknown_model_tokens) || 0
+    const noRateTok = Number(up.no_rate_tokens) || 0
+    const priced = (tce.priced_by_model || []).map(m => '<tr style="border-top:1px solid var(--border,#eee);"><td style="padding:4px 8px 4px 0;">' + esc(m.model) + '</td><td style="padding:4px 8px 4px 0;color:var(--text-muted,#888);">' + esc(m.provider) + '</td><td style="padding:4px 0;text-align:right;">' + fmt(m.estimated_huf) + '</td></tr>').join('') || '<tr><td colspan="3" style="color:var(--text-muted,#888);padding:4px 0;">nincs árazott modell</td></tr>'
+    const warn = (unknownTok + noRateTok) > 0
+      ? '<div style="font-size:0.78em;color:#e0a800;margin-top:6px;">' + (unknownTok + noRateTok).toLocaleString('hu-HU') + ' token árazatlan (ismeretlen modell vagy nincs díjszabás) — rájuk nem számoltunk költséget.</div>'
+      : ''
+    tokenCard = card('AI token költségbecslés ' + qBadge('local'),
+      '<div style="font-size:0.82em;color:var(--text-muted,#888);margin-bottom:8px;">Ez lokális tokenhasználatból számolt becslés, nem számlaadat. Nem része a fenti havi költésnek.</div>'
+      + '<div style="font-size:1.3em;font-weight:700;">' + fmt(tce.total_estimated_huf) + '</div>'
+      + warn
+      + '<details style="margin-top:10px;"><summary style="cursor:pointer;font-size:0.85em;color:var(--text-muted,#888);">Modellenkénti bontás</summary>'
+      + tableWrap('<table style="width:100%;min-width:320px;border-collapse:collapse;font-size:0.85em;margin-top:6px;"><tr style="color:var(--text-muted,#888);font-size:0.78em;text-align:left;"><th style="text-align:left;">Modell</th><th style="text-align:left;">Provider</th><th style="text-align:right;">Becsült</th></tr>' + priced + '</table>')
+      + '<div style="font-size:0.78em;color:var(--text-muted,#888);margin-top:6px;">Árazatlan: ismeretlen modell ' + unknownTok.toLocaleString('hu-HU') + ' token, nincs díjszabás ' + noRateTok.toLocaleString('hu-HU') + ' token.</div>'
+      + '</details>')
+  }
+
+  // ---- 5. Manual fallback / bootstrap sources (collapsed) ----
+  const allSrc = (s.all_sources || []).map(t => {
+    const so = sourceOf(t.confidence)
+    return '<tr style="border-top:1px solid var(--border,#eee);"><td style="padding:6px 10px 6px 0;">' + esc(t.name) + '</td><td style="padding:6px 10px 6px 0;">' + qBadge(so.q) + '</td><td style="padding:6px 0;text-align:right;white-space:nowrap;">' + fmt(t.spend) + '</td></tr>'
+  }).join('') || '<tr><td colspan="3" style="color:var(--text-muted,#888);padding:6px 0;">nincs konfigurált forrás</td></tr>'
+  const fallbackBlock = '<details style="border:1px solid var(--border,#e2e2e2);border-radius:12px;padding:14px 16px;margin-bottom:16px;">'
+    + '<summary style="cursor:pointer;font-weight:600;">Kézi fallback / bootstrap adatok (' + ((s.all_sources || []).length) + ')</summary>'
+    + '<div style="font-size:0.8em;color:var(--text-muted,#888);margin:8px 0;">Kézzel megadott értékek, amelyek csak összehasonlításra és bootstrap-hez szolgálnak, ha nincs API-adat.</div>'
+    + tableWrap('<table style="width:100%;min-width:320px;border-collapse:collapse;font-size:0.9em;"><tr style="color:var(--text-muted,#888);font-size:0.78em;text-align:left;"><th style="text-align:left;">Forrás</th><th style="text-align:left;">Minőség</th><th style="text-align:right;">Havi</th></tr>' + allSrc + '</table>')
+    + '</details>'
+
+  // ---- 6. Diagnostics / debug (collapsed, bottom) ----
+  const conf = Object.entries(s.confidence_breakdown || {}).map(([k, v]) => {
+    const label = { manual: 'Kézi fix', estimate: 'Kézi becslés', provider_plan_estimate: 'API plan estimate', provider_api: 'Billing API', billing: 'Billing API', local_token_estimate: 'Tokenbecslés' }[k] || k
+    return '<tr><td style="padding:3px 12px 3px 0;">' + esc(label) + '</td><td style="padding:3px 0;text-align:right;">' + fmt(v) + '</td></tr>'
+  }).join('') || '<tr><td colspan="2" style="color:var(--text-muted,#888);">—</td></tr>'
+  const bd = s.breakdown || {}
   const pm = s.previous_month
   const mom = s.month_over_month_delta
-  const momColor = mom == null ? '#888' : mom > 0 ? '#c0392b' : mom < 0 ? '#27ae60' : '#888'
-  const prevHtml = pm
-    ? `<div><b>${esc(pm.month)}</b> operational: ${fmt(pm.operational_spend)} <span style="color:${momColor};">(MoM: ${mom > 0 ? '+' : ''}${fmt(mom)})</span></div>`
-    : '<div style="color:#888;">no_previous_month_data (nincs előző havi adat — nem generálunk kamut)</div>'
-  const freshTs = opv.data_freshness ? new Date(opv.data_freshness * 1000).toLocaleString('hu-HU') : '-'
+  const momColor = mom == null ? '#9aa0a6' : mom > 0 ? '#e74c3c' : mom < 0 ? '#2ecc71' : '#9aa0a6'
+  const sync = s.provider_sync || []
+  const rec = s.reconcile || []
+  const ageStr = (sec) => { if (sec == null) return '—'; const h = Math.round(sec / 3600); return h < 24 ? (h + 'ó') : (Math.round(h / 24) + 'n') }
+  const syncRows = sync.map(p => {
+    const st = p.status === 'failed' ? sBadge('failed') : (p.status === 'stale' ? sBadge('stale') : (p.status === 'no_data' ? sBadge('nodata') : sBadge('ok')))
+    return '<tr style="border-top:1px solid var(--border,#eee);"><td style="padding:4px 10px 4px 0;text-transform:capitalize;">' + esc(p.provider) + '</td><td style="padding:4px 10px 4px 0;">' + st + '</td><td style="padding:4px 10px 4px 0;text-align:right;">' + (Number(p.imported_count) || 0) + '</td><td style="padding:4px 10px 4px 0;color:var(--text-muted,#888);font-size:0.85em;">' + ageStr(p.data_age_secs) + '</td><td style="padding:4px 0;color:var(--text-muted,#888);font-size:0.82em;">' + (p.last_success ? fmtDate(p.last_success) : '—') + '</td></tr>'
+  }).join('') || '<tr><td colspan="5" style="color:var(--text-muted,#888);padding:4px 0;">nincs provider-sync futás</td></tr>'
+  const recRows = rec.map(r => {
+    const vColor = r.variance > 0 ? '#e74c3c' : (r.variance < 0 ? '#2ecc71' : '#9aa0a6')
+    return '<tr style="border-top:1px solid var(--border,#eee);"><td style="padding:4px 10px 4px 0;">' + esc(r.source_id) + '</td><td style="padding:4px 10px 4px 0;text-align:right;">' + fmt(r.estimate) + '</td><td style="padding:4px 10px 4px 0;text-align:right;">' + fmt(r.actual) + '</td><td style="padding:4px 0;text-align:right;color:' + vColor + ';">' + fmt(r.variance) + '</td></tr>'
+  }).join('')
+  const cfgWarn = (s.config_present === false)
+    ? '<div style="color:#e0a800;font-size:0.85em;margin-bottom:8px;">Nincs költség-konfiguráció betöltve — üres összesítő.</div>'
+    : (s.config_errors && s.config_errors.length ? '<div style="color:#e0a800;font-size:0.85em;margin-bottom:8px;">Konfiguráció-figyelmeztetés: ' + esc(s.config_errors.join('; ')) + '</div>' : '')
+  const diagBlock = '<details style="border:1px solid var(--border,#e2e2e2);border-radius:12px;padding:14px 16px;margin-bottom:16px;">'
+    + '<summary style="cursor:pointer;font-weight:600;color:var(--text-muted,#888);">Diagnosztika</summary>'
+    + '<div style="margin-top:10px;">' + cfgWarn
+    + '<div style="font-size:0.8em;color:var(--text-muted,#888);margin:6px 0 4px;">Előző hónap: ' + (pm ? fmt(pm.operational_spend) + ' <span style="color:' + momColor + ';">(' + (mom > 0 ? '+' : '') + fmt(mom) + ' MoM)</span>' : 'nincs adat') + '</div>'
+    + '<div style="font-size:0.8em;color:var(--text-muted,#888);margin:10px 0 4px;">Adatminőség szerint</div>'
+    + tableWrap('<table style="width:100%;max-width:360px;border-collapse:collapse;font-size:0.88em;">' + conf + '</table>')
+    + '<div style="font-size:0.8em;color:var(--text-muted,#888);margin:10px 0 4px;">Kézi vs provider vs becslés</div>'
+    + tableWrap('<table style="width:100%;max-width:360px;border-collapse:collapse;font-size:0.88em;">'
+      + '<tr><td style="padding:3px 12px 3px 0;">Kézi fix</td><td style="padding:3px 0;text-align:right;">' + fmt(bd.fixed_manual) + '</td></tr>'
+      + '<tr><td style="padding:3px 12px 3px 0;">Provider</td><td style="padding:3px 0;text-align:right;">' + fmt(bd.provider) + '</td></tr>'
+      + '<tr><td style="padding:3px 12px 3px 0;">Becslés</td><td style="padding:3px 0;text-align:right;">' + fmt(bd.estimate) + '</td></tr></table>')
+    + '<div style="font-size:0.8em;color:var(--text-muted,#888);margin:10px 0 4px;">Kézi ↔ provider eltérés: ' + fmt(opv.manual_vs_provider_variance) + '</div>'
+    + '<div style="font-size:0.8em;color:var(--text-muted,#888);margin:12px 0 4px;">Provider-sync állapot</div>'
+    + tableWrap('<table style="width:100%;min-width:420px;border-collapse:collapse;font-size:0.85em;"><tr style="color:var(--text-muted,#888);font-size:0.76em;text-align:left;"><th style="text-align:left;">Provider</th><th style="text-align:left;">Állapot</th><th style="text-align:right;">Import</th><th style="text-align:left;">Kor</th><th style="text-align:left;">Utolsó siker</th></tr>' + syncRows + '</table>')
+    + (rec.length ? '<div style="font-size:0.8em;color:var(--text-muted,#888);margin:10px 0 4px;">Becslés vs tény</div>' + tableWrap('<table style="width:100%;min-width:360px;border-collapse:collapse;font-size:0.85em;"><tr style="color:var(--text-muted,#888);font-size:0.76em;text-align:left;"><th style="text-align:left;">Forrás</th><th style="text-align:right;">Becslés</th><th style="text-align:right;">Tény</th><th style="text-align:right;">Eltérés</th></tr>' + recRows + '</table>') : '')
+    + '<div style="font-size:0.75em;color:var(--text-muted,#888);margin-top:10px;">Összesítő készült: ' + fmtDate(s.generated_at) + '</div>'
+    + '</div></details>'
 
-  body.innerHTML = `
-    ${cfgWarn}
-    <div style="display:flex;justify-content:flex-end;margin-bottom:8px;">
-      <button id="costsSyncBtn" onclick="costopsSyncNow()" style="background:#2d6cdf;color:#fff;border:none;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:0.85em;">🔄 Render sync now</button>
-    </div>
-    <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:14px;">
-      <div style="flex:1;min-width:170px;border:2px solid #2d6cdf;border-radius:10px;padding:14px 16px;">
-        <div style="color:#2d6cdf;font-size:0.85em;font-weight:600;">${esc(s.month)} OPERATIONAL spend</div>
-        <div style="font-size:1.7em;font-weight:700;">${fmt(s.operational_spend)}</div>
-        <div style="font-size:0.75em;color:#888;">provider-preferred fő KPI</div>
-      </div>
-      <div style="flex:1;min-width:170px;border:1px solid #e2e2e2;border-radius:10px;padding:14px 16px;">
-        <div style="color:#888;font-size:0.85em;">operational forecast hó végére</div>
-        <div style="font-size:1.7em;font-weight:700;">${fmt(s.operational_forecast_month_end)}</div>
-      </div>
-      <div style="flex:1;min-width:170px;border:1px solid #e2e2e2;border-radius:10px;padding:14px 16px;">
-        <div style="color:#888;font-size:0.85em;">előző hó (operational)</div>
-        <div style="font-size:1.3em;font-weight:600;">${pm ? fmt(pm.operational_spend) : '—'}</div>
-        <div style="font-size:0.78em;color:${momColor};">${pm ? (mom > 0 ? '+' : '') + fmt(mom) + ' MoM' : 'no data'}</div>
-      </div>
-    </div>
-    ${card('Budget (operational alapon)', budgetHtml)}
-    ${card('Provider breakdown (operational)', `<table style="width:100%;max-width:480px;border-collapse:collapse;">
-      <tr style="color:#888;font-size:0.8em;text-align:left;"><th style="text-align:left;">Provider</th><th style="text-align:left;">Confidence</th><th style="text-align:right;">Operational</th></tr>${provBrk}</table>
-      <div style="font-size:0.8em;color:#888;margin-top:6px;">manual_spend (fallback): ${fmt(opv.manual_spend)} · provider_derived: ${fmt(opv.provider_derived_spend)} · manual↔provider variance: ${fmt(opv.manual_vs_provider_variance)} · data freshness: ${esc(freshTs)}</div>`)}
-    ${card('Előző hónap + MoM', prevHtml)}
-    ${card('Top források (top 5 spend szerint)', `<table style="width:100%;max-width:420px;border-collapse:collapse;">${topSrc}</table>`)}
-    ${card('Összes költségforrás (' + ((s.all_sources || []).length) + ')', `<table style="width:100%;max-width:640px;border-collapse:collapse;">
-      <tr style="color:#888;font-size:0.8em;text-align:left;"><th style="text-align:left;">Forrás</th><th style="text-align:left;">Típus</th><th style="text-align:left;">Provider</th><th style="text-align:left;">Confidence</th><th style="text-align:right;">Havi</th></tr>
-      ${allSrc}
-    </table>`)}
-    ${card('Confidence bontás', `<table style="width:100%;max-width:420px;border-collapse:collapse;">${conf}</table>`)}
-    ${card('Fixed/manual vs provider vs estimate', `<table style="width:100%;max-width:420px;border-collapse:collapse;">
-      <tr><td>fixed/manual</td><td style="text-align:right;">${fmt(s.breakdown ? s.breakdown.fixed_manual : 0)}</td></tr>
-      <tr><td>provider</td><td style="text-align:right;">${fmt(s.breakdown ? s.breakdown.provider : 0)}</td></tr>
-      <tr><td>estimate</td><td style="text-align:right;">${fmt(s.breakdown ? s.breakdown.estimate : 0)}</td></tr>
-    </table>`)}
-    ${card('Token aktivitás (' + esc(s.month) + ')', `
-      <div style="font-size:0.85em;color:#888;margin-bottom:6px;">volumen — v0.1-ben NEM forintosítva (nincs model oszlop; token→cost a v0.2-ben)</div>
-      <table style="width:100%;max-width:420px;border-collapse:collapse;">
-        <tr><td>hívások</td><td style="text-align:right;">${(Number(tu.calls) || 0).toLocaleString('hu-HU')}</td></tr>
-        <tr><td>ágensek</td><td style="text-align:right;">${(Number(tu.agents) || 0)}</td></tr>
-        <tr><td>input tokens</td><td style="text-align:right;">${(Number(tu.input_tokens) || 0).toLocaleString('hu-HU')}</td></tr>
-        <tr><td>output tokens</td><td style="text-align:right;">${(Number(tu.output_tokens) || 0).toLocaleString('hu-HU')}</td></tr>
-      </table>`)}
-    ${(function(){
-      var t = s.token_cost_estimate; if (!t) return ''
-      var statusTxt = { no_pricing_config: 'nincs pricing config (store/costops-pricing.json)', loaded: 'pricing betöltve', partial: 'részleges (van unpriced model)' }[t.pricing_profile_status] || esc(t.pricing_profile_status)
-      var priced = (t.priced_by_model || []).map(function(m){ return '<tr><td>'+esc(m.model)+'</td><td style="color:#888;">'+esc(m.provider)+'</td><td style="text-align:right;">'+fmt(m.estimated_huf)+'</td></tr>' }).join('') || '<tr><td colspan="3" style="color:#888;">nincs árazott model</td></tr>'
-      var up = t.unpriced || {}
-      return card('Token költségbecslés (ESTIMATE, nem számla)', ''
-        + '<div style="font-size:0.85em;color:#e67e22;margin-bottom:8px;">Ez BECSLÉS a token_usage-ból, nem tényleges számla. Külön a fix/manuális spendtől. Status: '+statusTxt+'</div>'
-        + '<div style="margin-bottom:8px;"><b>Becsült token-költség:</b> '+fmt(t.total_estimated_huf)+' <span style="color:#888;">(confidence: '+esc(t.confidence)+')</span></div>'
-        + '<table style="width:100%;max-width:480px;border-collapse:collapse;"><tr style="color:#888;font-size:0.8em;text-align:left;"><th style="text-align:left;">Model</th><th style="text-align:left;">Provider</th><th style="text-align:right;">Becsült</th></tr>'+priced+'</table>'
-        + '<div style="font-size:0.8em;color:#888;margin-top:8px;">Unpriced: unknown-model '+((Number(up.unknown_model_tokens)||0).toLocaleString('hu-HU'))+' token, nincs-ár '+((Number(up.no_rate_tokens)||0).toLocaleString('hu-HU'))+' token (nincs cost számítva rájuk).</div>'
-        + '<div style="margin-top:8px;padding-top:8px;border-top:1px solid #eee;"><b>Becsült összes (fix + token):</b> '+fmt(s.estimated_total_with_token_cost)+' <span style="color:#888;font-size:0.85em;">(a fix spend + a token-becslés, világosan jelölve)</span></div>')
-    })()}
-    ${(function(){
-      var sync = s.provider_sync || [], rec = s.reconcile || []
-      if (!sync.length && !rec.length) return card('Provider sync (v0.3)', '<div style="color:#888;font-size:0.85em;">Nincs provider-collector futás még. A provider API actual import a v0.3 külön jóváhagyott dry-run után jön; addig csak manual/estimate.</div>')
-      var ageStr = function(sec){ if(sec==null) return '-'; var h=Math.round(sec/3600); return h<24?(h+'ó'):(Math.round(h/24)+'n'); }
-      var syncRows = sync.map(function(p){
-        var badge = p.status === 'failed' ? '<span style="color:#c0392b;">failed ('+esc(p.error_code||'')+')</span>' : (p.status === 'stale' ? '<span style="color:#e67e22;">stale</span>' : (p.status === 'no_data' ? '<span style="color:#888;">no_data</span>' : '<span style="color:#27ae60;">ok</span>'))
-        var cov = p.previous_period_coverage ? '✓' : '—'
-        return '<tr><td>'+esc(p.provider)+'</td><td>'+badge+'</td><td style="text-align:right;">'+(Number(p.imported_count)||0)+'</td><td style="color:#888;font-size:0.85em;">'+ageStr(p.data_age_secs)+'</td><td style="color:#888;font-size:0.82em;">'+(p.last_success?new Date(p.last_success*1000).toLocaleString('hu-HU'):'-')+'</td><td style="color:#888;font-size:0.82em;">'+(p.last_failed?new Date(p.last_failed*1000).toLocaleString('hu-HU'):'-')+'</td><td style="text-align:center;color:#888;">'+cov+'</td></tr>'
-      }).join('') || '<tr><td colspan="7" style="color:#888;">nincs sync</td></tr>'
-      var recRows = rec.map(function(r){
-        var vColor = r.variance > 0 ? '#c0392b' : (r.variance < 0 ? '#27ae60' : '#888')
-        return '<tr><td>'+esc(r.source_id)+'</td><td style="text-align:right;">'+fmt(r.estimate)+'</td><td style="text-align:right;">'+fmt(r.actual)+'</td><td style="text-align:right;color:'+vColor+';">'+fmt(r.variance)+'</td><td style="color:#888;">'+esc(r.resolved_confidence)+'</td></tr>'
-      }).join('')
-      return card('Provider sync / freshness (v0.5)', ''
-        + '<div style="font-size:0.85em;color:#888;margin-bottom:6px;">Provider API-derived a manual/estimate MELLÉ; az operational a provider-preferred értéket használja (nincs dupla számolás). Sync: 🔄 gomb fent, vagy napi 1x ütemezve.</div>'
-        + '<table style="width:100%;max-width:720px;border-collapse:collapse;margin-bottom:10px;"><tr style="color:#888;font-size:0.78em;text-align:left;"><th style="text-align:left;">Provider</th><th style="text-align:left;">Állapot</th><th style="text-align:right;">Import</th><th style="text-align:left;">Kor</th><th style="text-align:left;">Utolsó ok</th><th style="text-align:left;">Utolsó hiba</th><th style="text-align:center;">Előző hó</th></tr>'+syncRows+'</table>'
-        + (rec.length ? '<div style="font-size:0.85em;color:#888;margin:6px 0;">Estimate vs Actual:</div><table style="width:100%;max-width:640px;border-collapse:collapse;"><tr style="color:#888;font-size:0.8em;text-align:left;"><th style="text-align:left;">Forrás</th><th style="text-align:right;">Estimate</th><th style="text-align:right;">Actual</th><th style="text-align:right;">Eltérés</th><th style="text-align:left;">Headline</th></tr>'+recRows+'</table>' : ''))
-    })()}
-    ${(function(){
-      var rp = s.render_plan
-      if (!rp) return ''
-      var vColor = rp.variance > 0 ? '#c0392b' : (rp.variance < 0 ? '#27ae60' : '#888')
-      var vLabel = rp.variance > 0 ? 'a plan-becslés MAGASABB a manuálnál' : (rp.variance < 0 ? 'a plan-becslés ALACSONYABB a manuálnál' : 'egyezik')
-      var nc = (rp.not_covered || []).map(function(x){ return '<li>'+esc(x)+'</li>' }).join('')
-      var det = rp.detail || null
-      var detailHtml = ''
-      if (det) {
-        var bp = Object.keys(det.by_type_plan || {}).map(function(k){ var b=det.by_type_plan[k]; return '<tr><td>'+esc(k)+'</td><td style="text-align:right;">'+(b.count||0)+'</td><td style="text-align:right;color:#888;">$'+(b.usd||0)+'</td></tr>' }).join('')
-        var flags = (det.undercount_flags || []).map(function(x){ return '<li>'+esc(x)+'</li>' }).join('')
-        detailHtml = '<div style="font-size:0.82em;color:#888;margin:8px 0 4px;">'+ (det.service_count||0) +' Render egység · utolsó sync: '+(rp.last_sync?new Date(rp.last_sync*1000).toLocaleString('hu-HU'):'-')+' · fx: '+(det.fx_usd_huf||0)+'</div>'
-          + '<table style="width:100%;max-width:420px;border-collapse:collapse;font-size:0.85em;"><tr style="color:#888;font-size:0.78em;text-align:left;"><th style="text-align:left;">Típus / plan</th><th style="text-align:right;">db</th><th style="text-align:right;">USD/hó</th></tr>'+bp+'</table>'
-          + (flags ? '<div style="font-size:0.78em;color:#e67e22;margin-top:4px;">Alulszámolás-jelzők:<ul style="margin:2px 0 0 18px;">'+flags+'</ul></div>' : '')
-      }
-      return card('Render infra -- plan-alapú becslés (v0.5, advisory)', ''
-        + '<div style="font-size:0.85em;color:#888;margin-bottom:8px;">Ez NEM számla, hanem a Render service-plánokból számolt <b>alsó becslés</b> (provider_plan_estimate). NEM része a headline spendnek, és nem írja felül a manual estimate-et.</div>'
-        + '<table style="width:100%;max-width:520px;border-collapse:collapse;margin-bottom:10px;">'
-        + '<tr><td>Manual render estimate</td><td style="text-align:right;">'+fmt(rp.manual_estimate)+' '+esc(rp.currency)+'</td></tr>'
-        + '<tr><td>Render plan-alapú becslés</td><td style="text-align:right;">'+fmt(rp.plan_estimate_total)+' '+esc(rp.currency)+'</td></tr>'
-        + '<tr style="font-weight:bold;"><td>Eltérés (variance)</td><td style="text-align:right;color:'+vColor+';">'+fmt(rp.variance)+' '+esc(rp.currency)+'</td></tr>'
-        + '</table>'
-        + '<div style="font-size:0.8em;color:'+vColor+';margin-bottom:8px;">'+esc(vLabel)+'</div>'
-        + detailHtml
-        + '<details style="font-size:0.82em;color:#888;margin-top:8px;"><summary style="cursor:pointer;">Nem fedett költségek (potenciális alulszámolás)</summary><ul style="margin:6px 0 0 18px;">'+nc+'</ul></details>')
-    })()}
-    <p style="font-size:0.8em;color:#888;">generálva: ${new Date((Number(s.generated_at) || 0) * 1000).toLocaleString('hu-HU')}</p>
-  `
+  body.innerHTML = ''
+    + '<div style="font-size:0.85em;color:var(--text-muted,#888);margin-bottom:14px;">Ahol van API-adat, azt használjuk. Becslés csak fallback, ha nincs API-adat.</div>'
+    + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:18px;">' + cards.join('') + '</div>'
+    + providerTable
+    + renderCard
+    + tokenCard
+    + fallbackBlock
+    + diagBlock
 }
 
 async function loadTokenUsage() {
