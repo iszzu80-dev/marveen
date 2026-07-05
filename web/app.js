@@ -10240,13 +10240,14 @@ async function loadCosts() {
 
   const b = s.budget
   const budgetColor = !b ? '#888' : b.status === 'hard' ? '#c0392b' : b.status === 'warning' ? '#e67e22' : '#27ae60'
+  const bOpPct = b ? (b.operational_used_pct != null ? b.operational_used_pct : b.used_pct) : 0
   const budgetHtml = b
-    ? `<div><b>${esc(b.id)}</b>: ${fmt(s.current_spend)} / ${fmt(b.amount)}
-        <span style="color:${budgetColor};font-weight:600;">(${pct(b.used_pct)}, ${esc(b.status)})</span>
+    ? `<div><b>${esc(b.id)}</b> (operational): ${fmt(s.operational_spend)} / ${fmt(b.amount)}
+        <span style="color:${budgetColor};font-weight:600;">(${pct(bOpPct)}, ${esc(b.status)})</span>
         <div style="background:#eee;border-radius:6px;height:10px;overflow:hidden;max-width:360px;margin-top:4px;">
-          <div style="background:${budgetColor};height:100%;width:${Math.min(100, (Number(b.used_pct) || 0) * 100)}%;"></div>
+          <div style="background:${budgetColor};height:100%;width:${Math.min(100, (Number(bOpPct) || 0) * 100)}%;"></div>
         </div>
-        <span style="font-size:0.8em;color:#888;">forecast: ${pct(b.forecast_pct)} · jelzés-only, semmilyen automatikus művelet</span></div>`
+        <span style="font-size:0.8em;color:#888;">operational forecast: ${pct(b.operational_forecast_pct != null ? b.operational_forecast_pct : b.forecast_pct)} · jelzés-only, semmilyen automatikus művelet · (legacy manual used: ${pct(b.used_pct)})</span></div>`
     : '<p style="color:#888;">Nincs aktív budget (állíts be amount &gt; 0 értéket a store/costops-config.json-ban).</p>'
 
   const topSrc = (s.top_sources || []).map(t => `<tr><td>${esc(t.name)}</td><td style="text-align:right;">${fmt(t.spend)}</td></tr>`).join('') || '<tr><td colspan="2" style="color:#888;">nincs adat</td></tr>'
@@ -10259,19 +10260,39 @@ async function loadCosts() {
 
   const card = (title, inner) => `<div style="border:1px solid #e2e2e2;border-radius:10px;padding:14px 16px;margin-bottom:14px;"><h3 style="margin:0 0 8px;font-size:1em;">${title}</h3>${inner}</div>`
 
+  const opv = s.operational || {}
+  const provBrk = (opv.provider_breakdown || []).map(p => `<tr><td>${esc(p.provider)}</td><td style="color:#888;font-size:0.85em;">${esc(p.confidence)}</td><td style="text-align:right;">${fmt(p.spend)}</td></tr>`).join('') || '<tr><td colspan="3" style="color:#888;">nincs adat</td></tr>'
+  const pm = s.previous_month
+  const mom = s.month_over_month_delta
+  const momColor = mom == null ? '#888' : mom > 0 ? '#c0392b' : mom < 0 ? '#27ae60' : '#888'
+  const prevHtml = pm
+    ? `<div><b>${esc(pm.month)}</b> operational: ${fmt(pm.operational_spend)} <span style="color:${momColor};">(MoM: ${mom > 0 ? '+' : ''}${fmt(mom)})</span></div>`
+    : '<div style="color:#888;">no_previous_month_data (nincs előző havi adat — nem generálunk kamut)</div>'
+  const freshTs = opv.data_freshness ? new Date(opv.data_freshness * 1000).toLocaleString('hu-HU') : '-'
+
   body.innerHTML = `
     ${cfgWarn}
     <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:14px;">
-      <div style="flex:1;min-width:160px;border:1px solid #e2e2e2;border-radius:10px;padding:14px 16px;">
-        <div style="color:#888;font-size:0.85em;">${esc(s.month)} spend</div>
-        <div style="font-size:1.6em;font-weight:700;">${fmt(s.current_spend)}</div>
+      <div style="flex:1;min-width:170px;border:2px solid #2d6cdf;border-radius:10px;padding:14px 16px;">
+        <div style="color:#2d6cdf;font-size:0.85em;font-weight:600;">${esc(s.month)} OPERATIONAL spend</div>
+        <div style="font-size:1.7em;font-weight:700;">${fmt(s.operational_spend)}</div>
+        <div style="font-size:0.75em;color:#888;">provider-preferred fő KPI</div>
       </div>
-      <div style="flex:1;min-width:160px;border:1px solid #e2e2e2;border-radius:10px;padding:14px 16px;">
-        <div style="color:#888;font-size:0.85em;">forecast hó végére</div>
-        <div style="font-size:1.6em;font-weight:700;">${fmt(s.forecast_month_end)}</div>
+      <div style="flex:1;min-width:170px;border:1px solid #e2e2e2;border-radius:10px;padding:14px 16px;">
+        <div style="color:#888;font-size:0.85em;">operational forecast hó végére</div>
+        <div style="font-size:1.7em;font-weight:700;">${fmt(s.operational_forecast_month_end)}</div>
+      </div>
+      <div style="flex:1;min-width:170px;border:1px solid #e2e2e2;border-radius:10px;padding:14px 16px;">
+        <div style="color:#888;font-size:0.85em;">előző hó (operational)</div>
+        <div style="font-size:1.3em;font-weight:600;">${pm ? fmt(pm.operational_spend) : '—'}</div>
+        <div style="font-size:0.78em;color:${momColor};">${pm ? (mom > 0 ? '+' : '') + fmt(mom) + ' MoM' : 'no data'}</div>
       </div>
     </div>
-    ${card('Budget', budgetHtml)}
+    ${card('Budget (operational alapon)', budgetHtml)}
+    ${card('Provider breakdown (operational)', `<table style="width:100%;max-width:480px;border-collapse:collapse;">
+      <tr style="color:#888;font-size:0.8em;text-align:left;"><th style="text-align:left;">Provider</th><th style="text-align:left;">Confidence</th><th style="text-align:right;">Operational</th></tr>${provBrk}</table>
+      <div style="font-size:0.8em;color:#888;margin-top:6px;">manual_spend (fallback): ${fmt(opv.manual_spend)} · provider_derived: ${fmt(opv.provider_derived_spend)} · manual↔provider variance: ${fmt(opv.manual_vs_provider_variance)} · data freshness: ${esc(freshTs)}</div>`)}
+    ${card('Előző hónap + MoM', prevHtml)}
     ${card('Top források (top 5 spend szerint)', `<table style="width:100%;max-width:420px;border-collapse:collapse;">${topSrc}</table>`)}
     ${card('Összes költségforrás (' + ((s.all_sources || []).length) + ')', `<table style="width:100%;max-width:640px;border-collapse:collapse;">
       <tr style="color:#888;font-size:0.8em;text-align:left;"><th style="text-align:left;">Forrás</th><th style="text-align:left;">Típus</th><th style="text-align:left;">Provider</th><th style="text-align:left;">Confidence</th><th style="text-align:right;">Havi</th></tr>
