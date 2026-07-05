@@ -96,8 +96,45 @@ unpriced. Estimate is never an invoice.
 
 **Provider billing/usage API collector is v0.3** (still no external API in v0.2).
 
+## v0.3 -- provider cost collector framework (offline; no live API in PR1)
+
+v0.3 adds a generic, deterministic framework to import ACTUAL provider cost as
+high-confidence `provider_api` line items -- **without** overwriting the local
+manual/estimate rows, and with a strict secrets-in-Vault-only posture.
+
+- **Framework** (`src/costops/collectors/`): `ProviderCollector` interface with an
+  INJECTED HTTP fetcher (so collectors are unit-tested fully offline with fixtures
+  -- no live call unless a real fetcher is passed after explicit approval). The
+  first collector is **Anthropic** (`anthropic-cost-report`), live-ready but never
+  called live in PR1; its mapper is pure and fixture-tested.
+- **`runner.ts`**: loads a collector's normalized lines, idempotently upserts them
+  into `cost_line_items` as `confidence='provider_api'` (dedup_key distinct from the
+  manual/estimate row -> both coexist), and records an `import_runs` row. On error
+  it DELETES NOTHING and records a **sanitized** failure (keys redacted).
+- **`import_runs` table**: provider, collector_name, started/finished, status,
+  period, imported_count, error_code, `error_message_sanitized`, data_freshness_at.
+  No raw account id, no raw API response, no secret ever stored.
+- **Config**: gitignored `store/costops-collectors.json` holds only non-secret
+  wiring -- an `enabled` flag and a `secret_ref` like `vault:costops.anthropic_admin_key`
+  (validated to REQUIRE the `vault:` form, never a raw key), plus `fx_usd_huf` and an
+  optional `account_ref_hash`. A tracked safe example lives at
+  `src/costops/collectors/collectors-config.example.json` (no key, no account id).
+- **Summary reconcile**: the headline `current_spend` resolves each source to its
+  single highest-confidence line (`actual_invoice` > `provider_api` > `billing_export`
+  > `local_usage` > `estimate` > `manual`) so an actual supersedes an estimate WITHOUT
+  double counting. New `reconcile[]` (per-source estimate vs actual vs variance) and
+  `provider_sync[]` (last run per provider: status, freshness, stale/failed marker).
+- **Dashboard**: a "Provider sync + estimate vs actual" section (empty until a run).
+
+**Vault**: real Admin keys go into `src/web/vault.ts` via the secure handover, never
+into config/log/transcript/dashboard-response. PR1 creates NO real secret and makes
+NO live call. A live dry-run is a separate, explicitly-approved step. Full design:
+`audits/costops-v0.3-provider-api-collectors-plan.md`.
+
 ## Known limitations
 
+- **v0.3 PR1 is offline-only**: no provider API is called; `provider_sync`/`reconcile`
+  stay empty until a Vault key is added and a live dry-run is explicitly approved.
 - **Forward-only enrichment**: token costs only appear for rows ingested AFTER
   the dashboard restart that activates model-capture, and only once you fill
   `store/costops-pricing.json` rates. Existing rows stay unknown -> unpriced.

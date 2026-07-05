@@ -641,6 +641,25 @@ export function initDatabase(dbPathOverride?: string): void {
       updated_at INTEGER NOT NULL
     )
   `)
+  // CostOps v0.3: provider cost-collector run history / sync status. No raw
+  // account id, no raw API response, no secret ever stored here.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS import_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider TEXT NOT NULL,
+      collector_name TEXT NOT NULL,
+      started_at INTEGER NOT NULL,
+      finished_at INTEGER,
+      status TEXT NOT NULL,
+      period_start INTEGER,
+      period_end INTEGER,
+      imported_count INTEGER NOT NULL DEFAULT 0,
+      error_code TEXT,
+      error_message_sanitized TEXT,
+      data_freshness_at INTEGER
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_import_runs_provider ON import_runs(provider, started_at)`)
 
   // One-shot migration from the old JSON file (which had a read-modify-write
   // race). Import rows if they exist, then rename the file so we don't keep

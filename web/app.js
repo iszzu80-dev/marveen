@@ -10303,6 +10303,22 @@ async function loadCosts() {
         + '<div style="font-size:0.8em;color:#888;margin-top:8px;">Unpriced: unknown-model '+((Number(up.unknown_model_tokens)||0).toLocaleString('hu-HU'))+' token, nincs-ár '+((Number(up.no_rate_tokens)||0).toLocaleString('hu-HU'))+' token (nincs cost számítva rájuk).</div>'
         + '<div style="margin-top:8px;padding-top:8px;border-top:1px solid #eee;"><b>Becsült összes (fix + token):</b> '+fmt(s.estimated_total_with_token_cost)+' <span style="color:#888;font-size:0.85em;">(a fix spend + a token-becslés, világosan jelölve)</span></div>')
     })()}
+    ${(function(){
+      var sync = s.provider_sync || [], rec = s.reconcile || []
+      if (!sync.length && !rec.length) return card('Provider sync (v0.3)', '<div style="color:#888;font-size:0.85em;">Nincs provider-collector futás még. A provider API actual import a v0.3 külön jóváhagyott dry-run után jön; addig csak manual/estimate.</div>')
+      var syncRows = sync.map(function(p){
+        var badge = p.status !== 'ok' ? '<span style="color:#c0392b;">sync failed ('+esc(p.error_code||p.status)+')</span>' : (p.stale ? '<span style="color:#e67e22;">stale</span>' : '<span style="color:#27ae60;">ok</span>')
+        return '<tr><td>'+esc(p.provider)+'</td><td style="color:#888;">'+esc(p.collector_name)+'</td><td>'+badge+'</td><td style="text-align:right;">'+(Number(p.imported_count)||0)+' sor</td><td style="color:#888;font-size:0.85em;">'+(p.last_sync?new Date(p.last_sync*1000).toLocaleString('hu-HU'):'-')+'</td></tr>'
+      }).join('') || '<tr><td colspan="5" style="color:#888;">nincs sync</td></tr>'
+      var recRows = rec.map(function(r){
+        var vColor = r.variance > 0 ? '#c0392b' : (r.variance < 0 ? '#27ae60' : '#888')
+        return '<tr><td>'+esc(r.source_id)+'</td><td style="text-align:right;">'+fmt(r.estimate)+'</td><td style="text-align:right;">'+fmt(r.actual)+'</td><td style="text-align:right;color:'+vColor+';">'+fmt(r.variance)+'</td><td style="color:#888;">'+esc(r.resolved_confidence)+'</td></tr>'
+      }).join('')
+      return card('Provider sync + estimate vs actual (v0.3)', ''
+        + '<div style="font-size:0.85em;color:#888;margin-bottom:6px;">Provider API actual a manual/estimate MELLÉ; a headline spend a legmagasabb confidence-t használja (nincs dupla számolás).</div>'
+        + '<table style="width:100%;max-width:640px;border-collapse:collapse;margin-bottom:10px;"><tr style="color:#888;font-size:0.8em;text-align:left;"><th style="text-align:left;">Provider</th><th style="text-align:left;">Collector</th><th style="text-align:left;">Állapot</th><th style="text-align:right;">Import</th><th style="text-align:left;">Utolsó sync</th></tr>'+syncRows+'</table>'
+        + (rec.length ? '<div style="font-size:0.85em;color:#888;margin:6px 0;">Estimate vs Actual:</div><table style="width:100%;max-width:640px;border-collapse:collapse;"><tr style="color:#888;font-size:0.8em;text-align:left;"><th style="text-align:left;">Forrás</th><th style="text-align:right;">Estimate</th><th style="text-align:right;">Actual</th><th style="text-align:right;">Eltérés</th><th style="text-align:left;">Headline</th></tr>'+recRows+'</table>' : ''))
+    })()}
     <p style="font-size:0.8em;color:#888;">generálva: ${new Date((Number(s.generated_at) || 0) * 1000).toLocaleString('hu-HU')}</p>
   `
 }
