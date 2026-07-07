@@ -331,6 +331,25 @@ export const SETTINGS_REGISTRY: SettingDefinition[] = [
     secret: false,
     requiresRestart: false,
   },
+  // --- Brand module (logo URL, accent colour) ---
+  {
+    key: 'BRAND_LOGO_URL',
+    type: 'string',
+    default: '',
+    description: 'A dashboard oldalsávjában megjelenő logó URL-je. Üres = monogram az első betűből.',
+    module: 'brand',
+    secret: false,
+    requiresRestart: false,
+  },
+  {
+    key: 'BRAND_ACCENT',
+    type: 'color',
+    default: '#d97757',
+    description: 'A dashboard kiemelő színe. Beállítja a --qq-accent, --qq-accent-dark és --qq-accent-light CSS változókat.',
+    module: 'brand',
+    secret: false,
+    requiresRestart: false,
+  },
   // --- Token usage module ---
   {
     key: 'TOKEN_USAGE_RETENTION_DAYS',

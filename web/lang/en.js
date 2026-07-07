@@ -568,6 +568,14 @@ window._i18n.en = {
   'settings.meta.range':         'Range',
   'settings.meta.format':        'Format',
   'settings.meta.default':       'Default',
+  // --- Brand settings ---
+  'brand.logo_url_label':        'Logo URL',
+  'brand.logo_url_desc':         'Image URL shown in the sidebar brand mark. Empty = monogram from the first letter.',
+  'brand.accent_label':          'Accent colour',
+  'brand.accent_desc':           'Dashboard accent colour. Sets --qq-accent, --qq-accent-dark and --qq-accent-light CSS custom properties.',
+  'brand.save_btn':              'Save Brand',
+  'brand.saving':                'Saving...',
+  'brand.saved':                 'Brand settings saved',
   'status.error.fetch':          'Failed to load status',
   'recall.summary.agents':       'Agents',
   'recall.summary.log_count':    '{n} log entries',
@@ -585,6 +593,7 @@ window._i18n.en = {
   'settings.module.system':      'System',
   'settings.module.heartbeat':   'Heartbeat',
   'settings.module.audit':       'Audit',
+  'settings.module.brand':       'Brand',
   'settings.col.key':            'Key',
   'settings.col.value':          'Value',
   'settings.col.description':    'Description',
@@ -617,6 +626,8 @@ window._i18n.en = {
   'settings.desc.IDEA_STALE_DAYS':             'Days of inactivity after which a "new" status idea receives a "Stale" indicator.',
   'settings.desc.AUDIT_LOG_RETENTION_DAYS':    'Retention period in days for the audit log (config changes, idea box audit, store file events). Older entries are deleted during the daily sweep.',
   'settings.desc.AUDIT_LOG_MAX_ENTRIES':       'Maximum number of entries in the audit log across all sources. API requests never return more than this (per-source limit: AUDIT_LOG_MAX_ENTRIES / 3).',
+  'settings.desc.BRAND_LOGO_URL':              'Image URL shown in the sidebar brand mark. Empty = monogram from the first letter of the brand name.',
+  'settings.desc.BRAND_ACCENT':                'Dashboard accent colour. Sets --qq-accent, --qq-accent-dark and --qq-accent-light CSS custom properties.',
 
   // --- Vault ---
   'vault.page_title':            'Vault',

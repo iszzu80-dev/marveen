@@ -485,6 +485,7 @@ window._i18n.hu = {
   'tasks.cadence.other':         'Egyéb / egyedi',
   'kanban.owner_filter':         'Csak a rám (a board felelőse) váró kártyák',
   'settings.module.ideabox':     'Ötletláda',
+  'settings.module.brand':       'Brand',
   'overview.stat.sub.memories':  'bejegyzés',
   'recall.sort.tooltip.desc':    'Csökkenő sorrend (legújabb elöl)',
   'recall.sort.tooltip.asc':     'Növekvő sorrend (legrégebbi elöl)',
@@ -861,6 +862,14 @@ window._i18n.hu = {
   'settings.meta.range':         'Tartomány',
   'settings.meta.format':        'Formátum',
   'settings.meta.default':       'Alapérték',
+  // --- Brand settings ---
+  'brand.logo_url_label':        'Logo URL',
+  'brand.logo_url_desc':         'A sidebar márkajelzésben megjelenő kép URL-je. Üres = monogram az első betűből.',
+  'brand.accent_label':          'Kiemelő szín',
+  'brand.accent_desc':           'A dashboard kiemelő színe. Beállítja a --qq-accent, --qq-accent-dark és --qq-accent-light CSS változókat.',
+  'brand.save_btn':              'Brand mentése',
+  'brand.saving':                'Mentés...',
+  'brand.saved':                 'Brand beállítások mentve',
   'status.error.fetch':          'Hiba a státusz lekérésnél',
   'recall.summary.agents':       'Ágensek',
   'recall.summary.log_count':    '{n} naplóbejegyzés',
@@ -910,6 +919,8 @@ window._i18n.hu = {
   'settings.desc.IDEA_STALE_DAYS':             'Ennyi napnyi mozdulatlanság után kap "Elavult" jelzést egy "új" státuszú ötlet.',
   'settings.desc.AUDIT_LOG_RETENTION_DAYS':    'Az audit napló (config-változások, ötletláda-audit, store-fájl események) megőrzési ideje napokban. Régebbi bejegyzések a napi sweepkor törlődnek.',
   'settings.desc.AUDIT_LOG_MAX_ENTRIES':       'Az audit napló összes forrásra vetített maximális bejegyzésszáma. Az API lekérések ennél soha nem adnak vissza többet (forrásanként egyéni limit: AUDIT_LOG_MAX_ENTRIES / 3).',
+  'settings.desc.BRAND_LOGO_URL':              'A sidebar márkajelzésben megjelenő logó URL-je. Üres = monogram az első betűből.',
+  'settings.desc.BRAND_ACCENT':                'A dashboard kiemelő színe. Beállítja a --qq-accent, --qq-accent-dark és --qq-accent-light CSS változókat.',
 
   // --- Vault ---
   'vault.page_title':            'Vault',

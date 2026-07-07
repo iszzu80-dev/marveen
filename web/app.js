@@ -9711,18 +9711,66 @@ async function loadOverview() {
 // distinct from the main agent's display name; the backend defaults brandName to
 // BOT_NAME, so a brand-unaware install keeps showing the agent name. If the
 // field is absent (legacy backend) the existing HTML default text is kept.
+// brandLogoUrl (when set) replaces the monogram with an <img>; brandAccent sets
+// --qq-accent / --qq-accent-dark / --qq-accent-light on :root.
+function hexToRgb(hex) {
+  var h = String(hex).replace('#', '')
+  return { r: parseInt(h.substring(0,2),16), g: parseInt(h.substring(2,4),16), b: parseInt(h.substring(4,6),16) }
+}
+function rgbToHex(r,g,b) { return '#' + [r,g,b].map(function(c) { return Math.max(0,Math.min(255,c)).toString(16).padStart(2,'0') }).join('') }
+function lightenHex(hex, pct) {
+  var rgb = hexToRgb(hex)
+  return rgbToHex(rgb.r + Math.round((255-rgb.r)*pct), rgb.g + Math.round((255-rgb.g)*pct), rgb.b + Math.round((255-rgb.b)*pct))
+}
+function darkenHex(hex, pct) {
+  var rgb = hexToRgb(hex)
+  return rgbToHex(Math.round(rgb.r*(1-pct)), Math.round(rgb.g*(1-pct)), Math.round(rgb.b*(1-pct)))
+}
+function applyBrandAccent(hex) {
+  var accent = String(hex || '#d97757')
+  var dark = darkenHex(accent, 0.12)
+  var rgb = hexToRgb(accent)
+  var light = 'rgba(' + rgb.r + ',' + rgb.g + ',' + rgb.b + ',0.1)'
+  var root = document.documentElement.style
+  root.setProperty('--qq-accent', accent)
+  root.setProperty('--qq-accent-dark', dark)
+  root.setProperty('--qq-accent-light', light)
+  root.setProperty('--accent', accent)
+  root.setProperty('--accent-hover', dark)
+  root.setProperty('--accent-soft', light)
+  root.setProperty('--border-focus', accent)
+}
+function applyBrandLogo(url) {
+  var mark = document.getElementById('sidebarBrandMark')
+  if (!mark) return
+  if (url && String(url).trim()) {
+    var img = document.createElement('img')
+    img.src = String(url).trim()
+    img.alt = ''
+    img.style.width = '100%'; img.style.height = '100%'; img.style.objectFit = 'contain'
+    img.onerror = function() {
+      var brand = (window._brandTokens && window._brandTokens.brand) || 'Marveen'
+      mark.textContent = brand.charAt(0).toUpperCase()
+    }
+    mark.textContent = ''
+    mark.appendChild(img)
+  }
+}
 async function initSidebarBrand() {
   try {
-    const img = document.createElement('img')
-    img.src = '/api/marveen/avatar?t=' + Date.now()
-    img.onload = () => {
-      const mark = document.getElementById('sidebarBrandMark')
-      if (mark) { mark.textContent = ''; mark.appendChild(img) }
+    var avatarImg = document.createElement('img')
+    avatarImg.src = '/api/marveen/avatar?t=' + Date.now()
+    avatarImg.onload = function() {
+      var mark = document.getElementById('sidebarBrandMark')
+      // Only replace with avatar if no brand logo is set.
+      if (mark && !(window._brandConfig && window._brandConfig.logoUrl)) {
+        mark.textContent = ''; mark.appendChild(avatarImg)
+      }
     }
-    const res = await fetch('/api/marveen')
+    var res = await fetch('/api/marveen')
     if (res.ok) {
-      const m = await res.json()
-      const brand = m.brandName || m.name
+      var m = await res.json()
+      var brand = m.brandName || m.name
       // Publish the brand tokens so every t() call ({brand}/{bot}/{agentId})
       // renders the configured names, then re-apply the static i18n so any
       // label painted before this fetch resolved picks up the real brand.
@@ -9734,15 +9782,26 @@ async function initSidebarBrand() {
       if (typeof renderStaticI18n === 'function') renderStaticI18n()
       if (brand) {
         document.title = brand
-        const appleTitle = document.querySelector('meta[name="apple-mobile-web-app-title"]')
+        var appleTitle = document.querySelector('meta[name="apple-mobile-web-app-title"]')
         if (appleTitle) appleTitle.setAttribute('content', brand)
-        const topbar = document.getElementById('mobileTopbarTitle')
+        var topbar = document.getElementById('mobileTopbarTitle')
         if (topbar) topbar.textContent = brand
-        const name = document.getElementById('sidebarBrandName')
+        var name = document.getElementById('sidebarBrandName')
         if (name) name.textContent = brand
-        const subtitle = document.getElementById('updatesSubtitle')
-        if (subtitle) subtitle.textContent = `${brand} ` + t('overview.updates_subtitle')
+        var subtitle = document.getElementById('updatesSubtitle')
+        if (subtitle) subtitle.textContent = brand + ' ' + t('overview.updates_subtitle')
+        // Update the monogram to match the brand name.
+        var mark = document.getElementById('sidebarBrandMark')
+        if (mark && !(window._brandConfig && window._brandConfig.logoUrl)) {
+          mark.textContent = brand.charAt(0).toUpperCase()
+        }
       }
+      // Apply brand accent if configured.
+      if (m.brandAccent) applyBrandAccent(m.brandAccent)
+      // Apply brand logo URL (with monogram fallback built-in).
+      if (m.brandLogoUrl) applyBrandLogo(m.brandLogoUrl)
+      // Publish so the brand settings panel can read the current state.
+      window._brandConfig = { logoUrl: m.brandLogoUrl || '', accent: m.brandAccent || '#d97757' }
     }
   } catch {}
 }
@@ -10444,7 +10503,7 @@ window.addEventListener('beforeunload', (e) => {
 // entry never requires a frontend change just to render a sane heading.
 function settingsModuleLabel(mod) {
   const key = `settings.module.${mod}`
-  const known = { kanban: true, system: true, heartbeat: true, audit: true, ideabox: true }
+  const known = { kanban: true, system: true, heartbeat: true, audit: true, ideabox: true, brand: true }
   return known[mod] ? t(key) : (mod.charAt(0).toUpperCase() + mod.slice(1))
 }
 
@@ -10656,6 +10715,159 @@ function resetAllSettings() {
 document.getElementById('settingsSaveAllBtn')?.addEventListener('click', saveAllSettings)
 document.getElementById('settingsResetBtn')?.addEventListener('click', resetAllSettings)
 
+// === Brand settings panel: logo URL + accent colour picker with live preview ===
+var BRAND_ACCENT_PRESETS = ['#d97757', '#e85c2e', '#2563eb', '#10b981', '#8b5cf6', '#f59e0b']
+var _brandSettingsLoaded = false
+
+function initBrandSettingsPanel() {
+  if (_brandSettingsLoaded) return
+  _brandSettingsLoaded = true
+
+  var logoInput = document.getElementById('brandLogoUrlInput')
+  var accentColor = document.getElementById('brandAccentColorInput')
+  var accentHex = document.getElementById('brandAccentHexInput')
+  var presetsContainer = document.getElementById('brandAccentPresets')
+  var previewMark = document.getElementById('brandPreviewMark')
+  var previewName = document.getElementById('brandPreviewName')
+  var previewSub = document.getElementById('brandPreviewSub')
+  var saveBtn = document.getElementById('brandSettingsSaveBtn')
+  var resetBtn = document.getElementById('brandSettingsResetBtn')
+
+  if (!logoInput || !accentColor) return
+
+  // Seed from /api/marveen (already loaded by initSidebarBrand).
+  var config = window._brandConfig || { logoUrl: '', accent: '#d97757' }
+  logoInput.value = config.logoUrl || ''
+  accentColor.value = config.accent || '#d97757'
+  accentHex.value = config.accent || '#d97757'
+
+  // Build preset swatches.
+  if (presetsContainer) {
+    presetsContainer.innerHTML = ''
+    for (var i = 0; i < BRAND_ACCENT_PRESETS.length; i++) {
+      var swatch = document.createElement('button')
+      swatch.type = 'button'
+      swatch.style.cssText = 'width:28px;height:28px;border-radius:6px;border:2px solid transparent;background:' + BRAND_ACCENT_PRESETS[i] + ';cursor:pointer;padding:0;transition:transform 0.15s, border-color 0.15s'
+      swatch.title = BRAND_ACCENT_PRESETS[i]
+      swatch.setAttribute('aria-label', BRAND_ACCENT_PRESETS[i])
+      ;(function(preset) {
+        swatch.addEventListener('click', function() {
+          accentColor.value = preset
+          accentHex.value = preset
+          updateBrandPreview(preset)
+          highlightActivePreset(presetsContainer, preset)
+        })
+      })(BRAND_ACCENT_PRESETS[i])
+      presetsContainer.appendChild(swatch)
+    }
+    highlightActivePreset(presetsContainer, config.accent || '#d97757')
+  }
+
+  // Sync the three accent controls.
+  accentColor.addEventListener('input', function() {
+    accentHex.value = accentColor.value
+    updateBrandPreview(accentColor.value)
+    highlightActivePreset(presetsContainer, accentColor.value)
+  })
+  accentHex.addEventListener('input', function() {
+    var val = accentHex.value.trim()
+    if (/^#[0-9a-fA-F]{6}$/.test(val)) {
+      accentColor.value = val
+      updateBrandPreview(val)
+      highlightActivePreset(presetsContainer, val)
+    }
+  })
+
+  // Live preview.
+  logoInput.addEventListener('input', function() { updateBrandPreview(null, logoInput.value) })
+
+  // Initial preview.
+  updateBrandPreview(config.accent || '#d97757', config.logoUrl)
+
+  // Save.
+  if (saveBtn) {
+    saveBtn.addEventListener('click', function() {
+      saveBtn.disabled = true; saveBtn.textContent = (t('brand.saving') || 'Mentés...')
+      var errs = []
+      var p1 = fetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({key:'BRAND_ACCENT',value:accentColor.value}) })
+        .then(function(r) { if (!r.ok) return r.json().then(function(d){ throw new Error('Szín: ' + (d.error || 'hiba')) }) })
+        .catch(function(e) { errs.push(e.message || 'Szín: kapcsolati hiba') })
+      var p2 = fetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({key:'BRAND_LOGO_URL',value:logoInput.value.trim()}) })
+        .then(function(r) { if (!r.ok) return r.json().then(function(d){ throw new Error('Logo: ' + (d.error || 'hiba')) }) })
+        .catch(function(e) { errs.push(e.message || 'Logo: kapcsolati hiba') })
+
+      Promise.all([p1, p2]).then(function() {
+        saveBtn.disabled = false; saveBtn.textContent = (t('brand.save_btn') || 'Brand mentése')
+        if (errs.length) { showToast(errs.join('; '), 'error') }
+        else {
+          applyBrandAccent(accentColor.value)
+          if (logoInput.value.trim()) applyBrandLogo(logoInput.value.trim())
+          else {
+            var mark = document.getElementById('sidebarBrandMark')
+            if (mark) { mark.textContent = ''; mark.textContent = ((window._brandTokens && window._brandTokens.brand) || 'Marveen').charAt(0).toUpperCase() }
+          }
+          window._brandConfig = { logoUrl: logoInput.value.trim(), accent: accentColor.value }
+          showToast(t('brand.saved') || 'Brand beállítások mentve')
+        }
+      })
+    })
+  }
+
+  // Reset.
+  if (resetBtn) {
+    resetBtn.addEventListener('click', function() {
+      logoInput.value = config.logoUrl || ''
+      accentColor.value = config.accent || '#d97757'
+      accentHex.value = config.accent || '#d97757'
+      updateBrandPreview(config.accent || '#d97757', config.logoUrl)
+      highlightActivePreset(presetsContainer, config.accent || '#d97757')
+    })
+  }
+}
+
+function highlightActivePreset(container, hex) {
+  if (!container) return
+  var swatches = container.querySelectorAll('button')
+  for (var i = 0; i < swatches.length; i++) {
+    var s = swatches[i]
+    s.style.borderColor = s.style.background.replace(/ /g,'') === hex ? 'var(--text)' : 'transparent'
+    s.style.transform = s.style.background.replace(/ /g,'') === hex ? 'scale(1.15)' : 'scale(1)'
+  }
+}
+
+function updateBrandPreview(accentHex, logoUrl) {
+  var mark = document.getElementById('brandPreviewMark')
+  var name = document.getElementById('brandPreviewName')
+  var sub = document.getElementById('brandPreviewSub')
+  if (accentHex && mark) {
+    mark.style.background = accentHex
+  }
+  if (logoUrl !== undefined && mark) {
+    // Show image or monogram in the preview.
+    if (logoUrl && logoUrl.trim()) {
+      mark.textContent = ''
+      var img = document.createElement('img')
+      img.src = logoUrl.trim()
+      img.style.width = '100%'; img.style.height = '100%'; img.style.objectFit = 'contain'
+      img.onerror = function() { mark.textContent = '!' }
+      mark.appendChild(img)
+    } else {
+      mark.textContent = ((window._brandTokens && window._brandTokens.brand) || 'Marveen').charAt(0).toUpperCase()
+    }
+  }
+  if (name) name.textContent = (window._brandTokens && window._brandTokens.brand) || 'Marveen'
+  if (sub) sub.textContent = 'online'
+}
+
+// Hook into loadSettings so the brand panel initialises each time Settings opens.
+var _origLoadSettings = loadSettings
+loadSettings = function() {
+  var p = _origLoadSettings.apply(this, arguments)
+  // initBrandSettingsPanel is sync and safe to call immediately.
+  initBrandSettingsPanel()
+  return p
+}
+
 // === connectors.hu install banner ===
 ;(function () {
   const DISMISSED_KEY = 'cxhu_banner_dismissed'
@@ -10821,6 +11033,12 @@ async function loadCosts() {
     body.innerHTML = '<p style="color:#c0392b;">Hálózati hiba.</p>'
     return
   }
+  // Typed + generic warnings live on a separate endpoint (not embedded in /api/costs/summary).
+  let warningsResp = []
+  try {
+    const wres = await fetch('/api/costs/warnings')
+    if (wres.ok) { const wj = await wres.json(); warningsResp = Array.isArray(wj.warnings) ? wj.warnings : [] }
+  } catch (e) { /* non-fatal -- Teendők just shows empty */ }
 
   const cur = s.currency || 'HUF'
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
@@ -10879,6 +11097,56 @@ async function loadCosts() {
     }
   }
 
+  // Typed cost/quota/expiry warnings (v0.7 addendum, audits/costops-dashboard-v2-ux-plan.md sec 16).
+  // Two warning vocabularies coexist on /api/costs/warnings: the pre-existing generic engine
+  // (severity: low|medium) and the sec-16 typed extension (severity: warn|high|critical|blocked).
+  const sevRank = { blocked: 0, critical: 1, high: 2, medium: 3, warn: 4, low: 5 }
+  const sevStyle = (sev) => ({
+    blocked: ['Blokkolva', '#e74c3c', 'rgba(231,76,60,0.16)'],
+    critical: ['Kritikus', '#e74c3c', 'rgba(231,76,60,0.16)'],
+    high: ['Magas', '#e0a800', 'rgba(224,168,0,0.16)'],
+    medium: ['Közepes', '#e0a800', 'rgba(224,168,0,0.12)'],
+    warn: ['Figyelmeztetés', '#e0a800', 'rgba(224,168,0,0.12)'],
+    low: ['Alacsony', '#5b9dff', 'rgba(45,108,223,0.14)'],
+  }[sev] || ['Info', '#9aa0a6', 'rgba(150,150,150,0.16)'])
+  const catLabel = (c) => ({
+    hosting: 'Webservice / hosting', webservice: 'Webservice / hosting', 'webservice/hosting': 'Webservice / hosting',
+    'ai/llm': 'AI / LLM', ai: 'AI / LLM',
+    productivity: 'Productivity / subscriptions', 'productivity/subscriptions': 'Productivity / subscriptions',
+    domains: 'Domains', domain: 'Domains',
+  }[String(c || '').toLowerCase()] || (c || 'Egyéb'))
+  const fmtAnyDate = (v) => {
+    if (v == null) return null
+    if (typeof v === 'number') return fmtDate(v)
+    try { const d = new Date(v); if (!isNaN(d.getTime())) return d.toLocaleDateString('hu-HU', { year: 'numeric', month: 'short', day: 'numeric' }) } catch (e) { /* fallthrough */ }
+    return String(v)
+  }
+  const dueOf = (w) => w.due_date || w.reset_date || w.expiry_date || null
+  const isPendingWarn = (w) => w.confidence === 'pending' || w.confidence === 'no_api_or_no_access'
+  const warnValStr = (w) => w.current_value == null ? null : String(w.current_value) + (w.unit ? (w.unit === '%' ? '%' : ' ' + w.unit) : '')
+  const warnItem = (w) => {
+    const [sevLabel, sevColor, sevBg] = sevStyle(w.severity)
+    const pending = isPendingWarn(w)
+    const due = fmtAnyDate(dueOf(w))
+    const val = warnValStr(w)
+    return '<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-top:1px solid var(--border,#eee);">'
+      + '<span style="flex:none;display:inline-block;margin-top:5px;width:8px;height:8px;border-radius:50%;background:' + (pending ? '#9aa0a6' : sevColor) + ';"></span>'
+      + '<div style="flex:1;min-width:0;">'
+      + '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">'
+      + '<span style="font-weight:600;font-size:0.9em;">' + esc(w.message || w.warning_type || w.code || 'Ismeretlen figyelmeztetés') + '</span>'
+      + (pending
+        ? '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.72em;font-weight:600;color:#9aa0a6;background:rgba(150,150,150,0.16);white-space:nowrap;">nincs adatforrás</span>'
+        : '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.72em;font-weight:600;color:' + sevColor + ';background:' + sevBg + ';white-space:nowrap;">' + sevLabel + '</span>')
+      + '</div>'
+      + '<div style="font-size:0.8em;color:var(--text-muted,#888);margin-top:2px;">'
+      + esc(catLabel(w.category)) + (w.provider ? ' · ' + esc(w.provider) : '')
+      + (val ? ' · ' + esc(val) + (w.threshold != null ? ' (küszöb ' + esc(String(w.threshold)) + (w.unit === '%' ? '%' : '') + ')' : '') : '')
+      + (due ? ' · határidő: ' + due : '')
+      + '</div>'
+      + (w.action ? '<div style="font-size:0.82em;margin-top:4px;">' + esc(w.action) + '</div>' : '')
+      + '</div></div>'
+  }
+
   const card = (title, inner, extraHead) => '<div style="border:1px solid var(--border,#e2e2e2);border-radius:12px;padding:16px;margin-bottom:16px;">'
     + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;">'
     + '<h3 style="margin:0;font-size:1em;">' + title + '</h3>' + (extraHead || '') + '</div>' + inner + '</div>'
@@ -10915,6 +11183,25 @@ async function loadCosts() {
     + '<div style="font-size:1.25em;font-weight:600;margin-top:6px;">' + relAge(freshTs) + ' ' + sBadge(ageState(freshTs)) + '</div>'
     + '<div style="font-size:0.75em;color:var(--text-muted,#888);margin-top:4px;">' + fmtDate(freshTs) + '</div></div>')
 
+  // ---- 1b. Teendők (typed warnings, top zone + drill-down) ----
+  const warningsArr = warningsResp.slice()
+  warningsArr.sort((a, b2) => (sevRank[a.severity] ?? 9) - (sevRank[b2.severity] ?? 9))
+  const topWarnings = warningsArr.slice(0, 5)
+  const restWarnings = warningsArr.slice(5)
+  const warningsBlock = card('Teendők' + (warningsArr.length ? ' (' + warningsArr.length + ')' : ''),
+    warningsArr.length === 0
+      ? '<div style="color:var(--text-muted,#888);font-size:0.9em;">Nincs teendő.</div>'
+      : topWarnings.map(warnItem).join('')
+      + (restWarnings.length
+        ? '<details style="margin-top:8px;"><summary style="cursor:pointer;font-size:0.85em;color:var(--text-muted,#888);">+' + restWarnings.length + ' további teendő</summary>' + restWarnings.map(warnItem).join('') + '</details>'
+        : ''))
+  const warnByProvider = {}
+  warningsArr.forEach(w => {
+    const p = String(w.provider || '').toLowerCase()
+    if (!p) return
+    if (!warnByProvider[p] || (sevRank[w.severity] ?? 9) < (sevRank[warnByProvider[p].severity] ?? 9)) warnByProvider[p] = w
+  })
+
   // ---- 2. Provider breakdown = main table ----
   const brk = (opv.provider_breakdown || []).slice().sort((a, b2) => (Number(b2.spend) || 0) - (Number(a.spend) || 0))
   const shown = brk.filter(p => (Number(p.spend) || 0) > 0)
@@ -10923,8 +11210,10 @@ async function loadCosts() {
     const so = sourceOf(p.confidence)
     const isRender = p.provider === 'render'
     const upd = isRender && rp ? rp.last_sync : opv.data_freshness
+    const pw = warnByProvider[String(p.provider || '').toLowerCase()]
+    const warnFlag = pw ? ' <span title="' + esc(pw.message || '') + '" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:' + sevStyle(pw.severity)[1] + ';margin-left:4px;vertical-align:middle;"></span>' : ''
     return '<tr style="border-top:1px solid var(--border,#eee);">'
-      + '<td style="padding:8px 10px 8px 0;font-weight:600;text-transform:capitalize;">' + esc(p.provider) + '</td>'
+      + '<td style="padding:8px 10px 8px 0;font-weight:600;text-transform:capitalize;">' + esc(p.provider) + warnFlag + '</td>'
       + '<td style="padding:8px 10px 8px 0;color:var(--text-muted,#888);">' + esc(so.src) + '</td>'
       + '<td style="padding:8px 10px 8px 0;">' + qBadge(so.q) + '</td>'
       + '<td style="padding:8px 10px 8px 0;text-align:right;white-space:nowrap;font-weight:600;">' + fmt(p.spend) + '</td>'
@@ -11044,6 +11333,7 @@ async function loadCosts() {
   body.innerHTML = ''
     + '<div style="font-size:0.85em;color:var(--text-muted,#888);margin-bottom:14px;">Ahol van API-adat, azt használjuk. Becslés csak fallback, ha nincs API-adat.</div>'
     + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:18px;">' + cards.join('') + '</div>'
+    + warningsBlock
     + providerTable
     + renderCard
     + tokenCard

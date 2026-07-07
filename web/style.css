@@ -14,6 +14,11 @@
   --accent: #d97757;
   --accent-hover: #c46849;
   --accent-soft: rgba(217, 119, 87, 0.1);
+  /* QQ / product-brand overrides: set via JS from brandAccent on /api/marveen.
+     Default to the stock terracotta so unconfigured installs keep the look. */
+  --qq-accent: var(--accent);
+  --qq-accent-dark: var(--accent-hover);
+  --qq-accent-light: var(--accent-soft);
   --danger: #bf4d43;
   --danger-soft: rgba(191, 77, 67, 0.12);
   --danger-hover: #a8413a;

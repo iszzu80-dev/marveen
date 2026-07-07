@@ -1,7 +1,7 @@
 import { existsSync, unlinkSync, copyFileSync, writeFileSync } from 'node:fs'
 import { join, extname } from 'node:path'
 import {
-  PROJECT_ROOT, OWNER_NAME, BOT_NAME, BRAND_NAME, MAIN_AGENT_ID, CHANNEL_PROVIDER,
+  PROJECT_ROOT, OWNER_NAME, BOT_NAME, BRAND_NAME, BRAND_LOGO_URL, BRAND_ACCENT, MAIN_AGENT_ID, CHANNEL_PROVIDER,
   KANBAN_LABEL_COLORS,
 } from '../../config.js'
 import { getEffectiveSettingValue } from '../../settings-store.js'
@@ -68,12 +68,20 @@ export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promi
     // legacy backend), `agentId` = canonical MAIN_AGENT_ID so the dashboard can
     // hit /api/agents/<id>/skills for the main agent.
     const idCore = buildMarveenIdentityCore(BOT_NAME, BRAND_NAME, MAIN_AGENT_ID)
+    // Brand accent resolved through settings overrides so the Settings page
+    // can hot-reload it; logo URL reads the boot-time env (overridable too).
+    const brandAccent = String(getEffectiveSettingValue('BRAND_ACCENT') ?? BRAND_ACCENT)
+    const brandLogoUrl = String(getEffectiveSettingValue('BRAND_LOGO_URL') ?? BRAND_LOGO_URL)
     json(res, {
       ...idCore,
       // Configured owner display name (OWNER_NAME). The dashboard chat view uses
       // this to pin/label the owner's own message thread instead of a hardcoded
       // literal, so a renamed install recognizes its real owner.
       ownerName: OWNER_NAME,
+      // Brand chrome: logo URL (empty = monogram fallback) and accent colour
+      // applied as --qq-accent / --qq-accent-dark / --qq-accent-light on :root.
+      brandLogoUrl,
+      brandAccent,
       description,
       model: getActiveMarveenModel(),
       tmuxSession: MAIN_CHANNELS_SESSION,

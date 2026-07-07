@@ -63,6 +63,16 @@ export const BOT_NAME = env['BOT_NAME'] ?? 'Marveen'
 // BOT_NAME, behaves exactly as before.
 export const BRAND_NAME = env['BRAND_NAME'] ?? BOT_NAME
 
+// Custom logo URL for the dashboard sidebar brand mark. When set, the sidebar
+// renders an <img> instead of the initial monogram. Empty by default (monogram
+// fallback derived from the first character of BRAND_NAME).
+export const BRAND_LOGO_URL = env['BRAND_LOGO_URL'] ?? ''
+
+// Accent colour hex for product-branded dashboard chrome. Applied as CSS custom
+// properties (--qq-accent, --qq-accent-dark, --qq-accent-light) on :root at
+// boot; defaults to the warm terracotta that ships with the dashboard.
+export const BRAND_ACCENT = env['BRAND_ACCENT'] ?? '#d97757'
+
 // Pure resolution rule for BRAND_NAME, so the default (brandEnv unset =>
 // botName) is provable without a live .env. brandEnv is the raw env value
 // (undefined / empty when unset). Mirrors the `env['BRAND_NAME'] ?? BOT_NAME`
