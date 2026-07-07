@@ -50,7 +50,10 @@ export function loadDomainsConfig(): { config: DomainsConfig; exists: boolean } 
   }
 }
 
-const SSL_THRESHOLDS = { warn: 30, urgent: 14, critical: 7 }
+// Shared 30/14/7-day severity ladder -- exported for reuse by any other date-deadline warning
+// (workspace-alerts.ts's suspension-date lifecycle uses the same "rises as it approaches" rule).
+export const EXPIRY_THRESHOLDS = { warn: 30, urgent: 14, critical: 7 }
+const SSL_THRESHOLDS = EXPIRY_THRESHOLDS
 
 interface TlsCheckDeps {
   connect?: (host: string, port: number) => Promise<{ validTo: string } | null>
@@ -68,10 +71,10 @@ function defaultTlsConnect(host: string, port: number): Promise<{ validTo: strin
   })
 }
 
-function severityForDays(days: number): CostWarning['severity'] | null {
-  if (days <= SSL_THRESHOLDS.critical) return 'high'
-  if (days <= SSL_THRESHOLDS.urgent) return 'medium'
-  if (days <= SSL_THRESHOLDS.warn) return 'low'
+export function severityForDays(days: number): CostWarning['severity'] | null {
+  if (days <= EXPIRY_THRESHOLDS.critical) return 'high'
+  if (days <= EXPIRY_THRESHOLDS.urgent) return 'medium'
+  if (days <= EXPIRY_THRESHOLDS.warn) return 'low'
   return null
 }
 

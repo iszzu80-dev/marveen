@@ -203,9 +203,15 @@ export function getWarnings(
 
   // 10. DeepSeek prepaid balance -- the collector's balance endpoint DOES exist
   // (live, read-only). % remaining is derived vs the highest balance snapshot
-  // seen (a proxy for the last top-up) -- never a fabricated absolute limit.
-  // Silent when healthy or when there's no snapshot history yet to compare.
-  const dsRows = db.prepare(`SELECT balance, captured_at FROM provider_balance_snapshots WHERE provider = 'deepseek' ORDER BY captured_at DESC`).all() as Array<{ balance: number; captured_at: number }>
+  // seen (a proxy for the last top-up). Gap-fill (card 65da75e6): unlike a
+  // healthy SSL cert (silent is fine, nobody needs a "cert is fine" entry),
+  // the balance NUMBER itself is always relevant for a quota gauge -- so this
+  // ALWAYS emits one entry when a snapshot exists (never silent), escalating
+  // severity only when the %-vs-peak is genuinely low. Never a fabricated
+  // absolute limit -- when there's no observed drop yet (peak === latest, e.g.
+  // right after a top-up or only one snapshot ever), the % isn't meaningful,
+  // so the raw balance is shown instead with confidence:'manual'.
+  const dsRows = db.prepare(`SELECT balance, currency, captured_at FROM provider_balance_snapshots WHERE provider = 'deepseek' ORDER BY captured_at DESC`).all() as Array<{ balance: number; currency: string; captured_at: number }>
   if (dsRows.length === 0) {
     warnings.push({
       code: 'deepseek_balance_unknown', severity: 'low', provider: 'deepseek',
@@ -214,20 +220,34 @@ export function getWarnings(
     })
   } else {
     const latest = dsRows[0].balance
+    const currency = dsRows[0].currency
     const peak = Math.max(...dsRows.map(r => r.balance))
-    if (peak > 0) {
-      const pct = Math.round((latest / peak) * 10000) / 100
-      const severity = pct <= 5 ? 'high' : pct <= 15 ? 'medium' : pct <= 30 ? 'low' : null
-      if (severity) {
-        warnings.push({
-          code: 'deepseek_balance_low', severity, provider: 'deepseek',
-          message: `DeepSeek előre fizetett egyenleg alacsony: ${pct}% a legutóbbi feltöltéshez képest.`,
-          detail: { latest_balance: latest, peak_balance: peak },
-          warning_type: 'quota', category: 'ai', source: 'ledger', confidence: 'estimated',
-          current_value: pct, threshold: 30, unit: '%',
-          action: 'Töltsd fel a DeepSeek egyenleget.',
-        })
-      }
+    const hadObservedDrop = peak > latest // a real drop was seen -- % vs peak is meaningful
+    const pct = hadObservedDrop ? Math.round((latest / peak) * 10000) / 100 : null
+    const tierSeverity = pct !== null ? (pct <= 5 ? 'high' : pct <= 15 ? 'medium' : pct <= 30 ? 'low' : null) : null
+    if (tierSeverity) {
+      // A real, meaningful drop AND below a real threshold -- an actual "top up soon" warning.
+      warnings.push({
+        code: 'deepseek_balance_low', severity: tierSeverity, provider: 'deepseek',
+        message: `DeepSeek előre fizetett egyenleg alacsony: ${pct}% a legutóbbi feltöltéshez képest (${latest} ${currency}).`,
+        detail: { latest_balance: latest, peak_balance: peak, currency },
+        warning_type: 'quota', category: 'ai', source: 'ledger', confidence: 'estimated',
+        current_value: pct as number, threshold: 30, unit: '%',
+        action: 'Töltsd fel a DeepSeek egyenleget.',
+      })
+    } else {
+      // Either healthy relative to a real peak, or no drop ever observed (peak===latest,
+      // e.g. right after a top-up or only one snapshot ever) so % isn't meaningful -- still
+      // always show the raw balance so a quota gauge has a real number (spec A1), as
+      // low-severity/informational, not a "problem". confidence stays 'manual' (not
+      // 'estimated') specifically when there's no real peak-vs-latest signal to derive from.
+      warnings.push({
+        code: 'deepseek_balance_info', severity: 'low', provider: 'deepseek',
+        message: `DeepSeek előre fizetett egyenleg: ${latest} ${currency}${pct !== null ? ` (${pct}% a legutóbbi feltöltéshez képest)` : ''}.`,
+        detail: { latest_balance: latest, peak_balance: peak, currency },
+        warning_type: 'quota', category: 'ai', source: 'ledger', confidence: hadObservedDrop ? 'estimated' : 'manual',
+        current_value: latest, unit: currency,
+      })
     }
   }
 

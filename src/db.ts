@@ -745,6 +745,10 @@ export function initDatabase(dbPathOverride?: string): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_workspace_alerts_account ON workspace_alerts(account, detected_at)`)
+  // v0.7/v2 gap-fill (card 65da75e6): the actual suspension DEADLINE date, when the ingest
+  // sweep can read it from the email (e.g. "suspended on Aug 4") -- lets the warning show a
+  // real due_date + severity that rises as the date approaches, not just a flat flag.
+  try { db.exec(`ALTER TABLE workspace_alerts ADD COLUMN suspension_date INTEGER`) } catch { /* already exists */ }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_vault_ssh_servers_name ON vault_ssh_servers(name)`)
   // Migrations for installs that ran earlier schema versions. MUST run before
   // the ssh_key_id index below: on an install where vault_ssh_servers already

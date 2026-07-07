@@ -9,6 +9,7 @@
 import { createHash } from 'node:crypto'
 import type Database from 'better-sqlite3'
 import type { CostWarning } from './warnings.js'
+import { severityForDays, EXPIRY_THRESHOLDS } from './expiry-checks.js'
 
 export type WorkspaceIssueType = 'payment_failure' | 'suspension_notice' | 'suspended'
 
@@ -17,12 +18,16 @@ export interface WorkspaceAlertEntry {
   issue_type: WorkspaceIssueType
   detected_at: number         // epoch sec -- when the signal (email) was dated
   message_ref: string         // opaque per-email ref; hashed here, never stored raw
+  // Gap-fill (card 65da75e6): the actual suspension DEADLINE, when the sweep can read it from
+  // the email body (e.g. "suspended on Aug 4"). Optional -- never fabricated when absent.
+  suspension_date?: number    // epoch sec
 }
 
 export interface WorkspaceAlertRow {
   account: string
   issue_type: WorkspaceIssueType
   detected_at: number
+  suspension_date: number | null
 }
 
 // A signal older than this is assumed resolved (paid/reinstated) -- never
@@ -48,10 +53,10 @@ export function ingestWorkspaceAlerts(
   idSalt = 'costops-workspace-alert',
 ): IngestWorkspaceAlertResult {
   const upsert = db.prepare(`
-    INSERT INTO workspace_alerts (account, issue_type, detected_at, message_ref, dedup_key, created_at)
-    VALUES (@account, @issue_type, @detected_at, @ref_hash, @dedup_key, @now)
+    INSERT INTO workspace_alerts (account, issue_type, detected_at, suspension_date, message_ref, dedup_key, created_at)
+    VALUES (@account, @issue_type, @detected_at, @suspension_date, @ref_hash, @dedup_key, @now)
     ON CONFLICT(dedup_key) DO UPDATE SET
-      detected_at=excluded.detected_at, issue_type=excluded.issue_type
+      detected_at=excluded.detected_at, issue_type=excluded.issue_type, suspension_date=excluded.suspension_date
   `)
   const out: IngestWorkspaceAlertResult = { ingested: 0, errors: [] }
   const tx = db.transaction((list: WorkspaceAlertEntry[]) => {
@@ -59,8 +64,15 @@ export function ingestWorkspaceAlerts(
       if (!e || typeof e.account !== 'string' || !e.account) { out.errors.push({ account: String(e?.account), reason: 'missing account' }); continue }
       if (!VALID_ISSUE_TYPES.has(e.issue_type)) { out.errors.push({ account: e.account, reason: `invalid issue_type '${e.issue_type}'` }); continue }
       if (typeof e.detected_at !== 'number' || !isFinite(e.detected_at)) { out.errors.push({ account: e.account, reason: 'missing/invalid detected_at' }); continue }
+      if (e.suspension_date !== undefined && (typeof e.suspension_date !== 'number' || !isFinite(e.suspension_date))) {
+        out.errors.push({ account: e.account, reason: 'invalid suspension_date' }); continue
+      }
       const refHash = createHash('sha256').update(idSalt).update('|').update(String(e.message_ref)).digest('hex').slice(0, 32)
-      upsert.run({ account: e.account, issue_type: e.issue_type, detected_at: e.detected_at, ref_hash: refHash, dedup_key: `wsalert|${refHash}`, now })
+      upsert.run({
+        account: e.account, issue_type: e.issue_type, detected_at: e.detected_at,
+        suspension_date: e.suspension_date ?? null,
+        ref_hash: refHash, dedup_key: `wsalert|${refHash}`, now,
+      })
       out.ingested++
     }
   })
@@ -71,7 +83,7 @@ export function ingestWorkspaceAlerts(
 /** Alerts detected within the active window -- treated as a currently-relevant signal. */
 export function getActiveWorkspaceAlerts(db: Database.Database, now: number): WorkspaceAlertRow[] {
   return db.prepare(`
-    SELECT account, issue_type, detected_at FROM workspace_alerts
+    SELECT account, issue_type, detected_at, suspension_date FROM workspace_alerts
     WHERE detected_at >= @cutoff ORDER BY detected_at DESC
   `).all({ cutoff: now - ACTIVE_WINDOW_SECS }) as WorkspaceAlertRow[]
 }
@@ -94,6 +106,40 @@ export function buildWorkspaceAlertWarnings(db: Database.Database, now: number):
     const key = `${r.account}|${r.issue_type}`
     if (seen.has(key)) continue // rows are DESC by detected_at -- first hit is the most recent
     seen.add(key)
+
+    // Gap-fill (card 65da75e6): when a real suspension DEADLINE is known, the date-based
+    // lifecycle warning supersedes the flat flag -- strictly more informative (due_date +
+    // severity rising as the date approaches), avoids showing two redundant entries for the
+    // same underlying issue. Never fabricated: only fires when suspension_date was actually
+    // extracted from the source email, not guessed from a generic grace-period assumption.
+    if (r.suspension_date !== null) {
+      const daysRemaining = Math.floor((r.suspension_date - now) / 86400)
+      if (daysRemaining < 0) {
+        // Deadline already passed with no re-detection since -- treat as an active suspension,
+        // not silently drop it (a stale-but-unresolved deadline is worse, not better).
+        warnings.push({
+          code: 'workspace_suspension_overdue', severity: 'high', provider: 'google-workspace',
+          message: `${r.account}: a felfüggesztési határidő (${new Date(r.suspension_date * 1000).toISOString().slice(0, 10)}) már elmúlt, a fiók állapota nem megerősített.`,
+          detail: { account: r.account, suspension_date: r.suspension_date },
+          warning_type: 'expiry', category: 'productivity', source: 'workspace_alert', confidence: 'measured',
+          due_date: new Date(r.suspension_date * 1000).toISOString().slice(0, 10),
+          action: 'Ellenőrizd azonnal a Workspace admin konzolt.',
+        })
+        continue
+      }
+      const severity = severityForDays(daysRemaining) ?? 'low' // always visible once a real deadline exists, even if >30d out
+      warnings.push({
+        code: 'workspace_suspension_scheduled', severity, provider: 'google-workspace',
+        message: `${r.account}: felfüggesztés ${daysRemaining} nap múlva (${new Date(r.suspension_date * 1000).toISOString().slice(0, 10)}), ha a fizetés nem rendeződik.`,
+        detail: { account: r.account, suspension_date: r.suspension_date, days_remaining: daysRemaining },
+        warning_type: 'expiry', category: 'productivity', source: 'workspace_alert', confidence: 'measured',
+        due_date: new Date(r.suspension_date * 1000).toISOString().slice(0, 10),
+        current_value: daysRemaining, threshold: EXPIRY_THRESHOLDS.warn, unit: 'day',
+        action: 'Rendezd a fizetési módot a Workspace fiókon.',
+      })
+      continue
+    }
+
     warnings.push({
       code: `workspace_${r.issue_type}`, severity: ISSUE_SEVERITY[r.issue_type], provider: 'google-workspace',
       message: `${r.account}: ${ISSUE_MESSAGE[r.issue_type]}.`,
