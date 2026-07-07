@@ -101,4 +101,51 @@ describe('costops warnings', () => {
     const w2 = getWarnings(db, c, NOW, summary, [])
     expect(w1).toEqual(w2)
   })
+
+  it('Render spend-limit and Claude Max weekly limit always surface as no_api_or_no_access (never fabricated)', () => {
+    const db = getDb()
+    const c = cfg({ budgets: [] })
+    syncFixedCostsToLedger(db, c, NOW)
+    const summary = getCostSummary(db, c, NOW)
+    const warnings = getWarnings(db, c, NOW, summary, [])
+    const render = warnings.find(w => w.code === 'render_spend_limit_unknown')
+    const claude = warnings.find(w => w.code === 'claude_max_weekly_limit_unknown')
+    expect(render?.confidence).toBe('no_api_or_no_access')
+    expect(render?.severity).toBe('low')
+    expect(claude?.confidence).toBe('no_api_or_no_access')
+  })
+
+  it('DeepSeek balance: no snapshots yet -> no_api_or_no_access, not a fabricated 0%', () => {
+    const db = getDb()
+    const c = cfg({ budgets: [] })
+    syncFixedCostsToLedger(db, c, NOW)
+    const summary = getCostSummary(db, c, NOW)
+    const w = getWarnings(db, c, NOW, summary, []).find(x => x.code === 'deepseek_balance_unknown')
+    expect(w).toBeDefined()
+    expect(w!.confidence).toBe('no_api_or_no_access')
+  })
+
+  it('DeepSeek balance: healthy (near peak) is silent, low balance vs peak fires with the right severity', () => {
+    const db = getDb()
+    const c = cfg({ budgets: [] })
+    syncFixedCostsToLedger(db, c, NOW)
+    db.prepare(`INSERT INTO provider_balance_snapshots (provider, currency, balance, captured_at) VALUES ('deepseek','USD',100,@t1)`).run({ t1: NOW - 3 * 86400 })
+    db.prepare(`INSERT INTO provider_balance_snapshots (provider, currency, balance, captured_at) VALUES ('deepseek','USD',4,@t2)`).run({ t2: NOW })
+    const summary = getCostSummary(db, c, NOW)
+    const w = getWarnings(db, c, NOW, summary, []).find(x => x.code === 'deepseek_balance_low')
+    expect(w).toBeDefined()
+    expect(w!.severity).toBe('high') // 4/100 = 4% <= 5%
+    expect(w!.current_value).toBe(4)
+  })
+
+  it('DeepSeek balance: near-peak balance produces no warning (no noise)', () => {
+    const db = getDb()
+    const c = cfg({ budgets: [] })
+    syncFixedCostsToLedger(db, c, NOW)
+    db.prepare(`INSERT INTO provider_balance_snapshots (provider, currency, balance, captured_at) VALUES ('deepseek','USD',100,@t1)`).run({ t1: NOW - 3 * 86400 })
+    db.prepare(`INSERT INTO provider_balance_snapshots (provider, currency, balance, captured_at) VALUES ('deepseek','USD',90,@t2)`).run({ t2: NOW })
+    const summary = getCostSummary(db, c, NOW)
+    const w = getWarnings(db, c, NOW, summary, []).find(x => x.code === 'deepseek_balance_low')
+    expect(w).toBeUndefined()
+  })
 })

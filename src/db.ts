@@ -640,6 +640,15 @@ export function initDatabase(dbPathOverride?: string): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cost_line_items_period ON cost_line_items(charge_period_start, charge_period_end)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cost_line_items_source ON cost_line_items(source_id)`)
+  // v0.7 currency-retention (additive, Phase-3 per Marveen's spec): when a line's
+  // billed_cost is HUF-converted from a foreign-currency invoice, keep the original
+  // amount/currency/fx_rate/fx_date alongside it so the UI can show "11.15 USD ->
+  // 4014 HUF" instead of just the converted number. NULL for lines that were never
+  // converted (already-HUF entries) -- never fabricated, no existing calc touched.
+  try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN original_amount REAL`) } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN original_currency TEXT`) } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN fx_rate REAL`) } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN fx_date INTEGER`) } catch { /* already exists */ }
   db.exec(`
     CREATE TABLE IF NOT EXISTS budgets (
       id TEXT PRIMARY KEY,
@@ -720,6 +729,22 @@ export function initDatabase(dbPathOverride?: string): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_balance_snapshots_provider ON provider_balance_snapshots(provider, captured_at)`)
+  // v0.7/v2 (card bea78483): Google Workspace payment-failure/suspension signal.
+  // Gmail is NOT reachable from this backend process -- an agent-side read-only
+  // sweep POSTs a structured, sanitized entry per detected signal (no raw email
+  // body/subject/sender, same convention as email-ingest.ts's cost lines).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS workspace_alerts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      account TEXT NOT NULL,
+      issue_type TEXT NOT NULL,
+      detected_at INTEGER NOT NULL,
+      message_ref TEXT,
+      dedup_key TEXT UNIQUE,
+      created_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_workspace_alerts_account ON workspace_alerts(account, detected_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_vault_ssh_servers_name ON vault_ssh_servers(name)`)
   // Migrations for installs that ran earlier schema versions. MUST run before
   // the ssh_key_id index below: on an install where vault_ssh_servers already
