@@ -13,6 +13,9 @@ import { getPeriodTrend } from '../../costops/period.js'
 import { loadSubscriptionsConfig, deriveLifecycle } from '../../costops/subscriptions.js'
 import { getWarnings } from '../../costops/warnings.js'
 import { exportCostRows, rowsToCsv } from '../../costops/export.js'
+import { ingestWorkspaceAlerts, buildWorkspaceAlertWarnings } from '../../costops/workspace-alerts.js'
+import { checkRenderBuildMinutes } from '../../costops/render-live-checks.js'
+import { loadDomainsConfig, checkSslExpiry, checkDomainExpiry } from '../../costops/expiry-checks.js'
 import type { RouteContext } from './types.js'
 
 export async function tryHandleCosts(ctx: RouteContext): Promise<boolean> {
@@ -146,8 +149,11 @@ export async function tryHandleCosts(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
-  // v0.7: deterministic warnings -- derived from the same summary + lifecycle
-  // data as summary/subscriptions above, no new writes.
+  // v0.7/v2: deterministic + LIVE-wired warnings. Deterministic rules (budget/
+  // sync/lifecycle/pending_permission) are DB-only and instant; the 2 live
+  // checks (Render build-minutes, workspace alerts) add a real network round
+  // trip (Render) / a stored agent-fed signal (workspace) -- never fabricated,
+  // "no_api_or_no_access" surfaces where there genuinely is no data source.
   if (path === '/api/costs/warnings' && method === 'GET') {
     try {
       const monthKey = url.searchParams.get('month') || undefined
@@ -159,10 +165,33 @@ export async function tryHandleCosts(ctx: RouteContext): Promise<boolean> {
       const summary = getCostSummary(db, config, now, { monthKey, configExists: exists, configErrors: errors, pricing, pricingExists })
       const { config: subsConfig } = loadSubscriptionsConfig()
       const subscriptions = deriveLifecycle(subsConfig, now)
-      json(res, { warnings: getWarnings(db, config, now, summary, subscriptions) })
+      const deterministic = getWarnings(db, config, now, summary, subscriptions)
+      const workspaceAlerts = buildWorkspaceAlertWarnings(db, now)
+      const renderBuildMinutes = await checkRenderBuildMinutes(now)
+      const { config: domainsConfig } = loadDomainsConfig()
+      const sslWarnings = await checkSslExpiry(domainsConfig.ssl_hosts, now)
+      const domainWarnings = await checkDomainExpiry(domainsConfig.domains, now)
+      json(res, { warnings: [...deterministic, ...workspaceAlerts, ...renderBuildMinutes, ...sslWarnings, ...domainWarnings] })
     } catch (err) {
       logger.error({ err }, 'CostOps warnings failed')
       json(res, { error: 'Cost warnings failed' }, 500)
+    }
+    return true
+  }
+
+  // v0.7/v2: agent-side Gmail sweep POSTs a sanitized workspace-alert signal
+  // here (payment failure / suspension notice). No raw email content stored.
+  if (path === '/api/costs/workspace-alerts' && method === 'POST') {
+    try {
+      const raw = await readBody(ctx.req)
+      const body = JSON.parse(raw.toString() || '{}') as { entries?: unknown }
+      const entries = Array.isArray(body?.entries) ? body.entries : []
+      const now = Math.floor(Date.now() / 1000)
+      const result = ingestWorkspaceAlerts(getDb(), entries as import('../../costops/workspace-alerts.js').WorkspaceAlertEntry[], now)
+      json(res, { ok: result.errors.length === 0, ...result })
+    } catch (err) {
+      logger.error({ err }, 'CostOps workspace-alerts ingest failed')
+      json(res, { ok: false, error: 'workspace-alerts ingest failed' }, 500)
     }
     return true
   }

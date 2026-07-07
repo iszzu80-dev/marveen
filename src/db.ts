@@ -729,6 +729,22 @@ export function initDatabase(dbPathOverride?: string): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_balance_snapshots_provider ON provider_balance_snapshots(provider, captured_at)`)
+  // v0.7/v2 (card bea78483): Google Workspace payment-failure/suspension signal.
+  // Gmail is NOT reachable from this backend process -- an agent-side read-only
+  // sweep POSTs a structured, sanitized entry per detected signal (no raw email
+  // body/subject/sender, same convention as email-ingest.ts's cost lines).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS workspace_alerts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      account TEXT NOT NULL,
+      issue_type TEXT NOT NULL,
+      detected_at INTEGER NOT NULL,
+      message_ref TEXT,
+      dedup_key TEXT UNIQUE,
+      created_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_workspace_alerts_account ON workspace_alerts(account, detected_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_vault_ssh_servers_name ON vault_ssh_servers(name)`)
   // Migrations for installs that ran earlier schema versions. MUST run before
   // the ssh_key_id index below: on an install where vault_ssh_servers already
