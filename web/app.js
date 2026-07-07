@@ -11039,6 +11039,19 @@ async function loadCosts() {
     const wres = await fetch('/api/costs/warnings')
     if (wres.ok) { const wj = await wres.json(); warningsResp = Array.isArray(wj.warnings) ? wj.warnings : [] }
   } catch (e) { /* non-fatal -- Teendők just shows empty */ }
+  // Non-PAYG AI subscription lifecycle (Claude Pro/Max, ChatGPT Plus) -- separate endpoint,
+  // this is the "AI subscription / token-limit" view Istvan doesn't currently see.
+  let subsResp = []
+  try {
+    const sres = await fetch('/api/costs/subscriptions')
+    if (sres.ok) { const sj = await sres.json(); subsResp = Array.isArray(sj.subscriptions) ? sj.subscriptions : [] }
+  } catch (e) { /* non-fatal -- AI subscription card just shows empty */ }
+  // Per-line original currency/FX retention (only /api/costs/export carries it, not /summary).
+  let exportRows = []
+  try {
+    const eres = await fetch('/api/costs/export?format=json')
+    if (eres.ok) { const ej = await eres.json(); exportRows = Array.isArray(ej.rows) ? ej.rows : [] }
+  } catch (e) { /* non-fatal -- currency detail just shows empty */ }
 
   const cur = s.currency || 'HUF'
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
@@ -11123,11 +11136,37 @@ async function loadCosts() {
   const dueOf = (w) => w.due_date || w.reset_date || w.expiry_date || null
   const isPendingWarn = (w) => w.confidence === 'no_api_or_no_access'
   const warnValStr = (w) => w.current_value == null ? null : String(w.current_value) + (w.unit ? (w.unit === '%' ? '%' : ' ' + w.unit) : '')
+  const daysRemaining = (dateStr) => {
+    if (!dateStr) return null
+    try { const d = new Date(dateStr); if (isNaN(d.getTime())) return null; return Math.ceil((d.getTime() - Date.now()) / 86400000) } catch (e) { return null }
+  }
+  const daysStr = (n) => n == null ? '' : (n < 0 ? ' (' + Math.abs(n) + ' napja lejárt)' : n === 0 ? ' (ma)' : ' (' + n + ' nap múlva)')
+  // Source/confidence badges -- makes API-verified (render_api/workspace_alert) vs computed
+  // (ledger) vs static/no-data (config) visually distinct, per Istvan's addendum.
+  const srcBadge = (src) => {
+    const m = {
+      render_api: ['Render API', '#2ecc71', 'rgba(46,204,113,0.15)'],
+      workspace_alert: ['Gmail (Workspace)', '#2ecc71', 'rgba(46,204,113,0.15)'],
+      ledger: ['Ledger', '#5b9dff', 'rgba(45,108,223,0.14)'],
+      config: ['Config', '#9aa0a6', 'rgba(150,150,150,0.16)'],
+    }[src] || [(src || '—'), '#9aa0a6', 'rgba(150,150,150,0.16)']
+    return '<span style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:0.68em;font-weight:600;color:' + m[1] + ';background:' + m[2] + ';white-space:nowrap;">' + esc(m[0]) + '</span>'
+  }
+  const confBadge = (c) => {
+    const m = {
+      measured: ['Mért', '#2ecc71', 'rgba(46,204,113,0.15)'],
+      estimated: ['Becsült', '#e0a800', 'rgba(224,168,0,0.14)'],
+      manual: ['Kézi', '#9aa0a6', 'rgba(150,150,150,0.16)'],
+    }[c]
+    if (!m) return ''
+    return '<span style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:0.68em;font-weight:600;color:' + m[1] + ';background:' + m[2] + ';white-space:nowrap;">' + esc(m[0]) + '</span>'
+  }
   const warnItem = (w) => {
     let [sevLabel, sevColor, sevBg] = sevStyle(w.severity)
     if (isHardBlock(w)) { sevLabel = 'Blokkolva'; sevColor = '#e74c3c'; sevBg = 'rgba(231,76,60,0.16)' }
     const pending = isPendingWarn(w)
     const due = fmtAnyDate(dueOf(w))
+    const dueDays = daysRemaining(dueOf(w))
     const val = warnValStr(w)
     return '<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-top:1px solid var(--border,#eee);">'
       + '<span style="flex:none;display:inline-block;margin-top:5px;width:8px;height:8px;border-radius:50%;background:' + (pending ? '#9aa0a6' : sevColor) + ';"></span>'
@@ -11137,11 +11176,12 @@ async function loadCosts() {
       + (pending
         ? '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.72em;font-weight:600;color:#9aa0a6;background:rgba(150,150,150,0.16);white-space:nowrap;">nincs adatforrás</span>'
         : '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.72em;font-weight:600;color:' + sevColor + ';background:' + sevBg + ';white-space:nowrap;">' + sevLabel + '</span>')
+      + (w.source ? srcBadge(w.source) : '') + (!pending && w.confidence ? confBadge(w.confidence) : '')
       + '</div>'
       + '<div style="font-size:0.8em;color:var(--text-muted,#888);margin-top:2px;">'
       + esc(catLabel(w.category)) + (w.provider ? ' · ' + esc(w.provider) : '')
       + (val ? ' · ' + esc(val) + (w.threshold != null ? ' (küszöb ' + esc(String(w.threshold)) + (w.unit === '%' ? '%' : '') + ')' : '') : '')
-      + (due ? ' · határidő: ' + due : '')
+      + (due ? ' · határidő: ' + due + daysStr(dueDays) : '')
       + '</div>'
       + (w.action ? '<div style="font-size:0.82em;margin-top:4px;">' + esc(w.action) + '</div>' : '')
       + '</div></div>'
@@ -11201,6 +11241,47 @@ async function loadCosts() {
     if (!p) return
     if (!warnByProvider[p] || (sevRank[w.severity] ?? 9) < (sevRank[warnByProvider[p].severity] ?? 9)) warnByProvider[p] = w
   })
+
+  // ---- 1c. AI subscription / kvóta nézet (non-PAYG: Claude Pro/Max, ChatGPT Plus, DeepSeek balance) ----
+  const subStatusLabel = (st) => ({ active: 'Aktív', canceled: 'Lemondva' }[st] || st || '—')
+  const amtSrcLabel = (a) => ({ invoice: 'Számla alapján', manual_fallback: 'Kézi becslés', no_invoice_found: 'Nincs számla/nyugta rögzítve' }[a] || a || '—')
+  const quotaGaugeRow = (w) => {
+    if (!w) return ''
+    if (isPendingWarn(w)) return '<div style="font-size:0.78em;color:#9aa0a6;margin-top:6px;">Kvóta: nincs adatforrás — ' + esc(w.message || '') + '</div>'
+    if (w.current_value != null && w.unit === '%') {
+      const pct = Math.max(0, Math.min(100, Number(w.current_value)))
+      const gColor = pct >= 85 ? '#e74c3c' : pct >= 60 ? '#e0a800' : '#2ecc71'
+      return '<div style="margin-top:6px;">'
+        + '<div style="display:flex;justify-content:space-between;font-size:0.78em;color:var(--text-muted,#888);"><span>Kvóta felhasználva</span><span>' + pct + '%</span></div>'
+        + '<div style="background:rgba(150,150,150,0.2);border-radius:6px;height:6px;overflow:hidden;margin-top:3px;"><div style="background:' + gColor + ';height:100%;width:' + pct + '%;"></div></div>'
+        + '</div>'
+    }
+    return '<div style="font-size:0.78em;color:var(--text-muted,#888);margin-top:6px;">' + esc(w.message || '') + '</div>'
+  }
+  const subRow = (sub, quotaW) => {
+    const statusColor = sub.status === 'canceled' ? '#e0a800' : sub.past_due ? '#e74c3c' : '#2ecc71'
+    const dateVal = sub.paid_until || sub.next_renewal
+    const dateLabel = sub.paid_until ? 'Fut, majd megszűnik: ' : (sub.next_renewal ? 'Következő megújítás: ' : '')
+    const dd = daysRemaining(dateVal)
+    return '<div style="padding:10px 0;border-top:1px solid var(--border,#eee);">'
+      + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">'
+      + '<span style="font-weight:600;font-size:0.9em;">' + esc(sub.name) + '</span>'
+      + '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.72em;font-weight:600;color:' + statusColor + ';background:' + statusColor + '22;white-space:nowrap;">' + esc(subStatusLabel(sub.status)) + '</span>'
+      + '</div>'
+      + (dateVal ? '<div style="font-size:0.82em;color:var(--text-muted,#888);margin-top:2px;">' + dateLabel + fmtAnyDate(dateVal) + daysStr(dd) + '</div>' : '')
+      + '<div style="font-size:0.78em;color:var(--text-muted,#888);margin-top:2px;">' + esc(amtSrcLabel(sub.amount_source)) + (sub.notes ? ' · ' + esc(sub.notes) : '') + '</div>'
+      + quotaGaugeRow(quotaW)
+      + '</div>'
+  }
+  const standaloneQuotaRow = (name, w) => '<div style="padding:10px 0;border-top:1px solid var(--border,#eee);">'
+    + '<div style="font-weight:600;font-size:0.9em;">' + esc(name) + '</div>' + quotaGaugeRow(w) + '</div>'
+  const quotaByCode = {}
+  warningsArr.filter(w => w.warning_type === 'quota').forEach(w => { quotaByCode[w.code] = w })
+  const subsRows = subsResp.map(sub => subRow(sub, sub.id === 'anthropic-max' ? quotaByCode['claude_max_weekly_limit_unknown'] : null)).join('')
+  const deepseekRow = quotaByCode['deepseek_balance_unknown'] ? standaloneQuotaRow('DeepSeek (előre fizetett egyenleg)', quotaByCode['deepseek_balance_unknown']) : ''
+  const aiSubBlock = (subsResp.length === 0 && !deepseekRow)
+    ? ''
+    : card('AI előfizetések / kvóták', subsRows + deepseekRow)
 
   // ---- 2. Provider breakdown = main table ----
   const brk = (opv.provider_breakdown || []).slice().sort((a, b2) => (Number(b2.spend) || 0) - (Number(a.spend) || 0))
@@ -11289,6 +11370,25 @@ async function loadCosts() {
     + tableWrap('<table style="width:100%;min-width:320px;border-collapse:collapse;font-size:0.9em;"><tr style="color:var(--text-muted,#888);font-size:0.78em;text-align:left;"><th style="text-align:left;">Forrás</th><th style="text-align:left;">Minőség</th><th style="text-align:right;">Havi</th></tr>' + allSrc + '</table>')
     + '</details>'
 
+  // ---- 5b. Eredeti deviza / FX (only rows where original_currency differs from the settlement currency) ----
+  const fxRows = exportRows.filter(r => r.original_amount != null && r.original_currency)
+  const fxTable = fxRows.map(r => {
+    const fxDateStr = r.fx_date ? fmtAnyDate(r.fx_date) : '—'
+    return '<tr style="border-top:1px solid var(--border,#eee);">'
+      + '<td style="padding:6px 10px 6px 0;text-transform:capitalize;">' + esc(r.provider) + '</td>'
+      + '<td style="padding:6px 10px 6px 0;">' + esc(r.service_name || '') + '</td>'
+      + '<td style="padding:6px 10px 6px 0;text-align:right;white-space:nowrap;">' + (Number(r.original_amount) || 0).toLocaleString('hu-HU') + ' ' + esc(r.original_currency) + '</td>'
+      + '<td style="padding:6px 10px 6px 0;text-align:right;white-space:nowrap;">' + fmt(r.amount) + '</td>'
+      + '<td style="padding:6px 0;color:var(--text-muted,#888);font-size:0.85em;">' + (r.fx_rate ? esc(String(r.fx_rate)) + ' (' + fxDateStr + ')' : '—') + '</td></tr>'
+  }).join('')
+  const fxBlock = '<details style="border:1px solid var(--border,#e2e2e2);border-radius:12px;padding:14px 16px;margin-bottom:16px;">'
+    + '<summary style="cursor:pointer;font-weight:600;">Eredeti deviza / árfolyam' + (fxRows.length ? ' (' + fxRows.length + ')' : '') + '</summary>'
+    + (fxRows.length === 0
+      ? '<div style="font-size:0.85em;color:var(--text-muted,#888);margin-top:8px;">Jelenleg nincs eltérő eredeti devizában rögzített tétel — minden sor már a jelentési devizában (' + esc(cur) + ') van tárolva.</div>'
+      : '<div style="font-size:0.8em;color:var(--text-muted,#888);margin:8px 0;">Ahol a számla eredeti pénzneme eltér a jelentési devizától (' + esc(cur) + '), az eredeti összeg + árfolyam is látszik.</div>'
+        + tableWrap('<table style="width:100%;min-width:460px;border-collapse:collapse;font-size:0.9em;"><tr style="color:var(--text-muted,#888);font-size:0.78em;text-align:left;"><th style="text-align:left;">Provider</th><th style="text-align:left;">Szolgáltatás</th><th style="text-align:right;">Eredeti</th><th style="text-align:right;">' + esc(cur) + '</th><th style="text-align:left;">Árfolyam</th></tr>' + fxTable + '</table>'))
+    + '</details>'
+
   // ---- 6. Diagnostics / debug (collapsed, bottom) ----
   const conf = Object.entries(s.confidence_breakdown || {}).map(([k, v]) => {
     const label = { manual: 'Kézi fix', estimate: 'Kézi becslés', provider_plan_estimate: 'API plan estimate', provider_api: 'Billing API', billing: 'Billing API', local_token_estimate: 'Tokenbecslés' }[k] || k
@@ -11334,10 +11434,12 @@ async function loadCosts() {
     + '<div style="font-size:0.85em;color:var(--text-muted,#888);margin-bottom:14px;">Ahol van API-adat, azt használjuk. Becslés csak fallback, ha nincs API-adat.</div>'
     + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:18px;">' + cards.join('') + '</div>'
     + warningsBlock
+    + aiSubBlock
     + providerTable
     + renderCard
     + tokenCard
     + fallbackBlock
+    + fxBlock
     + diagBlock
 }
 
