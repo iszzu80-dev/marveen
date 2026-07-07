@@ -71,4 +71,62 @@ describe('workspace alerts ingest', () => {
     expect(warnings.find(w => w.code === 'workspace_suspended')!.severity).toBe('high')
     expect(warnings.find(w => w.code === 'workspace_payment_failure')!.severity).toBe('medium')
   })
+
+  // --- Gap-fill (card 65da75e6): suspension-date lifecycle -------------------------------
+
+  it('a real suspension_date supersedes the flat flag with a due_date + days-remaining warning', () => {
+    const db = getDb()
+    ingestWorkspaceAlerts(db, [
+      { account: 'google-zst', issue_type: 'payment_failure', detected_at: NOW, suspension_date: NOW + 10 * 86400, message_ref: 'c' },
+    ], NOW)
+    const warnings = buildWorkspaceAlertWarnings(db, NOW)
+    expect(warnings).toHaveLength(1) // no redundant flat workspace_payment_failure entry too
+    const w = warnings[0]
+    expect(w.code).toBe('workspace_suspension_scheduled')
+    expect(w.warning_type).toBe('expiry')
+    expect(w.due_date).toBe(new Date((NOW + 10 * 86400) * 1000).toISOString().slice(0, 10))
+    expect(w.current_value).toBe(10)
+  })
+
+  it('severity rises as the suspension date approaches (30/14/7-day ladder)', () => {
+    const db = getDb()
+    ingestWorkspaceAlerts(db, [{ account: 'a1', issue_type: 'payment_failure', detected_at: NOW, suspension_date: NOW + 20 * 86400, message_ref: 'd20' }], NOW)
+    ingestWorkspaceAlerts(db, [{ account: 'a2', issue_type: 'payment_failure', detected_at: NOW, suspension_date: NOW + 10 * 86400, message_ref: 'd10' }], NOW)
+    ingestWorkspaceAlerts(db, [{ account: 'a3', issue_type: 'payment_failure', detected_at: NOW, suspension_date: NOW + 3 * 86400, message_ref: 'd3' }], NOW)
+    const warnings = buildWorkspaceAlertWarnings(db, NOW)
+    expect(warnings.find(w => (w.detail as { account: string }).account === 'a1')!.severity).toBe('low')
+    expect(warnings.find(w => (w.detail as { account: string }).account === 'a2')!.severity).toBe('medium')
+    expect(warnings.find(w => (w.detail as { account: string }).account === 'a3')!.severity).toBe('high')
+  })
+
+  it('a suspension date far in the future (>30d) is still visible (not silent), just low severity', () => {
+    const db = getDb()
+    ingestWorkspaceAlerts(db, [{ account: 'google-zst', issue_type: 'payment_failure', detected_at: NOW, suspension_date: NOW + 90 * 86400, message_ref: 'far' }], NOW)
+    const w = buildWorkspaceAlertWarnings(db, NOW)[0]
+    expect(w.code).toBe('workspace_suspension_scheduled')
+    expect(w.severity).toBe('low')
+  })
+
+  it('a suspension date already in the past (no re-detection since) is treated as overdue, not dropped', () => {
+    const db = getDb()
+    ingestWorkspaceAlerts(db, [{ account: 'google-zst', issue_type: 'payment_failure', detected_at: NOW, suspension_date: NOW - 5 * 86400, message_ref: 'overdue' }], NOW)
+    const w = buildWorkspaceAlertWarnings(db, NOW)[0]
+    expect(w.code).toBe('workspace_suspension_overdue')
+    expect(w.severity).toBe('high')
+  })
+
+  it('rejects an invalid suspension_date type without throwing', () => {
+    const db = getDb()
+    const result = ingestWorkspaceAlerts(db, [{ account: 'google-zst', issue_type: 'payment_failure', detected_at: NOW, suspension_date: 'not-a-number' as unknown as number, message_ref: 'bad' }], NOW)
+    expect(result.ingested).toBe(0)
+    expect(result.errors).toHaveLength(1)
+  })
+
+  it('no suspension_date -- falls back to the existing flat flag exactly as before (regression check)', () => {
+    const db = getDb()
+    ingestWorkspaceAlerts(db, [{ account: 'google-zst', issue_type: 'suspended', detected_at: NOW, message_ref: 'flat' }], NOW)
+    const w = buildWorkspaceAlertWarnings(db, NOW)[0]
+    expect(w.code).toBe('workspace_suspended')
+    expect(w.due_date).toBeUndefined()
+  })
 })
