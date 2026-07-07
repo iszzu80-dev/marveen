@@ -11097,18 +11097,17 @@ async function loadCosts() {
     }
   }
 
-  // Typed cost/quota/expiry warnings (v0.7 addendum, audits/costops-dashboard-v2-ux-plan.md sec 16).
-  // Two warning vocabularies coexist on /api/costs/warnings: the pre-existing generic engine
-  // (severity: low|medium) and the sec-16 typed extension (severity: warn|high|critical|blocked).
-  const sevRank = { blocked: 0, critical: 1, high: 2, medium: 3, warn: 4, low: 5 }
+  // Cost/quota/expiry warnings (v0.7 + sec-16 typed extension, /api/costs/warnings).
+  // Confirmed with Mason (fullstackfejleszto, 2026-07-07): severity is exactly 'low'|'medium'|'high',
+  // no 4th tier. The Render 100%-blocked state is still severity:'high' -- distinguished by
+  // code+threshold+current_value, not by a dedicated severity string (see isHardBlock below).
+  const sevRank = { high: 0, medium: 1, low: 2 }
   const sevStyle = (sev) => ({
-    blocked: ['Blokkolva', '#e74c3c', 'rgba(231,76,60,0.16)'],
-    critical: ['Kritikus', '#e74c3c', 'rgba(231,76,60,0.16)'],
     high: ['Magas', '#e0a800', 'rgba(224,168,0,0.16)'],
     medium: ['Közepes', '#e0a800', 'rgba(224,168,0,0.12)'],
-    warn: ['Figyelmeztetés', '#e0a800', 'rgba(224,168,0,0.12)'],
     low: ['Alacsony', '#5b9dff', 'rgba(45,108,223,0.14)'],
   }[sev] || ['Info', '#9aa0a6', 'rgba(150,150,150,0.16)'])
+  const isHardBlock = (w) => w.code === 'render_build_minutes_exhausted' && w.threshold === 100 && w.current_value === 100 && w.unit === '%'
   const catLabel = (c) => ({
     hosting: 'Webservice / hosting', webservice: 'Webservice / hosting', 'webservice/hosting': 'Webservice / hosting',
     'ai/llm': 'AI / LLM', ai: 'AI / LLM',
@@ -11122,10 +11121,11 @@ async function loadCosts() {
     return String(v)
   }
   const dueOf = (w) => w.due_date || w.reset_date || w.expiry_date || null
-  const isPendingWarn = (w) => w.confidence === 'pending' || w.confidence === 'no_api_or_no_access'
+  const isPendingWarn = (w) => w.confidence === 'no_api_or_no_access'
   const warnValStr = (w) => w.current_value == null ? null : String(w.current_value) + (w.unit ? (w.unit === '%' ? '%' : ' ' + w.unit) : '')
   const warnItem = (w) => {
-    const [sevLabel, sevColor, sevBg] = sevStyle(w.severity)
+    let [sevLabel, sevColor, sevBg] = sevStyle(w.severity)
+    if (isHardBlock(w)) { sevLabel = 'Blokkolva'; sevColor = '#e74c3c'; sevBg = 'rgba(231,76,60,0.16)' }
     const pending = isPendingWarn(w)
     const due = fmtAnyDate(dueOf(w))
     const val = warnValStr(w)
