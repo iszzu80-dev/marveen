@@ -14,6 +14,11 @@ export interface ExportRow {
   amount: number
   currency: string
   confidence: string
+  // Currency-retention (v0.7, additive): populated only when this line was
+  // converted from a foreign-currency invoice ("if any" per spec) -- never
+  // fabricated for an already-HUF line.
+  original_amount: number | null
+  original_currency: string | null
 }
 
 interface Row {
@@ -24,6 +29,8 @@ interface Row {
   billed_cost: number
   currency: string
   confidence: string
+  original_amount: number | null
+  original_currency: string | null
 }
 
 /**
@@ -48,7 +55,8 @@ export function exportCostRows(
   const rows = db.prepare(`
     SELECT cs.provider as provider, cs.source_type as source_type, cli.service_name as service_name,
            cli.charge_period_start as charge_period_start, cli.billed_cost as billed_cost,
-           cli.currency as currency, cli.confidence as confidence
+           cli.currency as currency, cli.confidence as confidence,
+           cli.original_amount as original_amount, cli.original_currency as original_currency
     FROM cost_line_items cli JOIN cost_sources cs ON cs.id = cli.source_id
     WHERE cli.charge_period_start < @end AND cli.charge_period_end > @start
     ORDER BY cli.charge_period_start ASC, cs.provider ASC
@@ -62,6 +70,8 @@ export function exportCostRows(
     amount: r.billed_cost,
     currency: r.currency,
     confidence: r.confidence,
+    original_amount: r.original_amount ?? null,
+    original_currency: r.original_currency ?? null,
   }))
 }
 
@@ -71,7 +81,7 @@ function csvEscape(v: unknown): string {
 }
 
 export function rowsToCsv(rows: ExportRow[]): string {
-  const headers = ['provider', 'source_type', 'service_name', 'period', 'amount', 'currency', 'confidence']
+  const headers = ['provider', 'source_type', 'service_name', 'period', 'amount', 'currency', 'confidence', 'original_amount', 'original_currency']
   const lines = [headers.join(',')]
   for (const r of rows) {
     lines.push(headers.map(h => csvEscape((r as unknown as Record<string, unknown>)[h])).join(','))

@@ -640,6 +640,15 @@ export function initDatabase(dbPathOverride?: string): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cost_line_items_period ON cost_line_items(charge_period_start, charge_period_end)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cost_line_items_source ON cost_line_items(source_id)`)
+  // v0.7 currency-retention (additive, Phase-3 per Marveen's spec): when a line's
+  // billed_cost is HUF-converted from a foreign-currency invoice, keep the original
+  // amount/currency/fx_rate/fx_date alongside it so the UI can show "11.15 USD ->
+  // 4014 HUF" instead of just the converted number. NULL for lines that were never
+  // converted (already-HUF entries) -- never fabricated, no existing calc touched.
+  try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN original_amount REAL`) } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN original_currency TEXT`) } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN fx_rate REAL`) } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN fx_date INTEGER`) } catch { /* already exists */ }
   db.exec(`
     CREATE TABLE IF NOT EXISTS budgets (
       id TEXT PRIMARY KEY,

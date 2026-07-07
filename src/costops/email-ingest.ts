@@ -66,14 +66,18 @@ export function ingestEmailCosts(
     INSERT INTO cost_line_items
       (source_id, charge_period_start, charge_period_end, charge_category, service_name,
        usage_type, consumed_quantity, consumed_unit, billed_cost, effective_cost, currency,
-       confidence, data_freshness, source_ref, dedup_key, created_at)
+       confidence, data_freshness, source_ref, dedup_key, created_at,
+       original_amount, original_currency, fx_rate, fx_date)
     VALUES
       (@source_id, @start, @end, 'invoice', @name,
        NULL, NULL, NULL, @amount, NULL, 'HUF',
-       @confidence, @now, @ref_hash, @dedup_key, @now)
+       @confidence, @now, @ref_hash, @dedup_key, @now,
+       @original_amount, @original_currency, @fx_rate, @fx_date)
     ON CONFLICT(dedup_key) DO UPDATE SET
       billed_cost=excluded.billed_cost, confidence=excluded.confidence,
-      data_freshness=excluded.data_freshness, source_ref=excluded.source_ref
+      data_freshness=excluded.data_freshness, source_ref=excluded.source_ref,
+      original_amount=excluded.original_amount, original_currency=excluded.original_currency,
+      fx_rate=excluded.fx_rate, fx_date=excluded.fx_date
   `)
   const out: IngestResult = { ingested: 0, skipped: 0, errors: [] }
   const tx = db.transaction((list: EmailCostEntry[]) => {
@@ -85,11 +89,19 @@ export function ingestEmailCosts(
       if (amountHuf === null || !isFinite(amountHuf)) { out.errors.push({ source_id: e.source_id, reason: `uncconvertible currency '${e.currency}'` }); continue }
       const refHash = createHash('sha256').update(salt).update('|').update(String(e.message_ref)).digest('hex').slice(0, 32)
       const dedup = `email|${refHash}|${e.month}`
+      const cur = (e.currency || 'HUF').toUpperCase()
+      // Currency-retention (v0.7, additive): only a REAL conversion has an "original"
+      // distinct from billed_cost -- an already-HUF entry has nothing to retain.
+      const wasConverted = cur !== 'HUF'
       upsertSource.run({ id: e.source_id, name: e.name || e.source_id, provider: e.provider || 'other', source_type: e.source_type || 'subscription', now: opts.now })
       upsertLine.run({
         source_id: e.source_id, start: win.start, end: win.end, name: e.name || e.source_id,
         amount: amountHuf, confidence: e.confidence || 'actual_invoice', now: opts.now,
         ref_hash: refHash, dedup_key: dedup,
+        original_amount: wasConverted ? Number(e.amount) : null,
+        original_currency: wasConverted ? cur : null,
+        fx_rate: wasConverted ? opts.fxUsdHuf : null,
+        fx_date: wasConverted ? opts.now : null,
       })
       out.ingested++
     }
