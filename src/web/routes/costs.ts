@@ -73,7 +73,8 @@ export async function tryHandleCosts(ctx: RouteContext): Promise<boolean> {
   // entries here. Idempotent per (email, month). No raw email content is stored.
   if (path === '/api/costs/email-ingest' && method === 'POST') {
     try {
-      const body = await readBody(ctx.req) as { entries?: unknown }
+      const raw = await readBody(ctx.req)
+      const body = JSON.parse(raw.toString() || '{}') as { entries?: unknown }
       const entries = Array.isArray(body?.entries) ? body.entries : []
       const now = Math.floor(Date.now() / 1000)
       let fxUsdHuf = 0
