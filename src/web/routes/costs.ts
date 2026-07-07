@@ -9,6 +9,10 @@ import { getDb } from '../../db.js'
 import { loadCostopsConfig } from '../../costops/config.js'
 import { loadPricingConfig } from '../../costops/pricing.js'
 import { syncFixedCostsToLedger, getCostSummary, getCostSources } from '../../costops/ledger.js'
+import { getPeriodTrend } from '../../costops/period.js'
+import { loadSubscriptionsConfig, deriveLifecycle } from '../../costops/subscriptions.js'
+import { getWarnings } from '../../costops/warnings.js'
+import { exportCostRows, rowsToCsv } from '../../costops/export.js'
 import type { RouteContext } from './types.js'
 
 export async function tryHandleCosts(ctx: RouteContext): Promise<boolean> {
@@ -106,6 +110,82 @@ export async function tryHandleCosts(ctx: RouteContext): Promise<boolean> {
     } catch (err) {
       logger.error({ err }, 'CostOps budgets failed')
       json(res, { error: 'Cost budgets failed' }, 500)
+    }
+    return true
+  }
+
+  // v0.7: monthly close / period view -- current + previous + last-N trend,
+  // per provider. READ-ONLY (no fixed-cost sync), so a month before a
+  // subscription existed correctly reports no_data, never a fabricated 0.
+  if (path === '/api/costs/period' && method === 'GET') {
+    try {
+      const monthsBack = Math.min(Math.max(parseInt(url.searchParams.get('months') || '6', 10) || 6, 1), 24)
+      const monthKey = url.searchParams.get('month') || undefined
+      const now = Math.floor(Date.now() / 1000)
+      const { config } = loadCostopsConfig()
+      const trend = getPeriodTrend(getDb(), config, now, monthsBack, monthKey)
+      json(res, trend)
+    } catch (err) {
+      logger.error({ err }, 'CostOps period failed')
+      json(res, { error: 'Cost period failed' }, 500)
+    }
+    return true
+  }
+
+  // v0.7: subscription lifecycle (active/canceled/paid_until/next_renewal),
+  // config-derived facts only -- no Gmail access, no raw email/PII.
+  if (path === '/api/costs/subscriptions' && method === 'GET') {
+    try {
+      const now = Math.floor(Date.now() / 1000)
+      const { config, exists, errors } = loadSubscriptionsConfig()
+      json(res, { subscriptions: deriveLifecycle(config, now), config_present: exists, config_errors: errors })
+    } catch (err) {
+      logger.error({ err }, 'CostOps subscriptions failed')
+      json(res, { error: 'Cost subscriptions failed' }, 500)
+    }
+    return true
+  }
+
+  // v0.7: deterministic warnings -- derived from the same summary + lifecycle
+  // data as summary/subscriptions above, no new writes.
+  if (path === '/api/costs/warnings' && method === 'GET') {
+    try {
+      const monthKey = url.searchParams.get('month') || undefined
+      const now = Math.floor(Date.now() / 1000)
+      const { config, exists, errors } = loadCostopsConfig()
+      const { pricing, exists: pricingExists } = loadPricingConfig()
+      const db = getDb()
+      syncFixedCostsToLedger(db, config, now, monthKey)
+      const summary = getCostSummary(db, config, now, { monthKey, configExists: exists, configErrors: errors, pricing, pricingExists })
+      const { config: subsConfig } = loadSubscriptionsConfig()
+      const subscriptions = deriveLifecycle(subsConfig, now)
+      json(res, { warnings: getWarnings(db, config, now, summary, subscriptions) })
+    } catch (err) {
+      logger.error({ err }, 'CostOps warnings failed')
+      json(res, { error: 'Cost warnings failed' }, 500)
+    }
+    return true
+  }
+
+  // v0.7: sanitized export -- provider/period/amount/confidence/source_type only.
+  // No raw email body, no raw invoice ID, no account reference, no PII.
+  if (path === '/api/costs/export' && method === 'GET') {
+    try {
+      const format = url.searchParams.get('format') === 'csv' ? 'csv' : 'json'
+      const month = url.searchParams.get('month') || undefined
+      const fromMonth = url.searchParams.get('from') || undefined
+      const toMonth = url.searchParams.get('to') || undefined
+      const now = Math.floor(Date.now() / 1000)
+      const rows = exportCostRows(getDb(), now, { month, fromMonth, toMonth })
+      if (format === 'csv') {
+        res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Cache-Control': 'private, no-store' })
+        res.end(rowsToCsv(rows))
+      } else {
+        json(res, { rows })
+      }
+    } catch (err) {
+      logger.error({ err }, 'CostOps export failed')
+      json(res, { error: 'Cost export failed' }, 500)
     }
     return true
   }

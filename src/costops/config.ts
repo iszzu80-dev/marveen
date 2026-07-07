@@ -24,6 +24,11 @@ export type CostConfidence =
   | 'local_usage'
   | 'estimate'
   | 'manual'
+  // v0.7: a real, tracked provider whose cost cannot be read (missing IAM/API
+  // permission, e.g. AWS Cost Explorer). Advisory like provider_plan_estimate --
+  // NEVER shown as 0, NEVER folded into current_spend/operational. Surfaces only
+  // via a dedicated billing_access_needed warning (see warnings.ts).
+  | 'pending_permission'
 
 export type ChargeCategory =
   | 'usage'

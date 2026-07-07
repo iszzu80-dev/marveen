@@ -1,0 +1,104 @@
+import { describe, it, expect, beforeEach } from 'vitest'
+import { initDatabase, getDb } from '../db.js'
+import { syncFixedCostsToLedger, getCostSummary, monthWindow } from '../costops/ledger.js'
+import { getWarnings } from '../costops/warnings.js'
+import { deriveLifecycle, type SubscriptionsConfig } from '../costops/subscriptions.js'
+import type { CostOpsConfig } from '../costops/config.js'
+
+const NOW = Math.floor(Date.UTC(2026, 6, 15, 12, 0, 0) / 1000) // 2026-07-15
+
+function cfg(over: Partial<CostOpsConfig> = {}): CostOpsConfig {
+  return {
+    version: 1,
+    currency: 'HUF',
+    fixed_costs: [
+      { source_id: 'anthropic-max', name: 'Claude Max', provider: 'anthropic', source_type: 'subscription', amount: 22000, period: 'monthly', confidence: 'manual', currency: 'HUF' },
+    ],
+    budgets: [{ id: 'global-monthly', name: 'Global', scope: 'global', amount: 20000, warning_threshold: 0.8, hard_threshold: 1.0, currency: 'HUF' }],
+    ...over,
+  }
+}
+
+describe('costops warnings', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('is empty when everything is healthy (no noise)', () => {
+    const db = getDb()
+    const c = cfg({
+      fixed_costs: [
+        { source_id: 'anthropic-max', name: 'Claude Max', provider: 'anthropic', source_type: 'subscription', amount: 22000, period: 'monthly', confidence: 'provider_api', currency: 'HUF' },
+      ],
+      budgets: [{ id: 'global-monthly', name: 'Global', scope: 'global', amount: 100000, warning_threshold: 0.8, hard_threshold: 1.0, currency: 'HUF' }],
+    })
+    syncFixedCostsToLedger(db, c, NOW)
+    const summary = getCostSummary(db, c, NOW)
+    const warnings = getWarnings(db, c, NOW, summary, [])
+    expect(warnings.filter(w => w.code === 'forecast_over_budget')).toHaveLength(0)
+    expect(warnings.filter(w => w.code === 'high_cost_manual_fallback')).toHaveLength(0)
+  })
+
+  it('forecast_over_budget fires when operational spend crosses the hard threshold', () => {
+    const db = getDb()
+    const c = cfg() // 22000 spend vs 20000 budget -> over hard threshold
+    syncFixedCostsToLedger(db, c, NOW)
+    const summary = getCostSummary(db, c, NOW)
+    const warnings = getWarnings(db, c, NOW, summary, [])
+    const w = warnings.find(x => x.code === 'forecast_over_budget')
+    expect(w).toBeDefined()
+    expect(w!.severity).toBe('high')
+  })
+
+  it('high_cost_manual_fallback fires when a manual-confidence source dominates spend', () => {
+    const db = getDb()
+    const c = cfg({ budgets: [] })
+    syncFixedCostsToLedger(db, c, NOW)
+    const summary = getCostSummary(db, c, NOW)
+    const warnings = getWarnings(db, c, NOW, summary, [])
+    const w = warnings.find(x => x.code === 'high_cost_manual_fallback')
+    expect(w).toBeDefined()
+    expect(w!.provider).toBe('anthropic')
+  })
+
+  it('expected_invoice_missing fires for a past_due active subscription', () => {
+    const db = getDb()
+    const c = cfg({ budgets: [] })
+    syncFixedCostsToLedger(db, c, NOW)
+    const summary = getCostSummary(db, c, NOW)
+    const subsCfg: SubscriptionsConfig = { version: 1, subscriptions: [{ id: 'overdue-sub', name: 'Overdue Sub', provider: 'openai', source: 'openai', status: 'active', next_renewal: '2026-07-01', amount_source: 'no_invoice_found' }] }
+    const subscriptions = deriveLifecycle(subsCfg, NOW)
+    const warnings = getWarnings(db, c, NOW, summary, subscriptions)
+    const w = warnings.find(x => x.code === 'expected_invoice_missing')
+    expect(w).toBeDefined()
+    expect(w!.provider).toBe('openai')
+  })
+
+  it('billing_access_needed fires for a pending_permission source, without fabricating an amount', () => {
+    const db = getDb()
+    const c = cfg({ budgets: [] })
+    syncFixedCostsToLedger(db, c, NOW)
+    const win = monthWindow(NOW)
+    db.prepare(`INSERT INTO cost_sources (id, name, provider, source_type, currency, active, created_at, updated_at) VALUES ('aws','AWS','aws','usage','HUF',1,@now,@now)`).run({ now: NOW })
+    db.prepare(`
+      INSERT INTO cost_line_items (source_id, charge_period_start, charge_period_end, charge_category, billed_cost, currency, confidence, data_freshness, created_at)
+      VALUES ('aws', @start, @end, 'usage', 0, 'HUF', 'pending_permission', @now, @now)
+    `).run({ start: win.start, end: win.end, now: NOW })
+    const summary = getCostSummary(db, c, NOW)
+    // The pending source must not appear as a headline 0-spend source.
+    expect(summary.all_sources.find(s => s.source_id === 'aws')).toBeUndefined()
+    const warnings = getWarnings(db, c, NOW, summary, [])
+    const w = warnings.find(x => x.code === 'billing_access_needed')
+    expect(w).toBeDefined()
+    expect(w!.provider).toBe('aws')
+    expect(w!.message).not.toMatch(/\d+\s*(HUF|Ft)/) // no fabricated amount in the message
+  })
+
+  it('is deterministic -- same inputs, same output, twice in a row', () => {
+    const db = getDb()
+    const c = cfg()
+    syncFixedCostsToLedger(db, c, NOW)
+    const summary = getCostSummary(db, c, NOW)
+    const w1 = getWarnings(db, c, NOW, summary, [])
+    const w2 = getWarnings(db, c, NOW, summary, [])
+    expect(w1).toEqual(w2)
+  })
+})

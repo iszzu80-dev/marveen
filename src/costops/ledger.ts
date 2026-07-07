@@ -63,6 +63,12 @@ export const CONF_PRIORITY: Record<string, number> = {
 // dedicated render_plan block (manual vs plan vs variance).
 export const ADVISORY_CONF = new Set<string>(['provider_plan_estimate'])
 
+// v0.7: pending_permission lines (a tracked provider whose cost can't be read,
+// e.g. AWS) are excluded the same way, but kept SEPARATE from ADVISORY_CONF so
+// they never leak into the Render-specific render_plan block. They surface only
+// via a dedicated warnings.ts billing_access_needed warning.
+export const PENDING_CONF = new Set<string>(['pending_permission'])
+
 // Costs a plan-based Render estimate structurally CANNOT see -> the estimate is a
 // lower bound. Surfaced verbatim so the number is never mistaken for an invoice.
 export const RENDER_NOT_COVERED: string[] = [
@@ -343,9 +349,10 @@ export function getCostSummary(
   // estimate-vs-actual reconcile view.
   // provider_plan_estimate lines are ADVISORY -- excluded from the headline
   // current_spend and from all_sources; they surface only in the render_plan block.
-  const headlineLines = lines.filter(l => !ADVISORY_CONF.has(l.confidence))
+  const headlineLines = lines.filter(l => !ADVISORY_CONF.has(l.confidence) && !PENDING_CONF.has(l.confidence))
   const planLines = lines.filter(l => ADVISORY_CONF.has(l.confidence))
-  const advisorySourceIds = new Set(planLines.map(l => l.source_id))
+  const pendingLines = lines.filter(l => PENDING_CONF.has(l.confidence))
+  const advisorySourceIds = new Set([...planLines, ...pendingLines].map(l => l.source_id))
   const bySource = new Map<string, LineRow[]>()
   for (const l of headlineLines) {
     const arr = bySource.get(l.source_id); if (arr) arr.push(l); else bySource.set(l.source_id, [l])
@@ -421,7 +428,7 @@ export function getCostSummary(
   // (manual + plan + provider actual), mapped to their provider, resolved so a
   // provider's manual is dropped once it has provider-derived data (no double count).
   const providerBySource = new Map(srcRows.map(r => [r.id, r.provider]))
-  const opLines: OpLine[] = lines.map(l => ({
+  const opLines: OpLine[] = lines.filter(l => !PENDING_CONF.has(l.confidence)).map(l => ({
     source_id: l.source_id, provider: providerBySource.get(l.source_id) || 'other',
     billed_cost: l.billed_cost, charge_category: l.charge_category, confidence: l.confidence, data_freshness: l.data_freshness,
   }))
@@ -435,7 +442,7 @@ export function getCostSummary(
   `).all({ start: prevWin.start, end: prevWin.end }) as LineRow[]
   let previous_month: CostSummary['previous_month'] = null
   if (prevRows.length > 0) {
-    const prevOp = resolveOperational(prevRows.map(l => ({
+    const prevOp = resolveOperational(prevRows.filter(l => !PENDING_CONF.has(l.confidence)).map(l => ({
       source_id: l.source_id, provider: providerBySource.get(l.source_id) || 'other',
       billed_cost: l.billed_cost, charge_category: l.charge_category, confidence: l.confidence, data_freshness: l.data_freshness,
     })), prevWin)
