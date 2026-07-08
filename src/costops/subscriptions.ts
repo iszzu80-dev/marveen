@@ -48,7 +48,7 @@ const EXAMPLE_CONFIG = {
   _doc: 'CostOps v0.7 subscription lifecycle facts. Copy to store/costops-subscriptions.json. paid_until/next_renewal are ISO dates (YYYY-MM-DD). amount is omitted (not 0) when genuinely unknown -- set amount_source accordingly.',
   subscriptions: [
     { id: 'claude-pro-google-play', name: 'Claude Pro', provider: 'anthropic', source: 'google_play', status: 'canceled', paid_until: '2026-07-16', amount_source: 'invoice', notes: 'cancellation notice received; active until paid_until, then ends' },
-    { id: 'anthropic-max', name: 'Anthropic Max', provider: 'anthropic', source: 'anthropic', status: 'active', next_renewal: '2026-07-20', amount_source: 'manual_fallback', notes: 'no invoice amount available yet' },
+    { id: 'anthropic-max', name: 'Claude Max', provider: 'anthropic', source: 'anthropic', status: 'active', next_renewal: '2026-07-20', amount_source: 'manual_fallback', notes: 'no invoice amount available yet' },
     { id: 'openai-chatgpt', name: 'ChatGPT Plus', provider: 'openai', source: 'openai', status: 'active', amount_source: 'no_invoice_found' },
   ],
 }
