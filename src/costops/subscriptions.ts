@@ -34,6 +34,22 @@ export interface SubscriptionEntry {
   // honestly as 'unknown' rather than inventing a number. Config-schema-only addition.
   weekly_limit_tokens?: number
   five_hour_limit_tokens?: number
+  // Card 2ed90db1: Claude session/weekly usage as a manual snapshot -- Istvan occasionally
+  // reads this off the Claude usage screen and shares it. There is no absolute token ceiling
+  // behind this (Anthropic exposes percent-of-limit only), so this is percent + a raw reset
+  // label, never a derived/fabricated token count.
+  usage_snapshot?: UsageSnapshot
+}
+
+export interface UsageSnapshot {
+  as_of: string                // ISO datetime this snapshot was captured/reported (manual, not live-polled)
+  session_pct: number          // 0..100, current 5-hour session window usage
+  weekly_pct: number           // 0..100, weekly (all models) usage -- this is what the 80% alert rule watches
+  // Raw label as given (e.g. 'Tue 08:59'), NOT parsed into a computed calendar date -- the
+  // reset's timezone and exact cadence aren't confirmed, so showing the verbatim fact Istvan
+  // reported beats silently guessing a specific date and risking it being wrong.
+  weekly_reset_label: string
+  fable_pct?: number           // optional, Fable-specific weekly % if reported (0 in the first snapshot)
 }
 
 export interface SubscriptionsConfig {
@@ -45,10 +61,13 @@ const EMPTY: SubscriptionsConfig = { version: 1, subscriptions: [] }
 
 const EXAMPLE_CONFIG = {
   version: 1,
-  _doc: 'CostOps v0.7 subscription lifecycle facts. Copy to store/costops-subscriptions.json. paid_until/next_renewal are ISO dates (YYYY-MM-DD). amount is omitted (not 0) when genuinely unknown -- set amount_source accordingly.',
+  _doc: 'CostOps v0.7 subscription lifecycle facts. Copy to store/costops-subscriptions.json. paid_until/next_renewal are ISO dates (YYYY-MM-DD). amount is omitted (not 0) when genuinely unknown -- set amount_source accordingly. usage_snapshot (card 2ed90db1) is an OPTIONAL manual reading off a Claude usage screen -- percent + a raw reset label only, never a derived token count; weekly_pct is what feeds the 80% alert.',
   subscriptions: [
     { id: 'claude-pro-google-play', name: 'Claude Pro', provider: 'anthropic', source: 'google_play', status: 'canceled', paid_until: '2026-07-16', amount_source: 'invoice', notes: 'cancellation notice received; active until paid_until, then ends' },
-    { id: 'anthropic-max', name: 'Claude Max', provider: 'anthropic', source: 'anthropic', status: 'active', next_renewal: '2026-07-20', amount_source: 'manual_fallback', notes: 'no invoice amount available yet' },
+    {
+      id: 'anthropic-max', name: 'Claude Max', provider: 'anthropic', source: 'anthropic', status: 'active', next_renewal: '2026-07-20', amount_source: 'manual_fallback', notes: 'no invoice amount available yet',
+      usage_snapshot: { as_of: '2026-07-08T21:00:00+02:00', session_pct: 5, weekly_pct: 19, weekly_reset_label: 'Tue 08:59', fable_pct: 0 },
+    },
     { id: 'openai-chatgpt', name: 'ChatGPT Plus', provider: 'openai', source: 'openai', status: 'active', amount_source: 'no_invoice_found' },
   ],
 }
@@ -110,6 +129,9 @@ export function validateSubscriptionsConfig(raw: unknown): SubscriptionsLoadResu
     if (s.five_hour_limit_tokens !== undefined && (typeof s.five_hour_limit_tokens !== 'number' || !isFinite(s.five_hour_limit_tokens as number) || (s.five_hour_limit_tokens as number) < 0)) {
       errors.push(`subscriptions[${i}] (${s.id}): five_hour_limit_tokens must be a non-negative number when present`); continue
     }
+    // Malformed usage_snapshot is dropped (not fatal to the whole subscription entry) -- a typo
+    // in a manually-pasted snapshot shouldn't lose the subscription's active/canceled status.
+    const usage_snapshot = parseUsageSnapshot(s.usage_snapshot)
     subscriptions.push({
       id: s.id, name: s.name,
       provider: typeof s.provider === 'string' ? s.provider : 'other',
@@ -123,9 +145,29 @@ export function validateSubscriptionsConfig(raw: unknown): SubscriptionsLoadResu
       notes: typeof s.notes === 'string' ? s.notes : undefined,
       weekly_limit_tokens: typeof s.weekly_limit_tokens === 'number' ? s.weekly_limit_tokens : undefined,
       five_hour_limit_tokens: typeof s.five_hour_limit_tokens === 'number' ? s.five_hour_limit_tokens : undefined,
+      usage_snapshot,
     })
   }
   return { config: { version: typeof obj.version === 'number' ? obj.version : 1, subscriptions }, exists: true, errors }
+}
+
+function isPct(v: unknown): v is number {
+  return typeof v === 'number' && isFinite(v) && v >= 0 && v <= 100
+}
+
+function parseUsageSnapshot(raw: unknown): UsageSnapshot | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const u = raw as Record<string, unknown>
+  if (typeof u.as_of !== 'string' || isNaN(Date.parse(u.as_of))) return undefined
+  if (!isPct(u.session_pct) || !isPct(u.weekly_pct)) return undefined
+  if (typeof u.weekly_reset_label !== 'string' || !u.weekly_reset_label) return undefined
+  return {
+    as_of: u.as_of,
+    session_pct: u.session_pct,
+    weekly_pct: u.weekly_pct,
+    weekly_reset_label: u.weekly_reset_label,
+    fable_pct: isPct(u.fable_pct) ? u.fable_pct : undefined,
+  }
 }
 
 export interface SubscriptionLifecycle extends SubscriptionEntry {

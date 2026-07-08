@@ -28,6 +28,11 @@ export interface LimitStatus {
   expiry_date: string | null
   status: LimitStatusTier
   source: string                 // 'config' | 'ledger' | 'render_api' | 'workspace_alert' | 'tls' | 'rdap'
+  // Card 2ed90db1: which costops-subscriptions.json entry this came from, when applicable
+  // (null for every non-subscription source). Multiple subscriptions can share the same
+  // `provider` (e.g. Claude Max + Claude Pro are both 'anthropic') -- provider alone can't
+  // disambiguate which subscription a row belongs to, sub_id can.
+  sub_id: string | null
 }
 
 function tierForPct(pct: number | null): LimitStatusTier {
@@ -48,20 +53,25 @@ function tierForDays(days: number | null): LimitStatusTier {
 
 // ---- 1. Subscription lifecycle (renewal/cancellation dates -- date-based, not %-based unless
 // an optional weekly_limit_tokens/five_hour_limit_tokens ceiling is present, see SubscriptionEntry) ---
-function fromSubscriptions(subs: SubscriptionLifecycle[]): LimitStatus[] {
+export function fromSubscriptions(subs: SubscriptionLifecycle[]): LimitStatus[] {
   const out: LimitStatus[] = []
   for (const s of subs) {
     const targetDate = s.status === 'canceled' ? s.paid_until : s.next_renewal
-    if (!targetDate) continue
-    out.push({
-      provider: s.provider, limit_type: 'subscription_renewal',
-      current_usage: null, limit_value: null, usage_pct: null,
-      reset_date: s.status === 'active' ? s.next_renewal ?? null : null,
-      paid_until: s.status === 'canceled' ? s.paid_until ?? null : null,
-      expiry_date: null,
-      status: s.past_due ? 'blocked' : tierForDays(s.days_until_next_date),
-      source: 'config',
-    })
+    // No early-continue here: a subscription can have a usage_snapshot (below) with no known
+    // renewal/cancellation date at all (e.g. Claude Pro after re-activation -- status flipped to
+    // active but no next_renewal was supplied, never fabricated) -- that must still emit its
+    // weekly-usage entry even though it has no renewal-date entry to emit.
+    if (targetDate) {
+      out.push({
+        provider: s.provider, limit_type: 'subscription_renewal',
+        current_usage: null, limit_value: null, usage_pct: null,
+        reset_date: s.status === 'active' ? s.next_renewal ?? null : null,
+        paid_until: s.status === 'canceled' ? s.paid_until ?? null : null,
+        expiry_date: null,
+        status: s.past_due ? 'blocked' : tierForDays(s.days_until_next_date),
+        source: 'config', sub_id: s.id,
+      })
+    }
     // Optional token ceiling (v0.8): only emitted when Istvan has actually supplied one --
     // never a fabricated limit_value. Current usage cross-referencing against token_usage by
     // agent is future work (no agent<->subscription mapping exists yet) -- honestly unknown
@@ -71,7 +81,21 @@ function fromSubscriptions(subs: SubscriptionLifecycle[]): LimitStatus[] {
         provider: s.provider, limit_type: s.weekly_limit_tokens ? 'weekly_tokens' : 'five_hour_tokens',
         current_usage: null, limit_value: s.weekly_limit_tokens ?? s.five_hour_limit_tokens ?? null,
         usage_pct: null, reset_date: null, paid_until: null, expiry_date: null,
-        status: 'unknown', source: 'config',
+        status: 'unknown', source: 'config', sub_id: s.id,
+      })
+    }
+    // Card 2ed90db1: manual weekly-usage-% snapshot (Claude Max/Pro's actual usage screen has
+    // no absolute token ceiling, percent + reset label is the real data). weekly_pct is what
+    // drives the 80% alert (warnings.ts rule 11, generic tiered limit) -- session_pct/fable_pct
+    // are informational-only (surfaced via the subscription object itself, not alerted on,
+    // since only weekly usage was asked to trigger the alert).
+    if (s.usage_snapshot) {
+      const pct = s.usage_snapshot.weekly_pct / 100
+      out.push({
+        provider: s.provider, limit_type: 'weekly_usage_pct',
+        current_usage: null, limit_value: null, usage_pct: pct,
+        reset_date: s.usage_snapshot.weekly_reset_label, paid_until: null, expiry_date: null,
+        status: tierForPct(pct), source: 'config', sub_id: s.id,
       })
     }
   }
@@ -87,7 +111,7 @@ function fromDeepSeekBalance(db: Database.Database): LimitStatus[] {
     return [{
       provider: 'deepseek', limit_type: 'balance', current_usage: null, limit_value: null,
       usage_pct: null, reset_date: null, paid_until: null, expiry_date: null,
-      status: 'unknown', source: 'ledger',
+      status: 'unknown', source: 'ledger', sub_id: null,
     }]
   }
   const latest = rows[0].balance
@@ -100,7 +124,7 @@ function fromDeepSeekBalance(db: Database.Database): LimitStatus[] {
   return [{
     provider: 'deepseek', limit_type: 'balance', current_usage: latest, limit_value: peak,
     usage_pct, reset_date: null, paid_until: null, expiry_date: null,
-    status: tierForPct(usage_pct), source: 'ledger',
+    status: tierForPct(usage_pct), source: 'ledger', sub_id: null,
   }]
 }
 
@@ -120,7 +144,7 @@ function fromWorkspaceAlerts(db: Database.Database, now: number): LimitStatus[] 
       reset_date: null, paid_until: null,
       expiry_date: r.suspension_date !== null ? new Date(r.suspension_date * 1000).toISOString().slice(0, 10) : null,
       status: r.issue_type === 'suspended' ? 'blocked' : tierForDays(daysRemaining) === 'unknown' ? 'warning' : tierForDays(daysRemaining),
-      source: 'workspace_alert',
+      source: 'workspace_alert', sub_id: null,
     })
   }
   return out
@@ -139,7 +163,7 @@ async function fromLiveChecks(now: number, sslHosts: string[], domains: string[]
     out.push({
       provider: 'render', limit_type: 'build_minutes', current_usage: null, limit_value: null,
       usage_pct: 1.0, reset_date: null, paid_until: null, expiry_date: null,
-      status: 'blocked', source: 'render_api',
+      status: 'blocked', source: 'render_api', sub_id: null,
     })
   }
   for (const w of sslWarnings) {
@@ -148,7 +172,7 @@ async function fromLiveChecks(now: number, sslHosts: string[], domains: string[]
       current_usage: w.current_value ?? null, limit_value: w.threshold ?? null, usage_pct: null,
       reset_date: null, paid_until: null, expiry_date: w.expiry_date ?? w.due_date ?? null,
       status: w.severity === 'high' ? 'critical' : w.severity === 'medium' ? 'warning' : 'warning',
-      source: 'tls',
+      source: 'tls', sub_id: null,
     })
   }
   for (const w of domainWarnings) {
@@ -157,7 +181,7 @@ async function fromLiveChecks(now: number, sslHosts: string[], domains: string[]
       current_usage: w.current_value ?? null, limit_value: w.threshold ?? null, usage_pct: null,
       reset_date: null, paid_until: null, expiry_date: w.expiry_date ?? w.due_date ?? null,
       status: w.severity === 'high' ? 'critical' : w.severity === 'medium' ? 'warning' : 'warning',
-      source: 'rdap',
+      source: 'rdap', sub_id: null,
     })
   }
   return out

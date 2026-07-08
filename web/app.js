@@ -11356,12 +11356,15 @@ async function loadCosts() {
   const limitTypeLabel = (t) => ({
     subscription_renewal: 'előfizetés megújítás', weekly_tokens: 'heti token-keret', five_hour_tokens: '5 órás token-keret',
     balance: 'egyenleg', workspace_payment: 'fizetés / felfüggesztés', build_minutes: 'build percek',
-    ssl_expiry: 'SSL lejárat', domain_expiry: 'domain lejárat',
+    ssl_expiry: 'SSL lejárat', domain_expiry: 'domain lejárat', weekly_usage_pct: 'heti felhasználás (kézi pillanatkép)',
   }[t] || t)
-  const subByProvider = {}
-  subsResp.forEach(sub => { subByProvider[sub.provider] = sub })
+  // Card 2ed90db1: lookup by sub_id, not provider -- Claude Max + Claude Pro share provider
+  // 'anthropic', so the old provider-keyed lookup silently collapsed two subscriptions into one
+  // (whichever the forEach visited last) once both had rows to show at the same time.
+  const subById = {}
+  subsResp.forEach(sub => { subById[sub.id] = sub })
   const limitGaugeRow = (l) => {
-    const sub = l.limit_type === 'subscription_renewal' ? subByProvider[l.provider] : null
+    const sub = l.sub_id ? subById[l.sub_id] : null
     const title = sub ? sub.name : (esc(l.provider) + ' · ' + esc(limitTypeLabel(l.limit_type)))
     const color = limitTierColor(l.status)
     let body
@@ -11370,6 +11373,7 @@ async function loadCosts() {
       body = '<div style="margin-top:6px;">'
         + '<div style="display:flex;justify-content:space-between;font-size:0.78em;color:var(--text-muted,#888);"><span>Felhasználva</span><span>' + pct + '%</span></div>'
         + '<div style="background:rgba(150,150,150,0.2);border-radius:6px;height:6px;overflow:hidden;margin-top:3px;"><div style="background:' + color + ';height:100%;width:' + Math.min(100, pct) + '%;"></div></div>'
+        + (l.reset_date ? '<div style="font-size:0.75em;color:var(--text-muted,#888);margin-top:3px;">Megújul: ' + esc(l.reset_date) + '</div>' : '')
         + '</div>'
     } else {
       const dateVal = l.expiry_date || l.paid_until || l.reset_date
@@ -11378,13 +11382,32 @@ async function loadCosts() {
         ? '<div style="font-size:0.78em;color:var(--text-muted,#888);margin-top:6px;">' + (l.paid_until ? 'Fut, majd megszűnik: ' : l.expiry_date ? 'Lejárat: ' : 'Következő: ') + fmtAnyDate(dateVal) + daysStr(dd) + '</div>'
         : '<div style="font-size:0.78em;color:var(--text-muted,#888);margin-top:6px;">nincs numerikus limit-adat</div>'
     }
+    // Card 2ed90db1: usage_snapshot is a manual, occasionally-refreshed reading Istvan pastes in
+    // from the Claude usage screen -- NOT live-polled. Label it as such plus its as-of timestamp
+    // so nobody mistakes this for a continuously-updated gauge, and surface the session%/Fable%
+    // that aren't part of the alerted weekly_usage_pct row itself.
+    const snap = l.limit_type === 'weekly_usage_pct' && sub && sub.usage_snapshot ? sub.usage_snapshot : null
+    const snapshotBadge = snap
+      ? '<span style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:0.68em;font-weight:600;color:#9aa0a6;background:rgba(150,150,150,0.16);white-space:nowrap;">Kézi pillanatkép</span>'
+      : ''
+    const snapshotDetail = snap
+      ? '<div style="font-size:0.75em;color:var(--text-muted,#888);margin-top:3px;">'
+        + 'Állapot ekkor: ' + fmtAnyDate(snap.as_of)
+        + ' · munkamenet: ' + Math.round(snap.session_pct) + '%'
+        + (snap.fable_pct != null ? ' · Fable: ' + Math.round(snap.fable_pct) + '%' : '')
+        + '</div>'
+      : ''
     return '<div style="padding:10px 0;border-top:1px solid var(--border,#eee);">'
       + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">'
       + '<span style="font-weight:600;font-size:0.9em;">' + title + '</span>'
+      + '<span style="display:flex;gap:4px;align-items:center;">'
+      + snapshotBadge
       + '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.72em;font-weight:600;color:' + color + ';background:' + color + '22;white-space:nowrap;">' + esc(limitStatusLabel(l.status)) + '</span>'
+      + '</span>'
       + '</div>'
       + (sub && sub.notes ? '<div style="font-size:0.78em;color:var(--text-muted,#888);margin-top:2px;">' + esc(sub.notes) + '</div>' : '')
       + body
+      + snapshotDetail
       + '</div>'
   }
   const limitRows = limitsResp.map(limitGaugeRow).join('') || '<div style="color:var(--text-muted,#888);font-size:0.9em;">nincs limit-adat.</div>'

@@ -33,6 +33,37 @@ describe('costops subscriptions validation', () => {
     const r = validateSubscriptionsConfig({ subscriptions: [{ id: 'noamt', name: 'No Amount', amount_source: 'no_invoice_found' }] })
     expect(r.config.subscriptions[0].amount).toBeUndefined()
   })
+
+  // Card 2ed90db1
+  it('accepts a valid usage_snapshot and keeps the raw weekly_reset_label verbatim (never a computed date)', () => {
+    const r = validateSubscriptionsConfig({
+      subscriptions: [{
+        id: 'max', name: 'Claude Max',
+        usage_snapshot: { as_of: '2026-07-08T21:00:00+02:00', session_pct: 5, weekly_pct: 19, weekly_reset_label: 'Tue 08:59', fable_pct: 0 },
+      }],
+    })
+    expect(r.errors).toEqual([])
+    expect(r.config.subscriptions[0].usage_snapshot).toEqual({
+      as_of: '2026-07-08T21:00:00+02:00', session_pct: 5, weekly_pct: 19, weekly_reset_label: 'Tue 08:59', fable_pct: 0,
+    })
+  })
+
+  it('drops a malformed usage_snapshot without losing the rest of the subscription', () => {
+    const r = validateSubscriptionsConfig({
+      subscriptions: [{ id: 'bad-snap', name: 'Bad Snap', status: 'active', usage_snapshot: { as_of: 'not-a-date', session_pct: 5, weekly_pct: 19, weekly_reset_label: 'Tue 08:59' } }],
+    })
+    expect(r.errors).toEqual([])
+    expect(r.config.subscriptions).toHaveLength(1)
+    expect(r.config.subscriptions[0].status).toBe('active')
+    expect(r.config.subscriptions[0].usage_snapshot).toBeUndefined()
+  })
+
+  it('rejects an out-of-range usage_snapshot percent (e.g. 150%)', () => {
+    const r = validateSubscriptionsConfig({
+      subscriptions: [{ id: 'oor', name: 'Out Of Range', usage_snapshot: { as_of: '2026-07-08T21:00:00+02:00', session_pct: 150, weekly_pct: 19, weekly_reset_label: 'Tue 08:59' } }],
+    })
+    expect(r.config.subscriptions[0].usage_snapshot).toBeUndefined()
+  })
 })
 
 describe('costops subscriptions lifecycle derivation', () => {
