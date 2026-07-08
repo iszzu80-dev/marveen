@@ -226,6 +226,10 @@ export function getTokenCostEstimate(
 // invented) -- this function has no subscription-limit context; a caller can overlay a real
 // ceiling (e.g. SubscriptionEntry.weekly_limit_tokens, if Istvan ever supplies one) separately.
 
+// v0.8.1 (card d9739cf3, Istvan tg3540): label/naming polish, no math change. The token-runrate
+// number is an ESTIMATE, never an invoice -- "actual_cost" was misleading (implied a confirmed
+// charge). Renamed to estimated_cost_mtd; billed_status/source are new explicit per-row fields
+// so a reader doesn't have to infer "is this actually charged?" from card-header prose.
 export interface TokenCostByAgentEntry {
   agent: string
   provider: string
@@ -234,9 +238,15 @@ export interface TokenCostByAgentEntry {
   output_tokens: number
   cache_read_tokens: number
   cache_creation_tokens: number
-  actual_cost_estimate_mtd: number
+  estimated_cost_mtd: number
   forecast_month_end: number | null   // null when fractionElapsed is not meaningful (e.g. 0 rows)
   forecast_basis: 'token_runrate'
+  // 'not_billed': provider has an active flat-fee subscription (Claude Max/Pro) that already
+  // covers this usage -- the number is visibility, not a separate charge. 'unknown': no
+  // subscription-coverage signal for this provider here (this is a pure function with no
+  // subscription context) -- genuinely don't know, never guessed as either not_billed or billed.
+  billed_status: 'not_billed' | 'unknown'
+  source: 'local_token_usage'
   limit_usage_pct: number | null      // always null -- see module comment above
 }
 
@@ -282,17 +292,24 @@ export function getTokenCostByAgent(
       (r.cache_read_tokens / 1e6) * rate.cache_read_per_mtok +
       (r.cache_creation_tokens / 1e6) * rate.cache_write_per_mtok,
     )
+    const provider = deriveProvider(r.model)
     out.push({
-      agent: r.agent, provider: deriveProvider(r.model), model: r.model,
+      agent: r.agent, provider, model: r.model,
       input_tokens: r.input_tokens, output_tokens: r.output_tokens,
       cache_read_tokens: r.cache_read_tokens, cache_creation_tokens: r.cache_creation_tokens,
-      actual_cost_estimate_mtd: est,
+      estimated_cost_mtd: est,
       forecast_month_end: fractionElapsed > 0 ? round2(est / fractionElapsed) : null,
       forecast_basis: 'token_runrate',
+      // Anthropic usage in this fleet runs under a flat-fee Claude Max/Pro subscription, not a
+      // metered API key -- local token counting is visibility only, never a separate charge.
+      // Every other provider: no subscription-coverage signal available in this pure function,
+      // stays honestly 'unknown' rather than assumed either way.
+      billed_status: provider === 'anthropic' ? 'not_billed' : 'unknown',
+      source: 'local_token_usage',
       limit_usage_pct: null,
     })
   }
-  return out.sort((a, b) => b.actual_cost_estimate_mtd - a.actual_cost_estimate_mtd)
+  return out.sort((a, b) => b.estimated_cost_mtd - a.estimated_cost_mtd)
 }
 
 function round2(n: number): number { return Math.round(n * 100) / 100 }
