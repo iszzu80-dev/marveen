@@ -11174,22 +11174,24 @@ async function loadCosts() {
   }
   // v0.8: actual_source distinguishes HOW a cost was captured (orthogonal to confidence's
   // priority axis) -- live API poll vs an email invoice vs a config-driven fixed cost vs
-  // genuinely no data yet.
+  // genuinely no data yet. Labels are Istvan's own exact requirements-doc wording
+  // (audits/costops-v08-cost-control-spec.md §1), not a paraphrase.
   const actualSrcBadge = (a) => {
     const m = {
-      provider_api: ['Élő API', '#2ecc71', 'rgba(46,204,113,0.15)'],
+      provider_api: ['Lekérdezett adat', '#2ecc71', 'rgba(46,204,113,0.15)'],
       email_invoice: ['Email számla', '#5b9dff', 'rgba(45,108,223,0.14)'],
-      manual_entry: ['Kézi tétel', '#9aa0a6', 'rgba(150,150,150,0.16)'],
-      pending_permission: ['Nincs hozzáférés', '#e0a800', 'rgba(224,168,0,0.14)'],
+      manual_entry: ['Manuális felvétel', '#9aa0a6', 'rgba(150,150,150,0.16)'],
+      pending_permission: ['Jogosultság kell', '#e0a800', 'rgba(224,168,0,0.14)'],
       no_data: ['Nincs adat', '#9aa0a6', 'rgba(150,150,150,0.16)'],
     }[a] || null
     if (!m) return ''
     return '<span style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:0.68em;font-weight:600;color:' + m[1] + ';background:' + m[2] + ';white-space:nowrap;">' + esc(m[0]) + '</span>'
   }
+  // Labels per audits/costops-v08-cost-control-spec.md §2's exact wording.
   const forecastBasisLabel = (b) => ({
-    run_rate: 'havi ütem alapján',
-    fixed_subscription: 'fix előfizetés',
-    manual_forecast: 'kézi előrejelzés',
+    run_rate: 'Run-rate extrapoláció',
+    fixed_subscription: 'Fix havi előfizetés',
+    manual_forecast: 'Manuális forecast',
     no_forecast: null,
   }[b] || null)
   const origCurrencyStr = (t) => (t.original_amount != null && t.original_currency)
