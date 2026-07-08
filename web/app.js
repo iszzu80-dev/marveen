@@ -11387,16 +11387,29 @@ async function loadCosts() {
       + '</div>'
   }
   const limitRows = limitsResp.map(limitGaugeRow).join('') || '<div style="color:var(--text-muted,#888);font-size:0.9em;">nincs limit-adat.</div>'
+  // v0.8 fix (§5, real gap found by architect review): was reading a nonexistent m.estimated_huf
+  // field -- TokenCostByAgentEntry's actual cost field is actual_cost_estimate_mtd, so this table
+  // silently rendered 0/blank cost since the initial build. Now also surfaces the full field set
+  // the requirements doc's §5 "minimum fields" list asks for (token breakdown, forecast, basis,
+  // limit_usage_pct) instead of just agent+model+cost.
   const tokenByAgentRows = tokenByAgent.slice()
-    .sort((a, b2) => (Number(b2.estimated_huf) || 0) - (Number(a.estimated_huf) || 0))
-    .map(m => '<tr style="border-top:1px solid var(--border,#eee);"><td style="padding:4px 8px 4px 0;">' + esc(m.agent) + '</td><td style="padding:4px 8px 4px 0;color:var(--text-muted,#888);">' + esc(m.model) + '</td><td style="padding:4px 0;text-align:right;">' + fmt(m.estimated_huf) + '</td></tr>')
-    .join('') || '<tr><td colspan="3" style="color:var(--text-muted,#888);padding:4px 0;">nincs adat</td></tr>'
-  const tokenTotal = tokenByAgent.reduce((sum, m) => sum + (Number(m.estimated_huf) || 0), 0)
+    .sort((a, b2) => (Number(b2.actual_cost_estimate_mtd) || 0) - (Number(a.actual_cost_estimate_mtd) || 0))
+    .map(m => '<tr style="border-top:1px solid var(--border,#eee);">'
+      + '<td style="padding:4px 8px 4px 0;">' + esc(m.agent) + '</td>'
+      + '<td style="padding:4px 8px 4px 0;color:var(--text-muted,#888);text-transform:capitalize;">' + esc(m.provider) + '</td>'
+      + '<td style="padding:4px 8px 4px 0;color:var(--text-muted,#888);">' + esc(m.model) + '</td>'
+      + '<td style="padding:4px 8px 4px 0;text-align:right;color:var(--text-muted,#888);white-space:nowrap;">' + Number(m.input_tokens || 0).toLocaleString('hu-HU') + ' / ' + Number(m.output_tokens || 0).toLocaleString('hu-HU') + '</td>'
+      + '<td style="padding:4px 8px 4px 0;text-align:right;color:var(--text-muted,#888);white-space:nowrap;">' + Number(m.cache_read_tokens || 0).toLocaleString('hu-HU') + ' / ' + Number(m.cache_creation_tokens || 0).toLocaleString('hu-HU') + '</td>'
+      + '<td style="padding:4px 8px 4px 0;text-align:right;font-weight:600;">' + fmt(m.actual_cost_estimate_mtd) + '</td>'
+      + '<td style="padding:4px 8px 4px 0;text-align:right;color:var(--text-muted,#888);">' + (m.forecast_month_end != null ? fmt(m.forecast_month_end) : '—') + '</td>'
+      + '<td style="padding:4px 0;color:var(--text-muted,#888);font-size:0.85em;">' + (m.limit_usage_pct != null ? Math.round(m.limit_usage_pct * 100) + '%' : '—') + '</td></tr>')
+    .join('') || '<tr><td colspan="8" style="color:var(--text-muted,#888);padding:4px 0;">nincs adat</td></tr>'
+  const tokenTotal = tokenByAgent.reduce((sum, m) => sum + (Number(m.actual_cost_estimate_mtd) || 0), 0)
   const tokenLimitCard = card('Token & limit monitor',
-    '<div style="font-size:0.82em;color:var(--text-muted,#888);margin-bottom:8px;">Lokális tokenhasználatból számolt becslés ágensenként, nem számlaadat -- nem része a fenti havi költésnek.</div>'
+    '<div style="font-size:0.82em;color:var(--text-muted,#888);margin-bottom:8px;">Lokális tokenhasználatból számolt becslés ágensenként (Run-rate extrapoláció), nem számlaadat -- nem része a fenti havi költésnek.</div>'
     + '<div style="font-size:1.3em;font-weight:700;">' + fmt(tokenTotal) + '</div>'
     + '<details style="margin-top:10px;"><summary style="cursor:pointer;font-size:0.85em;color:var(--text-muted,#888);">Ágensenkénti bontás</summary>'
-    + tableWrap('<table style="width:100%;min-width:320px;border-collapse:collapse;font-size:0.85em;margin-top:6px;"><tr style="color:var(--text-muted,#888);font-size:0.78em;text-align:left;"><th style="text-align:left;">Ágens</th><th style="text-align:left;">Modell</th><th style="text-align:right;">Becsült</th></tr>' + tokenByAgentRows + '</table>')
+    + tableWrap('<table style="width:100%;min-width:640px;border-collapse:collapse;font-size:0.85em;margin-top:6px;"><tr style="color:var(--text-muted,#888);font-size:0.78em;text-align:left;"><th style="text-align:left;">Ágens</th><th style="text-align:left;">Provider</th><th style="text-align:left;">Modell</th><th style="text-align:right;">In / Out token</th><th style="text-align:right;">Cache olvasás / írás</th><th style="text-align:right;">Becsült (MTD)</th><th style="text-align:right;">Hó végi előrejelzés</th><th style="text-align:left;">Limit%</th></tr>' + tokenByAgentRows + '</table>')
     + '</details>'
     + '<div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border,#e2e2e2);"><div style="font-weight:600;font-size:0.88em;margin-bottom:4px;">Limitek / kvóták</div>' + limitRows + '</div>')
 
