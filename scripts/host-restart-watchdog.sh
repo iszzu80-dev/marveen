@@ -23,9 +23,22 @@ set -uo pipefail
 STATE_DIR="${MARVEEN_STORE:-$HOME/marveen/store}"
 STATE_FILE="$STATE_DIR/.last-btime"
 ENV_FILE="${TELEGRAM_ENV:-$HOME/.claude/channels/telegram/.env}"
-CHAT_ID="${MARVEEN_ALERT_CHAT_ID:-8942301795}"
+# Alert target chat-id -- MUST come from the install's own config; there is
+# deliberately NO hardcoded fallback (a hardcoded id would make every downstream
+# install send its host-stability alerts to that one private chat).
+CHAT_ID="${MARVEEN_ALERT_CHAT_ID:-}"
 
 log() { echo "[host-restart-watchdog] $*"; }
+
+# Real WSL check -- only under WSL is a whole-VM reboot the expected surprise;
+# on a bare-metal/other Linux host a btime change is an ordinary reboot, so we
+# word the alert accordingly instead of always claiming "WSL VM restarted".
+if grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null \
+   || [[ -n "${WSL_DISTRO_NAME:-}" ]] || [[ -e /run/WSL ]]; then
+  HOST_KIND="WSL VM"
+else
+  HOST_KIND="host"
+fi
 
 # Current kernel boot epoch (changes only on a real (re)boot of the VM/host).
 btime="$(awk '/^btime/{print $2}' /proc/stat 2>/dev/null)"
@@ -70,7 +83,7 @@ if (( last_alive > 0 )); then
   gap_txt="~${gap_min} perc (utolsó aktivitás ${last_txt} előtt)"
 fi
 
-msg="Marveen host / WSL VM restarted.
+msg="Marveen ${HOST_KIND} restarted.
 Új boot: ${boot_local}
 Becsült kiesés: ${gap_txt}
 (Ez host/VM szintű restart, NEM app-crash. A dashboard/channels app-crash külön OnFailure-értesítést küld.)"
@@ -82,14 +95,14 @@ token=""
 if [[ -f "$ENV_FILE" ]]; then
   token="$(grep -E '^TELEGRAM_BOT_TOKEN=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' \r\n')"
 fi
-if [[ -n "$token" ]]; then
+if [[ -n "$token" && -n "$CHAT_ID" ]]; then
   curl -s --max-time 15 \
     "https://api.telegram.org/bot${token}/sendMessage" \
     --data-urlencode "chat_id=${CHAT_ID}" \
     --data-urlencode "text=${msg}" >/dev/null 2>&1 \
     && log "Telegram sent" || log "Telegram send failed (best-effort)"
 else
-  log "no TELEGRAM_BOT_TOKEN in $ENV_FILE; skipping Telegram (host restart still logged)"
+  log "skipping Telegram (${HOST_KIND} restart still logged): missing${token:+}$( [[ -z "$token" ]] && echo ' TELEGRAM_BOT_TOKEN(via TELEGRAM_ENV)')$( [[ -z "$CHAT_ID" ]] && echo ' MARVEEN_ALERT_CHAT_ID')"
 fi
 
 exit 0
