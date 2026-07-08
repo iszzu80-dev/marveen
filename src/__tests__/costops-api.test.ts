@@ -1,7 +1,10 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { writeFileSync, unlinkSync, existsSync, mkdirSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { initDatabase, getDb } from '../db.js'
-import { tryHandleCosts } from '../web/routes/costs.js'
+import { tryHandleCosts, startCostsSyncTask } from '../web/routes/costs.js'
 import { monthWindow } from '../costops/ledger.js'
+import { COSTOPS_CONFIG_PATH } from '../costops/config.js'
 import type { RouteContext } from '../web/routes/types.js'
 
 // Minimal fake ServerResponse capturing what json() writes.
@@ -58,5 +61,38 @@ describe('costops API (route smoke)', () => {
   it('falls through (returns false) for unrelated paths', async () => {
     const { ctx } = fakeCtx('/api/kanban')
     expect(await tryHandleCosts(ctx)).toBe(false)
+  })
+
+  // Review blocker (Szotasz, PR #524): "the GET endpoint performs writes". Proven with a
+  // REAL fixed cost configured (not the empty default), so there is something a buggy
+  // sync-on-GET would actually have inserted -- an empty-config test wouldn't distinguish
+  // "no write call" from "nothing to write".
+  describe('GET /api/costs/summary is read-only (review blocker regression)', () => {
+    const hadConfig = existsSync(COSTOPS_CONFIG_PATH)
+    beforeEach(() => {
+      mkdirSync(dirname(COSTOPS_CONFIG_PATH), { recursive: true })
+      writeFileSync(COSTOPS_CONFIG_PATH, JSON.stringify({
+        version: 1, currency: 'HUF',
+        fixed_costs: [{ source_id: 'anthropic-max', name: 'Claude Max', provider: 'anthropic', source_type: 'subscription', amount: 22000 }],
+        budgets: [],
+      }))
+    })
+    afterEach(() => { if (!hadConfig) { try { unlinkSync(COSTOPS_CONFIG_PATH) } catch { /* already gone */ } } })
+
+    it('never inserts into cost_line_items/cost_sources, even with a real fixed cost configured', async () => {
+      const { ctx } = fakeCtx('/api/costs/summary')
+      expect(await tryHandleCosts(ctx)).toBe(true)
+      expect(await tryHandleCosts(ctx)).toBe(true) // twice, to also rule out a one-shot lazy-write pattern
+      const items = (getDb().prepare('SELECT COUNT(*) as n FROM cost_line_items').get() as { n: number }).n
+      const sources = (getDb().prepare('SELECT COUNT(*) as n FROM cost_sources').get() as { n: number }).n
+      expect(items).toBe(0)
+      expect(sources).toBe(0)
+    })
+
+    it('startCostsSyncTask() is where the write actually happens, and it works', () => {
+      startCostsSyncTask(24 * 60 * 60 * 1000) // long interval -- test only needs the immediate one-shot run
+      const row = getDb().prepare("SELECT billed_cost FROM cost_line_items WHERE source_id='anthropic-max'").get() as { billed_cost: number } | undefined
+      expect(row?.billed_cost).toBe(22000)
+    })
   })
 })

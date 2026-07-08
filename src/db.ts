@@ -595,8 +595,14 @@ export function initDatabase(dbPathOverride?: string): void {
 
   // --- CostOps (local cost ledger) ---
   // Read-mostly, FOCUS-inspired. cost_sources = provider/subscription origin,
-  // cost_line_items = individual charge rows (estimate or provider-sourced),
-  // budgets = display-only warning thresholds. No secrets/account IDs stored raw.
+  // cost_line_items = individual charge rows (estimate or provider-sourced).
+  // No secrets/account IDs stored raw. Budgets are config-driven (costops/config.ts's
+  // BudgetEntry, from store/costops-config.json) -- there is deliberately no separate
+  // `budgets` DB table: an earlier draft of this schema had one, but it was never
+  // read from or written to (config.budgets was always the actual source), so it was
+  // a dead, unused second source of truth. Removed rather than wired up, since the
+  // config file already covers this fully and a DB table would just be a sync burden
+  // for no benefit.
   db.exec(`
     CREATE TABLE IF NOT EXISTS cost_sources (
       id TEXT PRIMARY KEY,
@@ -634,22 +640,6 @@ export function initDatabase(dbPathOverride?: string): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cost_line_items_period ON cost_line_items(charge_period_start, charge_period_end)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cost_line_items_source ON cost_line_items(source_id)`)
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS budgets (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      scope TEXT NOT NULL DEFAULT 'global',
-      scope_ref TEXT,
-      period TEXT NOT NULL DEFAULT 'monthly',
-      amount REAL NOT NULL,
-      currency TEXT NOT NULL DEFAULT 'HUF',
-      warning_threshold REAL NOT NULL DEFAULT 0.8,
-      hard_threshold REAL NOT NULL DEFAULT 1.0,
-      active INTEGER NOT NULL DEFAULT 1,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    )
-  `)
 
   // --- Vault SSH Keys (shared pool) ---
   db.exec(`

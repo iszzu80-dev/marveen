@@ -88,6 +88,7 @@ window._i18n.en = {
   'nav.tokenUsage':   'Token Monitor',
   'nav.ideas':        'Ideas',
   'nav.updates':      'Updates',
+  'nav.costs':        'Costs',
 
   // --- Overview ---
   'overview.card.team_meta':     'live status',
@@ -522,6 +523,25 @@ window._i18n.en = {
   'status.comp.partial_outage':  'partial outage',
   'status.comp.major_outage':    'major outage',
   'status.comp.maintenance':     'under maintenance',
+
+  // --- Costs (CostOps v0.1, PR #524) ---
+  'costs.page_title':            'Costs',
+  'costs.page_subtitle':         'Monthly cost summary from the local config',
+  'costs.loading':               'Loading...',
+  'costs.load_failed':           'Failed to load the cost summary.',
+  'costs.no_config':             'No local cost config yet -- numbers stay empty until one is set up.',
+  'costs.current_spend':         'Spend this month',
+  'costs.forecast':              'Month-end forecast',
+  'costs.month':                 'Period',
+  'costs.budget_title':          'Budget',
+  'costs.budget_used':           'Used',
+  'costs.no_sources':            'No active cost sources.',
+  'costs.source_name':           'Source',
+  'costs.source_provider':       'Provider',
+  'costs.source_spend':          'Spend',
+  'costs.token_usage_note':      'Token usage volume (not priced)',
+  'costs.calls':                 'calls',
+
   'tokenUsage.col.time':         'Time',
   'tokenUsage.col.agent':        'Agent',
   'tokenUsage.col.content':      'Content',
