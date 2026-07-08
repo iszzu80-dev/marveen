@@ -31,15 +31,16 @@ function upsertProviderLines(db: Database.Database, lines: NormalizedCostLine[],
     INSERT INTO cost_line_items
       (source_id, charge_period_start, charge_period_end, charge_category, service_name,
        usage_type, consumed_quantity, consumed_unit, billed_cost, effective_cost, currency,
-       confidence, data_freshness, source_ref, dedup_key, created_at)
+       confidence, data_freshness, source_ref, dedup_key, created_at, actual_source)
     VALUES
       (@source_id, @start, @end, 'usage', @source_id,
        @usage_type, @quantity, @unit, @amount, NULL, @currency,
-       @confidence, @freshness, @source_ref, @dedup_key, @now)
+       @confidence, @freshness, @source_ref, @dedup_key, @now, 'provider_api')
     ON CONFLICT(dedup_key) DO UPDATE SET
       billed_cost=excluded.billed_cost, currency=excluded.currency,
       confidence=excluded.confidence, data_freshness=excluded.data_freshness,
-      source_ref=excluded.source_ref, usage_type=excluded.usage_type
+      source_ref=excluded.source_ref, usage_type=excluded.usage_type,
+      actual_source=excluded.actual_source
   `)
   const tx = db.transaction((ls: NormalizedCostLine[]) => {
     let n = 0

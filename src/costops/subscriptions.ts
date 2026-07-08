@@ -29,6 +29,11 @@ export interface SubscriptionEntry {
   currency?: string
   amount_source: AmountSource
   notes?: string
+  // v0.8 (card 6f4d1332 §5): optional real ceiling, only if Istvan supplies one. No official
+  // Claude Max/ChatGPT quota API exists (checked) -- absent, limits.ts reports the usage
+  // honestly as 'unknown' rather than inventing a number. Config-schema-only addition.
+  weekly_limit_tokens?: number
+  five_hour_limit_tokens?: number
 }
 
 export interface SubscriptionsConfig {
@@ -99,6 +104,12 @@ export function validateSubscriptionsConfig(raw: unknown): SubscriptionsLoadResu
     if (s.amount !== undefined && (typeof s.amount !== 'number' || !isFinite(s.amount as number) || (s.amount as number) < 0)) {
       errors.push(`subscriptions[${i}] (${s.id}): amount must be a non-negative number when present`); continue
     }
+    if (s.weekly_limit_tokens !== undefined && (typeof s.weekly_limit_tokens !== 'number' || !isFinite(s.weekly_limit_tokens as number) || (s.weekly_limit_tokens as number) < 0)) {
+      errors.push(`subscriptions[${i}] (${s.id}): weekly_limit_tokens must be a non-negative number when present`); continue
+    }
+    if (s.five_hour_limit_tokens !== undefined && (typeof s.five_hour_limit_tokens !== 'number' || !isFinite(s.five_hour_limit_tokens as number) || (s.five_hour_limit_tokens as number) < 0)) {
+      errors.push(`subscriptions[${i}] (${s.id}): five_hour_limit_tokens must be a non-negative number when present`); continue
+    }
     subscriptions.push({
       id: s.id, name: s.name,
       provider: typeof s.provider === 'string' ? s.provider : 'other',
@@ -110,6 +121,8 @@ export function validateSubscriptionsConfig(raw: unknown): SubscriptionsLoadResu
       currency: typeof s.currency === 'string' ? s.currency : undefined,
       amount_source,
       notes: typeof s.notes === 'string' ? s.notes : undefined,
+      weekly_limit_tokens: typeof s.weekly_limit_tokens === 'number' ? s.weekly_limit_tokens : undefined,
+      five_hour_limit_tokens: typeof s.five_hour_limit_tokens === 'number' ? s.five_hour_limit_tokens : undefined,
     })
   }
   return { config: { version: typeof obj.version === 'number' ? obj.version : 1, subscriptions }, exists: true, errors }

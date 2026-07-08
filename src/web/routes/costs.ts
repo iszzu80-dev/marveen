@@ -8,7 +8,7 @@ import { logger } from '../../logger.js'
 import { getDb } from '../../db.js'
 import { loadCostopsConfig } from '../../costops/config.js'
 import { loadPricingConfig } from '../../costops/pricing.js'
-import { syncFixedCostsToLedger, getCostSummary, getCostSources } from '../../costops/ledger.js'
+import { syncFixedCostsToLedger, getCostSummary, getCostSources, monthWindow } from '../../costops/ledger.js'
 import { getPeriodTrend } from '../../costops/period.js'
 import { loadSubscriptionsConfig, deriveLifecycle } from '../../costops/subscriptions.js'
 import { getWarnings } from '../../costops/warnings.js'
@@ -16,6 +16,8 @@ import { exportCostRows, rowsToCsv } from '../../costops/export.js'
 import { ingestWorkspaceAlerts, buildWorkspaceAlertWarnings } from '../../costops/workspace-alerts.js'
 import { checkRenderBuildMinutes } from '../../costops/render-live-checks.js'
 import { loadDomainsConfig, checkSslExpiry, checkDomainExpiry } from '../../costops/expiry-checks.js'
+import { getTokenCostByAgent } from '../../costops/pricing.js'
+import { getLimitStatus } from '../../costops/limits.js'
 import type { RouteContext } from './types.js'
 
 export async function tryHandleCosts(ctx: RouteContext): Promise<boolean> {
@@ -85,9 +87,15 @@ export async function tryHandleCosts(ctx: RouteContext): Promise<boolean> {
       const entries = Array.isArray(body?.entries) ? body.entries : []
       const now = Math.floor(Date.now() / 1000)
       let fxUsdHuf = 0
-      try { const { loadRenderPricing } = await import('../../costops/collectors/render.js'); fxUsdHuf = loadRenderPricing().pricing.fx_usd_huf || 0 } catch { /* fx 0 -> USD entries flagged */ }
+      let fxEurHuf = 0
+      try {
+        const { loadRenderPricing } = await import('../../costops/collectors/render.js')
+        const p = loadRenderPricing().pricing
+        fxUsdHuf = p.fx_usd_huf || 0
+        fxEurHuf = p.fx_eur_huf || 0
+      } catch { /* fx 0 -> USD/EUR entries flagged */ }
       const { ingestEmailCosts } = await import('../../costops/email-ingest.js')
-      const result = ingestEmailCosts(getDb(), entries as import('../../costops/email-ingest.js').EmailCostEntry[], { fxUsdHuf, now })
+      const result = ingestEmailCosts(getDb(), entries as import('../../costops/email-ingest.js').EmailCostEntry[], { fxUsdHuf, fxEurHuf, now })
       json(res, { ok: result.errors.length === 0, ...result })
     } catch (err) {
       logger.error({ err }, 'CostOps email-ingest failed')
@@ -149,6 +157,29 @@ export async function tryHandleCosts(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
+  // v0.8 (card 6f4d1332 §5/§6.2): agent-grouped token cost + run-rate forecast, and the
+  // normalized limits/quota pass (subscription lifecycle + DeepSeek balance + workspace alerts +
+  // Render build-minutes + SSL/domain expiry, all into one shape). Separate from /summary so a
+  // live TLS/RDAP/Render round trip never slows down the primary (DB-only) summary load --
+  // matches how /warnings already keeps its own live checks out of /summary.
+  if (path === '/api/costs/limits' && method === 'GET') {
+    try {
+      const monthKey = url.searchParams.get('month') || undefined
+      const now = Math.floor(Date.now() / 1000)
+      const win = monthWindow(now, monthKey)
+      const { pricing } = loadPricingConfig()
+      const tokenByAgent = getTokenCostByAgent(getDb(), pricing, win.start, win.end, win.fractionElapsed)
+      const { config: subsConfig } = loadSubscriptionsConfig()
+      const subscriptions = deriveLifecycle(subsConfig, now)
+      const limits = await getLimitStatus(getDb(), now, subscriptions)
+      json(res, { token_by_agent: tokenByAgent, limits })
+    } catch (err) {
+      logger.error({ err }, 'CostOps limits failed')
+      json(res, { error: 'Cost limits failed' }, 500)
+    }
+    return true
+  }
+
   // v0.7/v2: deterministic + LIVE-wired warnings. Deterministic rules (budget/
   // sync/lifecycle/pending_permission) are DB-only and instant; the 2 live
   // checks (Render build-minutes, workspace alerts) add a real network round
@@ -165,7 +196,12 @@ export async function tryHandleCosts(ctx: RouteContext): Promise<boolean> {
       const summary = getCostSummary(db, config, now, { monthKey, configExists: exists, configErrors: errors, pricing, pricingExists })
       const { config: subsConfig } = loadSubscriptionsConfig()
       const subscriptions = deriveLifecycle(subsConfig, now)
-      const deterministic = getWarnings(db, config, now, summary, subscriptions)
+      // v0.8 (card 6f4d1332 §6): getLimitStatus() re-runs the same Render/SSL/domain live checks
+      // internally (normalized shape, for rule 11's uniform tiered alert) -- accepted duplicate
+      // round trip rather than threading raw+normalized dual output through fromLiveChecks; this
+      // route is a low-QPS internal dashboard call, not latency-sensitive.
+      const limits = await getLimitStatus(db, now, subscriptions)
+      const deterministic = getWarnings(db, config, now, summary, subscriptions, limits)
       const workspaceAlerts = buildWorkspaceAlertWarnings(db, now)
       const renderBuildMinutes = await checkRenderBuildMinutes(now)
       const { config: domainsConfig } = loadDomainsConfig()

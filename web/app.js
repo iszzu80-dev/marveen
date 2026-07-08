@@ -11046,12 +11046,19 @@ async function loadCosts() {
     const sres = await fetch('/api/costs/subscriptions')
     if (sres.ok) { const sj = await sres.json(); subsResp = Array.isArray(sj.subscriptions) ? sj.subscriptions : [] }
   } catch (e) { /* non-fatal -- AI subscription card just shows empty */ }
-  // Per-line original currency/FX retention (only /api/costs/export carries it, not /summary).
-  let exportRows = []
+  // v0.8: agent-grouped token cost + normalized limits/quota (subscriptions, DeepSeek balance,
+  // Workspace alerts, Render build-minutes, SSL/domain expiry) -- one shared "Token & limit
+  // monitor" section below is built from this instead of two separate cards.
+  let tokenByAgent = []
+  let limitsResp = []
   try {
-    const eres = await fetch('/api/costs/export?format=json')
-    if (eres.ok) { const ej = await eres.json(); exportRows = Array.isArray(ej.rows) ? ej.rows : [] }
-  } catch (e) { /* non-fatal -- currency detail just shows empty */ }
+    const lres = await fetch('/api/costs/limits')
+    if (lres.ok) {
+      const lj = await lres.json()
+      tokenByAgent = Array.isArray(lj.token_by_agent) ? lj.token_by_agent : []
+      limitsResp = Array.isArray(lj.limits) ? lj.limits : []
+    }
+  } catch (e) { /* non-fatal -- token/limit monitor just shows empty */ }
 
   const cur = s.currency || 'HUF'
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
@@ -11105,17 +11112,21 @@ async function loadCosts() {
       case 'provider_plan_estimate': return { src: 'API plan estimate', q: 'plan', note: 'plan-alapú, nem számla' }
       case 'local_token_estimate': return { src: 'Tokenbecslés', q: 'local', note: 'lokális tokenhasználatból' }
       case 'estimate': return { src: 'Kézi becslés', q: 'manual', note: 'nincs API collector' }
+      case 'pending_permission': return { src: 'Nincs hozzáférés', q: 'manual', note: 'hozzáférés/engedély hiányzik' }
       case 'manual':
       default: return { src: 'Kézi fallback', q: 'manual', note: 'nincs API collector' }
     }
   }
 
   // Cost/quota/expiry warnings (v0.7 + sec-16 typed extension, /api/costs/warnings).
-  // Confirmed with Mason (fullstackfejleszto, 2026-07-07): severity is exactly 'low'|'medium'|'high',
-  // no 4th tier. The Render 100%-blocked state is still severity:'high' -- distinguished by
-  // code+threshold+current_value, not by a dedicated severity string (see isHardBlock below).
-  const sevRank = { high: 0, medium: 1, low: 2 }
+  // v0.8 (card 6f4d1332 §6): WarningSeverity widened to 5 tiers -- 'critical'/'blocked' added
+  // above the pre-existing 'high'/'medium'/'low' for the new generic tiered-limit rule (70/80/
+  // 90/100%). The old Render-100% special case (isHardBlock below) predates this and still works
+  // standalone, but most future 100%-consumed signals now arrive as severity:'blocked' directly.
+  const sevRank = { blocked: -1, critical: 0, high: 1, medium: 2, low: 3 }
   const sevStyle = (sev) => ({
+    blocked: ['Blokkolva', '#e74c3c', 'rgba(231,76,60,0.16)'],
+    critical: ['Kritikus', '#e74c3c', 'rgba(231,76,60,0.14)'],
     high: ['Magas', '#e0a800', 'rgba(224,168,0,0.16)'],
     medium: ['Közepes', '#e0a800', 'rgba(224,168,0,0.12)'],
     low: ['Alacsony', '#5b9dff', 'rgba(45,108,223,0.14)'],
@@ -11161,6 +11172,31 @@ async function loadCosts() {
     if (!m) return ''
     return '<span style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:0.68em;font-weight:600;color:' + m[1] + ';background:' + m[2] + ';white-space:nowrap;">' + esc(m[0]) + '</span>'
   }
+  // v0.8: actual_source distinguishes HOW a cost was captured (orthogonal to confidence's
+  // priority axis) -- live API poll vs an email invoice vs a config-driven fixed cost vs
+  // genuinely no data yet.
+  const actualSrcBadge = (a) => {
+    const m = {
+      provider_api: ['Élő API', '#2ecc71', 'rgba(46,204,113,0.15)'],
+      email_invoice: ['Email számla', '#5b9dff', 'rgba(45,108,223,0.14)'],
+      manual_entry: ['Kézi tétel', '#9aa0a6', 'rgba(150,150,150,0.16)'],
+      pending_permission: ['Nincs hozzáférés', '#e0a800', 'rgba(224,168,0,0.14)'],
+      no_data: ['Nincs adat', '#9aa0a6', 'rgba(150,150,150,0.16)'],
+    }[a] || null
+    if (!m) return ''
+    return '<span style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:0.68em;font-weight:600;color:' + m[1] + ';background:' + m[2] + ';white-space:nowrap;">' + esc(m[0]) + '</span>'
+  }
+  const forecastBasisLabel = (b) => ({
+    run_rate: 'havi ütem alapján',
+    fixed_subscription: 'fix előfizetés',
+    manual_forecast: 'kézi előrejelzés',
+    no_forecast: null,
+  }[b] || null)
+  const origCurrencyStr = (t) => (t.original_amount != null && t.original_currency)
+    ? (Number(t.original_amount) || 0).toLocaleString('hu-HU') + ' ' + esc(t.original_currency)
+      + (t.fx_rate ? ' (árf. ' + esc(String(t.fx_rate)) + (t.fx_date ? ', ' + fmtAnyDate(t.fx_date) : '') + ')' : '')
+    : null
+
   const warnItem = (w) => {
     let [sevLabel, sevColor, sevBg] = sevStyle(w.severity)
     if (isHardBlock(w)) { sevLabel = 'Blokkolva'; sevColor = '#e74c3c'; sevBg = 'rgba(231,76,60,0.16)' }
@@ -11195,7 +11231,6 @@ async function loadCosts() {
   const opv = s.operational || {}
   const b = s.budget
   const rp = s.render_plan
-  const tce = s.token_cost_estimate
 
   // ---- 1. Top summary cards ----
   const freshTs = opv.data_freshness || (rp && rp.last_sync) || null
@@ -11242,71 +11277,39 @@ async function loadCosts() {
     if (!warnByProvider[p] || (sevRank[w.severity] ?? 9) < (sevRank[warnByProvider[p].severity] ?? 9)) warnByProvider[p] = w
   })
 
-  // ---- 1c. AI subscription / kvóta nézet (non-PAYG: Claude Pro/Max, ChatGPT Plus, DeepSeek balance) ----
-  const subStatusLabel = (st) => ({ active: 'Aktív', canceled: 'Lemondva' }[st] || st || '—')
-  const amtSrcLabel = (a) => ({ invoice: 'Számla alapján', manual_fallback: 'Kézi becslés', no_invoice_found: 'Nincs számla/nyugta rögzítve' }[a] || a || '—')
-  const quotaGaugeRow = (w) => {
-    if (!w) return ''
-    if (isPendingWarn(w)) return '<div style="font-size:0.78em;color:#9aa0a6;margin-top:6px;">Kvóta: nincs adatforrás — ' + esc(w.message || '') + '</div>'
-    if (w.current_value != null && w.unit === '%') {
-      const pct = Math.max(0, Math.min(100, Number(w.current_value)))
-      const gColor = pct >= 85 ? '#e74c3c' : pct >= 60 ? '#e0a800' : '#2ecc71'
-      return '<div style="margin-top:6px;">'
-        + '<div style="display:flex;justify-content:space-between;font-size:0.78em;color:var(--text-muted,#888);"><span>Kvóta felhasználva</span><span>' + pct + '%</span></div>'
-        + '<div style="background:rgba(150,150,150,0.2);border-radius:6px;height:6px;overflow:hidden;margin-top:3px;"><div style="background:' + gColor + ';height:100%;width:' + pct + '%;"></div></div>'
-        + '</div>'
-    }
-    return '<div style="font-size:0.78em;color:var(--text-muted,#888);margin-top:6px;">' + esc(w.message || '') + '</div>'
-  }
-  const subRow = (sub, quotaW) => {
-    const statusColor = sub.status === 'canceled' ? '#e0a800' : sub.past_due ? '#e74c3c' : '#2ecc71'
-    const dateVal = sub.paid_until || sub.next_renewal
-    const dateLabel = sub.paid_until ? 'Fut, majd megszűnik: ' : (sub.next_renewal ? 'Következő megújítás: ' : '')
-    const dd = daysRemaining(dateVal)
-    return '<div style="padding:10px 0;border-top:1px solid var(--border,#eee);">'
-      + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">'
-      + '<span style="font-weight:600;font-size:0.9em;">' + esc(sub.name) + '</span>'
-      + '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.72em;font-weight:600;color:' + statusColor + ';background:' + statusColor + '22;white-space:nowrap;">' + esc(subStatusLabel(sub.status)) + '</span>'
-      + '</div>'
-      + (dateVal ? '<div style="font-size:0.82em;color:var(--text-muted,#888);margin-top:2px;">' + dateLabel + fmtAnyDate(dateVal) + daysStr(dd) + '</div>' : '')
-      + '<div style="font-size:0.78em;color:var(--text-muted,#888);margin-top:2px;">' + esc(amtSrcLabel(sub.amount_source)) + (sub.notes ? ' · ' + esc(sub.notes) : '') + '</div>'
-      + quotaGaugeRow(quotaW)
-      + '</div>'
-  }
-  const standaloneQuotaRow = (name, w) => '<div style="padding:10px 0;border-top:1px solid var(--border,#eee);">'
-    + '<div style="font-weight:600;font-size:0.9em;">' + esc(name) + '</div>' + quotaGaugeRow(w) + '</div>'
-  const quotaByCode = {}
-  warningsArr.filter(w => w.warning_type === 'quota').forEach(w => { quotaByCode[w.code] = w })
-  const subsRows = subsResp.map(sub => subRow(sub, sub.id === 'anthropic-max' ? quotaByCode['claude_max_weekly_limit_unknown'] : null)).join('')
-  const deepseekRow = quotaByCode['deepseek_balance_unknown'] ? standaloneQuotaRow('DeepSeek (előre fizetett egyenleg)', quotaByCode['deepseek_balance_unknown']) : ''
-  const aiSubBlock = (subsResp.length === 0 && !deepseekRow)
-    ? ''
-    : card('AI előfizetések / kvóták', subsRows + deepseekRow)
-
-  // ---- 2. Provider breakdown = main table ----
-  const brk = (opv.provider_breakdown || []).slice().sort((a, b2) => (Number(b2.spend) || 0) - (Number(a.spend) || 0))
-  const shown = brk.filter(p => (Number(p.spend) || 0) > 0)
-  const zeroCount = brk.length - shown.length
-  const provRows = shown.map(p => {
-    const so = sourceOf(p.confidence)
-    const isRender = p.provider === 'render'
-    const upd = isRender && rp ? rp.last_sync : opv.data_freshness
-    const pw = warnByProvider[String(p.provider || '').toLowerCase()]
+  // ---- 2. Provider / source breakdown = main table ----
+  // v0.8 (card 6f4d1332 §3/§7): rebuilt on s.all_sources (per-source, not per-provider-summed
+  // opv.provider_breakdown) so actual_source, forecast+basis and original-currency/fx -- all
+  // newly threaded through ledger.ts this build -- can render inline per row instead of living
+  // in 2 separate collapsible blocks (manual-fallback + FX) that duplicated the same sources.
+  const allSources = (s.all_sources || []).slice()
+  const realRows = allSources.filter(t => t.spend != null && Number(t.spend) > 0)
+  const pendingRows = allSources.filter(t => t.confidence === 'pending_permission')
+  const zeroCount = allSources.length - realRows.length - pendingRows.length
+  const sourceRow = (t) => {
+    const so = sourceOf(t.confidence)
+    const isPending = t.confidence === 'pending_permission'
+    const pw = warnByProvider[String(t.provider || '').toLowerCase()]
     const warnFlag = pw ? ' <span title="' + esc(pw.message || '') + '" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:' + sevStyle(pw.severity)[1] + ';margin-left:4px;vertical-align:middle;"></span>' : ''
+    const basisLabel = forecastBasisLabel(t.forecast_basis)
+    const orig = origCurrencyStr(t)
+    const detailBits = []
+    if (t.forecast_month_end != null) detailBits.push('előrejelzés: ' + fmt(t.forecast_month_end) + (basisLabel ? ' (' + basisLabel + ')' : ''))
+    if (orig) detailBits.push('eredeti: ' + orig)
     return '<tr style="border-top:1px solid var(--border,#eee);">'
-      + '<td style="padding:8px 10px 8px 0;font-weight:600;text-transform:capitalize;">' + esc(p.provider) + warnFlag + '</td>'
-      + '<td style="padding:8px 10px 8px 0;color:var(--text-muted,#888);">' + esc(so.src) + '</td>'
+      + '<td style="padding:8px 10px 8px 0;font-weight:600;text-transform:capitalize;">' + esc(t.name || t.provider) + warnFlag + '</td>'
+      + '<td style="padding:8px 10px 8px 0;">' + actualSrcBadge(t.actual_source) + '</td>'
       + '<td style="padding:8px 10px 8px 0;">' + qBadge(so.q) + '</td>'
-      + '<td style="padding:8px 10px 8px 0;text-align:right;white-space:nowrap;font-weight:600;">' + fmt(p.spend) + '</td>'
-      + '<td style="padding:8px 10px 8px 0;color:var(--text-muted,#888);font-size:0.85em;white-space:nowrap;">' + fmtDate(upd) + '</td>'
-      + '<td style="padding:8px 0;color:var(--text-muted,#888);font-size:0.85em;">' + esc(so.note) + '</td></tr>'
-  }).join('') || '<tr><td colspan="6" style="color:var(--text-muted,#888);padding:8px 0;">nincs adat</td></tr>'
-  const providerTable = card('Providerenkénti bontás',
+      + '<td style="padding:8px 10px 8px 0;text-align:right;white-space:nowrap;font-weight:600;">' + (isPending ? '<span style="color:var(--text-muted,#888);font-weight:400;">nincs adat</span>' : fmt(t.spend)) + '</td>'
+      + '<td style="padding:8px 0;color:var(--text-muted,#888);font-size:0.85em;">' + (detailBits.length ? esc(detailBits.join(' · ')) : esc(so.note)) + '</td></tr>'
+  }
+  const provRows = realRows.map(sourceRow).join('') + pendingRows.map(sourceRow).join('')
+  const providerTable = card('Providerenkénti / forrásonkénti bontás',
     tableWrap('<table style="width:100%;min-width:560px;border-collapse:collapse;font-size:0.92em;">'
-      + '<tr style="color:var(--text-muted,#888);font-size:0.78em;text-align:left;"><th style="text-align:left;padding-bottom:4px;">Provider</th><th style="text-align:left;">Adatforrás</th><th style="text-align:left;">Adat minősége</th><th style="text-align:right;">Havi összeg</th><th style="text-align:left;">Frissítve</th><th style="text-align:left;">Megjegyzés</th></tr>'
-      + provRows + '</table>')
+      + '<tr style="color:var(--text-muted,#888);font-size:0.78em;text-align:left;"><th style="text-align:left;padding-bottom:4px;">Forrás</th><th style="text-align:left;">Rögzítés módja</th><th style="text-align:left;">Adat minősége</th><th style="text-align:right;">Havi összeg</th><th style="text-align:left;">Részletek</th></tr>'
+      + (provRows || '<tr><td colspan="5" style="color:var(--text-muted,#888);padding:8px 0;">nincs adat</td></tr>') + '</table>')
     + '<div style="font-size:0.78em;color:var(--text-muted,#888);margin-top:8px;">Becslésként csak azt jelöljük, amire nincs API-alapú adat. Kézi érték csak fallback.'
-    + (zeroCount > 0 ? ' (+' + zeroCount + ' provider 0 ' + cur + ')' : '') + '</div>')
+    + (zeroCount > 0 ? ' (+' + zeroCount + ' forrás 0 ' + cur + ')' : '') + '</div>')
 
   // ---- 3. Render card (compact; plan estimate since no billing API) ----
   let renderCard = ''
@@ -11339,55 +11342,61 @@ async function loadCosts() {
       syncBtn)
   }
 
-  // ---- 4. Token estimate (separate block) ----
-  let tokenCard = ''
-  if (tce) {
-    const up = tce.unpriced || {}
-    const unknownTok = Number(up.unknown_model_tokens) || 0
-    const noRateTok = Number(up.no_rate_tokens) || 0
-    const priced = (tce.priced_by_model || []).map(m => '<tr style="border-top:1px solid var(--border,#eee);"><td style="padding:4px 8px 4px 0;">' + esc(m.model) + '</td><td style="padding:4px 8px 4px 0;color:var(--text-muted,#888);">' + esc(m.provider) + '</td><td style="padding:4px 0;text-align:right;">' + fmt(m.estimated_huf) + '</td></tr>').join('') || '<tr><td colspan="3" style="color:var(--text-muted,#888);padding:4px 0;">nincs árazott modell</td></tr>'
-    const warn = (unknownTok + noRateTok) > 0
-      ? '<div style="font-size:0.78em;color:#e0a800;margin-top:6px;">' + (unknownTok + noRateTok).toLocaleString('hu-HU') + ' token árazatlan (ismeretlen modell vagy nincs díjszabás) — rájuk nem számoltunk költséget.</div>'
-      : ''
-    tokenCard = card('AI token költségbecslés ' + qBadge('local'),
-      '<div style="font-size:0.82em;color:var(--text-muted,#888);margin-bottom:8px;">Ez lokális tokenhasználatból számolt becslés, nem számlaadat. Nem része a fenti havi költésnek.</div>'
-      + '<div style="font-size:1.3em;font-weight:700;">' + fmt(tce.total_estimated_huf) + '</div>'
-      + warn
-      + '<details style="margin-top:10px;"><summary style="cursor:pointer;font-size:0.85em;color:var(--text-muted,#888);">Modellenkénti bontás</summary>'
-      + tableWrap('<table style="width:100%;min-width:320px;border-collapse:collapse;font-size:0.85em;margin-top:6px;"><tr style="color:var(--text-muted,#888);font-size:0.78em;text-align:left;"><th style="text-align:left;">Modell</th><th style="text-align:left;">Provider</th><th style="text-align:right;">Becsült</th></tr>' + priced + '</table>')
-      + '<div style="font-size:0.78em;color:var(--text-muted,#888);margin-top:6px;">Árazatlan: ismeretlen modell ' + unknownTok.toLocaleString('hu-HU') + ' token, nincs díjszabás ' + noRateTok.toLocaleString('hu-HU') + ' token.</div>'
-      + '</details>')
+  // ---- 4. Token & limit monitor ----
+  // v0.8 (card 6f4d1332 §5/§6.2/§7): merges the old separate "token cost estimate" card and
+  // "AI subscription / kvóta" card into one, both now driven by /api/costs/limits -- agent-
+  // grouped token cost (getTokenCostByAgent) + the normalized limits/quota pass (subscriptions,
+  // DeepSeek balance, Workspace alerts, Render build-minutes, SSL/domain expiry all in one
+  // uniform usage_pct shape) rather than piecing quota state together from warning codes.
+  const limitTierColor = (st) => ({ ok: '#2ecc71', warning: '#e0a800', critical: '#e74c3c', blocked: '#e74c3c', unknown: '#9aa0a6' }[st] || '#9aa0a6')
+  const limitStatusLabel = (st) => ({ ok: 'Rendben', warning: 'Figyelmeztetés', critical: 'Kritikus', blocked: 'Blokkolva', unknown: 'Ismeretlen' }[st] || st)
+  const limitTypeLabel = (t) => ({
+    subscription_renewal: 'előfizetés megújítás', weekly_tokens: 'heti token-keret', five_hour_tokens: '5 órás token-keret',
+    balance: 'egyenleg', workspace_payment: 'fizetés / felfüggesztés', build_minutes: 'build percek',
+    ssl_expiry: 'SSL lejárat', domain_expiry: 'domain lejárat',
+  }[t] || t)
+  const subByProvider = {}
+  subsResp.forEach(sub => { subByProvider[sub.provider] = sub })
+  const limitGaugeRow = (l) => {
+    const sub = l.limit_type === 'subscription_renewal' ? subByProvider[l.provider] : null
+    const title = sub ? sub.name : (esc(l.provider) + ' · ' + esc(limitTypeLabel(l.limit_type)))
+    const color = limitTierColor(l.status)
+    let body
+    if (l.usage_pct != null) {
+      const pct = Math.round(l.usage_pct * 100)
+      body = '<div style="margin-top:6px;">'
+        + '<div style="display:flex;justify-content:space-between;font-size:0.78em;color:var(--text-muted,#888);"><span>Felhasználva</span><span>' + pct + '%</span></div>'
+        + '<div style="background:rgba(150,150,150,0.2);border-radius:6px;height:6px;overflow:hidden;margin-top:3px;"><div style="background:' + color + ';height:100%;width:' + Math.min(100, pct) + '%;"></div></div>'
+        + '</div>'
+    } else {
+      const dateVal = l.expiry_date || l.paid_until || l.reset_date
+      const dd = daysRemaining(dateVal)
+      body = dateVal
+        ? '<div style="font-size:0.78em;color:var(--text-muted,#888);margin-top:6px;">' + (l.paid_until ? 'Fut, majd megszűnik: ' : l.expiry_date ? 'Lejárat: ' : 'Következő: ') + fmtAnyDate(dateVal) + daysStr(dd) + '</div>'
+        : '<div style="font-size:0.78em;color:var(--text-muted,#888);margin-top:6px;">nincs numerikus limit-adat</div>'
+    }
+    return '<div style="padding:10px 0;border-top:1px solid var(--border,#eee);">'
+      + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">'
+      + '<span style="font-weight:600;font-size:0.9em;">' + title + '</span>'
+      + '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.72em;font-weight:600;color:' + color + ';background:' + color + '22;white-space:nowrap;">' + esc(limitStatusLabel(l.status)) + '</span>'
+      + '</div>'
+      + (sub && sub.notes ? '<div style="font-size:0.78em;color:var(--text-muted,#888);margin-top:2px;">' + esc(sub.notes) + '</div>' : '')
+      + body
+      + '</div>'
   }
-
-  // ---- 5. Manual fallback / bootstrap sources (collapsed) ----
-  const allSrc = (s.all_sources || []).map(t => {
-    const so = sourceOf(t.confidence)
-    return '<tr style="border-top:1px solid var(--border,#eee);"><td style="padding:6px 10px 6px 0;">' + esc(t.name) + '</td><td style="padding:6px 10px 6px 0;">' + qBadge(so.q) + '</td><td style="padding:6px 0;text-align:right;white-space:nowrap;">' + fmt(t.spend) + '</td></tr>'
-  }).join('') || '<tr><td colspan="3" style="color:var(--text-muted,#888);padding:6px 0;">nincs konfigurált forrás</td></tr>'
-  const fallbackBlock = '<details style="border:1px solid var(--border,#e2e2e2);border-radius:12px;padding:14px 16px;margin-bottom:16px;">'
-    + '<summary style="cursor:pointer;font-weight:600;">Kézi fallback / bootstrap adatok (' + ((s.all_sources || []).length) + ')</summary>'
-    + '<div style="font-size:0.8em;color:var(--text-muted,#888);margin:8px 0;">Kézzel megadott értékek, amelyek csak összehasonlításra és bootstrap-hez szolgálnak, ha nincs API-adat.</div>'
-    + tableWrap('<table style="width:100%;min-width:320px;border-collapse:collapse;font-size:0.9em;"><tr style="color:var(--text-muted,#888);font-size:0.78em;text-align:left;"><th style="text-align:left;">Forrás</th><th style="text-align:left;">Minőség</th><th style="text-align:right;">Havi</th></tr>' + allSrc + '</table>')
+  const limitRows = limitsResp.map(limitGaugeRow).join('') || '<div style="color:var(--text-muted,#888);font-size:0.9em;">nincs limit-adat.</div>'
+  const tokenByAgentRows = tokenByAgent.slice()
+    .sort((a, b2) => (Number(b2.estimated_huf) || 0) - (Number(a.estimated_huf) || 0))
+    .map(m => '<tr style="border-top:1px solid var(--border,#eee);"><td style="padding:4px 8px 4px 0;">' + esc(m.agent) + '</td><td style="padding:4px 8px 4px 0;color:var(--text-muted,#888);">' + esc(m.model) + '</td><td style="padding:4px 0;text-align:right;">' + fmt(m.estimated_huf) + '</td></tr>')
+    .join('') || '<tr><td colspan="3" style="color:var(--text-muted,#888);padding:4px 0;">nincs adat</td></tr>'
+  const tokenTotal = tokenByAgent.reduce((sum, m) => sum + (Number(m.estimated_huf) || 0), 0)
+  const tokenLimitCard = card('Token & limit monitor',
+    '<div style="font-size:0.82em;color:var(--text-muted,#888);margin-bottom:8px;">Lokális tokenhasználatból számolt becslés ágensenként, nem számlaadat -- nem része a fenti havi költésnek.</div>'
+    + '<div style="font-size:1.3em;font-weight:700;">' + fmt(tokenTotal) + '</div>'
+    + '<details style="margin-top:10px;"><summary style="cursor:pointer;font-size:0.85em;color:var(--text-muted,#888);">Ágensenkénti bontás</summary>'
+    + tableWrap('<table style="width:100%;min-width:320px;border-collapse:collapse;font-size:0.85em;margin-top:6px;"><tr style="color:var(--text-muted,#888);font-size:0.78em;text-align:left;"><th style="text-align:left;">Ágens</th><th style="text-align:left;">Modell</th><th style="text-align:right;">Becsült</th></tr>' + tokenByAgentRows + '</table>')
     + '</details>'
-
-  // ---- 5b. Eredeti deviza / FX (only rows where original_currency differs from the settlement currency) ----
-  const fxRows = exportRows.filter(r => r.original_amount != null && r.original_currency)
-  const fxTable = fxRows.map(r => {
-    const fxDateStr = r.fx_date ? fmtAnyDate(r.fx_date) : '—'
-    return '<tr style="border-top:1px solid var(--border,#eee);">'
-      + '<td style="padding:6px 10px 6px 0;text-transform:capitalize;">' + esc(r.provider) + '</td>'
-      + '<td style="padding:6px 10px 6px 0;">' + esc(r.service_name || '') + '</td>'
-      + '<td style="padding:6px 10px 6px 0;text-align:right;white-space:nowrap;">' + (Number(r.original_amount) || 0).toLocaleString('hu-HU') + ' ' + esc(r.original_currency) + '</td>'
-      + '<td style="padding:6px 10px 6px 0;text-align:right;white-space:nowrap;">' + fmt(r.amount) + '</td>'
-      + '<td style="padding:6px 0;color:var(--text-muted,#888);font-size:0.85em;">' + (r.fx_rate ? esc(String(r.fx_rate)) + ' (' + fxDateStr + ')' : '—') + '</td></tr>'
-  }).join('')
-  const fxBlock = '<details style="border:1px solid var(--border,#e2e2e2);border-radius:12px;padding:14px 16px;margin-bottom:16px;">'
-    + '<summary style="cursor:pointer;font-weight:600;">Eredeti deviza / árfolyam' + (fxRows.length ? ' (' + fxRows.length + ')' : '') + '</summary>'
-    + (fxRows.length === 0
-      ? '<div style="font-size:0.85em;color:var(--text-muted,#888);margin-top:8px;">Jelenleg nincs eltérő eredeti devizában rögzített tétel — minden sor már a jelentési devizában (' + esc(cur) + ') van tárolva.</div>'
-      : '<div style="font-size:0.8em;color:var(--text-muted,#888);margin:8px 0;">Ahol a számla eredeti pénzneme eltér a jelentési devizától (' + esc(cur) + '), az eredeti összeg + árfolyam is látszik.</div>'
-        + tableWrap('<table style="width:100%;min-width:460px;border-collapse:collapse;font-size:0.9em;"><tr style="color:var(--text-muted,#888);font-size:0.78em;text-align:left;"><th style="text-align:left;">Provider</th><th style="text-align:left;">Szolgáltatás</th><th style="text-align:right;">Eredeti</th><th style="text-align:right;">' + esc(cur) + '</th><th style="text-align:left;">Árfolyam</th></tr>' + fxTable + '</table>'))
-    + '</details>'
+    + '<div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border,#e2e2e2);"><div style="font-weight:600;font-size:0.88em;margin-bottom:4px;">Limitek / kvóták</div>' + limitRows + '</div>')
 
   // ---- 6. Diagnostics / debug (collapsed, bottom) ----
   const conf = Object.entries(s.confidence_breakdown || {}).map(([k, v]) => {
@@ -11434,12 +11443,9 @@ async function loadCosts() {
     + '<div style="font-size:0.85em;color:var(--text-muted,#888);margin-bottom:14px;">Ahol van API-adat, azt használjuk. Becslés csak fallback, ha nincs API-adat.</div>'
     + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:18px;">' + cards.join('') + '</div>'
     + warningsBlock
-    + aiSubBlock
     + providerTable
     + renderCard
-    + tokenCard
-    + fallbackBlock
-    + fxBlock
+    + tokenLimitCard
     + diagBlock
 }
 

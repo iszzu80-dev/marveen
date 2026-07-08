@@ -4,6 +4,7 @@ import { syncFixedCostsToLedger, getCostSummary, monthWindow } from '../costops/
 import { getWarnings } from '../costops/warnings.js'
 import { deriveLifecycle, type SubscriptionsConfig } from '../costops/subscriptions.js'
 import type { CostOpsConfig } from '../costops/config.js'
+import type { LimitStatus } from '../costops/limits.js'
 
 const NOW = Math.floor(Date.UTC(2026, 6, 15, 12, 0, 0) / 1000) // 2026-07-15
 
@@ -83,8 +84,12 @@ describe('costops warnings', () => {
       VALUES ('aws', @start, @end, 'usage', 0, 'HUF', 'pending_permission', @now, @now)
     `).run({ start: win.start, end: win.end, now: NOW })
     const summary = getCostSummary(db, c, NOW)
-    // The pending source must not appear as a headline 0-spend source.
-    expect(summary.all_sources.find(s => s.source_id === 'aws')).toBeUndefined()
+    // v0.8: pending sources are no longer hidden from all_sources -- they appear with an
+    // honest spend: null (never a fake 0), confidence/actual_source both 'pending_permission'.
+    const awsRow = summary.all_sources.find(s => s.source_id === 'aws')
+    expect(awsRow).toBeDefined()
+    expect(awsRow!.spend).toBeNull()
+    expect(awsRow!.confidence).toBe('pending_permission')
     const warnings = getWarnings(db, c, NOW, summary, [])
     const w = warnings.find(x => x.code === 'billing_access_needed')
     expect(w).toBeDefined()
@@ -125,17 +130,25 @@ describe('costops warnings', () => {
     expect(w!.confidence).toBe('no_api_or_no_access')
   })
 
-  it('DeepSeek balance: healthy (near peak) is silent, low balance vs peak fires with the right severity', () => {
+  it('DeepSeek balance: low balance vs peak fires the generic tiered limit_usage_high rule (v0.8 -- escalation moved off deepseek_balance_low onto limits.ts + rule 11)', () => {
     const db = getDb()
     const c = cfg({ budgets: [] })
     syncFixedCostsToLedger(db, c, NOW)
     db.prepare(`INSERT INTO provider_balance_snapshots (provider, currency, balance, captured_at) VALUES ('deepseek','USD',100,@t1)`).run({ t1: NOW - 3 * 86400 })
     db.prepare(`INSERT INTO provider_balance_snapshots (provider, currency, balance, captured_at) VALUES ('deepseek','USD',4,@t2)`).run({ t2: NOW })
     const summary = getCostSummary(db, c, NOW)
-    const w = getWarnings(db, c, NOW, summary, []).find(x => x.code === 'deepseek_balance_low')
+    // usage_pct = fraction CONSUMED = 1 - 4/100 = 0.96, matching limits.ts's fromDeepSeekBalance shape.
+    const limits: LimitStatus[] = [{
+      provider: 'deepseek', limit_type: 'balance', current_usage: 4, limit_value: 100,
+      usage_pct: 0.96, reset_date: null, paid_until: null, expiry_date: null,
+      status: 'critical', source: 'ledger',
+    }]
+    const warnings = getWarnings(db, c, NOW, summary, [], limits)
+    expect(warnings.find(x => x.code === 'deepseek_balance_low')).toBeUndefined() // rule retired
+    const w = warnings.find(x => x.code === 'limit_usage_high' && x.provider === 'deepseek')
     expect(w).toBeDefined()
-    expect(w!.severity).toBe('high') // 4/100 = 4% <= 5%
-    expect(w!.current_value).toBe(4)
+    expect(w!.severity).toBe('critical') // 96% consumed >= 90% tier
+    expect(w!.current_value).toBe(96)
   })
 
   it('DeepSeek balance: near-peak (healthy) balance -- no "low" warning, but the raw balance is still always visible (spec 65da75e6 A1)', () => {

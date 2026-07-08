@@ -219,4 +219,80 @@ export function getTokenCostEstimate(
   }
 }
 
+// ---- v0.8 (card 6f4d1332 §5): agent-grouped token cost + run-rate forecast --------------------
+// Sibling of getTokenCostEstimate() -- same pricing config, same per-row pricing logic, just
+// GROUP BY agent, model instead of model alone. No new columns needed: token_usage already has
+// agent/model/provider on every row (db.ts). limit_usage_pct is always null here (honest, not
+// invented) -- this function has no subscription-limit context; a caller can overlay a real
+// ceiling (e.g. SubscriptionEntry.weekly_limit_tokens, if Istvan ever supplies one) separately.
+
+export interface TokenCostByAgentEntry {
+  agent: string
+  provider: string
+  model: string
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+  actual_cost_estimate_mtd: number
+  forecast_month_end: number | null   // null when fractionElapsed is not meaningful (e.g. 0 rows)
+  forecast_basis: 'token_runrate'
+  limit_usage_pct: number | null      // always null -- see module comment above
+}
+
+interface AgentModelAgg {
+  agent: string
+  model: string | null
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+}
+
+/**
+ * Per-(agent, model) token cost estimate + run-rate forecast for [start,end). Rows with no
+ * model or no matching pricing rate are excluded from the result (same "never guess" rule as
+ * getTokenCostEstimate) rather than returned with a fabricated cost.
+ */
+export function getTokenCostByAgent(
+  db: Database.Database,
+  pricing: PricingConfig,
+  start: number,
+  end: number,
+  fractionElapsed: number,
+): TokenCostByAgentEntry[] {
+  const rows = db.prepare(`
+    SELECT agent, model,
+      COALESCE(SUM(input_tokens),0) as input_tokens,
+      COALESCE(SUM(output_tokens),0) as output_tokens,
+      COALESCE(SUM(cache_read_tokens),0) as cache_read_tokens,
+      COALESCE(SUM(cache_creation_tokens),0) as cache_creation_tokens
+    FROM token_usage
+    WHERE timestamp >= @start AND timestamp < @end
+    GROUP BY agent, model
+  `).all({ start, end }) as AgentModelAgg[]
+
+  const out: TokenCostByAgentEntry[] = []
+  for (const r of rows) {
+    const rate = r.model ? pricing.models[r.model] : undefined
+    if (!r.model || !rate) continue // unpriced (unknown model / no rate) -- volume only, not returned here
+    const est = round2(
+      (r.input_tokens / 1e6) * rate.input_per_mtok +
+      (r.output_tokens / 1e6) * rate.output_per_mtok +
+      (r.cache_read_tokens / 1e6) * rate.cache_read_per_mtok +
+      (r.cache_creation_tokens / 1e6) * rate.cache_write_per_mtok,
+    )
+    out.push({
+      agent: r.agent, provider: deriveProvider(r.model), model: r.model,
+      input_tokens: r.input_tokens, output_tokens: r.output_tokens,
+      cache_read_tokens: r.cache_read_tokens, cache_creation_tokens: r.cache_creation_tokens,
+      actual_cost_estimate_mtd: est,
+      forecast_month_end: fractionElapsed > 0 ? round2(est / fractionElapsed) : null,
+      forecast_basis: 'token_runrate',
+      limit_usage_pct: null,
+    })
+  }
+  return out.sort((a, b) => b.actual_cost_estimate_mtd - a.actual_cost_estimate_mtd)
+}
+
 function round2(n: number): number { return Math.round(n * 100) / 100 }

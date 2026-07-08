@@ -649,6 +649,12 @@ export function initDatabase(dbPathOverride?: string): void {
   try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN original_currency TEXT`) } catch { /* already exists */ }
   try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN fx_rate REAL`) } catch { /* already exists */ }
   try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN fx_date INTEGER`) } catch { /* already exists */ }
+  // v0.8 (card 6f4d1332): distinguishes "we queried the provider API live" (provider_api) from
+  // "we read an email invoice" (email_invoice) from "config-driven fixed cost" (manual_entry) --
+  // neither `confidence` (the priority/authoritativeness axis) nor `cost_sources.source_type`
+  // (a category axis) cleanly carries this. Nullable, no default: every write site sets it
+  // explicitly; a NULL row (pre-migration history) falls back to 'no_data' at read time, never guessed.
+  try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN actual_source TEXT`) } catch { /* already exists */ }
   db.exec(`
     CREATE TABLE IF NOT EXISTS budgets (
       id TEXT PRIMARY KEY,

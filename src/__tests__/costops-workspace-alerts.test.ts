@@ -82,7 +82,7 @@ describe('workspace alerts ingest', () => {
     const warnings = buildWorkspaceAlertWarnings(db, NOW)
     expect(warnings).toHaveLength(1) // no redundant flat workspace_payment_failure entry too
     const w = warnings[0]
-    expect(w.code).toBe('workspace_suspension_scheduled')
+    expect(w.code).toBe('workspace_payment_failure_scheduled')
     expect(w.warning_type).toBe('expiry')
     expect(w.due_date).toBe(new Date((NOW + 10 * 86400) * 1000).toISOString().slice(0, 10))
     expect(w.current_value).toBe(10)
@@ -103,7 +103,7 @@ describe('workspace alerts ingest', () => {
     const db = getDb()
     ingestWorkspaceAlerts(db, [{ account: 'google-zst', issue_type: 'payment_failure', detected_at: NOW, suspension_date: NOW + 90 * 86400, message_ref: 'far' }], NOW)
     const w = buildWorkspaceAlertWarnings(db, NOW)[0]
-    expect(w.code).toBe('workspace_suspension_scheduled')
+    expect(w.code).toBe('workspace_payment_failure_scheduled')
     expect(w.severity).toBe('low')
   })
 
@@ -111,7 +111,7 @@ describe('workspace alerts ingest', () => {
     const db = getDb()
     ingestWorkspaceAlerts(db, [{ account: 'google-zst', issue_type: 'payment_failure', detected_at: NOW, suspension_date: NOW - 5 * 86400, message_ref: 'overdue' }], NOW)
     const w = buildWorkspaceAlertWarnings(db, NOW)[0]
-    expect(w.code).toBe('workspace_suspension_overdue')
+    expect(w.code).toBe('workspace_payment_failure_overdue')
     expect(w.severity).toBe('high')
   })
 

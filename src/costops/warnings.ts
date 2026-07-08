@@ -10,8 +10,14 @@ import type { CostOpsConfig } from './config.js'
 import type { CostSummary } from './ledger.js'
 import { monthWindow } from './ledger.js'
 import type { SubscriptionLifecycle } from './subscriptions.js'
+import type { LimitStatus } from './limits.js'
 
-export type WarningSeverity = 'low' | 'medium' | 'high'
+// v0.8 (card 6f4d1332 §6): widened from 'low'|'medium'|'high' to add 'critical'|'blocked' for
+// the new generic tiered limit rule (§4 of the requirements is explicit that an 80%+ limit MUST
+// alert, and a plain 3-tier scale can't distinguish "at 90%, urgent" from "at 100%, actually
+// blocked"). Plain TS union, no DB CHECK constraint -- safe additive change, every existing
+// warning (all still 'low'|'medium'|'high') keeps working unmodified.
+export type WarningSeverity = 'low' | 'medium' | 'high' | 'critical' | 'blocked'
 
 // v0.7/v2 typed extension (card bea78483). Additive on top of the original
 // {code,severity,provider,message,detail} shape -- every existing rule keeps
@@ -57,12 +63,23 @@ export function categoryForProvider(provider: string): string {
 // operational spend is noise, not a warning -- keeps the list actionable.
 const MATERIAL_FRACTION = 0.15
 
+// v0.8 (card 6f4d1332 §6): threshold ladder for the generic tiered limit rule, mapping
+// LimitStatus.usage_pct (fraction consumed) to a warning severity. 80%+ is mandatory per
+// requirements §4; the medium tier is added for earlier visibility, not requirements-mandated.
+const LIMIT_TIERS: Array<[number, WarningSeverity]> = [
+  [1.0, 'blocked'], [0.9, 'critical'], [0.8, 'high'], [0.7, 'medium'],
+]
+
 export function getWarnings(
   db: Database.Database,
   _config: CostOpsConfig,
   now: number,
   summary: CostSummary,
   subscriptions: SubscriptionLifecycle[],
+  // v0.8 (card 6f4d1332 §6): optional so every existing call site keeps compiling/behaving
+  // identically without passing it -- omitted, the new tiered-limit rule below is simply skipped
+  // (no fabricated data), same "degrade gracefully" convention as configExists/pricingExists.
+  limits: LimitStatus[] = [],
 ): CostWarning[] {
   const warnings: CostWarning[] = []
 
@@ -120,14 +137,17 @@ export function getWarnings(
   const totalOp = summary.operational_spend || 0
   if (totalOp > 0) {
     for (const src of summary.all_sources) {
-      const isFallback = src.confidence === 'manual' || src.confidence === 'estimate'
-      if (isFallback && src.spend / totalOp >= MATERIAL_FRACTION) {
+      // v0.8: spend is null for a pending_permission source (never a fabricated 0) -- excluded
+      // here by construction (its confidence is 'pending_permission', not manual/estimate), but
+      // the null check makes that explicit for the type checker too.
+      const isFallback = src.spend != null && (src.confidence === 'manual' || src.confidence === 'estimate')
+      if (isFallback && src.spend! / totalOp >= MATERIAL_FRACTION) {
         warnings.push({
           code: 'high_cost_manual_fallback', severity: 'low', provider: src.provider,
-          message: `${src.name}: a költség jelentős hányada (${Math.round((src.spend / totalOp) * 100)}%) kézi/becsült adaton alapul, nincs valódi számla/API forrás.`,
-          detail: { source_id: src.source_id, spend: src.spend, share: Math.round((src.spend / totalOp) * 100) / 100 },
+          message: `${src.name}: a költség jelentős hányada (${Math.round((src.spend! / totalOp) * 100)}%) kézi/becsült adaton alapul, nincs valódi számla/API forrás.`,
+          detail: { source_id: src.source_id, spend: src.spend, share: Math.round((src.spend! / totalOp) * 100) / 100 },
           warning_type: 'cost', category: categoryForProvider(src.provider), source: 'ledger', confidence: 'estimated',
-          current_value: Math.round((src.spend / totalOp) * 100), threshold: Math.round(MATERIAL_FRACTION * 100), unit: '%',
+          current_value: Math.round((src.spend! / totalOp) * 100), threshold: Math.round(MATERIAL_FRACTION * 100), unit: '%',
         })
       }
     }
@@ -159,6 +179,29 @@ export function getWarnings(
           detail: { previous: prev, current: cur.spend },
           warning_type: 'cost', category: categoryForProvider(cur.provider), source: 'ledger', confidence: 'measured',
           current_value: cur.spend, unit: summary.currency,
+        })
+      }
+    }
+  }
+
+  // 6b. v0.8 (card 6f4d1332 §6.3): large INCREASE vs previous month, per provider -- distinct
+  // from rule 6 above (any material CHANGE, either direction, 15% threshold, low severity,
+  // informational). This is one-directional (increase only) with a higher, more urgent
+  // threshold. 50% is a recommendation, not business-specified (flagged, same treatment as the
+  // Eskuvő bundle-discount placeholder earlier this session) -- tune once real data exists.
+  const LARGE_INCREASE_FRACTION = 0.5
+  if (summary.previous_month) {
+    const prevByProvider = new Map(summary.previous_month.by_provider.map(p => [p.provider, p.spend]))
+    for (const cur of summary.operational.provider_breakdown) {
+      const prev = prevByProvider.get(cur.provider)
+      if (prev !== undefined && prev > 0 && (cur.spend - prev) / prev >= LARGE_INCREASE_FRACTION) {
+        warnings.push({
+          code: 'large_increase_vs_previous_month', severity: 'medium', provider: cur.provider,
+          message: `${cur.provider}: jelentős növekedés az előző hónaphoz képest (${prev} -> ${cur.spend}, +${Math.round(((cur.spend - prev) / prev) * 100)}%).`,
+          detail: { previous: prev, current: cur.spend, threshold_fraction: LARGE_INCREASE_FRACTION },
+          warning_type: 'cost', category: categoryForProvider(cur.provider), source: 'ledger', confidence: 'measured',
+          current_value: cur.spend, threshold: Math.round(LARGE_INCREASE_FRACTION * 100), unit: '%',
+          action: 'Nézd meg, mi okozta a növekedést -- új szolgáltatás, plan-váltás, vagy anomália.',
         })
       }
     }
@@ -224,31 +267,42 @@ export function getWarnings(
     const peak = Math.max(...dsRows.map(r => r.balance))
     const hadObservedDrop = peak > latest // a real drop was seen -- % vs peak is meaningful
     const pct = hadObservedDrop ? Math.round((latest / peak) * 10000) / 100 : null
-    const tierSeverity = pct !== null ? (pct <= 5 ? 'high' : pct <= 15 ? 'medium' : pct <= 30 ? 'low' : null) : null
-    if (tierSeverity) {
-      // A real, meaningful drop AND below a real threshold -- an actual "top up soon" warning.
-      warnings.push({
-        code: 'deepseek_balance_low', severity: tierSeverity, provider: 'deepseek',
-        message: `DeepSeek előre fizetett egyenleg alacsony: ${pct}% a legutóbbi feltöltéshez képest (${latest} ${currency}).`,
-        detail: { latest_balance: latest, peak_balance: peak, currency },
-        warning_type: 'quota', category: 'ai', source: 'ledger', confidence: 'estimated',
-        current_value: pct as number, threshold: 30, unit: '%',
-        action: 'Töltsd fel a DeepSeek egyenleget.',
-      })
-    } else {
-      // Either healthy relative to a real peak, or no drop ever observed (peak===latest,
-      // e.g. right after a top-up or only one snapshot ever) so % isn't meaningful -- still
-      // always show the raw balance so a quota gauge has a real number (spec A1), as
-      // low-severity/informational, not a "problem". confidence stays 'manual' (not
-      // 'estimated') specifically when there's no real peak-vs-latest signal to derive from.
-      warnings.push({
-        code: 'deepseek_balance_info', severity: 'low', provider: 'deepseek',
-        message: `DeepSeek előre fizetett egyenleg: ${latest} ${currency}${pct !== null ? ` (${pct}% a legutóbbi feltöltéshez képest)` : ''}.`,
-        detail: { latest_balance: latest, peak_balance: peak, currency },
-        warning_type: 'quota', category: 'ai', source: 'ledger', confidence: hadObservedDrop ? 'estimated' : 'manual',
-        current_value: latest, unit: currency,
-      })
-    }
+    // v0.8 (card 6f4d1332 §6.1): the ad-hoc, inverted-logic (%-remaining) severity escalation
+    // that used to live here (deepseek_balance_low, 3 hardcoded tiers) is now owned by the
+    // generic tiered limit rule below, fed by limits.ts's normalized usage_pct (fraction
+    // CONSUMED -- the correctly-oriented inverse of this rule's %-remaining framing) for this
+    // exact same balance. This entry stays what spec A1 actually needs: a plain, ALWAYS-shown
+    // informational gauge (never silent, never severity-escalating on its own).
+    warnings.push({
+      code: 'deepseek_balance_info', severity: 'low', provider: 'deepseek',
+      message: `DeepSeek előre fizetett egyenleg: ${latest} ${currency}${pct !== null ? ` (${pct}% a legutóbbi feltöltéshez képest)` : ''}.`,
+      detail: { latest_balance: latest, peak_balance: peak, currency },
+      warning_type: 'quota', category: 'ai', source: 'ledger', confidence: hadObservedDrop ? 'estimated' : 'manual',
+      current_value: latest, unit: currency,
+    })
+  }
+
+  // 11. v0.8 §6.1: generic tiered limit alert -- ANY normalized limit (§6.2's limits.ts pass)
+  // crossing 70/80/90/100% usage gets ONE consistent escalation, replacing the DeepSeek-only
+  // ad-hoc tiering removed above. 'balance' (DeepSeek) is intentionally included -- it no longer
+  // has its own escalation. 'build_minutes' (Render) is intentionally excluded: that source can
+  // only ever report a binary blocked/not-blocked (no API for intermediate tiers, see
+  // render-live-checks.ts), already fully covered by its own dedicated
+  // render_build_minutes_exhausted warning -- adding this generic rule on top would just
+  // duplicate the exact same fact under a second code.
+  for (const l of limits) {
+    if (l.usage_pct === null || l.limit_type === 'build_minutes') continue
+    const tier = LIMIT_TIERS.find(([t]) => l.usage_pct! >= t)
+    if (!tier) continue
+    const [threshold, severity] = tier
+    warnings.push({
+      code: 'limit_usage_high', severity, provider: l.provider,
+      message: `${l.provider} (${l.limit_type}): ${Math.round(l.usage_pct! * 100)}% felhasználva.`,
+      detail: { limit_type: l.limit_type, current_usage: l.current_usage, limit_value: l.limit_value, source: l.source },
+      warning_type: 'quota', category: categoryForProvider(l.provider), source: 'ledger', confidence: 'estimated',
+      current_value: Math.round(l.usage_pct! * 100), threshold: Math.round(threshold * 100), unit: '%',
+      action: severity === 'blocked' ? 'A limit elérve -- azonnali beavatkozás szükséges.' : 'Kövesd a felhasználást, közelít a limithez.',
+    })
   }
 
   return warnings

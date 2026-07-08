@@ -113,14 +113,20 @@ export function buildWorkspaceAlertWarnings(db: Database.Database, now: number):
     // same underlying issue. Never fabricated: only fires when suspension_date was actually
     // extracted from the source email, not guessed from a generic grace-period assumption.
     if (r.suspension_date !== null) {
+      // v0.8 (card 6f4d1332 §6.4): code carries issue_type too -- previously every date-based
+      // row collapsed onto the same 'workspace_suspension_overdue'/'_scheduled' code regardless
+      // of whether the underlying signal was a payment_failure, suspension_notice, or an already
+      // -suspended account, losing that distinction for any code-keyed consumer (dedup, UI
+      // grouping, requirements §6's per-type list). detail.issue_type carried it, but the code
+      // itself did not.
       const daysRemaining = Math.floor((r.suspension_date - now) / 86400)
       if (daysRemaining < 0) {
         // Deadline already passed with no re-detection since -- treat as an active suspension,
         // not silently drop it (a stale-but-unresolved deadline is worse, not better).
         warnings.push({
-          code: 'workspace_suspension_overdue', severity: 'high', provider: 'google-workspace',
+          code: `workspace_${r.issue_type}_overdue`, severity: 'high', provider: 'google-workspace',
           message: `${r.account}: a felfüggesztési határidő (${new Date(r.suspension_date * 1000).toISOString().slice(0, 10)}) már elmúlt, a fiók állapota nem megerősített.`,
-          detail: { account: r.account, suspension_date: r.suspension_date },
+          detail: { account: r.account, issue_type: r.issue_type, suspension_date: r.suspension_date },
           warning_type: 'expiry', category: 'productivity', source: 'workspace_alert', confidence: 'measured',
           due_date: new Date(r.suspension_date * 1000).toISOString().slice(0, 10),
           action: 'Ellenőrizd azonnal a Workspace admin konzolt.',
@@ -129,9 +135,9 @@ export function buildWorkspaceAlertWarnings(db: Database.Database, now: number):
       }
       const severity = severityForDays(daysRemaining) ?? 'low' // always visible once a real deadline exists, even if >30d out
       warnings.push({
-        code: 'workspace_suspension_scheduled', severity, provider: 'google-workspace',
+        code: `workspace_${r.issue_type}_scheduled`, severity, provider: 'google-workspace',
         message: `${r.account}: felfüggesztés ${daysRemaining} nap múlva (${new Date(r.suspension_date * 1000).toISOString().slice(0, 10)}), ha a fizetés nem rendeződik.`,
-        detail: { account: r.account, suspension_date: r.suspension_date, days_remaining: daysRemaining },
+        detail: { account: r.account, issue_type: r.issue_type, suspension_date: r.suspension_date, days_remaining: daysRemaining },
         warning_type: 'expiry', category: 'productivity', source: 'workspace_alert', confidence: 'measured',
         due_date: new Date(r.suspension_date * 1000).toISOString().slice(0, 10),
         current_value: daysRemaining, threshold: EXPIRY_THRESHOLDS.warn, unit: 'day',

@@ -214,15 +214,16 @@ export function syncFixedCostsToLedger(
     INSERT INTO cost_line_items
       (source_id, charge_period_start, charge_period_end, charge_category, service_name,
        usage_type, consumed_quantity, consumed_unit, billed_cost, effective_cost, currency,
-       confidence, data_freshness, source_ref, dedup_key, created_at)
+       confidence, data_freshness, source_ref, dedup_key, created_at, actual_source)
     VALUES
       (@source_id, @start, @end, @charge_category, @service_name,
        NULL, 1, 'month', @billed_cost, NULL, @currency,
-       @confidence, @now, NULL, @dedup_key, @now)
+       @confidence, @now, NULL, @dedup_key, @now, 'manual_entry')
     ON CONFLICT(dedup_key) DO UPDATE SET
       billed_cost=excluded.billed_cost, charge_category=excluded.charge_category,
       service_name=excluded.service_name, currency=excluded.currency,
-      confidence=excluded.confidence, data_freshness=excluded.data_freshness
+      confidence=excluded.confidence, data_freshness=excluded.data_freshness,
+      actual_source=excluded.actual_source
   `)
   const tx = db.transaction((entries: CostOpsConfig['fixed_costs']) => {
     let count = 0
@@ -263,7 +264,24 @@ export interface CostSummary {
   top_sources: Array<{ source_id: string; name: string; spend: number }>
   // Full list of every configured/active source (not capped) -- top_sources is
   // the top-5 by spend; all_sources is the complete set for the dashboard table.
-  all_sources: Array<{ source_id: string; name: string; provider: string; source_type: string; spend: number; confidence: string }>
+  // v0.8 (card 6f4d1332): extended with actual_source, per-source forecast, and
+  // original-currency retention -- this array is now the main provider-table backing data
+  // (replacing operational.provider_breakdown, a coarser per-provider aggregate that can't
+  // correctly carry these per-item fields once a provider has more than one source). spend is
+  // `number | null` -- null (never a fabricated 0) for a pending_permission source with no
+  // readable amount.
+  all_sources: Array<{
+    source_id: string; name: string; provider: string; source_type: string
+    spend: number | null; confidence: string
+    actual_source: string  // 'provider_api' | 'email_invoice' | 'manual_entry' | 'pending_permission' | 'no_data'
+    forecast_month_end: number | null
+    forecast_basis: 'run_rate' | 'fixed_subscription' | 'manual_forecast' | 'no_forecast'
+    forecast_confidence: string | null
+    original_amount: number | null
+    original_currency: string | null
+    fx_rate: number | null
+    fx_date: number | null
+  }>
   confidence_breakdown: Record<string, number>
   breakdown: { fixed_manual: number; provider: number; estimate: number }
   budget: {
@@ -319,6 +337,13 @@ interface LineRow {
   charge_category: string
   confidence: CostConfidence
   data_freshness: number
+  // v0.8 (card 6f4d1332): already on the underlying SQL row since v0.7 (original_amount etc.)
+  // resp. this migration (actual_source) -- just not selected into this query until now.
+  actual_source: string | null
+  original_amount: number | null
+  original_currency: string | null
+  fx_rate: number | null
+  fx_date: number | null
 }
 
 export function getCostSummary(
@@ -330,7 +355,8 @@ export function getCostSummary(
   const win = monthWindow(now, opts.monthKey)
 
   const lines = db.prepare(`
-    SELECT source_id, billed_cost, charge_category, confidence, data_freshness
+    SELECT source_id, billed_cost, charge_category, confidence, data_freshness,
+      actual_source, original_amount, original_currency, fx_rate, fx_date
     FROM cost_line_items
     WHERE charge_period_start < @end AND charge_period_end > @start
   `).all({ start: win.start, end: win.end }) as LineRow[]
@@ -341,6 +367,14 @@ export function getCostSummary(
   const breakdown = { fixed_manual: 0, provider: 0, estimate: 0 }
   const perSource = new Map<string, number>()
   const perSourceConfidence = new Map<string, string>()
+  // v0.8 (card 6f4d1332 §2/§3): captured in the SAME per-source loop below, no second query --
+  // the run-rate/fixed/manual forecast formula already existed but was only summed into the
+  // aggregate forecast_month_end and discarded per-source; original-currency fields already
+  // existed on the row (v0.7) but were never threaded through to all_sources.
+  const perSourceForecast = new Map<string, number>()
+  const perSourceForecastBasis = new Map<string, CostSummary['all_sources'][number]['forecast_basis']>()
+  const perSourceActualSource = new Map<string, string>()
+  const perSourceOriginal = new Map<string, { amount: number | null; currency: string | null; fx_rate: number | null; fx_date: number | null }>()
   let latestFreshness: number | null = null
 
   // Group lines per source. The HEADLINE spend resolves each source to its
@@ -353,6 +387,10 @@ export function getCostSummary(
   const planLines = lines.filter(l => ADVISORY_CONF.has(l.confidence))
   const pendingLines = lines.filter(l => PENDING_CONF.has(l.confidence))
   const advisorySourceIds = new Set([...planLines, ...pendingLines].map(l => l.source_id))
+  // v0.8 §1 bugfix: all_sources' OWN filter (below) must exclude only plan-estimate sources, not
+  // pending ones too -- see the all_sources construction for the full explanation.
+  const planOnlySourceIds = new Set(planLines.map(l => l.source_id))
+  const pendingSourceIds = new Set(pendingLines.map(l => l.source_id))
   const bySource = new Map<string, LineRow[]>()
   for (const l of headlineLines) {
     const arr = bySource.get(l.source_id); if (arr) arr.push(l); else bySource.set(l.source_id, [l])
@@ -366,13 +404,27 @@ export function getCostSummary(
   for (const [sid, ls] of bySource) {
     const resolved = ls.reduce((a, b) => (CONF_PRIORITY[b.confidence] || 0) > (CONF_PRIORITY[a.confidence] || 0) ? b : a)
     current_spend += resolved.billed_cost
-    forecast_month_end += resolved.charge_category === 'usage'
+    const sourceForecast = resolved.charge_category === 'usage'
       ? resolved.billed_cost / win.fractionElapsed
       : resolved.billed_cost
+    forecast_month_end += sourceForecast
     confidence_breakdown[resolved.confidence] = (confidence_breakdown[resolved.confidence] || 0) + resolved.billed_cost
     breakdown[confidenceBucket(resolved.confidence)] += resolved.billed_cost
     perSource.set(sid, resolved.billed_cost)
     perSourceConfidence.set(sid, resolved.confidence)
+    perSourceForecast.set(sid, round2(sourceForecast))
+    const actualSource = resolved.actual_source || 'no_data'
+    perSourceActualSource.set(sid, actualSource)
+    perSourceOriginal.set(sid, {
+      amount: resolved.original_amount, currency: resolved.original_currency,
+      fx_rate: resolved.fx_rate, fx_date: resolved.fx_date,
+    })
+    const basis: CostSummary['all_sources'][number]['forecast_basis'] =
+      resolved.charge_category === 'usage' ? 'run_rate'
+      : (actualSource === 'provider_api' || actualSource === 'email_invoice') ? 'fixed_subscription'
+      : (resolved.confidence === 'manual' || resolved.confidence === 'estimate') ? 'manual_forecast'
+      : 'no_forecast'
+    perSourceForecastBasis.set(sid, basis)
     const estAmt = ls.filter(l => EST_CONF.includes(l.confidence)).reduce((s, l) => s + l.billed_cost, 0)
     const actAmt = ls.filter(l => ACT_CONF.includes(l.confidence)).reduce((s, l) => s + l.billed_cost, 0)
     if (actAmt > 0) reconcile.push({ source_id: sid, estimate: round2(estAmt), actual: round2(actAmt), variance: round2(actAmt - estAmt), resolved_confidence: resolved.confidence })
@@ -388,16 +440,38 @@ export function getCostSummary(
     .sort((a, b) => b.spend - a.spend)
     .slice(0, 5)
 
-  // Full list: every configured/active source with spend (0 if none this month).
-  // Advisory-only sources (render-plan / provider_plan_estimate) are excluded --
-  // they appear in the render_plan block, never in the headline source list.
+  // Full list: every configured/active source with spend (0 if none this month), extended per
+  // v0.8 §1-3 with actual_source/forecast/original-currency.
+  //
+  // v0.8 §1 bugfix (found reading the code, not in the original requirements): this filter used
+  // to exclude BOTH plan-estimate AND pending_permission sources via the combined
+  // advisorySourceIds set. Line 67-68's own comment says pending sources are kept "SEPARATE from
+  // ADVISORY_CONF" deliberately -- but this filter re-merged them, so a pending_permission source
+  // (the spec's own example: "AWS - Jogosultsag kell - nincs osszeg") could never appear in
+  // all_sources at all. Fixed: exclude only plan-estimate sources (still correctly advisory-only,
+  // surfaced via render_plan instead); INCLUDE pending sources with spend:null (never a fabricated
+  // 0 -- guardrail requires the JSON field itself to express "unknown", not just render blank
+  // client-side) and actual_source:'pending_permission'.
   const all_sources = srcRows
-    .filter(r => !advisorySourceIds.has(r.id))
-    .map(r => ({
-      source_id: r.id, name: r.name, provider: r.provider, source_type: r.source_type,
-      spend: round2(perSource.get(r.id) || 0), confidence: perSourceConfidence.get(r.id) || 'manual',
-    }))
-    .sort((a, b) => b.spend - a.spend || a.name.localeCompare(b.name))
+    .filter(r => !planOnlySourceIds.has(r.id))
+    .map(r => {
+      const isPending = pendingSourceIds.has(r.id) && !bySource.has(r.id)
+      const original = perSourceOriginal.get(r.id)
+      return {
+        source_id: r.id, name: r.name, provider: r.provider, source_type: r.source_type,
+        spend: isPending ? null : round2(perSource.get(r.id) || 0),
+        confidence: isPending ? 'pending_permission' : (perSourceConfidence.get(r.id) || 'manual'),
+        actual_source: isPending ? 'pending_permission' : (perSourceActualSource.get(r.id) || 'no_data'),
+        forecast_month_end: isPending ? null : (perSourceForecast.get(r.id) ?? null),
+        forecast_basis: isPending ? 'no_forecast' as const : (perSourceForecastBasis.get(r.id) || 'no_forecast'),
+        forecast_confidence: isPending ? null : (perSourceConfidence.get(r.id) ?? null),
+        original_amount: original?.amount ?? null,
+        original_currency: original?.currency ?? null,
+        fx_rate: original?.fx_rate ?? null,
+        fx_date: original?.fx_date ?? null,
+      }
+    })
+    .sort((a, b) => (b.spend ?? -1) - (a.spend ?? -1) || a.name.localeCompare(b.name))
 
   // v0.3 Render plan-based estimate (ADVISORY): manual render estimate vs plan-based
   // estimate vs variance. NEVER folded into current_spend. Empty until a Render import.
