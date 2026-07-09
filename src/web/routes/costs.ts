@@ -14,10 +14,9 @@ import { loadSubscriptionsConfig, deriveLifecycle } from '../../costops/subscrip
 import { getWarnings } from '../../costops/warnings.js'
 import { exportCostRows, rowsToCsv } from '../../costops/export.js'
 import { ingestWorkspaceAlerts, buildWorkspaceAlertWarnings } from '../../costops/workspace-alerts.js'
-import { checkRenderBuildMinutes } from '../../costops/render-live-checks.js'
-import { loadDomainsConfig, checkSslExpiry, checkDomainExpiry } from '../../costops/expiry-checks.js'
+import { loadDomainsConfig } from '../../costops/expiry-checks.js'
 import { getTokenCostByAgent } from '../../costops/pricing.js'
-import { getLimitStatus } from '../../costops/limits.js'
+import { getLimitStatus, getLiveCheckWarnings } from '../../costops/limits.js'
 import type { RouteContext } from './types.js'
 
 export async function tryHandleCosts(ctx: RouteContext): Promise<boolean> {
@@ -196,17 +195,16 @@ export async function tryHandleCosts(ctx: RouteContext): Promise<boolean> {
       const summary = getCostSummary(db, config, now, { monthKey, configExists: exists, configErrors: errors, pricing, pricingExists })
       const { config: subsConfig } = loadSubscriptionsConfig()
       const subscriptions = deriveLifecycle(subsConfig, now)
-      // v0.8 (card 6f4d1332 §6): getLimitStatus() re-runs the same Render/SSL/domain live checks
-      // internally (normalized shape, for rule 11's uniform tiered alert) -- accepted duplicate
-      // round trip rather than threading raw+normalized dual output through fromLiveChecks; this
-      // route is a low-QPS internal dashboard call, not latency-sensitive.
+      // Card fa041036: getLimitStatus() and this route's own render/ssl/domain warnings both need
+      // the same 3 live checks -- they now share getLiveCheckWarnings()'s TTL-cached result instead
+      // of each independently hitting Render's API + doing a TLS handshake per host + an RDAP
+      // lookup (previously: once concurrently inside getLimitStatus, then AGAIN sequentially here
+      // -- the real cause of the reported 20-35s, not the DB-side ledger reads).
       const limits = await getLimitStatus(db, now, subscriptions)
       const deterministic = getWarnings(db, config, now, summary, subscriptions, limits)
       const workspaceAlerts = buildWorkspaceAlertWarnings(db, now)
-      const renderBuildMinutes = await checkRenderBuildMinutes(now)
       const { config: domainsConfig } = loadDomainsConfig()
-      const sslWarnings = await checkSslExpiry(domainsConfig.ssl_hosts, now)
-      const domainWarnings = await checkDomainExpiry(domainsConfig.domains, now)
+      const { renderWarnings: renderBuildMinutes, sslWarnings, domainWarnings } = await getLiveCheckWarnings(now, domainsConfig.ssl_hosts, domainsConfig.domains)
       json(res, { warnings: [...deterministic, ...workspaceAlerts, ...renderBuildMinutes, ...sslWarnings, ...domainWarnings] })
     } catch (err) {
       logger.error({ err }, 'CostOps warnings failed')

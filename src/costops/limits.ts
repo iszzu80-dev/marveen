@@ -14,6 +14,7 @@ import type { SubscriptionLifecycle } from './subscriptions.js'
 import { getActiveWorkspaceAlerts } from './workspace-alerts.js'
 import { checkRenderBuildMinutes } from './render-live-checks.js'
 import { loadDomainsConfig, checkSslExpiry, checkDomainExpiry, EXPIRY_THRESHOLDS } from './expiry-checks.js'
+import type { CostWarning } from './warnings.js'
 
 export type LimitStatusTier = 'ok' | 'warning' | 'critical' | 'blocked' | 'unknown'
 
@@ -151,13 +152,40 @@ function fromWorkspaceAlerts(db: Database.Database, now: number): LimitStatus[] 
 }
 
 // ---- 4. Render build-minutes + SSL/domain expiry (live network checks -> normalized) --------
-async function fromLiveChecks(now: number, sslHosts: string[], domains: string[]): Promise<LimitStatus[]> {
-  const out: LimitStatus[] = []
-  const [renderWarnings, sslWarnings, domainWarnings] = await Promise.all([
+//
+// Card fa041036: /api/costs/warnings was independently re-running these exact same 3 live checks
+// a second time (sequentially, no less) right after calling getLimitStatus() -- which already ran
+// them once, concurrently, via this function. That double-fetch (one concurrent + one sequential,
+// same request) was the real cost behind the reported 20-35s, not the DB-side ledger reads (those
+// are narrow, indexed sqlite queries -- checked, not the bottleneck). Fix: cache the raw 3-way
+// result for LIVE_CHECKS_TTL_MS and share it between both routes, so within the TTL window a
+// second caller (same request or the next dashboard poll) gets the already-fetched result instead
+// of re-hitting Render's API for every service + a TLS handshake per host + an RDAP lookup.
+const LIVE_CHECKS_TTL_MS = 5 * 60 * 1000
+interface LiveChecksResult { renderWarnings: CostWarning[]; sslWarnings: CostWarning[]; domainWarnings: CostWarning[] }
+let liveChecksCache: { key: string; at: number; promise: Promise<LiveChecksResult> } | null = null
+
+export async function getLiveCheckWarnings(now: number, sslHosts: string[], domains: string[]): Promise<LiveChecksResult> {
+  const key = JSON.stringify([sslHosts, domains])
+  const nowMs = now * 1000
+  if (liveChecksCache && liveChecksCache.key === key && (nowMs - liveChecksCache.at) < LIVE_CHECKS_TTL_MS) {
+    return liveChecksCache.promise
+  }
+  const promise = Promise.all([
     checkRenderBuildMinutes(now),
     checkSslExpiry(sslHosts, now),
     checkDomainExpiry(domains, now),
-  ])
+  ]).then(([renderWarnings, sslWarnings, domainWarnings]) => ({ renderWarnings, sslWarnings, domainWarnings }))
+  liveChecksCache = { key, at: nowMs, promise }
+  // A failed round shouldn't poison the cache for the rest of the TTL window -- clear it so the
+  // next call retries live instead of returning a stuck rejection for up to 5 minutes.
+  promise.catch(() => { if (liveChecksCache?.promise === promise) liveChecksCache = null })
+  return promise
+}
+
+async function fromLiveChecks(now: number, sslHosts: string[], domains: string[]): Promise<LimitStatus[]> {
+  const out: LimitStatus[] = []
+  const { renderWarnings, sslWarnings, domainWarnings } = await getLiveCheckWarnings(now, sslHosts, domains)
   for (const w of renderWarnings) {
     if (w.code !== 'render_build_minutes_exhausted') continue // access-failure warnings aren't a limit signal
     out.push({
