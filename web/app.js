@@ -388,8 +388,8 @@ function renderStaticI18n() {
   }
   // Kanban column titles
   const colTitles = document.querySelectorAll('.kanban-col-title')
-  const statusKeys = ['kanban.col.planned', 'kanban.col.in_progress', 'kanban.col.waiting', 'kanban.col.done']
-  const statuses = ['planned', 'in_progress', 'waiting', 'done']
+  const statusKeys = ['kanban.col.planned', 'kanban.col.in_progress', 'kanban.col.waiting', 'kanban.col.testing', 'kanban.col.done']
+  const statuses = ['planned', 'in_progress', 'waiting', 'testing', 'done']
   colTitles.forEach((el) => {
     const status = el.closest('[data-status]')?.dataset?.status
     if (status) {
@@ -633,6 +633,9 @@ let kanbanGroupByInitialized = false
 // Which swimlane keys (assignee name or priority value) are collapsed. Lives
 // for the page session only -- intentionally not persisted across reloads.
 const kanbanCollapsedLanes = new Set()
+// Set of status column keys that are hidden from the board view.
+// Empty = all columns visible. Persisted in localStorage.
+let kanbanHiddenColumns = new Set()
 
 const cardModalOverlay = document.getElementById('cardModalOverlay')
 const cardDetailOverlay = document.getElementById('cardDetailOverlay')
@@ -688,6 +691,10 @@ async function loadKanban() {
         const storedLabels = JSON.parse(localStorage.getItem('marveen.kanbanLabelFilter') || '[]')
         if (Array.isArray(storedLabels)) kanbanLabelFilter = new Set(storedLabels)
       } catch { /* ignore malformed storage */ }
+      try {
+        const storedHiddenCols = JSON.parse(localStorage.getItem('marveen.kanbanHiddenColumns') || '[]')
+        if (Array.isArray(storedHiddenCols)) kanbanHiddenColumns = new Set(storedHiddenCols)
+      } catch { /* ignore malformed storage */ }
     }
     const [cardsRes, assigneesRes, projectsRes, labelsRes] = await Promise.all([
       fetch('/api/kanban'),
@@ -726,6 +733,27 @@ function populateProjectFilter() {
     sel.appendChild(opt)
   }
   if (prev && !kanbanProjects.includes(prev)) kanbanProjectFilter = ''
+}
+
+function renderKanbanColumnChips() {
+  const container = document.getElementById('kanbanColumnChips')
+  if (!container) return
+  container.innerHTML = ''
+  for (const def of KANBAN_STATUS_DEFS) {
+    const hidden = kanbanHiddenColumns.has(def.status)
+    const label = typeof def.title === 'function' ? def.title() : def.title
+    const chip = document.createElement('span')
+    chip.className = 'kanban-col-chip' + (hidden ? ' hidden' : '')
+    chip.title = hidden ? t('kanban.filter.column_show') : t('kanban.filter.column_hide')
+    chip.textContent = label
+    chip.addEventListener('click', () => {
+      if (kanbanHiddenColumns.has(def.status)) kanbanHiddenColumns.delete(def.status)
+      else kanbanHiddenColumns.add(def.status)
+      localStorage.setItem('marveen.kanbanHiddenColumns', JSON.stringify([...kanbanHiddenColumns]))
+      renderKanban()
+    })
+    container.appendChild(chip)
+  }
 }
 
 function populateProjectSuggestions() {
@@ -903,6 +931,7 @@ function renderKanbanQuickFilters() {
 function renderKanban() {
   const cardById = new Map(kanbanCards.map(c => [c.id, c]))
 
+  renderKanbanColumnChips()
   renderKanbanQuickFilters()
 
   // Determine which top-level cards are visible under current filters.
@@ -925,7 +954,7 @@ function renderKanban() {
     if (parent.status === card.status) embeddedSubtaskIds.add(card.id)
   }
 
-  const grouped = { planned: [], in_progress: [], waiting: [], done: [] }
+  const grouped = { planned: [], in_progress: [], waiting: [], testing: [], done: [] }
   for (const card of kanbanCards) {
     if (embeddedSubtaskIds.has(card.id)) continue
     if (!visibleCardIds.has(card.id)) continue
@@ -935,6 +964,7 @@ function renderKanban() {
   // Update counts (embedded subtasks don't count as separate cards)
   document.getElementById('countPlanned').textContent = grouped.planned.length
   document.getElementById('countInProgress').textContent = grouped.in_progress.length
+  document.getElementById('countTesting').textContent = grouped.testing.length
   document.getElementById('countWaiting').textContent = grouped.waiting.length
   document.getElementById('countDone').textContent = grouped.done.length
 
@@ -956,6 +986,25 @@ function renderKanban() {
         col.appendChild(createCardEl(card, embeddedChildren))
       }
     }
+    // Hide/show flat-board columns based on visibility set
+    const allColsHidden = KANBAN_STATUS_DEFS.every(d => kanbanHiddenColumns.has(d.status))
+    for (const def of KANBAN_STATUS_DEFS) {
+      const colEl = flatBoard.querySelector(`.kanban-col[data-status="${def.status}"]`)
+      if (colEl) colEl.hidden = kanbanHiddenColumns.has(def.status)
+    }
+    // "All columns hidden" hint
+    let allHiddenMsg = document.getElementById('kanbanAllHiddenMsg')
+    if (allColsHidden) {
+      if (!allHiddenMsg) {
+        allHiddenMsg = document.createElement('p')
+        allHiddenMsg.id = 'kanbanAllHiddenMsg'
+        allHiddenMsg.style.cssText = 'color:var(--muted);font-size:13px;padding:24px 0;text-align:center;width:100%;'
+        flatBoard.appendChild(allHiddenMsg)
+      }
+      allHiddenMsg.textContent = t('kanban.filter.all_cols_hidden')
+    } else {
+      allHiddenMsg?.remove()
+    }
     // Badge: only count subtasks that are in a different column (not embedded here)
     updateSubtaskBadges(embeddedSubtaskIds)
     // WIP limit badges (count/limit + colour) on the flat board too -- previously
@@ -973,6 +1022,7 @@ const KANBAN_STATUS_DEFS = [
   { status: 'planned', title: () => t('kanban.col.planned') },
   { status: 'in_progress', title: () => t('kanban.col.in_progress') },
   { status: 'waiting', title: () => t('kanban.col.waiting') },
+  { status: 'testing', title: () => t('kanban.col.testing') },
   { status: 'done', title: () => t('kanban.col.done') },
 ]
 const KANBAN_PRIORITY_LABELS = { urgent: () => t('kanban.priority.urgent'), high: () => t('kanban.priority.high'), normal: () => t('kanban.priority.normal'), low: () => t('kanban.priority.low') }
@@ -1028,7 +1078,7 @@ function renderSwimlaneBoard(grouped, embeddedSubtaskIds) {
     for (const def of KANBAN_STATUS_DEFS) {
       const cards = grouped[def.status].filter(c => kanbanSwimlaneKeyFor(c) === key)
       laneCardsByStatus[def.status] = cards
-      totalCount += cards.length
+      if (!kanbanHiddenColumns.has(def.status)) totalCount += cards.length
     }
 
     const lane = document.createElement('div')
@@ -1055,6 +1105,7 @@ function renderSwimlaneBoard(grouped, embeddedSubtaskIds) {
     const body = document.createElement('div')
     body.className = 'kanban-swimlane-body'
     for (const def of KANBAN_STATUS_DEFS) {
+      if (kanbanHiddenColumns.has(def.status)) continue
       const col = document.createElement('div')
       col.className = 'kanban-swimlane-col'
 
@@ -1093,6 +1144,7 @@ function renderSwimlaneBoard(grouped, embeddedSubtaskIds) {
 const WIP_COUNT_IDS = {
   planned: 'countPlanned',
   in_progress: 'countInProgress',
+  testing: 'countTesting',
   waiting: 'countWaiting',
   done: 'countDone',
 }
@@ -1550,7 +1602,7 @@ async function showCardDetail(card) {
     : null
   const assigneeDisplay = assignee ? (assignee.displayName || assignee.name) : (rawDetailAssignee || '-- nincs --')
   const priorityLabels = { low: t('kanban.priority.low'), normal: t('kanban.priority.normal'), high: t('kanban.priority.high'), urgent: t('kanban.priority.urgent') }
-  const statusLabels = { planned: t('kanban.status.planned'), in_progress: t('kanban.status.in_progress'), waiting: t('kanban.status.waiting'), done: t('kanban.status.done') }
+  const statusLabels = { planned: t('kanban.status.planned'), in_progress: t('kanban.status.in_progress'), testing: t('kanban.status.testing'), waiting: t('kanban.status.waiting'), done: t('kanban.status.done') }
 
   const meta = document.getElementById('cardDetailMeta')
   const idLabel = (card.seq != null ? `#${card.seq} · ` : '') + card.id
@@ -1642,7 +1694,7 @@ async function showCardDetail(card) {
     parentSelect.innerHTML = `<option value="">${t('kanban.parent.empty')}</option>`
     const availableParents = kanbanCards.filter(c =>
       !c.parent_id && c.id !== card.id && !c.archived_at &&
-      (c.status === 'planned' || c.status === 'in_progress' || c.status === 'waiting')
+      (c.status === 'planned' || c.status === 'in_progress' || c.status === 'testing' || c.status === 'waiting')
     )
     for (const p of availableParents) {
       const opt = document.createElement('option')
@@ -1799,7 +1851,7 @@ async function showCardDetail(card) {
       addSubtaskSection.style.display = 'none'
     }
 
-    const statusLabelsShort = { planned: t('kanban.status.planned'), in_progress: t('kanban.status.in_progress'), waiting: t('kanban.status.waiting_short'), done: t('kanban.status.done') }
+    const statusLabelsShort = { planned: t('kanban.status.planned'), in_progress: t('kanban.status.in_progress'), testing: t('kanban.status.testing'), waiting: t('kanban.status.waiting_short'), done: t('kanban.status.done') }
     if (children.length > 0 || isTask) {
       section.style.display = ''
       list.innerHTML = ''
