@@ -16,6 +16,7 @@ import {
 } from './agent-process.js'
 import { setLastInboundModality } from './voice-modality.js'
 import { classifyAgentMessage, wrapAgentMessageForDelivery } from './agent-message-wrap.js'
+import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 
 // A message that cannot be delivered within this window (target session never
 // exists / stays busy) is marked failed so it stops clogging the pending
@@ -30,6 +31,12 @@ const JANITOR_PARKED_MIN_AGE_MS = 45 * 1000
 // Log "skipping, target not ready" at most once per message id so a busy
 // receiver over many 5s ticks does not spam the log.
 const routerLoggedMisses: Set<number> = new Set()
+// Wakeup cooldown for the main agent: the router fires at most one
+// sendPromptToSession wakeup per COOLDOWN_MS window to avoid spamming the
+// channels session. 45s gives enough headroom that a normal turn (typically
+// 5-30s) ends and drain-inbox fires before we would retry.
+let lastMainAgentWakeupMs = 0
+const MAIN_AGENT_WAKEUP_COOLDOWN_MS = 45 * 1000
 
 /**
  * Pure decision: should a pending inter-agent message be abandoned?
@@ -56,7 +63,7 @@ export function shouldAbandon(sessionExists: boolean, ageMs: number, windowMs: n
 let _tickRunning = false
 
 // Max messages drained per 5s tick; a larger backlog rolls to the next tick.
-const MAX_MESSAGES_PER_TICK = 25
+export const MAX_MESSAGES_PER_TICK = 25
 
 export function startMessageRouter(): NodeJS.Timeout {
   return setInterval(async () => {
@@ -65,6 +72,18 @@ export function startMessageRouter(): NodeJS.Timeout {
     if (_tickRunning) return
     _tickRunning = true
     try {
+      await runMessageRouterTick()
+    } finally {
+      _tickRunning = false
+    }
+  }, 5000)
+}
+
+// One router pass: drain up to MAX_MESSAGES_PER_TICK pending inter-agent
+// messages and inject each into its target tmux session. Extracted from the
+// setInterval body so it can be exercised directly in unit tests (the
+// _tickRunning re-entrancy guard stays in startMessageRouter, around the call).
+export async function runMessageRouterTick(): Promise<void> {
     // Cap work per tick: process at most MAX_MESSAGES_PER_TICK messages, the
     // rest roll to the next 5s tick. Bounds a single tick's wall-time so a
     // backlog (e.g. after a delivery stall) can never make one tick run long
@@ -72,6 +91,7 @@ export function startMessageRouter(): NodeJS.Timeout {
     // pattern. Ordering is preserved (oldest first) so nothing is starved.
     const pending = getPendingMessages().slice(0, MAX_MESSAGES_PER_TICK)
     const now = Date.now()
+    let mainAgentWakeupFiredThisTick = false
     for (const msg of pending) {
       const ageMs = now - msg.created_at * 1000
       // The main agent runs in `${MAIN_AGENT_ID}-channels`, not `agent-${name}`,
@@ -84,7 +104,25 @@ export function startMessageRouter(): NodeJS.Timeout {
       // what stalled inter-agent delivery to the main agent for ~1h on a busy
       // day. Leave the message pending; the next main-agent turn claims it
       // atomically. Sub-agents keep the tmux-inject path (they have idle gaps).
-      if (isMainAgent) continue
+      //
+      // WAKEUP: without an active nudge the main agent only drains on the next
+      // user message or heartbeat -- up to 22+ min latency observed in prod.
+      // Fire one lightweight wakeup per cooldown window so an idle channels
+      // session starts a turn and drain-inbox claims the message immediately.
+      // Busy session: Claude Code queues the wakeup for the next turn boundary.
+      if (isMainAgent) {
+        if (!mainAgentWakeupFiredThisTick && now - lastMainAgentWakeupMs >= MAIN_AGENT_WAKEUP_COOLDOWN_MS) {
+          mainAgentWakeupFiredThisTick = true
+          lastMainAgentWakeupMs = now
+          try {
+            sendPromptToSession(MAIN_CHANNELS_SESSION, '[inbox-wakeup: pending inter-agent messages]', null, { waitForIdle: false })
+            logger.info({ msgId: msg.id }, 'message-router: main-agent wakeup fired')
+          } catch (err) {
+            logger.warn({ err }, 'message-router: main-agent wakeup injection failed')
+          }
+        }
+        continue
+      }
       const session = agentSessionName(msg.to_agent)
       // Remote sub-agents run their tmux session on the laptop; resolve the host
       // so the existence/readiness checks and the send all cross the ssh
@@ -180,8 +218,9 @@ export function startMessageRouter(): NodeJS.Timeout {
       try {
         // channel-inbound carries the STT-applied deliveryContent; the agent
         // wrap (trusted/untrusted) carries the raw content. Single-source frame.
+        // msgId passed so receiving agents can write back via PUT /api/messages/:id.
         const content = isChannelInbound ? deliveryContent : msg.content
-        const { prefix, wrapped } = wrapAgentMessageForDelivery(category, safeFromAgent, msg.from_agent, content)
+        const { prefix, wrapped } = wrapAgentMessageForDelivery(category, safeFromAgent, msg.from_agent, content, msg.id)
         // Inline preamble so a fresh session (post hard-restart) doesn't miss
         // the context that explains the tag semantics.
         sendPromptToSession(session, prefix + wrapped, host)
@@ -198,10 +237,6 @@ export function startMessageRouter(): NodeJS.Timeout {
         routerLoggedMisses.delete(msg.id)
       }
     }
-    } finally {
-      _tickRunning = false
-    }
-  }, 5000)
 }
 
 // ---- voice helpers (message-router level) ----------------------------------
