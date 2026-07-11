@@ -197,16 +197,26 @@ export function mapRenderPlanCost(
 }
 
 // v0.5: read the Render API key WITHOUT logging it. process.env first, then the
-// gitignored root .env. Returns null if absent (caller reports a config error).
+// gitignored root .env, then the devops-only relocation path (686a7823/0ff0a457:
+// moved out of the shared root .env so build-agent CLAUDE.md files, which never
+// reference this path, don't incidentally point at it). Returns null if absent
+// (caller reports a config error).
+function readKeyFromEnvFile(path: string): string | null {
+  try {
+    const envFile = readFileSync(path, 'utf-8')
+    const line = envFile.split('\n').find(l => l.startsWith('RENDER_API_KEY'))
+    if (line) return line.slice(line.indexOf('=') + 1).trim().replace(/^["']|["']$/g, '')
+  } catch { /* file missing */ }
+  return null
+}
+
 export function getRenderApiKey(): string | null {
   const fromEnv = process.env.RENDER_API_KEY
   if (fromEnv && fromEnv.trim()) return fromEnv.trim()
-  try {
-    const envFile = readFileSync(join(PROJECT_ROOT, '.env'), 'utf-8')
-    const line = envFile.split('\n').find(l => l.startsWith('RENDER_API_KEY'))
-    if (line) return line.slice(line.indexOf('=') + 1).trim().replace(/^["']|["']$/g, '')
-  } catch { /* no .env */ }
-  return null
+  return (
+    readKeyFromEnvFile(join(PROJECT_ROOT, '.env')) ??
+    readKeyFromEnvFile(join(PROJECT_ROOT, 'agents', 'devops', '.env.render'))
+  )
 }
 
 export interface RenderSyncResult {
