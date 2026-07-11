@@ -791,6 +791,43 @@ export function initDatabase(dbPathOverride?: string): void {
   // sweep can read it from the email (e.g. "suspended on Aug 4") -- lets the warning show a
   // real due_date + severity that rises as the date approaches, not just a flat flag.
   try { db.exec(`ALTER TABLE workspace_alerts ADD COLUMN suspension_date INTEGER`) } catch { /* already exists */ }
+  // CostOps v1.0 (card ef6c6a2c, spec section 5.1): included-usage/entitlement model, kept
+  // SEPARATE from cost_line_items -- included usage must never leak into operational_spend.
+  // This is a presentational/status view only, same role as the existing limits.ts output for
+  // subscriptions/DeepSeek balance/Render build-minutes -- it does NOT feed resolveOperational()
+  // or CONF_PRIORITY/OPERATIONAL_TIER (per architect's 2026-07-08 spec, that resolver must stay
+  // the single source of truth for spend; a second one would be exactly the double-counting
+  // risk the whole ledger design guards against). dedup_key lets a sync job upsert idempotently
+  // per (provider, product, entitlement_type, billing_period) without a separate lookup query.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS entitlements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider TEXT NOT NULL,
+      product TEXT NOT NULL,
+      plan_name TEXT,
+      billing_period TEXT NOT NULL,
+      entitlement_type TEXT NOT NULL,
+      included_limit REAL,
+      included_unit TEXT,
+      usage_to_date REAL,
+      remaining REAL,
+      usage_pct REAL,
+      reset_at INTEGER,
+      usage_source TEXT NOT NULL,
+      usage_confidence TEXT,
+      forecast_usage_period_end REAL,
+      forecast_exhaustion_at INTEGER,
+      overage_supported INTEGER NOT NULL DEFAULT 0,
+      overage_unit_price REAL,
+      forecast_overage_quantity REAL,
+      forecast_overage_cost REAL,
+      status TEXT NOT NULL,
+      dedup_key TEXT UNIQUE,
+      last_updated INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_entitlements_provider ON entitlements(provider, product)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_vault_ssh_servers_name ON vault_ssh_servers(name)`)
   // Migrations for installs that ran earlier schema versions. MUST run before
   // the ssh_key_id index below: on an install where vault_ssh_servers already
