@@ -11858,6 +11858,25 @@ async function loadCostsV2() {
       '.cv2-muted{color:#9aa0a6;background:rgba(150,150,150,0.14);}',
       '.cv2-soon{color:var(--text-muted);font-size:0.82em;padding:10px 0;border-top:1px dashed var(--border);margin-top:4px;line-height:1.5;}',
       '@media(max-width:560px){.cv2-cards{grid-template-columns:1fr 1fr;}}',
+      '.cv2-sec{margin:22px 0 8px;font-size:0.95em;font-weight:700;color:var(--text);}',
+      '.cv2-movers{display:flex;flex-direction:column;gap:0;margin-bottom:8px;}',
+      '.cv2-mover{display:flex;justify-content:space-between;gap:10px;font-size:0.85em;padding:6px 0;border-top:1px solid var(--border);}',
+      '.cv2-recon{font-size:0.8em;color:var(--text-secondary);margin:6px 0 18px;}',
+      '.cv2-acc{border:1px solid var(--border);border-radius:var(--radius,10px);overflow:hidden;margin-bottom:10px;}',
+      '.cv2-acc>details{border-top:1px solid var(--border);}',
+      '.cv2-acc>details:first-child{border-top:none;}',
+      '.cv2-acc summary{cursor:pointer;list-style:none;padding:10px 14px;display:flex;justify-content:space-between;gap:10px;align-items:center;font-size:0.9em;}',
+      '.cv2-acc summary::-webkit-details-marker{display:none;}',
+      '.cv2-acc summary:hover{background:var(--bg-card-hover,rgba(127,127,127,0.05));}',
+      '.cv2-acc .cv2-lvl2 summary{padding-left:30px;font-size:0.86em;}',
+      '.cv2-acc .cv2-lvl3{padding:4px 14px 8px 46px;font-size:0.82em;color:var(--text-secondary);}',
+      '.cv2-acc .cv2-srcrow{display:flex;justify-content:space-between;gap:10px;padding:4px 0;border-top:1px dashed var(--border);}',
+      '.cv2-amt{font-variant-numeric:tabular-nums;white-space:nowrap;}',
+      '.cv2-tblwrap{overflow-x:auto;}',
+      '.cv2-tbl{width:100%;border-collapse:collapse;font-size:0.8em;}',
+      '.cv2-tbl th,.cv2-tbl td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap;}',
+      '.cv2-tbl th{color:var(--text-muted);font-weight:600;position:sticky;top:0;background:var(--bg-card);}',
+      '.cv2-tbl td.cv2-r{text-align:right;font-variant-numeric:tabular-nums;}',
     ].join('')
     document.head.appendChild(st)
   }
@@ -11898,6 +11917,57 @@ async function loadCostsV2() {
   const staleN = ps.filter(p => p.stale).length
   const pendingN = ps.filter(p => p.status && /pending|permission/.test(String(p.status))).length
 
+  // --- source badge (mirror v1 colour map) ---
+  const srcBadge = (a) => {
+    const m = {
+      provider_api: ['API', '#2ecc71', 'rgba(46,204,113,0.15)'],
+      actual_invoice: ['Számla', '#2ecc71', 'rgba(46,204,113,0.15)'],
+      email_invoice: ['Email számla', '#5b9dff', 'rgba(45,108,223,0.14)'],
+      manual_entry: ['Kézi', '#e0a800', 'rgba(224,168,0,0.14)'],
+      manual: ['Kézi', '#e0a800', 'rgba(224,168,0,0.14)'],
+      estimate: ['Becslés', '#9aa0a6', 'rgba(150,150,150,0.16)'],
+      pending_permission: ['Jogosultság kell', '#e0854a', 'rgba(224,133,74,0.16)'],
+      no_data: ['Nincs adat', '#9aa0a6', 'rgba(150,150,150,0.16)'],
+    }[a]
+    if (!m) return ''
+    return '<span class="cv2-chip" style="color:' + m[1] + ';background:' + m[2] + ';font-size:0.72em;">' + esc(m[0]) + '</span>'
+  }
+  const fBasis = (x) => ({ run_rate: 'run-rate', fixed_subscription: 'fix előfizetés', manual_forecast: 'kézi forecast', token_runrate: 'token alapú', no_forecast: '' }[x] || '')
+  const origCur = (t) => (t.original_amount != null && t.original_currency)
+    ? (Number(t.original_amount) || 0).toLocaleString('hu-HU') + ' ' + esc(t.original_currency) : ''
+  const CAT = (p, st) => ({
+    openai: 'AI / LLM', anthropic: 'AI / LLM', deepseek: 'AI / LLM', google: 'AI / LLM',
+    render: 'Webszolgáltatás / hosting', vercel: 'Webszolgáltatás / hosting',
+    aws: 'Cloud infra', cloudflare: 'Cloud infra',
+    posthog: 'Monitoring', github: 'Fejlesztői eszközök',
+  }[p] || (st === 'domain' ? 'Domainek' : (st === 'subscription' || st === 'saas' ? 'Előfizetések' : 'Egyéb')))
+
+  const sources = Array.isArray(s.all_sources) ? s.all_sources : []
+  const catMap = {}
+  for (const it of sources) {
+    const cat = CAT(it.provider, it.source_type)
+    const prov = it.provider || 'egyéb'
+    if (!catMap[cat]) catMap[cat] = {}
+    if (!catMap[cat][prov]) catMap[cat][prov] = []
+    catMap[cat][prov].push(it)
+  }
+  const sumSpend = (arr) => arr.reduce((x, y) => x + (Number(y.spend) || 0), 0)
+  const sumFc = (arr) => arr.reduce((x, y) => x + (Number(y.forecast_month_end) || 0), 0)
+  const lineSum = sumSpend(sources)
+  const headline = Number(s.operational_spend) || 0
+  const reconOk = Math.abs(lineSum - headline) < 1
+
+  // Mi változott: per-provider current vs previous month
+  const curByProv = {}
+  for (const it of sources) curByProv[it.provider] = (curByProv[it.provider] || 0) + (Number(it.spend) || 0)
+  const prevByProv = {}
+  for (const it of (Array.isArray(prev.by_provider) ? prev.by_provider : [])) prevByProv[it.provider] = (Number(it.spend) || 0)
+  const movers = Array.from(new Set([...Object.keys(curByProv), ...Object.keys(prevByProv)]))
+    .map(p => ({ p, cur: curByProv[p] || 0, prev: prevByProv[p] || 0, delta: (curByProv[p] || 0) - (prevByProv[p] || 0) }))
+    .filter(m => m.delta !== 0)
+    .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
+    .slice(0, 5)
+
   const cards = [
     { label: 'Előző lezárt hónap', num: fmt(prev.operational_spend || 0), sub: esc(prev.month || '—') },
     { label: 'Aktuális hónap (MTD)', num: fmt(s.operational_spend || 0), sub: esc(s.month || '') + ' eddig' },
@@ -11921,7 +11991,63 @@ async function loadCostsV2() {
     + (pendingN ? '<span class="cv2-chip cv2-muted">' + pendingN + ' jogosultság kell</span>' : '')
     + '<span>· változás előző hóhoz: <b style="color:' + momColor + '">' + momArrow + ' ' + fmt(Math.abs(mom)) + '</b></span>'
     + '<span>· frissítve ' + relAge(s.data_freshness) + '</span></div>'
-  html += '<div class="cv2-soon">A további zónák (Mi változott · kategória→provider→forrás bontás · egységes tételtábla · költség+keretek · teendők · trend · diagnosztika) épülnek. Minden a meglévő /api/costs/* adatra, flag mögött, a v1 nézet érintetlen.</div>'
+  // --- Mi változott? (top movers vs previous month) ---
+  html += '<div class="cv2-sec">Mi változott?</div>'
+  if (movers.length) {
+    html += '<div class="cv2-movers">'
+    for (const m of movers) {
+      const up = m.delta > 0
+      const tag = m.prev === 0 ? 'új' : (m.cur === 0 ? 'megszűnt' : (up ? 'nőtt' : 'csökkent'))
+      const col = up ? 'var(--danger,#e74c3c)' : 'var(--success,#2ecc71)'
+      html += '<div class="cv2-mover"><span>' + esc(m.p) + ' <span style="color:var(--text-muted);font-size:0.9em;">(' + tag + ')</span></span>'
+        + '<span class="cv2-amt" style="color:' + col + '">' + (up ? '▲' : '▼') + ' ' + fmt(Math.abs(m.delta)) + '</span></div>'
+    }
+    html += '</div>'
+  } else {
+    html += '<div class="cv2-recon">Nincs érdemi változás az előző hónaphoz képest.</div>'
+  }
+  html += '<div class="cv2-recon">' + (reconOk
+    ? '✓ A főszám (' + fmt(headline) + ') megegyezik a tételek összegével.'
+    : '⚠ Eltérés: főszám ' + fmt(headline) + ' vs tételek ' + fmt(lineSum) + '.') + '</div>'
+
+  // --- Category -> provider -> source accordion ---
+  html += '<div class="cv2-sec">Kategóriák → providerek → források</div>'
+  html += '<div class="cv2-acc">'
+  const catNames = Object.keys(catMap).sort((a, b) => sumSpend(Object.values(catMap[b]).flat()) - sumSpend(Object.values(catMap[a]).flat()))
+  for (const cat of catNames) {
+    const provs = catMap[cat]
+    const flat = Object.values(provs).flat()
+    html += '<details><summary><span><b>' + esc(cat) + '</b> <span style="color:var(--text-muted);font-size:0.85em;">' + Object.keys(provs).length + ' provider</span></span>'
+      + '<span class="cv2-amt">' + fmt(sumSpend(flat)) + ' <span style="color:var(--text-muted);font-size:0.85em;">→ ' + fmt(sumFc(flat)) + '</span></span></summary>'
+    const provNames = Object.keys(provs).sort((a, b) => sumSpend(provs[b]) - sumSpend(provs[a]))
+    for (const prov of provNames) {
+      const items = provs[prov]
+      html += '<details class="cv2-lvl2"><summary><span>' + esc(prov) + '</span><span class="cv2-amt">' + fmt(sumSpend(items)) + ' <span style="color:var(--text-muted);font-size:0.85em;">→ ' + fmt(sumFc(items)) + '</span></span></summary><div class="cv2-lvl3">'
+      for (const it of items) {
+        html += '<div class="cv2-srcrow"><span>' + esc(it.name || it.source_id) + ' ' + srcBadge(it.actual_source || it.confidence)
+          + (origCur(it) ? ' <span style="color:var(--text-muted);">' + origCur(it) + '</span>' : '') + '</span>'
+          + '<span class="cv2-amt">' + fmt(it.spend) + '</span></div>'
+      }
+      html += '</div></details>'
+    }
+    html += '</details>'
+  }
+  html += '</div>'
+
+  // --- Unified line-item table (collapsed) ---
+  html += '<details class="cv2-acc"><summary style="font-weight:600;">Egységes tételtábla (' + sources.length + ' tétel)</summary>'
+    + '<div class="cv2-tblwrap"><table class="cv2-tbl"><thead><tr>'
+    + '<th>Provider</th><th>Tétel</th><th>Kategória</th><th>MTD</th><th>Forecast</th><th>Alap</th><th>Forrás</th><th>Eredeti deviza</th>'
+    + '</tr></thead><tbody>'
+  for (const it of sources.slice().sort((a, b) => (Number(b.spend) || 0) - (Number(a.spend) || 0))) {
+    html += '<tr><td>' + esc(it.provider) + '</td><td>' + esc(it.name || it.source_id) + '</td><td>' + esc(CAT(it.provider, it.source_type))
+      + '</td><td class="cv2-r">' + fmt(it.spend) + '</td><td class="cv2-r">' + fmt(it.forecast_month_end)
+      + '</td><td>' + esc(fBasis(it.forecast_basis) || '—') + '</td><td>' + (srcBadge(it.actual_source || it.confidence) || '—')
+      + '</td><td>' + (origCur(it) || '—') + '</td></tr>'
+  }
+  html += '</tbody></table></div></details>'
+
+  html += '<div class="cv2-soon">Következő zónák: költség + felhasználási keretek (entitlement), teendők (warnings), havi trend, diagnosztika. Flag mögött, a v1 nézet érintetlen.</div>'
   html += '</div>'
   body.innerHTML = html
 }
