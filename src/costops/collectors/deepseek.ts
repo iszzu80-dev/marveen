@@ -30,6 +30,32 @@ export function deriveMtdSpend(snapshotsAsc: BalanceSnapshot[]): number {
   return Math.round(spend * 10000) / 10000
 }
 
+// Card ef6c6a2c (spec section 5, "will the quota fill?" -- inverted here to "will the
+// prepaid balance run OUT?"): extrapolates a daily burn rate from ALL historical snapshots
+// (not just this month -- a longer window gives a steadier rate than a fresh month with only
+// 1-2 points), reusing deriveMtdSpend's drop-summing logic (it's period-agnostic despite the
+// name -- ignoring top-ups/rises is exactly right for a burn-rate calculation too, not just MTD).
+// Returns null (never a fabricated date) whenever the input can't support a trustworthy
+// extrapolation: fewer than 2 snapshots, less than a day of history (a same-day rate is too
+// noisy to project weeks out), or no net spend observed (zero or net-positive balance change
+// -- there's no "running out" to forecast).
+const MIN_FORECAST_SPAN_SECONDS = 86400
+
+export function forecastDeepSeekExhaustion(snapshotsAsc: BalanceSnapshot[], now: number): number | null {
+  if (snapshotsAsc.length < 2) return null
+  const first = snapshotsAsc[0]
+  const last = snapshotsAsc[snapshotsAsc.length - 1]
+  const spanSeconds = last.captured_at - first.captured_at
+  if (spanSeconds < MIN_FORECAST_SPAN_SECONDS) return null
+  const totalSpend = deriveMtdSpend(snapshotsAsc)
+  if (totalSpend <= 0) return null
+  const dailyBurn = totalSpend / (spanSeconds / 86400)
+  if (!isFinite(dailyBurn) || dailyBurn <= 0) return null
+  const daysToZero = last.balance / dailyBurn
+  if (!isFinite(daysToZero) || daysToZero < 0) return null
+  return Math.floor(now + daysToZero * 86400)
+}
+
 interface DeepSeekBalanceInfo { currency?: string; total_balance?: string | number }
 interface DeepSeekBalanceResp { is_available?: boolean; balance_infos?: DeepSeekBalanceInfo[] }
 
@@ -101,7 +127,14 @@ export async function syncDeepSeekBalance(
     dedup_key: `provider|deepseek|${DEEPSEEK_API_SOURCE}|${w.key}|provider_api`, now,
   })
   recordRun(db, 'ok', 1, w, now, null)
-  upsertDeepSeekEntitlement(db, balanceUsd, now)
+  // Forecast uses ALL-time snapshots (not the this-month-only window above) -- a steadier
+  // burn-rate base, especially right after a month boundary when the MTD window has only 1-2
+  // points of its own.
+  const allRows = db.prepare(
+    `SELECT balance, captured_at FROM provider_balance_snapshots WHERE provider='deepseek' ORDER BY captured_at ASC`,
+  ).all() as Array<{ balance: number; captured_at: number }>
+  const exhaustionAt = forecastDeepSeekExhaustion(allRows, now)
+  upsertDeepSeekEntitlement(db, balanceUsd, exhaustionAt, now)
   return { ok: true, provider: 'deepseek', status: 'ok', imported_count: 1, balance_usd: balanceUsd, mtd_spend_usd: mtdSpendUsd, period: w.key }
 }
 
@@ -120,21 +153,22 @@ function statusForDeepSeekBalance(balanceUsd: number): string {
   return 'ok'
 }
 
-function upsertDeepSeekEntitlement(db: import('better-sqlite3').Database, balanceUsd: number, now: number): void {
+function upsertDeepSeekEntitlement(db: import('better-sqlite3').Database, balanceUsd: number, forecastExhaustionAt: number | null, now: number): void {
   db.prepare(`
     INSERT INTO entitlements
       (provider, product, plan_name, billing_period, entitlement_type,
        included_limit, included_unit, usage_to_date, remaining, usage_pct, reset_at,
-       usage_source, usage_confidence, status, dedup_key, last_updated, created_at)
+       usage_source, usage_confidence, forecast_exhaustion_at, status, dedup_key, last_updated, created_at)
     VALUES
       ('deepseek', 'deepseek-api', 'prepaid', 'ongoing', 'prepaid_balance',
        NULL, 'USD', NULL, @remaining, NULL, NULL,
-       'provider_api', 'actual', @status, 'deepseek|prepaid_balance', @now, @now)
+       'provider_api', 'actual', @forecastExhaustionAt, @status, 'deepseek|prepaid_balance', @now, @now)
     ON CONFLICT(dedup_key) DO UPDATE SET
       remaining = excluded.remaining,
       status = excluded.status,
+      forecast_exhaustion_at = excluded.forecast_exhaustion_at,
       last_updated = excluded.last_updated
-  `).run({ remaining: balanceUsd, status: statusForDeepSeekBalance(balanceUsd), now })
+  `).run({ remaining: balanceUsd, status: statusForDeepSeekBalance(balanceUsd), forecastExhaustionAt, now })
 }
 
 function upsertLine(db: import('better-sqlite3').Database, a: { source: string; provider: string; start: number; end: number; amount: number; confidence: string; freshness: number; dedup_key: string; now: number }): void {
