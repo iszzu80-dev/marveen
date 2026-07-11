@@ -253,5 +253,50 @@ export async function tryHandleCosts(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
+  // Card a1552362 (item 3): manual cost/entitlement entry -- the one hand-entry door for a
+  // provider Istvan already knows the number for but that has no API/invoice-ingest path yet.
+  // POST creates (409 if the key already exists), PATCH updates (404 if it doesn't) -- see
+  // manual-entry.ts for the full rationale.
+  if (path === '/api/costs/manual' && (method === 'POST' || method === 'PATCH')) {
+    try {
+      const raw = await readBody(ctx.req)
+      const body = JSON.parse(raw.toString() || '{}')
+      const now = Math.floor(Date.now() / 1000)
+      let fxUsdHuf = 0, fxEurHuf = 0
+      try {
+        const { loadRenderPricing } = await import('../../costops/collectors/render.js')
+        const p = loadRenderPricing().pricing
+        fxUsdHuf = p.fx_usd_huf || 0
+        fxEurHuf = p.fx_eur_huf || 0
+      } catch { /* fx 0 -> non-HUF entries rejected as unconvertible */ }
+      const { createManualCost, updateManualCost } = await import('../../costops/manual-entry.js')
+      const result = method === 'POST'
+        ? createManualCost(getDb(), body, { fxUsdHuf, fxEurHuf, now })
+        : updateManualCost(getDb(), body, { fxUsdHuf, fxEurHuf, now })
+      json(res, result, result.ok ? 200 : (result.status || 500))
+    } catch (err) {
+      logger.error({ err }, 'CostOps manual cost entry failed')
+      json(res, { ok: false, error: 'manual cost entry failed' }, 500)
+    }
+    return true
+  }
+
+  if (path === '/api/costs/entitlements/manual' && (method === 'POST' || method === 'PATCH')) {
+    try {
+      const raw = await readBody(ctx.req)
+      const body = JSON.parse(raw.toString() || '{}')
+      const now = Math.floor(Date.now() / 1000)
+      const { createManualEntitlement, updateManualEntitlement } = await import('../../costops/manual-entry.js')
+      const result = method === 'POST'
+        ? createManualEntitlement(getDb(), body, now)
+        : updateManualEntitlement(getDb(), body, now)
+      json(res, result, result.ok ? 200 : (result.status || 500))
+    } catch (err) {
+      logger.error({ err }, 'CostOps manual entitlement entry failed')
+      json(res, { ok: false, error: 'manual entitlement entry failed' }, 500)
+    }
+    return true
+  }
+
   return false
 }

@@ -55,7 +55,7 @@ export function toHuf(amount: number, currency: string, fxUsdHuf: number, fxEurH
 }
 
 /** The fx rate actually used for a given currency, for retaining alongside the converted amount. */
-function fxRateFor(currency: string, fxUsdHuf: number, fxEurHuf: number): number | null {
+export function fxRateFor(currency: string, fxUsdHuf: number, fxEurHuf: number): number | null {
   const cur = (currency || 'HUF').toUpperCase()
   if (cur === 'USD') return fxUsdHuf
   if (cur === 'EUR' && fxEurHuf > 0) return fxEurHuf

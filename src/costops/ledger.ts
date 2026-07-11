@@ -281,6 +281,13 @@ export interface CostSummary {
     original_currency: string | null
     fx_rate: number | null
     fx_date: number | null
+    // Card a1552362: every fx_rate currently in the system comes from the static
+    // Render-pricing config (fx_usd_huf), never a rate embedded in the source
+    // invoice/API response itself -- so it's honestly an ESTIMATE, not a bank/invoice
+    // rate. true whenever a conversion happened, null when there's nothing to flag
+    // (no conversion, no rate). Derived at read time, not a stored column -- the day
+    // a real per-invoice rate exists, that write site can carry its own flag.
+    fx_estimated: boolean | null
   }>
   confidence_breakdown: Record<string, number>
   breakdown: { fixed_manual: number; provider: number; estimate: number }
@@ -469,6 +476,7 @@ export function getCostSummary(
         original_currency: original?.currency ?? null,
         fx_rate: original?.fx_rate ?? null,
         fx_date: original?.fx_date ?? null,
+        fx_estimated: (original?.fx_rate ?? null) != null ? true : null,
       }
     })
     .sort((a, b) => (b.spend ?? -1) - (a.spend ?? -1) || a.name.localeCompare(b.name))

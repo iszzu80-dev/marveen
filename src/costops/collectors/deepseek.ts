@@ -121,10 +121,18 @@ export async function syncDeepSeekBalance(
   const amountHuf = Math.round(mtdSpendUsd * (fxUsdHuf || 0) * 100) / 100
 
   // upsert the provider line (usage actual, derived) for deepseek-api
+  // Card a1552362: this is a real USD->HUF conversion (mtdSpendUsd * fxUsdHuf) but the line
+  // never retained original_amount/original_currency/fx_rate -- unlike email-ingest.ts's
+  // equivalent conversion, which does. Only set when a rate was actually available (fxUsdHuf >
+  // 0); a 0 rate means amountHuf is already 0 and there's nothing real to retain.
   upsertLine(db, {
     source: DEEPSEEK_API_SOURCE, provider: 'deepseek', start: w.start, end: w.end,
     amount: amountHuf, confidence: 'provider_api', freshness: now,
     dedup_key: `provider|deepseek|${DEEPSEEK_API_SOURCE}|${w.key}|provider_api`, now,
+    original_amount: fxUsdHuf ? mtdSpendUsd : null,
+    original_currency: fxUsdHuf ? 'USD' : null,
+    fx_rate: fxUsdHuf ? fxUsdHuf : null,
+    fx_date: fxUsdHuf ? now : null,
   })
   recordRun(db, 'ok', 1, w, now, null)
   // Forecast uses ALL-time snapshots (not the this-month-only window above) -- a steadier
@@ -171,7 +179,11 @@ function upsertDeepSeekEntitlement(db: import('better-sqlite3').Database, balanc
   `).run({ remaining: balanceUsd, status: statusForDeepSeekBalance(balanceUsd), forecastExhaustionAt, now })
 }
 
-function upsertLine(db: import('better-sqlite3').Database, a: { source: string; provider: string; start: number; end: number; amount: number; confidence: string; freshness: number; dedup_key: string; now: number }): void {
+function upsertLine(db: import('better-sqlite3').Database, a: {
+  source: string; provider: string; start: number; end: number; amount: number; confidence: string
+  freshness: number; dedup_key: string; now: number
+  original_amount?: number | null; original_currency?: string | null; fx_rate?: number | null; fx_date?: number | null
+}): void {
   db.prepare(`INSERT INTO cost_sources (id, name, provider, source_type, currency, active, created_at, updated_at)
     VALUES (@id,@id,@provider,'usage','HUF',1,@now,@now)
     ON CONFLICT(id) DO UPDATE SET provider=excluded.provider, updated_at=excluded.updated_at`).run({ id: a.source, provider: a.provider, now: a.now })
@@ -183,9 +195,14 @@ function upsertLine(db: import('better-sqlite3').Database, a: { source: string; 
   // provider-API-observed balance-drain spend as "Nincs adat" in the dashboard, even though
   // confidence was correctly 'provider_api' the whole time.
   db.prepare(`INSERT INTO cost_line_items
-      (source_id, charge_period_start, charge_period_end, charge_category, service_name, usage_type, consumed_quantity, consumed_unit, billed_cost, effective_cost, currency, confidence, data_freshness, source_ref, dedup_key, created_at, actual_source)
-    VALUES (@source,@start,@end,'usage',@source,NULL,NULL,NULL,@amount,NULL,'HUF',@confidence,@freshness,NULL,@dedup_key,@now,'provider_api')
-    ON CONFLICT(dedup_key) DO UPDATE SET billed_cost=excluded.billed_cost, confidence=excluded.confidence, data_freshness=excluded.data_freshness, actual_source=excluded.actual_source`).run(a)
+      (source_id, charge_period_start, charge_period_end, charge_category, service_name, usage_type, consumed_quantity, consumed_unit, billed_cost, effective_cost, currency, confidence, data_freshness, source_ref, dedup_key, created_at, actual_source, original_amount, original_currency, fx_rate, fx_date)
+    VALUES (@source,@start,@end,'usage',@source,NULL,NULL,NULL,@amount,NULL,'HUF',@confidence,@freshness,NULL,@dedup_key,@now,'provider_api',@original_amount,@original_currency,@fx_rate,@fx_date)
+    ON CONFLICT(dedup_key) DO UPDATE SET billed_cost=excluded.billed_cost, confidence=excluded.confidence, data_freshness=excluded.data_freshness, actual_source=excluded.actual_source,
+      original_amount=excluded.original_amount, original_currency=excluded.original_currency, fx_rate=excluded.fx_rate, fx_date=excluded.fx_date`).run({
+    ...a,
+    original_amount: a.original_amount ?? null, original_currency: a.original_currency ?? null,
+    fx_rate: a.fx_rate ?? null, fx_date: a.fx_date ?? null,
+  })
 }
 
 function recordRun(db: import('better-sqlite3').Database, status: string, count: number, w: { start: number; end: number }, now: number, errMsg: string | null): void {

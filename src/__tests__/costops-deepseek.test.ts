@@ -163,4 +163,36 @@ describe('syncDeepSeekBalance (offline stub)', () => {
     expect(line.actual_source).toBe('provider_api')
     expect(line.confidence).toBe('provider_api')
   })
+
+  // Card a1552362 (item 2): the USD->HUF conversion here never retained original_amount/
+  // original_currency/fx_rate, unlike email-ingest.ts's equivalent conversion -- so this real
+  // spend's original currency was silently lost, and getCostSummary()'s all_sources always
+  // showed it as HUF-native (no fx_estimated flag possible either, with nothing to derive it from).
+  it('retains original USD amount + fx_rate on the cost_line_items row once a drop is observed (card a1552362, item 2)', async () => {
+    const db = getDb()
+    const t0 = Math.floor(Date.UTC(2026, 6, 5) / 1000)
+    const bal = (v: string) => async () => ({ is_available: true, balance_infos: [{ currency: 'USD', total_balance: v }] })
+    await syncDeepSeekBalance(db, t0, { apiKey: 'k', fxUsdHuf: 360, httpGetJson: bal('5.00') })
+    // first sync: baseline, 0 USD spend so far -- still a real (if zero) USD-denominated amount
+    let line = db.prepare("SELECT original_amount, original_currency, fx_rate FROM cost_line_items WHERE source_id='deepseek-api'").get() as { original_amount: number | null; original_currency: string | null; fx_rate: number | null }
+    expect(line.original_amount).toBe(0)
+    expect(line.original_currency).toBe('USD')
+    // second sync: a real 1.80 USD drop -> retained alongside the converted HUF billed_cost
+    await syncDeepSeekBalance(db, t0 + 86400, { apiKey: 'k', fxUsdHuf: 360, httpGetJson: bal('3.20') })
+    line = db.prepare("SELECT original_amount, original_currency, fx_rate FROM cost_line_items WHERE source_id='deepseek-api'").get() as { original_amount: number | null; original_currency: string | null; fx_rate: number | null }
+    expect(line.original_amount).toBeCloseTo(1.8, 4)
+    expect(line.original_currency).toBe('USD')
+    expect(line.fx_rate).toBe(360)
+  })
+
+  it('does not fabricate an original currency when no fx rate is configured (fxUsdHuf 0)', async () => {
+    const db = getDb()
+    const t0 = Math.floor(Date.UTC(2026, 6, 5) / 1000)
+    const bal = (v: string) => async () => ({ is_available: true, balance_infos: [{ currency: 'USD', total_balance: v }] })
+    await syncDeepSeekBalance(db, t0, { apiKey: 'k', fxUsdHuf: 0, httpGetJson: bal('5.00') })
+    await syncDeepSeekBalance(db, t0 + 86400, { apiKey: 'k', fxUsdHuf: 0, httpGetJson: bal('3.20') })
+    const line = db.prepare("SELECT original_currency, fx_rate FROM cost_line_items WHERE source_id='deepseek-api'").get() as { original_currency: string | null; fx_rate: number | null }
+    expect(line.original_currency).toBeNull()
+    expect(line.fx_rate).toBeNull()
+  })
 })
