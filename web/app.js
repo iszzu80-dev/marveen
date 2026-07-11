@@ -12077,6 +12077,16 @@ async function loadCostsV2() {
     ? '✓ A főszám (' + fmt(headline) + ') megegyezik a tételek összegével.'
     : '⚠ Eltérés: főszám ' + fmt(headline) + ' vs tételek ' + fmt(lineSum) + '.') + '</div>'
 
+  // Never fake a 0 for an unknown value (integrity rule #1): a no_data / pending source,
+  // or a null amount, renders "—", not "0 HUF" -- otherwise a "Nincs adat"/"Jogosultság
+  // kell" badge sits next to a fabricated 0. A MEASURED/entered value (incl. a real 0,
+  // e.g. github's API-confirmed zero bill) still renders explicitly via fmt(). Hoisted here
+  // (card 55d75546 F2) so the accordion leaf uses it too, not just the unified table.
+  const valCell = (it, v) => {
+    const k = effSrc(it)
+    if (k === 'no_data' || k === 'pending_permission') return '—'
+    return v == null ? '—' : fmt(v)
+  }
   // --- Category -> provider -> source accordion ---
   html += '<div class="cv2-sec">Kategóriák → providerek → források</div>'
   html += '<div class="cv2-filter" role="group" aria-label="Szűrés adatminőség szerint">'
@@ -12105,7 +12115,7 @@ async function loadCostsV2() {
       for (const it of items) {
         html += '<div class="cv2-srcrow"><span>' + esc(it.name || it.source_id) + ' ' + srcBadge(effSrc(it))
           + (origCur(it) ? ' <span style="color:var(--text-muted);">' + origCur(it) + '</span>' : '') + '</span>'
-          + '<span class="cv2-amt">' + fmt(it.spend) + '</span></div>'
+          + '<span class="cv2-amt">' + valCell(it, it.spend) + '</span></div>'
       }
       html += '</div></details>'
     }
@@ -12118,15 +12128,6 @@ async function loadCostsV2() {
     + '<div class="cv2-tblwrap" tabindex="0" role="group" aria-label="Egységes tételtábla (görgethető)"><table class="cv2-tbl"><caption class="cv2-vh">Egységes tételtábla: provider, tétel, kategória, MTD, forecast, alap, forrás, eredeti deviza</caption><thead><tr>'
     + '<th scope="col">Provider</th><th scope="col">Tétel</th><th scope="col">Kategória</th><th scope="col">MTD</th><th scope="col">Forecast</th><th scope="col">Alap</th><th scope="col">Forrás</th><th scope="col">Eredeti deviza</th>'
     + '</tr></thead><tbody>'
-  // Never fake a 0 for an unknown value (integrity rule #1): a no_data / pending source,
-  // or a null amount, renders "—", not "0 HUF" -- otherwise a "Nincs adat"/"Jogosultság
-  // kell" badge sits next to a fabricated 0. A MEASURED/entered value (incl. a real 0,
-  // e.g. github's API-confirmed zero bill) still renders explicitly via fmt().
-  const valCell = (it, v) => {
-    const k = effSrc(it)
-    if (k === 'no_data' || k === 'pending_permission') return '—'
-    return v == null ? '—' : fmt(v)
-  }
   for (const it of sources.slice().sort((a, b) => (Number(b.spend) || 0) - (Number(a.spend) || 0))) {
     html += '<tr><td>' + esc(it.provider) + '</td><td>' + esc(it.name || it.source_id) + '</td><td>' + esc(CAT(it.provider, it.source_type))
       + '</td><td class="cv2-r">' + valCell(it, it.spend) + '</td><td class="cv2-r">' + valCell(it, it.forecast_month_end)
@@ -12184,13 +12185,32 @@ async function loadCostsV2() {
       const stCol = sub.past_due ? '#e74c3c' : (sub.status === 'active' ? '#2ecc71' : '#9aa0a6')
       html += '<tr><td>' + esc(sub.name) + '</td><td>' + esc(sub.provider) + '</td><td>—</td><td>' + esc(used) + '</td><td>' + esc(reset) + '</td><td>—</td><td style="color:' + stCol + ';font-weight:600;">' + esc(st) + '</td><td>' + forrasCell(subUsageSrc(sub)) + '</td></tr>'
     }
+    // F6: raw limit_type ("weekly_usage_pct") reads as a debug token and the two anthropic
+    // meters (weekly limit vs the subscription's session row) look like twin unlabeled %s.
+    // Give a human label + tag the weekly meter "(heti)" to disambiguate from "(session)".
+    const limitLabel = (l) => ({ weekly_usage_pct: 'Heti limit', monthly_usage_pct: 'Havi limit', balance: 'Egyenleg' }[l.limit_type] || l.limit_type || '—')
+    // F4: never stamp HUF on a non-HUF value. A pct ceiling is %, a prepaid balance is its
+    // native currency (deepseek = USD; prefer l.unit once the backend supplies it, plan §6).
+    const limitUnit = (l) => l.unit || (l.limit_type === 'balance' ? (l.provider === 'deepseek' ? 'USD' : '') : (/pct/.test(String(l.limit_type)) ? '%' : ''))
+    const limitAmount = (l, v) => {
+      if (v == null) return '—'
+      const u = limitUnit(l)
+      if (u === '%') return (Number(v) || 0) + '%'
+      if (u) return (Number(v) || 0).toLocaleString('hu-HU') + ' ' + esc(u)
+      return fmt(v)
+    }
     for (const l of limits) {
-      const keret = l.limit_value != null ? fmt(l.limit_value) : '—'
-      const used = l.usage_pct != null ? (Math.round(l.usage_pct * 1000) / 10) + '%' : (l.current_usage != null ? esc(String(l.current_usage)) : '—')
+      // F5: subscription_renewal is a cost-axis billing date, not a usage keret -- excluded
+      // per §16/§10 (the subs loop already excludes it; the limits loop must too).
+      if (l.limit_type === 'subscription_renewal') continue
+      const keret = limitAmount(l, l.limit_value)
+      const used = l.usage_pct != null
+        ? (Math.round(l.usage_pct * 1000) / 10) + '%' + (l.limit_type === 'weekly_usage_pct' ? ' (heti)' : '')
+        : (l.current_usage != null ? limitAmount(l, l.current_usage) : '—')
       const reset = l.reset_date || '—'
       const expiry = l.expiry_date || l.paid_until || '—'
       const stCol = /over|critical|high/.test(String(l.status)) ? '#e74c3c' : (/warn/.test(String(l.status)) ? '#e0a800' : (l.status === 'ok' ? '#2ecc71' : '#9aa0a6'))
-      html += '<tr><td>' + esc(l.limit_type || '—') + '</td><td>' + esc(l.provider) + '</td><td>' + esc(keret) + '</td><td>' + used + '</td><td>' + esc(String(reset)) + '</td><td>' + esc(String(expiry)) + '</td><td style="color:' + stCol + ';font-weight:600;">' + esc(l.status || '—') + '</td><td>' + forrasCell(limitUsageSrc(l)) + '</td></tr>'
+      html += '<tr><td>' + esc(limitLabel(l)) + '</td><td>' + esc(l.provider) + '</td><td>' + keret + '</td><td>' + used + '</td><td>' + esc(String(reset)) + '</td><td>' + esc(String(expiry)) + '</td><td style="color:' + stCol + ';font-weight:600;">' + esc(l.status || '—') + '</td><td>' + forrasCell(limitUsageSrc(l)) + '</td></tr>'
     }
     html += '</tbody></table></div>'
     html += '<div class="cv2-recon">Külön szekció: a csomaghasználat (keret / reset / lejárat) nincs összekeverve az operatív költéssel.</div>'
