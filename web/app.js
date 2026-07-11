@@ -11873,6 +11873,8 @@ async function loadCostsV2() {
       '.cv2-acc .cv2-srcrow{display:flex;justify-content:space-between;gap:10px;padding:4px 0;border-top:1px dashed var(--border);}',
       '.cv2-amt{font-variant-numeric:tabular-nums;white-space:nowrap;}',
       '.cv2-tblwrap{overflow-x:auto;}',
+      '.cv2-tblwrap:focus-visible{outline:2px solid var(--accent,#4a90d9);outline-offset:2px;}',
+      '.cv2-vh{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;}',
       '.cv2-tbl{width:100%;border-collapse:collapse;font-size:0.8em;}',
       '.cv2-tbl th,.cv2-tbl td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap;}',
       '.cv2-tbl th{color:var(--text-muted);font-weight:600;position:sticky;top:0;background:var(--bg-card);}',
@@ -12006,7 +12008,7 @@ async function loadCostsV2() {
     { label: 'Változás előző hónaphoz', num: (momArrow + ' ' + momSign + fmt(Math.abs(mom))), numColor: momColor, sub: 'előző hó: ' + fmt(prev.operational_spend || 0) },
   ]
 
-  let html = '<div class="cv2-wrap">'
+  let html = '<div class="cv2-wrap" role="region" aria-label="Költség-áttekintő">'
   html += '<div class="cv2-topbar"><span class="cv2-month">Hónap: <b>' + esc(s.month || '—') + '</b></span>'
     + '<a class="cv2-toglink" href="#costs">← Klasszikus nézet (v1)</a></div>'
   html += '<div class="cv2-cards">'
@@ -12078,8 +12080,8 @@ async function loadCostsV2() {
 
   // --- Unified line-item table (collapsed) ---
   html += '<details class="cv2-acc"><summary style="font-weight:600;">Egységes tételtábla (' + sources.length + ' tétel)</summary>'
-    + '<div class="cv2-tblwrap"><table class="cv2-tbl"><thead><tr>'
-    + '<th>Provider</th><th>Tétel</th><th>Kategória</th><th>MTD</th><th>Forecast</th><th>Alap</th><th>Forrás</th><th>Eredeti deviza</th>'
+    + '<div class="cv2-tblwrap" tabindex="0" role="group" aria-label="Egységes tételtábla (görgethető)"><table class="cv2-tbl"><caption class="cv2-vh">Egységes tételtábla: provider, tétel, kategória, MTD, forecast, alap, forrás, eredeti deviza</caption><thead><tr>'
+    + '<th scope="col">Provider</th><th scope="col">Tétel</th><th scope="col">Kategória</th><th scope="col">MTD</th><th scope="col">Forecast</th><th scope="col">Alap</th><th scope="col">Forrás</th><th scope="col">Eredeti deviza</th>'
     + '</tr></thead><tbody>'
   // Never fake a 0 for an unknown value (integrity rule #1): a no_data / pending source,
   // or a null amount, renders "—", not "0 HUF" -- otherwise a "Nincs adat"/"Jogosultság
@@ -12123,8 +12125,8 @@ async function loadCostsV2() {
   if (!limits.length && !subs.length) {
     html += '<div class="cv2-recon">Nincs csomag/keret adat.</div>'
   } else {
-    html += '<div class="cv2-tblwrap"><table class="cv2-tbl"><thead><tr>'
-      + '<th>Csomag / keret</th><th>Provider</th><th>Felhasználási keret</th><th>Felhasználva</th><th>Nullázódik</th><th>Lejárat</th><th>Státusz</th><th>Forrás</th></tr></thead><tbody>'
+    html += '<div class="cv2-tblwrap" tabindex="0" role="group" aria-label="Csomagok és keretek (görgethető)"><table class="cv2-tbl"><caption class="cv2-vh">Csomagok és keretek: csomag/keret, provider, felhasználási keret, felhasználva, nullázódik, lejárat, státusz, forrás</caption><thead><tr>'
+      + '<th scope="col">Csomag / keret</th><th scope="col">Provider</th><th scope="col">Felhasználási keret</th><th scope="col">Felhasználva</th><th scope="col">Nullázódik</th><th scope="col">Lejárat</th><th scope="col">Státusz</th><th scope="col">Forrás</th></tr></thead><tbody>'
     // Entitlement Forrás = the USAGE/quota data source, NEVER the cost source (sec16
     // entitlement != cost). Muse ruling (msg 11427): ledger / workspace_alert are official
     // read-only feeds -> API; a real usage reading present (limits weekly_usage_pct, or a
