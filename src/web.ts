@@ -8,7 +8,8 @@ import { isBlockedCrossOriginWrite, originMatchesServedHost } from './web/csrf-o
 import { json } from './web/http-helpers.js'
 import { detectLanIp } from './web/network-info.js'
 import { AGENTS_BASE_DIR, listAgentNames } from './web/agent-config.js'
-import { ensureAgentHooks, ensureAgentStalenessHook, ensureDefaultScheduledTasks } from './web/agent-scaffold.js'
+import { ensureAgentHooks, ensureAgentStalenessHook, ensureDefaultScheduledTasks, agentSettingsPath } from './web/agent-scaffold.js'
+import { shouldRegisterHooks, pruneStaleHooksFromSettingsFile } from './web/hook-registration-guard.js'
 import { refreshMarveenBotUsername } from './web/telegram.js'
 import { startMessageRouter } from './web/message-router.js'
 import { startUpdateChecker } from './web/update-checker.js'
@@ -396,19 +397,36 @@ export function startWebServer(port = 3420): http.Server {
   // Backfill the PreCompact hook into existing agents' settings.json so the
   // auto-skill / auto-memory flow runs on context compaction. No-op if the
   // agent already has its own hooks block.
-  try {
-    const patched: string[] = []
-    const stalePatched: string[] = []
-    // Include the main agent (MAIN_AGENT_ID) so the voice hook is also seeded
-    // into ~/.claude/settings.json alongside existing hooks (e.g. telegram_progress.py).
-    for (const agentName of [MAIN_AGENT_ID, ...listAgentNames()]) {
-      if (ensureAgentHooks(agentName)) patched.push(agentName)
-      if (ensureAgentStalenessHook(agentName)) stalePatched.push(agentName)
+  //
+  // Guarded: a worktree checkout or a WEB_ONLY staging instance must NEVER
+  // register hooks -- its PROJECT_ROOT is temporary, and baking it into the
+  // user-global ~/.claude/settings.json leaves stale absolute paths behind
+  // once the worktree is deleted. A failing (exit 2) UserPromptSubmit hook
+  // then BLOCKS every prompt and deafens the main agent (2026-07-11 incident).
+  const hookDecision = shouldRegisterHooks({ projectRoot: PROJECT_ROOT, webOnly })
+  if (!hookDecision.register) {
+    logger.info({ reason: hookDecision.reason, projectRoot: PROJECT_ROOT }, 'Hook registration skipped')
+  } else {
+    try {
+      const patched: string[] = []
+      const stalePatched: string[] = []
+      const pruned: string[] = []
+      // Include the main agent (MAIN_AGENT_ID) so the voice hook is also seeded
+      // into ~/.claude/settings.json alongside existing hooks (e.g. telegram_progress.py).
+      for (const agentName of [MAIN_AGENT_ID, ...listAgentNames()]) {
+        // Self-heal FIRST: drop entries this app previously wrote whose script
+        // file no longer exists (e.g. a deleted worktree instance's paths), so
+        // the re-registration below lands on a clean, unblocked settings file.
+        pruned.push(...pruneStaleHooksFromSettingsFile(agentSettingsPath(agentName)))
+        if (ensureAgentHooks(agentName)) patched.push(agentName)
+        if (ensureAgentStalenessHook(agentName)) stalePatched.push(agentName)
+      }
+      if (pruned.length) logger.info({ pruned }, 'Stale hook entries pruned from agent settings.json')
+      if (patched.length) logger.info({ patched }, 'PreCompact hook backfilled into agent settings.json')
+      if (stalePatched.length) logger.info({ patched: stalePatched }, 'staleness-guard UserPromptSubmit hook backfilled into agent settings.json')
+    } catch (err) {
+      logger.warn({ err }, 'Agent hook backfill skipped')
     }
-    if (patched.length) logger.info({ patched }, 'PreCompact hook backfilled into agent settings.json')
-    if (stalePatched.length) logger.info({ patched: stalePatched }, 'staleness-guard UserPromptSubmit hook backfilled into agent settings.json')
-  } catch (err) {
-    logger.warn({ err }, 'Agent hook backfill skipped')
   }
 
   try {
