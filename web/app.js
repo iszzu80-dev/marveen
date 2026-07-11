@@ -287,6 +287,7 @@ function switchPage(pageId) {
   if (pageId === 'messages') loadMessagesPage()
   if (pageId === 'tokenUsage') loadTokenUsage()
   if (pageId === 'costs') loadCosts()
+  if (pageId === 'costs-v2') loadCostsV2()
   if (pageId === 'ideas') loadIdeasPage()
   if (pageId === 'archived') loadArchivedPage()
   if (pageId === 'naplo') loadNaplo()
@@ -11830,6 +11831,99 @@ async function loadCosts() {
     + renderCard
     + tokenLimitCard
     + diagBlock
+}
+
+async function loadCostsV2() {
+  const body = document.getElementById('costsV2Body')
+  if (!body) return
+  if (!document.getElementById('cv2Style')) {
+    const st = document.createElement('style')
+    st.id = 'cv2Style'
+    st.textContent = [
+      '.cv2-wrap{max-width:1100px;margin:0 auto;}',
+      '.cv2-topbar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap;}',
+      '.cv2-topbar .cv2-month{font-size:0.9em;color:var(--text-secondary);}',
+      '.cv2-toglink{font-size:0.82em;color:var(--text-muted);text-decoration:none;border:1px solid var(--border);border-radius:var(--radius-sm,6px);padding:4px 10px;}',
+      '.cv2-toglink:hover{color:var(--text);border-color:var(--accent);}',
+      '.cv2-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:16px;}',
+      '.cv2-card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius,10px);padding:15px 17px;box-shadow:var(--shadow-sm);}',
+      '.cv2-card .cv2-label{font-size:0.74em;color:var(--text-muted);text-transform:uppercase;letter-spacing:.03em;}',
+      '.cv2-card .cv2-num{font-size:clamp(1.35rem,3vw,1.85rem);font-weight:700;color:var(--text);margin:5px 0 3px;line-height:1.1;}',
+      '.cv2-card .cv2-sub{font-size:0.79em;color:var(--text-secondary);}',
+      '.cv2-qual{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;margin-bottom:20px;font-size:0.8em;color:var(--text-secondary);}',
+      '.cv2-chip{display:inline-block;padding:2px 9px;border-radius:9px;font-size:0.92em;font-weight:600;white-space:nowrap;}',
+      '.cv2-ok{color:#2ecc71;background:rgba(46,204,113,0.14);}',
+      '.cv2-warn{color:#e0a800;background:rgba(224,168,0,0.14);}',
+      '.cv2-over{color:#e74c3c;background:rgba(231,76,60,0.15);}',
+      '.cv2-muted{color:#9aa0a6;background:rgba(150,150,150,0.14);}',
+      '.cv2-soon{color:var(--text-muted);font-size:0.82em;padding:10px 0;border-top:1px dashed var(--border);margin-top:4px;line-height:1.5;}',
+      '@media(max-width:560px){.cv2-cards{grid-template-columns:1fr 1fr;}}',
+    ].join('')
+    document.head.appendChild(st)
+  }
+  body.innerHTML = '<p style="color:var(--text-muted);">Betöltés...</p>'
+  let s
+  try {
+    const res = await fetch('/api/costs/summary')
+    if (!res.ok) { body.innerHTML = '<p style="color:var(--danger,#c0392b);">Nem sikerült betölteni a költség-összesítőt.</p>'; return }
+    s = await res.json()
+  } catch (e) { body.innerHTML = '<p style="color:var(--danger,#c0392b);">Hálózati hiba a költség-adatok betöltésekor.</p>'; return }
+
+  const cur = s.currency || 'HUF'
+  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+  const fmt = (n) => (Number(n) || 0).toLocaleString('hu-HU') + ' ' + cur
+  const pct = (n) => (Math.round((Number(n) || 0) * 1000) / 10) + '%'
+  const nowSec = Number(s.generated_at) || Math.floor(Date.now() / 1000)
+  const relAge = (unixSec) => {
+    if (!unixSec) return 'nincs adat'
+    const age = nowSec - Number(unixSec)
+    if (age < 3600) return Math.max(1, Math.round(age / 60)) + ' perce'
+    if (age < 86400) return Math.round(age / 3600) + ' órája'
+    return Math.round(age / 86400) + ' napja'
+  }
+
+  const b = s.budget || {}
+  const budgetPct = b.operational_used_pct != null ? b.operational_used_pct : b.used_pct
+  const budgetFPct = b.operational_forecast_pct != null ? b.operational_forecast_pct : b.forecast_pct
+  const budgetStatus = b.status || 'unknown'
+  const bColor = (budgetStatus === 'over' || budgetStatus === 'hard') ? '#e74c3c' : (budgetStatus === 'warning' ? '#e0a800' : '#2ecc71')
+
+  const mom = Number(s.month_over_month_delta) || 0
+  const momArrow = mom > 0 ? '▲' : (mom < 0 ? '▼' : '■')
+  const momColor = mom > 0 ? 'var(--danger,#e74c3c)' : (mom < 0 ? 'var(--success,#2ecc71)' : 'var(--text-muted)')
+
+  const prev = s.previous_month || {}
+  const ps = Array.isArray(s.provider_sync) ? s.provider_sync : []
+  const actualN = ps.filter(p => (p.status === 'ok' || Number(p.imported_count) > 0) && !p.stale).length
+  const staleN = ps.filter(p => p.stale).length
+  const pendingN = ps.filter(p => p.status && /pending|permission/.test(String(p.status))).length
+
+  const cards = [
+    { label: 'Előző lezárt hónap', num: fmt(prev.operational_spend || 0), sub: esc(prev.month || '—') },
+    { label: 'Aktuális hónap (MTD)', num: fmt(s.operational_spend || 0), sub: esc(s.month || '') + ' eddig' },
+    { label: 'Várható hó vége', num: fmt(s.operational_forecast_month_end || 0), sub: 'forecast' },
+    { label: 'Budget státusz', num: (budgetPct != null ? pct(budgetPct) : '—'), numColor: (budgetPct != null ? bColor : null), sub: (b.amount ? 'keret ' + fmt(b.amount) : 'nincs keret megadva') + (budgetFPct != null ? ' · várható ' + pct(budgetFPct) : '') },
+  ]
+
+  let html = '<div class="cv2-wrap">'
+  html += '<div class="cv2-topbar"><span class="cv2-month">Hónap: <b>' + esc(s.month || '—') + '</b></span>'
+    + '<a class="cv2-toglink" href="#costs">← Klasszikus nézet (v1)</a></div>'
+  html += '<div class="cv2-cards">'
+  for (const c of cards) {
+    html += '<div class="cv2-card"><div class="cv2-label">' + esc(c.label) + '</div>'
+      + '<div class="cv2-num"' + (c.numColor ? ' style="color:' + c.numColor + '"' : '') + '>' + c.num + '</div>'
+      + '<div class="cv2-sub">' + c.sub + '</div></div>'
+  }
+  html += '</div>'
+  html += '<div class="cv2-qual"><span>Adatminőség:</span>'
+    + '<span class="cv2-chip cv2-ok">' + actualN + ' actual/API</span>'
+    + (staleN ? '<span class="cv2-chip cv2-warn">' + staleN + ' elavult</span>' : '')
+    + (pendingN ? '<span class="cv2-chip cv2-muted">' + pendingN + ' jogosultság kell</span>' : '')
+    + '<span>· változás előző hóhoz: <b style="color:' + momColor + '">' + momArrow + ' ' + fmt(Math.abs(mom)) + '</b></span>'
+    + '<span>· frissítve ' + relAge(s.data_freshness) + '</span></div>'
+  html += '<div class="cv2-soon">A további zónák (Mi változott · kategória→provider→forrás bontás · egységes tételtábla · költség+keretek · teendők · trend · diagnosztika) épülnek. Minden a meglévő /api/costs/* adatra, flag mögött, a v1 nézet érintetlen.</div>'
+  html += '</div>'
+  body.innerHTML = html
 }
 
 async function loadTokenUsage() {
