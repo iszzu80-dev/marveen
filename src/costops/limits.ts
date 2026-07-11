@@ -34,6 +34,13 @@ export interface LimitStatus {
   // `provider` (e.g. Claude Max + Claude Pro are both 'anthropic') -- provider alone can't
   // disambiguate which subscription a row belongs to, sub_id can.
   sub_id: string | null
+  // Card 7d086cd3 (F4, Muse WS-C design-fidelity): current_usage/limit_value carry NO unit info
+  // on their own -- every limit_type here except DeepSeek's balance leaves both null (a day-count,
+  // a token-count, or genuinely unknown), so the renderer's HUF-formatter silently stamping "Ft"
+  // onto whatever number showed up went unnoticed until a real dollar-denominated value (DeepSeek's
+  // native USD prepaid balance) hit it and printed "3,17 HUF" for a ~$3.17 USD balance. null means
+  // "not a monetary value, or currency genuinely unknown" -- never assume HUF by omission.
+  unit: string | null
 }
 
 function tierForPct(pct: number | null): LimitStatusTier {
@@ -70,7 +77,7 @@ export function fromSubscriptions(subs: SubscriptionLifecycle[]): LimitStatus[] 
         paid_until: s.status === 'canceled' ? s.paid_until ?? null : null,
         expiry_date: null,
         status: s.past_due ? 'blocked' : tierForDays(s.days_until_next_date),
-        source: 'config', sub_id: s.id,
+        source: 'config', sub_id: s.id, unit: null,
       })
     }
     // Optional token ceiling (v0.8): only emitted when Istvan has actually supplied one --
@@ -82,7 +89,7 @@ export function fromSubscriptions(subs: SubscriptionLifecycle[]): LimitStatus[] 
         provider: s.provider, limit_type: s.weekly_limit_tokens ? 'weekly_tokens' : 'five_hour_tokens',
         current_usage: null, limit_value: s.weekly_limit_tokens ?? s.five_hour_limit_tokens ?? null,
         usage_pct: null, reset_date: null, paid_until: null, expiry_date: null,
-        status: 'unknown', source: 'config', sub_id: s.id,
+        status: 'unknown', source: 'config', sub_id: s.id, unit: null,
       })
     }
     // Card 2ed90db1: manual weekly-usage-% snapshot (Claude Max/Pro's actual usage screen has
@@ -96,7 +103,7 @@ export function fromSubscriptions(subs: SubscriptionLifecycle[]): LimitStatus[] 
         provider: s.provider, limit_type: 'weekly_usage_pct',
         current_usage: null, limit_value: null, usage_pct: pct,
         reset_date: s.usage_snapshot.weekly_reset_label, paid_until: null, expiry_date: null,
-        status: tierForPct(pct), source: 'config', sub_id: s.id,
+        status: tierForPct(pct), source: 'config', sub_id: s.id, unit: null,
       })
     }
   }
@@ -104,7 +111,7 @@ export function fromSubscriptions(subs: SubscriptionLifecycle[]): LimitStatus[] 
 }
 
 // ---- 2. DeepSeek prepaid balance (same data/logic already in warnings.ts rule 10, normalized) ---
-function fromDeepSeekBalance(db: Database.Database): LimitStatus[] {
+export function fromDeepSeekBalance(db: Database.Database): LimitStatus[] {
   const rows = db.prepare(
     `SELECT balance, currency, captured_at FROM provider_balance_snapshots WHERE provider = 'deepseek' ORDER BY captured_at DESC`,
   ).all() as Array<{ balance: number; currency: string; captured_at: number }>
@@ -112,7 +119,7 @@ function fromDeepSeekBalance(db: Database.Database): LimitStatus[] {
     return [{
       provider: 'deepseek', limit_type: 'balance', current_usage: null, limit_value: null,
       usage_pct: null, reset_date: null, paid_until: null, expiry_date: null,
-      status: 'unknown', source: 'ledger', sub_id: null,
+      status: 'unknown', source: 'ledger', sub_id: null, unit: null,
     }]
   }
   const latest = rows[0].balance
@@ -125,7 +132,9 @@ function fromDeepSeekBalance(db: Database.Database): LimitStatus[] {
   return [{
     provider: 'deepseek', limit_type: 'balance', current_usage: latest, limit_value: peak,
     usage_pct, reset_date: null, paid_until: null, expiry_date: null,
-    status: tierForPct(usage_pct), source: 'ledger', sub_id: null,
+    // Card 7d086cd3 (F4): this is a raw prepaid balance, native currency -- always USD for
+    // DeepSeek today (the snapshot row itself carries it, not assumed), never HUF-converted here.
+    status: tierForPct(usage_pct), source: 'ledger', sub_id: null, unit: rows[0].currency,
   }]
 }
 
@@ -145,7 +154,7 @@ function fromWorkspaceAlerts(db: Database.Database, now: number): LimitStatus[] 
       reset_date: null, paid_until: null,
       expiry_date: r.suspension_date !== null ? new Date(r.suspension_date * 1000).toISOString().slice(0, 10) : null,
       status: r.issue_type === 'suspended' ? 'blocked' : tierForDays(daysRemaining) === 'unknown' ? 'warning' : tierForDays(daysRemaining),
-      source: 'workspace_alert', sub_id: null,
+      source: 'workspace_alert', sub_id: null, unit: null,
     })
   }
   return out
@@ -191,7 +200,7 @@ async function fromLiveChecks(now: number, sslHosts: string[], domains: string[]
     out.push({
       provider: 'render', limit_type: 'build_minutes', current_usage: null, limit_value: null,
       usage_pct: 1.0, reset_date: null, paid_until: null, expiry_date: null,
-      status: 'blocked', source: 'render_api', sub_id: null,
+      status: 'blocked', source: 'render_api', sub_id: null, unit: null,
     })
   }
   for (const w of sslWarnings) {
@@ -200,7 +209,7 @@ async function fromLiveChecks(now: number, sslHosts: string[], domains: string[]
       current_usage: w.current_value ?? null, limit_value: w.threshold ?? null, usage_pct: null,
       reset_date: null, paid_until: null, expiry_date: w.expiry_date ?? w.due_date ?? null,
       status: w.severity === 'high' ? 'critical' : w.severity === 'medium' ? 'warning' : 'warning',
-      source: 'tls', sub_id: null,
+      source: 'tls', sub_id: null, unit: null,
     })
   }
   for (const w of domainWarnings) {
@@ -209,7 +218,7 @@ async function fromLiveChecks(now: number, sslHosts: string[], domains: string[]
       current_usage: w.current_value ?? null, limit_value: w.threshold ?? null, usage_pct: null,
       reset_date: null, paid_until: null, expiry_date: w.expiry_date ?? w.due_date ?? null,
       status: w.severity === 'high' ? 'critical' : w.severity === 'medium' ? 'warning' : 'warning',
-      source: 'rdap', sub_id: null,
+      source: 'rdap', sub_id: null, unit: null,
     })
   }
   return out

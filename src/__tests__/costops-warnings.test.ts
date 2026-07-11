@@ -141,7 +141,7 @@ describe('costops warnings', () => {
     const limits: LimitStatus[] = [{
       provider: 'deepseek', limit_type: 'balance', current_usage: 4, limit_value: 100,
       usage_pct: 0.96, reset_date: null, paid_until: null, expiry_date: null,
-      status: 'critical', source: 'ledger', sub_id: null,
+      status: 'critical', source: 'ledger', sub_id: null, unit: 'USD',
     }]
     const warnings = getWarnings(db, c, NOW, summary, [], limits)
     expect(warnings.find(x => x.code === 'deepseek_balance_low')).toBeUndefined() // rule retired

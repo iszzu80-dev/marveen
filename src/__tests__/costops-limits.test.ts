@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import { fromSubscriptions } from '../costops/limits.js'
+import { fromSubscriptions, fromDeepSeekBalance } from '../costops/limits.js'
 import { deriveLifecycle, type SubscriptionsConfig } from '../costops/subscriptions.js'
+import { initDatabase, getDb } from '../db.js'
 
 // Card 2ed90db1: wiring real Claude Max/Pro weekly-limit % data into the subscription gauge.
 const NOW = Math.floor(Date.UTC(2026, 6, 8, 19, 0, 0) / 1000) // 2026-07-08 21:00 CEST
@@ -66,5 +67,32 @@ describe('costops limits: weekly usage-% snapshot (card 2ed90db1)', () => {
   it('no usage_snapshot at all -> no weekly_usage_pct entry (never fabricated)', () => {
     const lc = deriveLifecycle(cfg([{ id: 'openai-chatgpt', name: 'ChatGPT Plus', provider: 'openai', status: 'active' }]), NOW)
     expect(fromSubscriptions(lc).some(l => l.limit_type === 'weekly_usage_pct')).toBe(false)
+  })
+})
+
+// Card 7d086cd3 (F4, Muse WS-C design-fidelity): DeepSeek's prepaid balance is a raw native-
+// currency number (USD), unlike every other limit_type here which either has no monetary
+// current_usage/limit_value at all, or is a plain percentage -- the renderer's HUF-formatter was
+// silently stamping "Ft" onto it, printing "3,17 HUF" for a ~$3.17 USD balance.
+describe('costops limits: DeepSeek balance unit (card 7d086cd3, F4)', () => {
+  it('no snapshots yet -> unknown status, unit null (not assumed USD before any data exists)', () => {
+    initDatabase(':memory:')
+    const db = getDb()
+    const limits = fromDeepSeekBalance(db)
+    expect(limits).toHaveLength(1)
+    expect(limits[0].status).toBe('unknown')
+    expect(limits[0].unit).toBeNull()
+  })
+
+  it('carries the real native currency from the snapshot row, never HUF-assumed', () => {
+    initDatabase(':memory:')
+    const db = getDb()
+    db.prepare(`INSERT INTO provider_balance_snapshots (provider, currency, balance, captured_at) VALUES ('deepseek','USD',10,?)`).run(1000)
+    db.prepare(`INSERT INTO provider_balance_snapshots (provider, currency, balance, captured_at) VALUES ('deepseek','USD',3.17,?)`).run(2000)
+    const limits = fromDeepSeekBalance(db)
+    expect(limits).toHaveLength(1)
+    expect(limits[0].unit).toBe('USD')
+    expect(limits[0].current_usage).toBe(3.17)
+    expect(limits[0].limit_value).toBe(10)
   })
 })

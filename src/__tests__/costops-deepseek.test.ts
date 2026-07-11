@@ -147,4 +147,20 @@ describe('syncDeepSeekBalance (offline stub)', () => {
     row = db.prepare("SELECT forecast_exhaustion_at FROM entitlements WHERE dedup_key='deepseek|prepaid_balance'").get() as any
     expect(row.forecast_exhaustion_at).toBe(t1 + 10 * 86400) // 5 USD remaining / 0.5 per day = 10 more days
   })
+
+  // Card 7d086cd3 (F1, Muse WS-C design-fidelity): actual_source is a separate column from
+  // confidence (v0.8, ledger.ts) -- the shared collector runner (runner.ts) hardcodes it to
+  // 'provider_api', but this collector's own hand-rolled upsertLine() predates/bypasses that
+  // runner and never got the same treatment, so it silently stayed NULL. getCostSummary()'s
+  // `resolved.actual_source || 'no_data'` fallback then mislabeled a genuinely real,
+  // provider-API-observed spend as "no data" in the dashboard.
+  it('sets actual_source=provider_api on the cost_line_items row (card 7d086cd3, F1)', async () => {
+    const db = getDb()
+    const t0 = Math.floor(Date.UTC(2026, 6, 5) / 1000)
+    const bal = (v: string) => async () => ({ is_available: true, balance_infos: [{ currency: 'USD', total_balance: v }] })
+    await syncDeepSeekBalance(db, t0, { apiKey: 'k', fxUsdHuf: 360, httpGetJson: bal('5.00') })
+    const line = db.prepare("SELECT actual_source, confidence FROM cost_line_items WHERE source_id='deepseek-api'").get() as { actual_source: string; confidence: string }
+    expect(line.actual_source).toBe('provider_api')
+    expect(line.confidence).toBe('provider_api')
+  })
 })

@@ -175,10 +175,17 @@ function upsertLine(db: import('better-sqlite3').Database, a: { source: string; 
   db.prepare(`INSERT INTO cost_sources (id, name, provider, source_type, currency, active, created_at, updated_at)
     VALUES (@id,@id,@provider,'usage','HUF',1,@now,@now)
     ON CONFLICT(id) DO UPDATE SET provider=excluded.provider, updated_at=excluded.updated_at`).run({ id: a.source, provider: a.provider, now: a.now })
+  // Card 7d086cd3 (F1, Muse WS-C design-fidelity): actual_source is a separate column from
+  // confidence, added in v0.8 (ledger.ts) for the shared collector runner (runner.ts hardcodes
+  // 'provider_api' the same way) -- this hand-rolled upsert predates/bypasses that runner and
+  // never got the same treatment, so it silently stayed NULL. getCostSummary()'s
+  // `resolved.actual_source || 'no_data'` fallback then mislabeled a genuinely real,
+  // provider-API-observed balance-drain spend as "Nincs adat" in the dashboard, even though
+  // confidence was correctly 'provider_api' the whole time.
   db.prepare(`INSERT INTO cost_line_items
-      (source_id, charge_period_start, charge_period_end, charge_category, service_name, usage_type, consumed_quantity, consumed_unit, billed_cost, effective_cost, currency, confidence, data_freshness, source_ref, dedup_key, created_at)
-    VALUES (@source,@start,@end,'usage',@source,NULL,NULL,NULL,@amount,NULL,'HUF',@confidence,@freshness,NULL,@dedup_key,@now)
-    ON CONFLICT(dedup_key) DO UPDATE SET billed_cost=excluded.billed_cost, confidence=excluded.confidence, data_freshness=excluded.data_freshness`).run(a)
+      (source_id, charge_period_start, charge_period_end, charge_category, service_name, usage_type, consumed_quantity, consumed_unit, billed_cost, effective_cost, currency, confidence, data_freshness, source_ref, dedup_key, created_at, actual_source)
+    VALUES (@source,@start,@end,'usage',@source,NULL,NULL,NULL,@amount,NULL,'HUF',@confidence,@freshness,NULL,@dedup_key,@now,'provider_api')
+    ON CONFLICT(dedup_key) DO UPDATE SET billed_cost=excluded.billed_cost, confidence=excluded.confidence, data_freshness=excluded.data_freshness, actual_source=excluded.actual_source`).run(a)
 }
 
 function recordRun(db: import('better-sqlite3').Database, status: string, count: number, w: { start: number; end: number }, now: number, errMsg: string | null): void {
