@@ -101,7 +101,40 @@ export async function syncDeepSeekBalance(
     dedup_key: `provider|deepseek|${DEEPSEEK_API_SOURCE}|${w.key}|provider_api`, now,
   })
   recordRun(db, 'ok', 1, w, now, null)
+  upsertDeepSeekEntitlement(db, balanceUsd, now)
   return { ok: true, provider: 'deepseek', status: 'ok', imported_count: 1, balance_usd: balanceUsd, mtd_spend_usd: mtdSpendUsd, period: w.key }
+}
+
+// Card ef6c6a2c (spec section 4): DeepSeek prepaid balance is one of the named
+// subscription/limit-usage rows -- a distinct cost-control dimension from the
+// derived cost-line above. Prepaid balance has no period/reset or fixed
+// included_limit (unlike a weekly/monthly quota), so included_limit/usage_pct/
+// reset_at stay null; `remaining` IS the live balance. Status is a plain
+// absolute-dollar heuristic (not the spec's 70/80/90/100% usage-of-limit
+// thresholds, which don't apply to an unbounded prepaid balance) -- disclosed,
+// not presented as the same rule. Single row per provider (dedup_key has no
+// period component), upserted on every sync.
+function statusForDeepSeekBalance(balanceUsd: number): string {
+  if (balanceUsd < 1) return 'critical'
+  if (balanceUsd < 3) return 'warning'
+  return 'ok'
+}
+
+function upsertDeepSeekEntitlement(db: import('better-sqlite3').Database, balanceUsd: number, now: number): void {
+  db.prepare(`
+    INSERT INTO entitlements
+      (provider, product, plan_name, billing_period, entitlement_type,
+       included_limit, included_unit, usage_to_date, remaining, usage_pct, reset_at,
+       usage_source, usage_confidence, status, dedup_key, last_updated, created_at)
+    VALUES
+      ('deepseek', 'deepseek-api', 'prepaid', 'ongoing', 'prepaid_balance',
+       NULL, 'USD', NULL, @remaining, NULL, NULL,
+       'provider_api', 'actual', @status, 'deepseek|prepaid_balance', @now, @now)
+    ON CONFLICT(dedup_key) DO UPDATE SET
+      remaining = excluded.remaining,
+      status = excluded.status,
+      last_updated = excluded.last_updated
+  `).run({ remaining: balanceUsd, status: statusForDeepSeekBalance(balanceUsd), now })
 }
 
 function upsertLine(db: import('better-sqlite3').Database, a: { source: string; provider: string; start: number; end: number; amount: number; confidence: string; freshness: number; dedup_key: string; now: number }): void {

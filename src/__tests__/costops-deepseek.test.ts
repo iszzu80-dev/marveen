@@ -54,4 +54,38 @@ describe('syncDeepSeekBalance (offline stub)', () => {
     expect(r.ok).toBe(false)
     expect((db.prepare("SELECT COUNT(*) c FROM cost_line_items WHERE source_id='deepseek-api'").get() as { c: number }).c).toBe(0)
   })
+
+  // Card ef6c6a2c (spec section 4): prepaid balance is also a distinct entitlements row,
+  // separate from the derived cost_line_items spend above.
+  it('upserts a single entitlements row per sync, remaining tracks the live balance, status derives from absolute thresholds', async () => {
+    const db = getDb()
+    const t0 = Math.floor(Date.UTC(2026, 6, 5) / 1000)
+    const bal = (v: string) => async () => ({ is_available: true, balance_infos: [{ currency: 'USD', total_balance: v }] })
+
+    await syncDeepSeekBalance(db, t0, { apiKey: 'k', fxUsdHuf: 360, httpGetJson: bal('5.00') })
+    let row = db.prepare("SELECT * FROM entitlements WHERE dedup_key='deepseek|prepaid_balance'").get() as any
+    expect(row.remaining).toBe(5)
+    expect(row.status).toBe('ok')
+    expect(row.provider).toBe('deepseek')
+    expect(row.included_limit).toBeNull()
+    expect(row.reset_at).toBeNull()
+
+    // balance drops into the warning band -- same row updates, no duplicate
+    await syncDeepSeekBalance(db, t0 + 86400, { apiKey: 'k', fxUsdHuf: 360, httpGetJson: bal('2.50') })
+    row = db.prepare("SELECT * FROM entitlements WHERE dedup_key='deepseek|prepaid_balance'").get() as any
+    expect(row.remaining).toBe(2.5)
+    expect(row.status).toBe('warning')
+    expect((db.prepare("SELECT COUNT(*) c FROM entitlements WHERE provider='deepseek'").get() as { c: number }).c).toBe(1)
+
+    // critical band
+    await syncDeepSeekBalance(db, t0 + 2 * 86400, { apiKey: 'k', fxUsdHuf: 360, httpGetJson: bal('0.50') })
+    row = db.prepare("SELECT * FROM entitlements WHERE dedup_key='deepseek|prepaid_balance'").get() as any
+    expect(row.status).toBe('critical')
+  })
+
+  it('does not touch entitlements when the sync itself fails (no key)', async () => {
+    const db = getDb()
+    await syncDeepSeekBalance(db, Math.floor(Date.now() / 1000), { apiKey: null, fxUsdHuf: 360, httpGetJson: async () => ({}) })
+    expect((db.prepare("SELECT COUNT(*) c FROM entitlements WHERE provider='deepseek'").get() as { c: number }).c).toBe(0)
+  })
 })
