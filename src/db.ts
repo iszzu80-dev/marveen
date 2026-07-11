@@ -1697,7 +1697,10 @@ export function claimPendingForAgent(toAgent: string, limit: number): AgentMessa
 
 export function markMessageDone(id: number, result?: string): boolean {
   const now = Math.floor(Date.now() / 1000)
-  return db.prepare("UPDATE agent_messages SET status = 'done', result = ?, completed_at = ? WHERE id = ?").run(result ?? null, now, id).changes > 0
+  // COALESCE: some done-transitions skip the delivered step entirely (e.g. a
+  // still-pending row marked done directly via PUT), so backfill delivered_at
+  // only when it was never set -- don't clobber a real earlier delivery time.
+  return db.prepare("UPDATE agent_messages SET status = 'done', result = ?, completed_at = ?, delivered_at = COALESCE(delivered_at, ?) WHERE id = ?").run(result ?? null, now, now, id).changes > 0
 }
 
 export function markMessageFailed(id: number, error?: string): boolean {
