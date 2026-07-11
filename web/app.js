@@ -11833,6 +11833,20 @@ async function loadCosts() {
     + diagBlock
 }
 
+// Card 55d75546: data-quality focus filter for the category->provider accordion.
+// Pure client-side view toggle (no re-fetch, no recompute) -- category totals stay
+// the full honest sum; the filter only shows/hides provider rows by their dominant
+// source bucket so a user can answer "hol hiányzik számla/API adat?" (main Q6).
+function cv2FilterProviders(btn, mode) {
+  const acc = document.getElementById('cv2CatAcc');
+  if (!acc) return;
+  acc.classList.remove('f-teendo', 'f-valos');
+  if (mode === 'teendo') acc.classList.add('f-teendo');
+  else if (mode === 'valos') acc.classList.add('f-valos');
+  const grp = btn.parentElement;
+  grp.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', b === btn ? 'true' : 'false'));
+}
+
 async function loadCostsV2() {
   const body = document.getElementById('costsV2Body')
   if (!body) return
@@ -11875,6 +11889,15 @@ async function loadCostsV2() {
       '.cv2-tblwrap{overflow-x:auto;}',
       '.cv2-tblwrap:focus-visible{outline:2px solid var(--accent,#4a90d9);outline-offset:2px;}',
       '.cv2-vh{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;}',
+      '.cv2-filter{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px;}',
+      '.cv2-fbtn{font-size:0.78em;padding:4px 11px;border:1px solid var(--border);border-radius:14px;background:transparent;color:var(--text-secondary);cursor:pointer;min-height:32px;}',
+      '.cv2-fbtn:hover{border-color:var(--accent);}',
+      '.cv2-fbtn[aria-pressed="true"]{background:var(--accent,#4a90d9);color:#fff;border-color:var(--accent,#4a90d9);}',
+      '.cv2-fbtn:focus-visible{outline:2px solid var(--accent,#4a90d9);outline-offset:2px;}',
+      '.cv2-acc.f-teendo .cv2-lvl2[data-q="real"]{display:none;}',
+      '.cv2-acc.f-teendo>details[data-cat-q="allreal"]{display:none;}',
+      '.cv2-acc.f-valos .cv2-lvl2[data-q="attention"]{display:none;}',
+      '.cv2-acc.f-valos>details[data-cat-q="noreal"]{display:none;}',
       '.cv2-tbl{width:100%;border-collapse:collapse;font-size:0.8em;}',
       '.cv2-tbl th,.cv2-tbl td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap;}',
       '.cv2-tbl th{color:var(--text-muted);font-weight:600;position:sticky;top:0;background:var(--bg-card);}',
@@ -12056,17 +12079,29 @@ async function loadCostsV2() {
 
   // --- Category -> provider -> source accordion ---
   html += '<div class="cv2-sec">Kategóriák → providerek → források</div>'
-  html += '<div class="cv2-acc">'
+  html += '<div class="cv2-filter" role="group" aria-label="Szűrés adatminőség szerint">'
+    + '<button type="button" class="cv2-fbtn" aria-pressed="true" onclick="cv2FilterProviders(this,\'mind\')">Mind</button>'
+    + '<button type="button" class="cv2-fbtn" aria-pressed="false" onclick="cv2FilterProviders(this,\'teendo\')">Teendő (hiányzó adat)</button>'
+    + '<button type="button" class="cv2-fbtn" aria-pressed="false" onclick="cv2FilterProviders(this,\'valos\')">Valós (számla/API)</button>'
+    + '</div>'
+  html += '<div class="cv2-acc" id="cv2CatAcc">'
   const catNames = Object.keys(catMap).sort((a, b) => sumSpend(Object.values(catMap[b]).flat()) - sumSpend(Object.values(catMap[a]).flat()))
   for (const cat of catNames) {
     const provs = catMap[cat]
     const flat = Object.values(provs).flat()
-    html += '<details><summary><span><b>' + esc(cat) + '</b> <span style="color:var(--text-muted);font-size:0.85em;">' + Object.keys(provs).length + ' provider</span></span>'
+    // Category data-quality class for the focus filter: does it hold any "real"
+    // (invoice/API) provider, any "attention" (estimate/manual/pending/no_data) one, or both.
+    let catReal = false, catAtt = false
+    for (const p of Object.keys(provs)) { const r = (provBucket[p] && provBucket[p].r) || 3; if (r >= 4) catReal = true; else catAtt = true }
+    const catQ = catReal && catAtt ? 'mixed' : (catReal ? 'allreal' : 'noreal')
+    html += '<details data-cat-q="' + catQ + '"><summary><span><b>' + esc(cat) + '</b> <span style="color:var(--text-muted);font-size:0.85em;">' + Object.keys(provs).length + ' provider</span></span>'
       + '<span class="cv2-amt">' + fmt(sumSpend(flat)) + ' <span style="color:var(--text-muted);font-size:0.85em;">→ ' + fmt(sumFc(flat)) + '</span></span></summary>'
     const provNames = Object.keys(provs).sort((a, b) => sumSpend(provs[b]) - sumSpend(provs[a]))
     for (const prov of provNames) {
       const items = provs[prov]
-      html += '<details class="cv2-lvl2"><summary><span>' + esc(prov) + '</span><span class="cv2-amt">' + fmt(sumSpend(items)) + ' <span style="color:var(--text-muted);font-size:0.85em;">→ ' + fmt(sumFc(items)) + '</span></span></summary><div class="cv2-lvl3">'
+      const pr = (provBucket[prov] && provBucket[prov].r) || 3
+      const pq = pr >= 4 ? 'real' : 'attention'
+      html += '<details class="cv2-lvl2" data-q="' + pq + '"><summary><span>' + esc(prov) + '</span><span class="cv2-amt">' + fmt(sumSpend(items)) + ' <span style="color:var(--text-muted);font-size:0.85em;">→ ' + fmt(sumFc(items)) + '</span></span></summary><div class="cv2-lvl3">'
       for (const it of items) {
         html += '<div class="cv2-srcrow"><span>' + esc(it.name || it.source_id) + ' ' + srcBadge(effSrc(it))
           + (origCur(it) ? ' <span style="color:var(--text-muted);">' + origCur(it) + '</span>' : '') + '</span>'
