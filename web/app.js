@@ -11847,6 +11847,52 @@ function cv2FilterProviders(btn, mode) {
   grp.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', b === btn ? 'true' : 'false'));
 }
 
+// §8.6 Manual UI submit -- POST/PATCH a hand-entered cost line or entitlement.
+// The token is auto-injected into /api/* by the patched window.fetch; we only set
+// Content-Type. On success we reload loadCostsV2 so the new row appears (badged
+// "Kézi fallback" via confidence=manual/actual_source=manual_entry -- no new badge).
+async function cv2SubmitManual(kind, method) {
+  const gv = (id) => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
+  const num = (v) => { if (v === '' || v == null) return null; const n = Number(v); return isFinite(n) ? n : null; };
+  const isCost = kind === 'cost';
+  const statusEl = document.getElementById(isCost ? 'cvm_c_status' : 'cvm_e_status');
+  const setStatus = (msg, ok) => { if (statusEl) { statusEl.textContent = msg; statusEl.className = 'cv2-mstatus ' + (ok ? 'ok' : 'err'); } };
+  let url, body;
+  if (isCost) {
+    const source_id = gv('cvm_c_source_id'), month = gv('cvm_c_month'), currency = gv('cvm_c_currency') || 'HUF';
+    const amount = num(gv('cvm_c_amount'));
+    if (!source_id || !month) { setStatus('Forrás azonosító és hónap kötelező.', false); return; }
+    if (amount == null) { setStatus('Az összeg kötelező és szám kell legyen.', false); return; }
+    url = '/api/costs/manual';
+    body = method === 'PATCH'
+      ? { source_id, month, amount, currency }
+      : { source_id, name: gv('cvm_c_name') || source_id, provider: gv('cvm_c_provider'), amount, currency, month, source_type: gv('cvm_c_source_type') || 'subscription' };
+    if (method === 'POST' && !body.provider) { setStatus('Provider kötelező új tételnél.', false); return; }
+  } else {
+    const provider = gv('cvm_e_provider'), product = gv('cvm_e_product'), entitlement_type = gv('cvm_e_entitlement_type');
+    if (!provider || !product || !entitlement_type) { setStatus('Provider, termék és keret-típus kötelező.', false); return; }
+    const resetRaw = gv('cvm_e_reset_at');
+    const reset_at = resetRaw ? Math.floor(new Date(resetRaw + 'T00:00:00').getTime() / 1000) : null;
+    url = '/api/costs/entitlements/manual';
+    body = { provider, product, plan_name: gv('cvm_e_plan_name') || null, billing_period: gv('cvm_e_billing_period') || 'monthly',
+      entitlement_type, included_limit: num(gv('cvm_e_included_limit')), included_unit: gv('cvm_e_included_unit') || null,
+      remaining: num(gv('cvm_e_remaining')), reset_at, status: gv('cvm_e_status') || 'unknown' };
+  }
+  setStatus('Küldés...', true);
+  try {
+    const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const d = await res.json().catch(() => ({}));
+    if (res.ok && d && d.ok) {
+      setStatus(method === 'POST' ? 'Létrehozva.' : 'Frissítve.', true);
+      setTimeout(() => { if (typeof loadCostsV2 === 'function') loadCostsV2(); }, 900);
+    } else {
+      setStatus('Hiba (' + res.status + '): ' + ((d && d.error) || 'ismeretlen hiba'), false);
+    }
+  } catch (e) {
+    setStatus('Hálózati hiba a rögzítéskor.', false);
+  }
+}
+
 async function loadCostsV2() {
   const body = document.getElementById('costsV2Body')
   if (!body) return
@@ -11902,6 +11948,26 @@ async function loadCostsV2() {
       '.cv2-tbl th,.cv2-tbl td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap;}',
       '.cv2-tbl th{color:var(--text-muted);font-weight:600;position:sticky;top:0;background:var(--bg-card);}',
       '.cv2-tbl td.cv2-r{text-align:right;font-variant-numeric:tabular-nums;}',
+      // §8.4 Havi trend -- simple monthly bar chart (plan §5: bars, 3-6 months, no dense multi-series)
+      '.cv2-trend{display:flex;align-items:flex-end;gap:8px;height:130px;margin:8px 0 4px;padding-top:6px;}',
+      '.cv2-tcol{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;min-width:0;}',
+      '.cv2-tbar{width:100%;max-width:44px;border-radius:5px 5px 0 0;background:var(--accent,#4a90d9);min-height:2px;}',
+      '.cv2-tpartial{background:repeating-linear-gradient(45deg,var(--accent,#4a90d9),var(--accent,#4a90d9) 5px,rgba(74,144,217,0.4) 5px,rgba(74,144,217,0.4) 10px);}',
+      '.cv2-tnodata{background:repeating-linear-gradient(45deg,transparent,transparent 4px,var(--border) 4px,var(--border) 5px);border:1px dashed var(--border);}',
+      '.cv2-tlabel{font-size:0.72em;color:var(--text-muted);margin-top:6px;text-align:center;white-space:nowrap;}',
+      '.cv2-tval{font-size:0.68em;color:var(--text-secondary);margin-top:2px;font-variant-numeric:tabular-nums;white-space:nowrap;}',
+      // §8.6 Kézi rögzítés -- manual cost/entitlement forms
+      '.cv2-mform{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:10px 0;}',
+      '.cv2-mfield{display:flex;flex-direction:column;gap:3px;font-size:0.8em;}',
+      '.cv2-mfield label{color:var(--text-muted);font-size:0.9em;}',
+      '.cv2-mfield input,.cv2-mfield select{padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-card);color:var(--text);font-size:0.95em;min-height:34px;}',
+      '.cv2-mfield input:focus-visible,.cv2-mfield select:focus-visible{outline:2px solid var(--accent,#4a90d9);outline-offset:1px;}',
+      '.cv2-mactions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:4px;}',
+      '.cv2-mbtn{font-size:0.82em;padding:7px 14px;border:1px solid var(--accent,#4a90d9);border-radius:7px;background:var(--accent,#4a90d9);color:#fff;cursor:pointer;min-height:36px;}',
+      '.cv2-mbtn.secondary{background:transparent;color:var(--accent,#4a90d9);}',
+      '.cv2-mbtn:focus-visible{outline:2px solid var(--accent,#4a90d9);outline-offset:2px;}',
+      '.cv2-mstatus{font-size:0.8em;margin-top:6px;min-height:1.1em;}',
+      '.cv2-mstatus.ok{color:#2ecc71;}.cv2-mstatus.err{color:var(--danger,#e74c3c);}',
     ].join('')
     document.head.appendChild(st)
   }
@@ -11918,6 +11984,9 @@ async function loadCostsV2() {
   try { const r = await fetch('/api/costs/warnings'); if (r.ok) { const j = await r.json(); warnings = Array.isArray(j.warnings) ? j.warnings : [] } } catch (e) { /* Teendők empty */ }
   try { const r = await fetch('/api/costs/limits'); if (r.ok) { const j = await r.json(); limits = Array.isArray(j.limits) ? j.limits : [] } } catch (e) { /* keretek empty */ }
   try { const r = await fetch('/api/costs/subscriptions'); if (r.ok) { const j = await r.json(); subs = Array.isArray(j.subscriptions) ? j.subscriptions : [] } } catch (e) { /* keretek empty */ }
+  // §8.4 Havi trend source (pre-existing endpoint): months[] oldest-first + current/previous/MoM.
+  let period = { months: [] }
+  try { const r = await fetch('/api/costs/period?months=6'); if (r.ok) { const j = await r.json(); period = j || period } } catch (e) { /* trend zone degrades to empty */ }
 
   const cur = s.currency || 'HUF'
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
@@ -11972,8 +12041,12 @@ async function loadCostsV2() {
     return it.actual_source || it.confidence || 'no_data'
   }
   const fBasis = (x) => ({ run_rate: 'run-rate', fixed_subscription: 'fix előfizetés', manual_forecast: 'kézi forecast', token_runrate: 'token alapú', no_forecast: '' }[x] || '')
+  // Eredeti deviza. fx_estimated (card a1552362): the HUF conversion used an estimated
+  // FX rate (static Render-pricing config, not an invoice-native rate), so flag it honestly
+  // rather than implying invoice-exact precision (plan §5 "if FX estimated/manual, flag it").
+  const fxEst = (t) => (t.fx_estimated && t.original_currency && t.original_currency !== cur) ? ' · becsült árf.' : ''
   const origCur = (t) => (t.original_amount != null && t.original_currency)
-    ? (Number(t.original_amount) || 0).toLocaleString('hu-HU') + ' ' + esc(t.original_currency) : ''
+    ? (Number(t.original_amount) || 0).toLocaleString('hu-HU') + ' ' + esc(t.original_currency) + fxEst(t) : ''
   const CAT = (p, st) => ({
     openai: 'AI / LLM', anthropic: 'AI / LLM', deepseek: 'AI / LLM', google: 'AI / LLM',
     render: 'Webszolgáltatás / hosting', vercel: 'Webszolgáltatás / hosting',
@@ -12233,7 +12306,73 @@ async function loadCostsV2() {
     html += '<div class="cv2-recon">Külön szekció: a csomaghasználat (keret / reset / lejárat) nincs összekeverve az operatív költéssel.</div>'
   }
 
-  html += '<div class="cv2-soon">Következő zónák: havi trend (jelenleg csak aktuális + előző hó valós, a 3-6 havi trend-végpont a backendnél épül) és a diagnosztika. Flag mögött, a v1 nézet érintetlen.</div>'
+  // --- §8.4 Havi trend (utolsó 3-6 hónap) -- GET /api/costs/period, months[] oldest-first ---
+  html += '<div class="cv2-sec">Havi trend</div>'
+  const pmonths = Array.isArray(period.months) ? period.months : []
+  if (!pmonths.length) {
+    html += '<div class="cv2-recon">Még nincs havi trend adat erre az időszakra.</div>'
+  } else {
+    const curMonth = s.month
+    const maxSpend = Math.max(1, ...pmonths.map(m => Number(m.operational_spend) || 0))
+    const shortM = (ym) => { const mm = Number(String(ym || '').slice(5, 7)); return (['', 'jan', 'feb', 'már', 'ápr', 'máj', 'jún', 'júl', 'aug', 'szep', 'okt', 'nov', 'dec'][mm] || String(ym)) + ' ' + String(ym || '').slice(2, 4) }
+    const ndCount = pmonths.filter(m => m.no_data).length
+    html += '<div class="cv2-trend" role="img" aria-label="Havi operatív költés oszlopdiagram, utolsó ' + pmonths.length + ' hónap">'
+    for (const m of pmonths) {
+      const val = Number(m.operational_spend) || 0
+      const isCur = m.month === curMonth
+      const cls = m.no_data ? 'cv2-tnodata' : (isCur ? 'cv2-tpartial' : '')
+      const h = m.no_data ? 4 : Math.max(3, Math.round(val / maxSpend * 108))
+      const ttl = esc(m.month) + ': ' + (m.no_data ? 'nincs adat' : fmt(val) + (isCur ? ' (MTD, részleges)' : ''))
+      html += '<div class="cv2-tcol" aria-hidden="true"><div class="cv2-tbar ' + cls + '" style="height:' + h + 'px;" title="' + ttl + '"></div>'
+        + '<div class="cv2-tlabel">' + esc(shortM(m.month)) + (isCur ? ' •' : '') + '</div>'
+        + '<div class="cv2-tval">' + (m.no_data ? '—' : Number(val).toLocaleString('hu-HU')) + '</div></div>'
+    }
+    html += '</div>'
+    // Screen-reader data table; the visual bars are aria-hidden.
+    html += '<table class="cv2-vh"><caption>Havi operatív költés (forrás-táblázat)</caption><thead><tr><th>Hónap</th><th>Költés</th><th>Állapot</th></tr></thead><tbody>'
+    for (const m of pmonths) html += '<tr><td>' + esc(m.month) + '</td><td>' + (m.no_data ? 'nincs adat' : fmt(Number(m.operational_spend) || 0)) + '</td><td>' + (m.no_data ? 'nincs adat' : (m.month === curMonth ? 'részleges (MTD)' : 'teljes hónap')) + '</td></tr>'
+    html += '</tbody></table>'
+    html += '<div class="cv2-recon">Sávozott oszlop = aktuális hó (MTD, még nem teljes)' + (ndCount ? ' · szaggatott = nincs adat (' + ndCount + ' hó)' : '') + '. A trend csak lezárt hónapokból von következtetést; a részleges aktuális hót nem vetíti előre.</div>'
+  }
+
+  // --- §8.6 Kézi rögzítés (költség + keret) -- POST/PATCH /api/costs/manual + /entitlements/manual.
+  // Writes flow through the pipeline as confidence=manual / actual_source=manual_entry, so they
+  // render with the existing "Kézi fallback" badge -- NO new badge/distinction (Muse spec).
+  const mField = (id, label, type, ph) => '<div class="cv2-mfield"><label for="' + id + '">' + esc(label) + '</label><input id="' + id + '" type="' + type + '" placeholder="' + esc(ph) + '"' + (type === 'number' ? ' step="any"' : '') + '></div>'
+  const mSelect = (id, label, opts) => '<div class="cv2-mfield"><label for="' + id + '">' + esc(label) + '</label><select id="' + id + '">' + opts.map(o => '<option value="' + esc(o) + '">' + esc(o) + '</option>').join('') + '</select></div>'
+  html += '<details class="cv2-acc" style="margin-top:18px;"><summary style="font-weight:600;">Kézi rögzítés (költség / keret)</summary>'
+  html += '<div style="padding:6px 14px 14px;">'
+  html += '<div class="cv2-recon" style="margin-top:6px;">Csak olyan providerhez, aminek nincs API/számla-útja. POST = új tétel (409 ha erre a hónapra már létezik), PATCH = meglévő frissítése (404 ha nincs). A HUF-ra váltás a Render árfolyam-configgal történik; nem-HUF csak érvényes árfolyammal megy át.</div>'
+  html += '<div class="cv2-sec" style="margin-top:10px;font-size:0.88em;">Költség tétel</div>'
+  html += '<div class="cv2-mform">'
+    + mField('cvm_c_source_id', 'Forrás azonosító (source_id)', 'text', 'pl. notion-sub')
+    + mField('cvm_c_name', 'Név', 'text', 'pl. Notion előfizetés')
+    + mField('cvm_c_provider', 'Provider', 'text', 'pl. notion')
+    + mField('cvm_c_amount', 'Összeg', 'number', '0')
+    + mSelect('cvm_c_currency', 'Deviza', ['HUF', 'USD', 'EUR'])
+    + mField('cvm_c_month', 'Hónap (YYYY-MM)', 'month', '')
+    + mSelect('cvm_c_source_type', 'Típus', ['subscription', 'domain', 'usage', 'saas'])
+    + '</div>'
+  html += '<div class="cv2-mactions"><button type="button" class="cv2-mbtn" onclick="cv2SubmitManual(\'cost\',\'POST\')">Létrehozás</button>'
+    + '<button type="button" class="cv2-mbtn secondary" onclick="cv2SubmitManual(\'cost\',\'PATCH\')">Frissítés</button></div>'
+  html += '<div class="cv2-mstatus" id="cvm_c_status" role="status" aria-live="polite"></div>'
+  html += '<div class="cv2-sec" style="margin-top:14px;font-size:0.88em;">Csomag / keret (entitlement)</div>'
+  html += '<div class="cv2-mform">'
+    + mField('cvm_e_provider', 'Provider', 'text', 'pl. anthropic')
+    + mField('cvm_e_product', 'Termék', 'text', 'pl. Claude Max')
+    + mField('cvm_e_plan_name', 'Csomag neve (opcionális)', 'text', '')
+    + mSelect('cvm_e_billing_period', 'Számlázási ciklus', ['monthly', 'weekly', 'ongoing'])
+    + mField('cvm_e_entitlement_type', 'Keret típusa', 'text', 'pl. weekly_limit')
+    + mField('cvm_e_included_limit', 'Keret (opcionális)', 'number', '')
+    + mField('cvm_e_included_unit', 'Egység (opcionális)', 'text', 'pl. üzenet')
+    + mField('cvm_e_remaining', 'Hátralévő (opcionális)', 'number', '')
+    + mField('cvm_e_reset_at', 'Nullázódik (opcionális)', 'date', '')
+    + mSelect('cvm_e_status', 'Státusz', ['ok', 'warning', 'critical', 'unknown'])
+    + '</div>'
+  html += '<div class="cv2-mactions"><button type="button" class="cv2-mbtn" onclick="cv2SubmitManual(\'entitlement\',\'POST\')">Létrehozás</button>'
+    + '<button type="button" class="cv2-mbtn secondary" onclick="cv2SubmitManual(\'entitlement\',\'PATCH\')">Frissítés</button></div>'
+  html += '<div class="cv2-mstatus" id="cvm_e_status" role="status" aria-live="polite"></div>'
+  html += '</div></details>'
   html += '</div>'
   body.innerHTML = html
 }
