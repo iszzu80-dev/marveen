@@ -11888,6 +11888,12 @@ async function loadCostsV2() {
     s = await res.json()
   } catch (e) { body.innerHTML = '<p style="color:var(--danger,#c0392b);">Hálózati hiba a költség-adatok betöltésekor.</p>'; return }
 
+  // Secondary endpoints (non-fatal -- zones degrade to empty/pending if missing).
+  let warnings = [], limits = [], subs = []
+  try { const r = await fetch('/api/costs/warnings'); if (r.ok) { const j = await r.json(); warnings = Array.isArray(j.warnings) ? j.warnings : [] } } catch (e) { /* Teendők empty */ }
+  try { const r = await fetch('/api/costs/limits'); if (r.ok) { const j = await r.json(); limits = Array.isArray(j.limits) ? j.limits : [] } } catch (e) { /* keretek empty */ }
+  try { const r = await fetch('/api/costs/subscriptions'); if (r.ok) { const j = await r.json(); subs = Array.isArray(j.subscriptions) ? j.subscriptions : [] } } catch (e) { /* keretek empty */ }
+
   const cur = s.currency || 'HUF'
   const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
   const fmt = (n) => (Number(n) || 0).toLocaleString('hu-HU') + ' ' + cur
@@ -11904,33 +11910,41 @@ async function loadCostsV2() {
   const b = s.budget || {}
   const budgetPct = b.operational_used_pct != null ? b.operational_used_pct : b.used_pct
   const budgetFPct = b.operational_forecast_pct != null ? b.operational_forecast_pct : b.forecast_pct
-  const budgetStatus = b.status || 'unknown'
-  const bColor = (budgetStatus === 'over' || budgetStatus === 'hard') ? '#e74c3c' : (budgetStatus === 'warning' ? '#e0a800' : '#2ecc71')
 
   const mom = Number(s.month_over_month_delta) || 0
   const momArrow = mom > 0 ? '▲' : (mom < 0 ? '▼' : '■')
   const momColor = mom > 0 ? 'var(--danger,#e74c3c)' : (mom < 0 ? 'var(--success,#2ecc71)' : 'var(--text-muted)')
 
   const prev = s.previous_month || {}
-  const ps = Array.isArray(s.provider_sync) ? s.provider_sync : []
-  const actualN = ps.filter(p => (p.status === 'ok' || Number(p.imported_count) > 0) && !p.stale).length
-  const staleN = ps.filter(p => p.stale).length
-  const pendingN = ps.filter(p => p.status && /pending|permission/.test(String(p.status))).length
 
-  // --- source badge (mirror v1 colour map) ---
+  // --- source badge: EXACTLY the 6 canonical badges (Muse UX plan sec3). No seventh
+  // label may leak in. email invoice -> Számla; manual -> Kézi fallback; any estimate
+  // (plan_estimate) -> API becslés (grey/advisory), never a "Becslés"/"Kézi becslés" variant.
   const srcBadge = (a) => {
     const m = {
       provider_api: ['API', '#2ecc71', 'rgba(46,204,113,0.15)'],
       actual_invoice: ['Számla', '#2ecc71', 'rgba(46,204,113,0.15)'],
-      email_invoice: ['Email számla', '#5b9dff', 'rgba(45,108,223,0.14)'],
-      manual_entry: ['Kézi', '#e0a800', 'rgba(224,168,0,0.14)'],
-      manual: ['Kézi', '#e0a800', 'rgba(224,168,0,0.14)'],
-      estimate: ['Becslés', '#9aa0a6', 'rgba(150,150,150,0.16)'],
+      email_invoice: ['Számla', '#2ecc71', 'rgba(46,204,113,0.15)'],
+      manual_entry: ['Kézi fallback', '#e0a800', 'rgba(224,168,0,0.14)'],
+      manual: ['Kézi fallback', '#e0a800', 'rgba(224,168,0,0.14)'],
+      estimate: ['API becslés', '#9aa0a6', 'rgba(150,150,150,0.16)'],
+      plan_estimate: ['API becslés', '#9aa0a6', 'rgba(150,150,150,0.16)'],
       pending_permission: ['Jogosultság kell', '#e0854a', 'rgba(224,133,74,0.16)'],
       no_data: ['Nincs adat', '#9aa0a6', 'rgba(150,150,150,0.16)'],
     }[a]
     if (!m) return ''
     return '<span class="cv2-chip" style="color:' + m[1] + ';background:' + m[2] + ';font-size:0.72em;">' + esc(m[0]) + '</span>'
+  }
+  // Reconciled source for badging. `confidence` is authoritative (it feeds the API's
+  // confidence_breakdown); `actual_source` can lag -- e.g. Render carries
+  // actual_source=no_data while its reconciled confidence is actual_invoice, so a real
+  // invoice must NOT be hidden as "Nincs adat". A reconciled invoice always wins; a
+  // provider_api confidence only counts as API when actual_source confirms live data,
+  // otherwise (API configured but returned nothing) it falls through to no_data.
+  const effSrc = (it) => {
+    if (it.confidence === 'actual_invoice') return 'actual_invoice'
+    if (it.confidence === 'provider_api' && it.actual_source === 'provider_api') return 'provider_api'
+    return it.actual_source || it.confidence || 'no_data'
   }
   const fBasis = (x) => ({ run_rate: 'run-rate', fixed_subscription: 'fix előfizetés', manual_forecast: 'kézi forecast', token_runrate: 'token alapú', no_forecast: '' }[x] || '')
   const origCur = (t) => (t.original_amount != null && t.original_currency)
@@ -11968,11 +11982,28 @@ async function loadCostsV2() {
     .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
     .slice(0, 5)
 
+  // Zone A: 4 executive cards (Muse UX plan sec10). COLOR only on Budget + Past;
+  // Present/Forecast stay neutral so a raw operational number is never dressed as
+  // good/bad. Budget colour keys off the FORECAST pct (green <80 / amber 80-100 / red >100).
+  const budgetZoneColor = budgetFPct == null ? null : (budgetFPct > 1 ? '#e74c3c' : (budgetFPct >= 0.8 ? '#e0a800' : '#2ecc71'))
+  const momSign = mom > 0 ? '+' : (mom < 0 ? '-' : '')
+  // Forecast basis sub-line (Muse): two identical big numbers (forecast == current) must
+  // not read as a broken duplicate. Aggregate the forecast by its basis -- when it is
+  // dominated by fixed/manual bases rather than a usage run-rate, forecast == current is
+  // the honest truth (fixed costs don't trend), so say so instead of "jelenlegi trend".
+  const fcByBasis = {}
+  for (const it of sources) { const bkey = it.forecast_basis || 'no_forecast'; fcByBasis[bkey] = (fcByBasis[bkey] || 0) + (Number(it.forecast_month_end) || 0) }
+  const fcTot = Object.values(fcByBasis).reduce((x, y) => x + y, 0) || 1
+  const runRateShare = Math.round((fcByBasis['run_rate'] || 0) / fcTot * 100)
+  // Only assert "run-rate trend" when that basis genuinely DOMINATES (Muse: a 40-59%
+  // basket is majority-fixed and would over-claim as purely trend-based). Below the
+  // threshold, default to the honest fixed/manual explanation.
+  const fcSub = runRateShare >= 67 ? 'run-rate trend alapján' : 'fix/kézi alapon · nincs usage-trend'
   const cards = [
-    { label: 'Előző lezárt hónap', num: fmt(prev.operational_spend || 0), sub: esc(prev.month || '—') },
-    { label: 'Aktuális hónap (MTD)', num: fmt(s.operational_spend || 0), sub: esc(s.month || '') + ' eddig' },
-    { label: 'Várható hó vége', num: fmt(s.operational_forecast_month_end || 0), sub: 'forecast' },
-    { label: 'Budget státusz', num: (budgetPct != null ? pct(budgetPct) : '—'), numColor: (budgetPct != null ? bColor : null), sub: (b.amount ? 'keret ' + fmt(b.amount) : 'nincs keret megadva') + (budgetFPct != null ? ' · várható ' + pct(budgetFPct) : '') },
+    { label: 'Aktuális havi költés', num: fmt(s.operational_spend || 0), sub: 'eddig ebben a hónapban' },
+    { label: 'Várható hó végi költés', num: fmt(s.operational_forecast_month_end || 0), sub: fcSub },
+    { label: 'Budget státusz', num: (budgetPct != null ? pct(budgetPct) + ' elhasználva' : '—'), numColor: budgetZoneColor, sub: (budgetFPct != null ? 'előrejelzett ' + pct(budgetFPct) : (b.amount ? 'keret ' + fmt(b.amount) : 'nincs keret megadva')) },
+    { label: 'Változás előző hónaphoz', num: (momArrow + ' ' + momSign + fmt(Math.abs(mom))), numColor: momColor, sub: 'előző hó: ' + fmt(prev.operational_spend || 0) },
   ]
 
   let html = '<div class="cv2-wrap">'
@@ -11985,12 +12016,23 @@ async function loadCostsV2() {
       + '<div class="cv2-sub">' + c.sub + '</div></div>'
   }
   html += '</div>'
-  html += '<div class="cv2-qual"><span>Adatminőség:</span>'
-    + '<span class="cv2-chip cv2-ok">' + actualN + ' actual/API</span>'
-    + (staleN ? '<span class="cv2-chip cv2-warn">' + staleN + ' elavult</span>' : '')
-    + (pendingN ? '<span class="cv2-chip cv2-muted">' + pendingN + ' jogosultság kell</span>' : '')
-    + '<span>· változás előző hóhoz: <b style="color:' + momColor + '">' + momArrow + ' ' + fmt(Math.abs(mom)) + '</b></span>'
-    + '<span>· frissítve ' + relAge(s.data_freshness) + '</span></div>'
+  // Zone A data-quality strip (Muse UX plan): providers bucketed by their REAL source,
+  // any 0 bucket omitted, never fabricated. Derived from actual per-line source fields.
+  const srcRank = { actual_invoice: 5, provider_api: 4, estimate: 2, manual_entry: 1, manual: 1, pending_permission: 0, no_data: -1 }
+  const bktLabel = { actual_invoice: 'Számla', provider_api: 'API', estimate: 'API becslés', manual_entry: 'Kézi fallback', manual: 'Kézi fallback', pending_permission: 'Jogosultság kell', no_data: 'Nincs adat' }
+  const provBucket = {}
+  for (const it of sources) {
+    const src = effSrc(it)
+    const r = srcRank[src] != null ? srcRank[src] : 3
+    if (provBucket[it.provider] == null || r > provBucket[it.provider].r) provBucket[it.provider] = { r, src }
+  }
+  const bktCount = {}
+  for (const p in provBucket) { const l = bktLabel[provBucket[p].src] || 'Nincs adat'; bktCount[l] = (bktCount[l] || 0) + 1 }
+  const provTotal = Object.keys(provBucket).length
+  const bktOrder = ['Számla', 'API', 'API becslés', 'Kézi fallback', 'Jogosultság kell', 'Nincs adat']
+  const bktParts = bktOrder.filter(l => bktCount[l]).map(l => bktCount[l] + ' ' + l)
+  html += '<div class="cv2-qual">' + provTotal + ' providerből ' + (bktParts.length ? bktParts.join(' · ') : 'nincs adat')
+    + ' · frissítve ' + relAge(s.data_freshness) + '</div>'
   // --- Mi változott? (top movers vs previous month) ---
   html += '<div class="cv2-sec">Mi változott?</div>'
   if (movers.length) {
@@ -12024,7 +12066,7 @@ async function loadCostsV2() {
       const items = provs[prov]
       html += '<details class="cv2-lvl2"><summary><span>' + esc(prov) + '</span><span class="cv2-amt">' + fmt(sumSpend(items)) + ' <span style="color:var(--text-muted);font-size:0.85em;">→ ' + fmt(sumFc(items)) + '</span></span></summary><div class="cv2-lvl3">'
       for (const it of items) {
-        html += '<div class="cv2-srcrow"><span>' + esc(it.name || it.source_id) + ' ' + srcBadge(it.actual_source || it.confidence)
+        html += '<div class="cv2-srcrow"><span>' + esc(it.name || it.source_id) + ' ' + srcBadge(effSrc(it))
           + (origCur(it) ? ' <span style="color:var(--text-muted);">' + origCur(it) + '</span>' : '') + '</span>'
           + '<span class="cv2-amt">' + fmt(it.spend) + '</span></div>'
       }
@@ -12039,15 +12081,85 @@ async function loadCostsV2() {
     + '<div class="cv2-tblwrap"><table class="cv2-tbl"><thead><tr>'
     + '<th>Provider</th><th>Tétel</th><th>Kategória</th><th>MTD</th><th>Forecast</th><th>Alap</th><th>Forrás</th><th>Eredeti deviza</th>'
     + '</tr></thead><tbody>'
+  // Never fake a 0 for an unknown value (integrity rule #1): a no_data / pending source,
+  // or a null amount, renders "—", not "0 HUF" -- otherwise a "Nincs adat"/"Jogosultság
+  // kell" badge sits next to a fabricated 0. A MEASURED/entered value (incl. a real 0,
+  // e.g. github's API-confirmed zero bill) still renders explicitly via fmt().
+  const valCell = (it, v) => {
+    const k = effSrc(it)
+    if (k === 'no_data' || k === 'pending_permission') return '—'
+    return v == null ? '—' : fmt(v)
+  }
   for (const it of sources.slice().sort((a, b) => (Number(b.spend) || 0) - (Number(a.spend) || 0))) {
     html += '<tr><td>' + esc(it.provider) + '</td><td>' + esc(it.name || it.source_id) + '</td><td>' + esc(CAT(it.provider, it.source_type))
-      + '</td><td class="cv2-r">' + fmt(it.spend) + '</td><td class="cv2-r">' + fmt(it.forecast_month_end)
-      + '</td><td>' + esc(fBasis(it.forecast_basis) || '—') + '</td><td>' + (srcBadge(it.actual_source || it.confidence) || '—')
+      + '</td><td class="cv2-r">' + valCell(it, it.spend) + '</td><td class="cv2-r">' + valCell(it, it.forecast_month_end)
+      + '</td><td>' + esc(fBasis(it.forecast_basis) || '—') + '</td><td>' + (srcBadge(effSrc(it)) || '—')
       + '</td><td>' + (origCur(it) || '—') + '</td></tr>'
   }
   html += '</tbody></table></div></details>'
 
-  html += '<div class="cv2-soon">Következő zónák: költség + felhasználási keretek (entitlement), teendők (warnings), havi trend, diagnosztika. Flag mögött, a v1 nézet érintetlen.</div>'
+  // --- Teendők (warnings): top 3-5 surfaced, rest collapsed ---
+  const sevRank = { critical: 4, high: 3, medium: 2, low: 1 }
+  const sevColor = (sv) => ({ critical: '#e74c3c', high: '#e74c3c', medium: '#e0a800', low: '#9aa0a6' }[sv] || '#9aa0a6')
+  const sortedW = warnings.slice().sort((a, b) => (sevRank[b.severity] || 0) - (sevRank[a.severity] || 0))
+  const warnRow = (w) => '<div class="cv2-mover" style="align-items:flex-start;">'
+    + '<span style="display:flex;gap:8px;min-width:0;"><span style="flex:none;margin-top:6px;width:8px;height:8px;border-radius:50%;background:' + sevColor(w.severity) + ';"></span>'
+    + '<span style="min-width:0;"><b style="font-weight:600;">' + esc(w.message || w.warning_type || w.code) + '</b>'
+    + (w.action ? '<br><span style="color:var(--text-muted);font-size:0.9em;">→ ' + esc(w.action) + '</span>' : '') + '</span></span>'
+    + '<span style="color:var(--text-muted);font-size:0.8em;white-space:nowrap;">' + esc(w.category || w.provider || '') + '</span></div>'
+  html += '<div class="cv2-sec">Teendők' + (warnings.length ? ' <span style="color:var(--text-muted);font-size:0.8em;font-weight:400;">(' + warnings.length + ')</span>' : '') + '</div>'
+  if (!warnings.length) {
+    html += '<div class="cv2-recon">Nincs teendő.</div>'
+  } else {
+    html += '<div class="cv2-movers">' + sortedW.slice(0, 5).map(warnRow).join('') + '</div>'
+    const restW = sortedW.slice(5)
+    if (restW.length) {
+      html += '<details class="cv2-acc" style="margin-top:8px;"><summary style="font-weight:600;">További ' + restW.length + ' figyelmeztetés</summary><div style="padding:2px 14px 10px;">' + restW.map(warnRow).join('') + '</div></details>'
+    }
+  }
+
+  // --- Csomagok és keretek (entitlement) -- linked, not conflated ---
+  html += '<div class="cv2-sec">Csomagok és keretek</div>'
+  if (!limits.length && !subs.length) {
+    html += '<div class="cv2-recon">Nincs csomag/keret adat.</div>'
+  } else {
+    html += '<div class="cv2-tblwrap"><table class="cv2-tbl"><thead><tr>'
+      + '<th>Csomag / keret</th><th>Provider</th><th>Felhasználási keret</th><th>Felhasználva</th><th>Nullázódik</th><th>Lejárat</th><th>Státusz</th><th>Forrás</th></tr></thead><tbody>'
+    // Entitlement Forrás = the USAGE/quota data source, NEVER the cost source (sec16
+    // entitlement != cost). Muse ruling (msg 11427): ledger / workspace_alert are official
+    // read-only feeds -> API; a real usage reading present (limits weekly_usage_pct, or a
+    // sub usage_snapshot) is a manual screen-read -> Kézi fallback; a bare renewal date or
+    // token ceiling has no live usage feed -> Nincs adat + reason. Inferred from existing
+    // fields -- a self-describing usage_source on LimitStatus would be a nice-to-have, not a gate.
+    const limitUsageSrc = (l) => (l.source === 'ledger' || l.source === 'workspace_alert') ? 'provider_api'
+      : (l.source === 'config' && l.limit_type === 'weekly_usage_pct') ? 'manual' : 'no_data'
+    const subUsageSrc = (sub) => { const u = sub.usage_snapshot || {}; return (u.session_pct != null || u.weekly_pct != null) ? 'manual' : 'no_data' }
+    const forrasCell = (key) => srcBadge(key) + (key === 'no_data' ? '<span style="color:var(--text-muted);font-size:0.72em;margin-left:4px;">nincs read-only forrás</span>' : '')
+    // Nullázódik (recurring quota reset) and Lejárat (terminal expiry/paid_until) are SEPARATE
+    // columns per Muse sec10 -- a reset date recurs, an expiry is final; never merge them.
+    for (const sub of subs) {
+      const snap = sub.usage_snapshot || {}
+      const used = snap.session_pct != null ? snap.session_pct + '% (session)' : (snap.weekly_pct != null ? snap.weekly_pct + '% (heti)' : '—')
+      const reset = snap.weekly_reset_label || '—'
+      // Active recurring subs have no terminal usage expiry; the billing renewal
+      // (days_until_next_date) is a COST-axis date, excluded from this usage table (sec16).
+      const st = sub.past_due ? 'lejárt' : (sub.status || '—')
+      const stCol = sub.past_due ? '#e74c3c' : (sub.status === 'active' ? '#2ecc71' : '#9aa0a6')
+      html += '<tr><td>' + esc(sub.name) + '</td><td>' + esc(sub.provider) + '</td><td>—</td><td>' + esc(used) + '</td><td>' + esc(reset) + '</td><td>—</td><td style="color:' + stCol + ';font-weight:600;">' + esc(st) + '</td><td>' + forrasCell(subUsageSrc(sub)) + '</td></tr>'
+    }
+    for (const l of limits) {
+      const keret = l.limit_value != null ? fmt(l.limit_value) : '—'
+      const used = l.usage_pct != null ? (Math.round(l.usage_pct * 1000) / 10) + '%' : (l.current_usage != null ? esc(String(l.current_usage)) : '—')
+      const reset = l.reset_date || '—'
+      const expiry = l.expiry_date || l.paid_until || '—'
+      const stCol = /over|critical|high/.test(String(l.status)) ? '#e74c3c' : (/warn/.test(String(l.status)) ? '#e0a800' : (l.status === 'ok' ? '#2ecc71' : '#9aa0a6'))
+      html += '<tr><td>' + esc(l.limit_type || '—') + '</td><td>' + esc(l.provider) + '</td><td>' + esc(keret) + '</td><td>' + used + '</td><td>' + esc(String(reset)) + '</td><td>' + esc(String(expiry)) + '</td><td style="color:' + stCol + ';font-weight:600;">' + esc(l.status || '—') + '</td><td>' + forrasCell(limitUsageSrc(l)) + '</td></tr>'
+    }
+    html += '</tbody></table></div>'
+    html += '<div class="cv2-recon">Külön szekció: a csomaghasználat (keret / reset / lejárat) nincs összekeverve az operatív költéssel.</div>'
+  }
+
+  html += '<div class="cv2-soon">Következő zónák: havi trend (jelenleg csak aktuális + előző hó valós, a 3-6 havi trend-végpont a backendnél épül) és a diagnosztika. Flag mögött, a v1 nézet érintetlen.</div>'
   html += '</div>'
   body.innerHTML = html
 }
