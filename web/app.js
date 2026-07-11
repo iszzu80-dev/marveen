@@ -12007,6 +12007,16 @@ async function loadCostsV2() {
     .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
     .slice(0, 5)
 
+  // F3 (card e4fc58a3, Muse ruling comment 4312): the +MoM number and the "Mi változott?"
+  // wall are FACTUALLY correct but dressed with the wrong SEVERITY (red = real spike) when
+  // the previous month is an onboarding baseline (plan §5: pre-June is legit no_data). Damp
+  // the severity framing, KEEP the fact. Pure client-side, auto-heals once a real comparable
+  // baseline exists (≥half of current providers tracked last month), so it is conditional.
+  const prevProvs = Array.isArray(prev.by_provider) ? prev.by_provider.length : 0
+  const curProvs = new Set(sources.filter(it => it.spend != null).map(it => it.provider)).size
+  const BASELINE_MIN_COVERAGE = 0.5
+  const baselineIncomplete = !curProvs ? false : (prevProvs / curProvs) < BASELINE_MIN_COVERAGE
+
   // Zone A: 4 executive cards (Muse UX plan sec10). COLOR only on Budget + Past;
   // Present/Forecast stay neutral so a raw operational number is never dressed as
   // good/bad. Budget colour keys off the FORECAST pct (green <80 / amber 80-100 / red >100).
@@ -12028,7 +12038,7 @@ async function loadCostsV2() {
     { label: 'Aktuális havi költés', num: fmt(s.operational_spend || 0), sub: 'eddig ebben a hónapban' },
     { label: 'Várható hó végi költés', num: fmt(s.operational_forecast_month_end || 0), sub: fcSub },
     { label: 'Budget státusz', num: (budgetPct != null ? pct(budgetPct) + ' elhasználva' : '—'), numColor: budgetZoneColor, sub: (budgetFPct != null ? 'előrejelzett ' + pct(budgetFPct) : (b.amount ? 'keret ' + fmt(b.amount) : 'nincs keret megadva')) },
-    { label: 'Változás előző hónaphoz', num: (momArrow + ' ' + momSign + fmt(Math.abs(mom))), numColor: momColor, sub: 'előző hó: ' + fmt(prev.operational_spend || 0) },
+    { label: 'Változás előző hónaphoz', num: (momArrow + ' ' + momSign + fmt(Math.abs(mom))), numColor: baselineIncomplete ? null : momColor, sub: baselineIncomplete ? ('előző hó részleges: ' + prevProvs + '/' + curProvs + ' provider követve, új számlák') : ('előző hó: ' + fmt(prev.operational_spend || 0)) },
   ]
 
   let html = '<div class="cv2-wrap" role="region" aria-label="Költség-áttekintő">'
@@ -12060,12 +12070,19 @@ async function loadCostsV2() {
     + ' · frissítve ' + relAge(s.data_freshness) + '</div>'
   // --- Mi változott? (top movers vs previous month) ---
   html += '<div class="cv2-sec">Mi változott?</div>'
+  // F3: when the prior month is an incomplete onboarding baseline, prepend a plain-text
+  // honesty caption (not color) so the "új/nőtt" wall is not read as a real cost spike.
+  if (baselineIncomplete) {
+    html += '<div class="cv2-recon" style="color:var(--text-muted);">Az előző hónap (' + esc(prev.month || '') + ') hiányos: az új fiókok miatt a legtöbb tétel „új”, ez nem valós növekedés.</div>'
+  }
   if (movers.length) {
     html += '<div class="cv2-movers">'
     for (const m of movers) {
       const up = m.delta > 0
       const tag = m.prev === 0 ? 'új' : (m.cur === 0 ? 'megszűnt' : (up ? 'nőtt' : 'csökkent'))
-      const col = up ? 'var(--danger,#e74c3c)' : 'var(--success,#2ecc71)'
+      // F3: against a partial baseline no per-provider delta is trustworthy, so damp the
+      // WHOLE wall to neutral uniformly (keep the arrow + tag -- direction is factual).
+      const col = baselineIncomplete ? 'var(--text-muted)' : (up ? 'var(--danger,#e74c3c)' : 'var(--success,#2ecc71)')
       html += '<div class="cv2-mover"><span>' + esc(m.p) + ' <span style="color:var(--text-muted);font-size:0.9em;">(' + tag + ')</span></span>'
         + '<span class="cv2-amt" style="color:' + col + '">' + (up ? '▲' : '▼') + ' ' + fmt(Math.abs(m.delta)) + '</span></div>'
     }
@@ -12188,7 +12205,7 @@ async function loadCostsV2() {
     // F6: raw limit_type ("weekly_usage_pct") reads as a debug token and the two anthropic
     // meters (weekly limit vs the subscription's session row) look like twin unlabeled %s.
     // Give a human label + tag the weekly meter "(heti)" to disambiguate from "(session)".
-    const limitLabel = (l) => ({ weekly_usage_pct: 'Heti limit', monthly_usage_pct: 'Havi limit', balance: 'Egyenleg' }[l.limit_type] || l.limit_type || '—')
+    const limitLabel = (l) => ({ weekly_usage_pct: 'Heti limit', monthly_usage_pct: 'Havi limit', balance: 'Egyenleg', workspace_payment: 'Workspace fizetés' }[l.limit_type] || l.limit_type || '—')
     // F4: never stamp HUF on a non-HUF value. A pct ceiling is %, a prepaid balance is its
     // native currency (deepseek = USD; prefer l.unit once the backend supplies it, plan §6).
     const limitUnit = (l) => l.unit || (l.limit_type === 'balance' ? (l.provider === 'deepseek' ? 'USD' : '') : (/pct/.test(String(l.limit_type)) ? '%' : ''))
