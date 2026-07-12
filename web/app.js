@@ -9784,6 +9784,7 @@ function buildBubbleHtml(m) {
         ${!isOutgoing ? `<span class="bubble-sender">${escapeHtml(senderLabel)}</span>` : ''}
         <span class="bubble-id-chip">#${m.id}</span>
         <span class="badge ${statusMeta.cls}" style="font-size:10px">${escapeHtml(statusMeta.label)}</span>
+        ${m.origin_note ? `<span class="badge" style="font-size:10px" title="Self-declared by the sender, not verified (card 06f062e4)">origin: ${escapeHtml(m.origin_note)}</span>` : ''}
       </div>
       <div class="bubble-text">${escapeHtml(m.content || '')}</div>
       <div class="bubble-time">${when}</div>
