@@ -419,6 +419,24 @@ export function initDatabase(dbPathOverride?: string): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_messages_status ON agent_messages(status, to_agent)`)
+  // Card 06f062e4: the bus has no sender authentication -- from_agent is
+  // self-declared and every sub-agent spawned under a parent shares that
+  // parent's from_agent string, invisibly to the parent session and its
+  // siblings (the 2026-07-12 self-fill-sweep incident's root cause: a
+  // uat sub-session's message was indistinguishable from any other uat
+  // session's, producing an unpinnable ~15-message contradictory dispute).
+  // This does NOT add authentication (that needs per-agent bus credentials,
+  // a bigger cross-fleet rollout, tracked separately) -- it's the cheap
+  // half: an OPTIONAL, caller-supplied free-text tag a sub-agent can set to
+  // distinguish itself from siblings sharing its parent identity, carried
+  // through to delivery so a human/agent reading the message has SOMETHING
+  // to go on. Self-declared, so it's an attributability aid, not a trust
+  // boundary -- do not treat a present origin_note as proof of anything.
+  try {
+    db.exec('ALTER TABLE agent_messages ADD COLUMN origin_note TEXT')
+  } catch {
+    // column already exists
+  }
 
   // --- Pending Channel Requests (Slack channel opt-in workflow) ---
   db.exec(`
@@ -1670,17 +1688,22 @@ export interface AgentMessage {
   created_at: number
   delivered_at: number | null
   completed_at: number | null
+  // Card 06f062e4: optional, self-declared attributability tag (e.g. a
+  // sub-agent's own task/branch name) -- NOT an authentication mechanism,
+  // see the table-creation comment. Null for every caller that doesn't pass one.
+  origin_note: string | null
 }
 
-export function createAgentMessage(from: string, to: string, content: string): AgentMessage {
+export function createAgentMessage(from: string, to: string, content: string, originNote?: string | null): AgentMessage {
   const now = Math.floor(Date.now() / 1000)
   const info = db.prepare(
-    'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at) VALUES (?, ?, ?, ?, ?)'
-  ).run(from, to, content, 'pending', now)
+    'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, origin_note) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(from, to, content, 'pending', now, originNote ?? null)
   return {
     id: Number(info.lastInsertRowid),
     from_agent: from, to_agent: to, content, status: 'pending',
     result: null, created_at: now, delivered_at: null, completed_at: null,
+    origin_note: originNote ?? null,
   }
 }
 
