@@ -1249,7 +1249,7 @@ function createCardEl(card, embeddedChildren = []) {
     const shown = card.labels.slice(0, 3)
     const overflow = card.labels.length - shown.length
     const pills = shown.map((l) =>
-      `<span class="kanban-card-label-pill" data-label-id="${escapeHtml(l.id)}" style="--label-color:${escapeHtml(l.color)}" title="${t('kanban.label.filter_tooltip', { name: escapeHtml(l.name) })}">#${escapeHtml(l.name)}</span>`
+      `<span class="kanban-card-label-pill" data-label-id="${escapeHtml(l.id)}" style="--label-color:${escapeHtml(l.color)};max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(l.name)}">#${escapeHtml(l.name)}</span>`
     ).join('')
     const overflowHtml = overflow > 0
       ? `<span class="kanban-card-label-pill kanban-card-label-overflow" title="${t('kanban.label.overflow_tooltip', { n: overflow })}">+${overflow}</span>`
@@ -12054,12 +12054,16 @@ async function loadCostsV2() {
   // label may leak in. email invoice -> Számla; manual -> Kézi fallback; any estimate
   // (plan_estimate) -> API becslés (grey/advisory), never a "Becslés"/"Kézi becslés" variant.
   const srcBadge = (a) => {
+    // §6 Two-tier manual labels: "Kézi — nincs API" (grey) vs "Kézi — API hiba" (amber).
+    // Cascade: unified table sets the new labels via manual_reason; here the generic
+    // "manual_entry" / "manual" keys map to the "nincs API" default — the "API hiba"
+    // variant is set inline in the unified table where manual_reason is available.
     const m = {
       provider_api: ['API', '#2ecc71', 'rgba(46,204,113,0.15)'],
       actual_invoice: ['Számla', '#2ecc71', 'rgba(46,204,113,0.15)'],
       email_invoice: ['Számla', '#2ecc71', 'rgba(46,204,113,0.15)'],
-      manual_entry: ['Kézi fallback', '#e0a800', 'rgba(224,168,0,0.14)'],
-      manual: ['Kézi fallback', '#e0a800', 'rgba(224,168,0,0.14)'],
+      manual_entry: ['Kézi — nincs API', '#9aa0a6', 'rgba(150,150,150,0.16)'],
+      manual: ['Kézi — nincs API', '#9aa0a6', 'rgba(150,150,150,0.16)'],
       estimate: ['API becslés', '#9aa0a6', 'rgba(150,150,150,0.16)'],
       plan_estimate: ['API becslés', '#9aa0a6', 'rgba(150,150,150,0.16)'],
       pending_permission: ['Jogosultság kell', '#e0854a', 'rgba(224,133,74,0.16)'],
@@ -12232,7 +12236,7 @@ async function loadCostsV2() {
     const statusCell = src === 'no_data' ? 'Hiányzó adat' : (src === 'pending_permission' ? 'Jogosultság kell' : (src === 'estimate' ? 'Becslés' : 'OK'))
     const statusColor = src === 'no_data' ? '#e74c3c' : (src === 'pending_permission' ? '#e0854a' : (src === 'estimate' ? '#e0a800' : '#2ecc71'))
     html += '<tr><td>' + esc(it.provider) + '</td><td>' + esc(it.name || it.source_id) + '</td>'
-      + '<td class="cv2-r">' + (prevSpend != null ? fmt(prevSpend) : (baselineIncomplete ? 'új tétel' : '—')) + '</td>'
+      + '<td class="cv2-r">' + (prevSpend != null ? fmt(prevSpend) : '—') + '</td>'
       + '<td class="cv2-r">' + valCell(it, it.spend) + '</td>'
       + '<td class="cv2-r">' + valCell(it, it.forecast_month_end) + '</td>'
       + '<td><span class="cv2-chip" style="color:' + srcColor + ';background:rgba(' + (srcColor === '#2ecc71' ? '46,204,113' : srcColor === '#e0a800' ? '224,168,0' : srcColor === '#e0854a' ? '224,133,74' : '150,150,150') + ',0.16);font-size:0.72em;">' + esc(srcLabel) + '</span></td>'
