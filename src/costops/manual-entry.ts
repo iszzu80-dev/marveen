@@ -33,6 +33,11 @@ export interface ManualCostPatch {
   currency: string
 }
 
+export interface ManualCostDeleteInput {
+  source_id: string
+  month: string
+}
+
 function monthWindow(month: string): { start: number; end: number } | null {
   if (!/^\d{4}-\d{2}$/.test(month)) return null
   const y = parseInt(month.slice(0, 4)), m = parseInt(month.slice(5, 7)) - 1
@@ -122,6 +127,27 @@ export function updateManualCost(
   return { ok: true }
 }
 
+// Card 73e8914a: create+patch had no way to remove a mistyped row -- only direct SQL on
+// cost_line_items could. Same guard as updateManualCost (404 if missing, 409 if the row isn't
+// actually a manual entry) so this door can never delete a live provider-fed row. Hard delete,
+// not soft-remove -- this file's own header rule is "no new provenance/estimate layers beyond
+// what email-ingest.ts already established," and a soft-delete flag would be exactly that; a
+// removed manual entry has no ongoing meaning worth retaining a tombstone for.
+export function deleteManualCost(
+  db: Database.Database,
+  input: ManualCostDeleteInput,
+): { ok: boolean; error?: string; status?: number } {
+  if (!input || typeof input.source_id !== 'string' || !input.source_id) return { ok: false, error: 'missing source_id', status: 400 }
+  const win = monthWindow(input.month)
+  if (!win) return { ok: false, error: `bad month '${input.month}'`, status: 400 }
+  const dedup = manualCostDedupKey(input.source_id, input.month)
+  const existing = db.prepare(`SELECT confidence FROM cost_line_items WHERE dedup_key = ?`).get(dedup) as { confidence: string } | undefined
+  if (!existing) return { ok: false, error: `no manual entry for '${input.source_id}' / '${input.month}'`, status: 404 }
+  if (existing.confidence !== 'manual') return { ok: false, error: `'${input.source_id}' / '${input.month}' is not a manual entry (confidence='${existing.confidence}')`, status: 409 }
+  db.prepare(`DELETE FROM cost_line_items WHERE dedup_key = ?`).run(dedup)
+  return { ok: true }
+}
+
 export interface ManualEntitlementInput {
   provider: string
   product: string
@@ -195,5 +221,29 @@ export function updateManualEntitlement(
     included_unit: patch.included_unit ?? null, remaining: patch.remaining ?? null,
     reset_at: patch.reset_at ?? null, status: patch.status, now, dedup_key: dedup,
   })
+  return { ok: true }
+}
+
+export interface ManualEntitlementDeleteInput {
+  provider: string
+  product: string
+  entitlement_type: string
+  billing_period: string
+}
+
+// Card 73e8914a: same missing lifecycle corner as deleteManualCost above -- same guard
+// (404 missing, 409 not-manual), hard delete.
+export function deleteManualEntitlement(
+  db: Database.Database,
+  input: ManualEntitlementDeleteInput,
+): { ok: boolean; error?: string; status?: number } {
+  if (!input?.provider || !input?.product || !input?.entitlement_type || !input?.billing_period) {
+    return { ok: false, error: 'missing provider/product/entitlement_type/billing_period', status: 400 }
+  }
+  const dedup = entitlementDedupKey(input)
+  const existing = db.prepare(`SELECT usage_source FROM entitlements WHERE dedup_key = ?`).get(dedup) as { usage_source: string } | undefined
+  if (!existing) return { ok: false, error: `no manual entitlement for '${dedup}'`, status: 404 }
+  if (existing.usage_source !== 'manual') return { ok: false, error: `'${dedup}' is not a manual entitlement (usage_source='${existing.usage_source}')`, status: 409 }
+  db.prepare(`DELETE FROM entitlements WHERE dedup_key = ?`).run(dedup)
   return { ok: true }
 }

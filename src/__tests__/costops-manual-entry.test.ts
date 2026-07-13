@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
-import { createManualCost, updateManualCost, createManualEntitlement, updateManualEntitlement } from '../costops/manual-entry.js'
+import { createManualCost, updateManualCost, deleteManualCost, createManualEntitlement, updateManualEntitlement, deleteManualEntitlement } from '../costops/manual-entry.js'
 import { getCostSummary, monthWindow as ledgerMonthWindow } from '../costops/ledger.js'
 import type { CostOpsConfig } from '../costops/config.js'
 
@@ -82,6 +82,43 @@ describe('costops manual cost entry (card a1552362, item 3)', () => {
     expect(r.ok).toBe(false)
     expect(r.status).toBe(400)
   })
+
+  it('DELETE removes the manual cost_line_items row (card 73e8914a)', () => {
+    const db = getDb()
+    createManualCost(db, { source_id: 'notion', name: 'Notion', provider: 'notion', amount: 5000, currency: 'HUF', month: '2026-07' }, { fxUsdHuf: 360, now: NOW })
+    const r = deleteManualCost(db, { source_id: 'notion', month: '2026-07' })
+    expect(r.ok).toBe(true)
+    expect(db.prepare(`SELECT 1 FROM cost_line_items WHERE dedup_key = 'manual|notion|2026-07'`).get()).toBeUndefined()
+    // The cost_sources catalog entry itself is untouched by design (createManualCost upserts it
+    // separately from the line item) -- the source still shows up in all_sources, just back to
+    // no_data spend, same as any other source with no billing data in the query window.
+    const s = getCostSummary(db, cfg, NOW)
+    const row = s.all_sources.find(x => x.source_id === 'notion')!
+    expect(row.spend).toBe(0)
+    expect(row.actual_source).toBe('no_data')
+  })
+
+  it('DELETE 404s when there is nothing to delete', () => {
+    const db = getDb()
+    const r = deleteManualCost(db, { source_id: 'ghost', month: '2026-07' })
+    expect(r.ok).toBe(false)
+    expect(r.status).toBe(404)
+  })
+
+  it('DELETE refuses to touch a non-manual (e.g. provider_api) line for the same key', () => {
+    const db = getDb()
+    const win = ledgerMonthWindow(NOW)
+    db.prepare(`INSERT INTO cost_sources (id, name, provider, source_type, currency, active, created_at, updated_at) VALUES ('render-hosting','Render','render','usage','HUF',1,?,?)`).run(NOW, NOW)
+    db.prepare(`
+      INSERT INTO cost_line_items (source_id, charge_period_start, charge_period_end, charge_category, billed_cost, currency, confidence, data_freshness, created_at, dedup_key, actual_source)
+      VALUES ('render-hosting', @start, @end, 'usage', 1000, 'HUF', 'provider_api', @now, @now, 'manual|render-hosting|2026-07', 'provider_api')
+    `).run({ start: win.start, end: win.end, now: NOW })
+    const r = deleteManualCost(db, { source_id: 'render-hosting', month: '2026-07' })
+    expect(r.ok).toBe(false)
+    expect(r.status).toBe(409)
+    const row = db.prepare(`SELECT 1 FROM cost_line_items WHERE dedup_key = 'manual|render-hosting|2026-07'`).get()
+    expect(row).toBeTruthy() // still there -- the guard actually blocked the delete, not a no-op coincidence
+  })
 })
 
 describe('costops manual entitlement entry (card a1552362, item 3)', () => {
@@ -122,6 +159,22 @@ describe('costops manual entitlement entry (card a1552362, item 3)', () => {
   it('PATCH 404s when there is nothing to update yet', () => {
     const db = getDb()
     const r = updateManualEntitlement(db, { provider: 'ghost', product: 'x', billing_period: 'monthly', entitlement_type: 'seats', status: 'ok' }, NOW)
+    expect(r.ok).toBe(false)
+    expect(r.status).toBe(404)
+  })
+
+  it('DELETE removes a manual entitlement (card 73e8914a)', () => {
+    const db = getDb()
+    createManualEntitlement(db, { provider: 'notion', product: 'notion-plus', billing_period: 'monthly', entitlement_type: 'seats', remaining: 3, status: 'ok' }, NOW)
+    const r = deleteManualEntitlement(db, { provider: 'notion', product: 'notion-plus', billing_period: 'monthly', entitlement_type: 'seats' })
+    expect(r.ok).toBe(true)
+    const row = db.prepare(`SELECT 1 FROM entitlements WHERE dedup_key = 'manual|notion|notion-plus|seats|monthly'`).get()
+    expect(row).toBeUndefined()
+  })
+
+  it('DELETE 404s when there is nothing to delete', () => {
+    const db = getDb()
+    const r = deleteManualEntitlement(db, { provider: 'ghost', product: 'x', billing_period: 'monthly', entitlement_type: 'seats' })
     expect(r.ok).toBe(false)
     expect(r.status).toBe(404)
   })

@@ -11894,6 +11894,42 @@ async function cv2SubmitManual(kind, method) {
   }
 }
 
+// Card 73e8914a: DELETE a manual cost/entitlement row -- only the identifying fields matter
+// (source_id+month for cost, provider+product+entitlement_type+billing_period for entitlement),
+// same fields the operator already fills in to PATCH one. Irreversible, so confirm() first.
+async function cv2DeleteManual(kind) {
+  const gv = (id) => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
+  const isCost = kind === 'cost';
+  const statusEl = document.getElementById(isCost ? 'cvm_c_status' : 'cvm_e_status');
+  const setStatus = (msg, ok) => { if (statusEl) { statusEl.textContent = msg; statusEl.className = 'cv2-mstatus ' + (ok ? 'ok' : 'err'); } };
+  let url, body;
+  if (isCost) {
+    const source_id = gv('cvm_c_source_id'), month = gv('cvm_c_month');
+    if (!source_id || !month) { setStatus('Forrás azonosító és hónap kötelező a törléshez.', false); return; }
+    url = '/api/costs/manual';
+    body = { source_id, month };
+  } else {
+    const provider = gv('cvm_e_provider'), product = gv('cvm_e_product'), entitlement_type = gv('cvm_e_entitlement_type'), billing_period = gv('cvm_e_billing_period') || 'monthly';
+    if (!provider || !product || !entitlement_type) { setStatus('Provider, termék és keret-típus kötelező a törléshez.', false); return; }
+    url = '/api/costs/entitlements/manual';
+    body = { provider, product, entitlement_type, billing_period };
+  }
+  if (!confirm('Biztosan törlöd ezt a kézi bejegyzést? Ez nem vonható vissza.')) return;
+  setStatus('Törlés...', true);
+  try {
+    const res = await fetch(url, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const d = await res.json().catch(() => ({}));
+    if (res.ok && d && d.ok) {
+      setStatus('Törölve.', true);
+      setTimeout(() => { if (typeof loadCostsV2 === 'function') loadCostsV2(); }, 900);
+    } else {
+      setStatus('Hiba (' + res.status + '): ' + ((d && d.error) || 'ismeretlen hiba'), false);
+    }
+  } catch (e) {
+    setStatus('Hálózati hiba a törléskor.', false);
+  }
+}
+
 async function loadCostsV2() {
   const body = document.getElementById('costsV2Body')
   if (!body) return
@@ -12343,7 +12379,7 @@ async function loadCostsV2() {
   const mSelect = (id, label, opts) => '<div class="cv2-mfield"><label for="' + id + '">' + esc(label) + '</label><select id="' + id + '">' + opts.map(o => '<option value="' + esc(o) + '">' + esc(o) + '</option>').join('') + '</select></div>'
   html += '<details class="cv2-acc" style="margin-top:18px;"><summary style="font-weight:600;">Kézi rögzítés (költség / keret)</summary>'
   html += '<div style="padding:6px 14px 14px;">'
-  html += '<div class="cv2-recon" style="margin-top:6px;">Csak olyan providerhez, aminek nincs API/számla-útja. POST = új tétel (409 ha erre a hónapra már létezik), PATCH = meglévő frissítése (404 ha nincs). A HUF-ra váltás a Render árfolyam-configgal történik; nem-HUF csak érvényes árfolyammal megy át.</div>'
+  html += '<div class="cv2-recon" style="margin-top:6px;">Csak olyan providerhez, aminek nincs API/számla-útja. POST = új tétel (409 ha erre a hónapra már létezik), PATCH = meglévő frissítése (404 ha nincs), Törlés = eltávolítja (404 ha nincs, 409 ha nem kézi tétel). A HUF-ra váltás a Render árfolyam-configgal történik; nem-HUF csak érvényes árfolyammal megy át.</div>'
   html += '<div class="cv2-sec" style="margin-top:10px;font-size:0.88em;">Költség tétel</div>'
   html += '<div class="cv2-mform">'
     + mField('cvm_c_source_id', 'Forrás azonosító (source_id)', 'text', 'pl. notion-sub')
@@ -12355,7 +12391,8 @@ async function loadCostsV2() {
     + mSelect('cvm_c_source_type', 'Típus', ['subscription', 'domain', 'usage', 'saas'])
     + '</div>'
   html += '<div class="cv2-mactions"><button type="button" class="cv2-mbtn" onclick="cv2SubmitManual(\'cost\',\'POST\')">Létrehozás</button>'
-    + '<button type="button" class="cv2-mbtn secondary" onclick="cv2SubmitManual(\'cost\',\'PATCH\')">Frissítés</button></div>'
+    + '<button type="button" class="cv2-mbtn secondary" onclick="cv2SubmitManual(\'cost\',\'PATCH\')">Frissítés</button>'
+    + '<button type="button" class="cv2-mbtn secondary" onclick="cv2DeleteManual(\'cost\')">Törlés</button></div>'
   html += '<div class="cv2-mstatus" id="cvm_c_status" role="status" aria-live="polite"></div>'
   html += '<div class="cv2-sec" style="margin-top:14px;font-size:0.88em;">Csomag / keret (entitlement)</div>'
   html += '<div class="cv2-mform">'
@@ -12371,7 +12408,8 @@ async function loadCostsV2() {
     + mSelect('cvm_e_status', 'Státusz', ['ok', 'warning', 'critical', 'unknown'])
     + '</div>'
   html += '<div class="cv2-mactions"><button type="button" class="cv2-mbtn" onclick="cv2SubmitManual(\'entitlement\',\'POST\')">Létrehozás</button>'
-    + '<button type="button" class="cv2-mbtn secondary" onclick="cv2SubmitManual(\'entitlement\',\'PATCH\')">Frissítés</button></div>'
+    + '<button type="button" class="cv2-mbtn secondary" onclick="cv2SubmitManual(\'entitlement\',\'PATCH\')">Frissítés</button>'
+    + '<button type="button" class="cv2-mbtn secondary" onclick="cv2DeleteManual(\'entitlement\')">Törlés</button></div>'
   html += '<div class="cv2-mstatus" id="cvm_e_status" role="status" aria-live="polite"></div>'
   html += '</div></details>'
   html += '</div>'

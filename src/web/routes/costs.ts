@@ -255,9 +255,10 @@ export async function tryHandleCosts(ctx: RouteContext): Promise<boolean> {
 
   // Card a1552362 (item 3): manual cost/entitlement entry -- the one hand-entry door for a
   // provider Istvan already knows the number for but that has no API/invoice-ingest path yet.
-  // POST creates (409 if the key already exists), PATCH updates (404 if it doesn't) -- see
-  // manual-entry.ts for the full rationale.
-  if (path === '/api/costs/manual' && (method === 'POST' || method === 'PATCH')) {
+  // POST creates (409 if the key already exists), PATCH updates (404 if it doesn't), DELETE
+  // removes (card 73e8914a -- 404 if missing, 409 if the target isn't actually a manual entry,
+  // same guard as PATCH) -- see manual-entry.ts for the full rationale.
+  if (path === '/api/costs/manual' && (method === 'POST' || method === 'PATCH' || method === 'DELETE')) {
     try {
       const raw = await readBody(ctx.req)
       const body = JSON.parse(raw.toString() || '{}')
@@ -269,10 +270,12 @@ export async function tryHandleCosts(ctx: RouteContext): Promise<boolean> {
         fxUsdHuf = p.fx_usd_huf || 0
         fxEurHuf = p.fx_eur_huf || 0
       } catch { /* fx 0 -> non-HUF entries rejected as unconvertible */ }
-      const { createManualCost, updateManualCost } = await import('../../costops/manual-entry.js')
+      const { createManualCost, updateManualCost, deleteManualCost } = await import('../../costops/manual-entry.js')
       const result = method === 'POST'
         ? createManualCost(getDb(), body, { fxUsdHuf, fxEurHuf, now })
-        : updateManualCost(getDb(), body, { fxUsdHuf, fxEurHuf, now })
+        : method === 'PATCH'
+        ? updateManualCost(getDb(), body, { fxUsdHuf, fxEurHuf, now })
+        : deleteManualCost(getDb(), body)
       json(res, result, result.ok ? 200 : (result.status || 500))
     } catch (err) {
       logger.error({ err }, 'CostOps manual cost entry failed')
@@ -281,15 +284,17 @@ export async function tryHandleCosts(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
-  if (path === '/api/costs/entitlements/manual' && (method === 'POST' || method === 'PATCH')) {
+  if (path === '/api/costs/entitlements/manual' && (method === 'POST' || method === 'PATCH' || method === 'DELETE')) {
     try {
       const raw = await readBody(ctx.req)
       const body = JSON.parse(raw.toString() || '{}')
       const now = Math.floor(Date.now() / 1000)
-      const { createManualEntitlement, updateManualEntitlement } = await import('../../costops/manual-entry.js')
+      const { createManualEntitlement, updateManualEntitlement, deleteManualEntitlement } = await import('../../costops/manual-entry.js')
       const result = method === 'POST'
         ? createManualEntitlement(getDb(), body, now)
-        : updateManualEntitlement(getDb(), body, now)
+        : method === 'PATCH'
+        ? updateManualEntitlement(getDb(), body, now)
+        : deleteManualEntitlement(getDb(), body)
       json(res, result, result.ok ? 200 : (result.status || 500))
     } catch (err) {
       logger.error({ err }, 'CostOps manual entitlement entry failed')
