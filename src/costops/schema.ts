@@ -11,6 +11,7 @@
 import type Database from 'better-sqlite3'
 import { initForecastSchema } from './forecast.js'
 import { initFxSchema } from './fx.js'
+import { initAlertsSchema } from './alerts.js'
 
 export function initCostOpsSchema(db: Database.Database): void {
   // CostOps v0.2: model/provider enrichment on the CORE token_usage table
@@ -95,6 +96,8 @@ export function initCostOpsSchema(db: Database.Database): void {
   // Phase 1 (GAP-09, Anvil's fx.ts): fx_source/conversion_method columns +
   // the fx_rates history table. Must run after cost_line_items exists.
   initFxSchema(db)
+  // Phase 3 (GAP-12, Anvil's alerts.ts): costops_alerts lifecycle table.
+  initAlertsSchema(db)
   // Phase 1 (GAP-10, Anvil's forecast.ts): forecast_snapshots.source_id
   // references cost_sources(id) -- must run after that table exists, which it
   // already does at this point in initCostOpsSchema.

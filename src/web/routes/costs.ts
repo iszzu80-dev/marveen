@@ -22,6 +22,7 @@ import { captureReliabilitySnapshot, listReliabilitySnapshots, getLatestReliabil
 import { listForecastSnapshots } from '../../costops/forecast-capture.js'
 import { buildReconciliation } from '../../costops/reconciliation.js'
 import { createCorrection, getCorrectionChain } from '../../costops/correction.js'
+import { listAlerts, acknowledgeAlertByKey, resolveAlertByKey } from '../../costops/alerts-store.js'
 import type { RouteContext } from './types.js'
 
 export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
@@ -223,6 +224,48 @@ export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
     } catch (err) {
       logger.error({ err }, 'CostOps correction-chain lookup failed')
       json(res, { error: 'Correction chain lookup failed' }, 500)
+    }
+    return true
+  }
+
+  // Phase 3 (GAP-12): deterministic alert lifecycle, persisted via
+  // alerts-store.ts. Reads whatever is currently stored -- population (the
+  // 13-detector signal-gathering round) is a separate orchestration piece
+  // (alerts-capture.ts) not yet wired into the boot seam.
+  if (path === '/api/costs/alerts' && method === 'GET') {
+    try {
+      const status = (url.searchParams.get('status') as 'active' | 'resolved' | 'all' | null) ?? undefined
+      const type = url.searchParams.get('type') || undefined
+      json(res, { alerts: listAlerts(getDb(), { status, type }) })
+    } catch (err) {
+      logger.error({ err }, 'CostOps alerts list failed')
+      json(res, { error: 'Alerts list failed' }, 500)
+    }
+    return true
+  }
+  if (path === '/api/costs/alerts/acknowledge' && method === 'POST') {
+    try {
+      const raw = await readBody(ctx.req)
+      const body = JSON.parse(raw.toString() || '{}')
+      const now = Math.floor(Date.now() / 1000)
+      const result = acknowledgeAlertByKey(getDb(), body.dedup_key, body.actor || 'unknown', now)
+      json(res, result, result.ok ? 200 : (result.status || 500))
+    } catch (err) {
+      logger.error({ err }, 'CostOps alert acknowledge failed')
+      json(res, { ok: false, error: 'alert acknowledge failed' }, 500)
+    }
+    return true
+  }
+  if (path === '/api/costs/alerts/resolve' && method === 'POST') {
+    try {
+      const raw = await readBody(ctx.req)
+      const body = JSON.parse(raw.toString() || '{}')
+      const now = Math.floor(Date.now() / 1000)
+      const result = resolveAlertByKey(getDb(), body.dedup_key, now)
+      json(res, result, result.ok ? 200 : (result.status || 500))
+    } catch (err) {
+      logger.error({ err }, 'CostOps alert resolve failed')
+      json(res, { ok: false, error: 'alert resolve failed' }, 500)
     }
     return true
   }

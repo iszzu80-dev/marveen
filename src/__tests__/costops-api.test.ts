@@ -149,4 +149,26 @@ describe('costops API (route smoke)', () => {
     expect(await tryHandleCostOps(ctx)).toBe(true)
     expect(out.status).toBe(400)
   })
+
+  // Phase 3 (GAP-12): alerts routes.
+  it('GET /api/costs/alerts returns an empty list before any candidate is persisted', async () => {
+    const { ctx, out } = fakeCtx('/api/costs/alerts')
+    expect(await tryHandleCostOps(ctx)).toBe(true)
+    expect(out.body.alerts).toEqual([])
+  })
+
+  it('acknowledge/resolve routes 404 on an unknown dedup_key', async () => {
+    const { ctx, out } = fakeCtx('/api/costs/alerts/acknowledge', 'POST')
+    // Minimal fake IncomingMessage: readBody() registers 'data'/'end'/'error'
+    // listeners and reads the body via them -- invoking synchronously here is
+    // fine since readBody's Promise resolves off whatever chunks were pushed
+    // before 'end' fires, and both calls happen synchronously in sequence.
+    ctx.req.on = ((event: string, cb: (...args: any[]) => void) => {
+      if (event === 'data') cb(Buffer.from(JSON.stringify({ dedup_key: 'ghost', actor: 'x' })))
+      if (event === 'end') cb()
+      return ctx.req
+    }) as any
+    expect(await tryHandleCostOps(ctx)).toBe(true)
+    expect(out.status).toBe(404)
+  })
 })
