@@ -31,6 +31,7 @@ import { createCorrection, getCorrectionChain } from '../../costops/correction.j
 import { listAlerts, acknowledgeAlertByKey, resolveAlertByKey } from '../../costops/alerts-store.js'
 import { getPeriodStatus, checkCloseReadiness, closePeriod, reopenPeriod, getPeriodCloseHistory, getCloseSnapshot } from '../../costops/period-close.js'
 import { getAllBudgetStatuses, upsertBudget, deleteBudget, getBudgetAuditHistory } from '../../costops/budgets.js'
+import { listRecommendations, acceptRecommendationByKey, dismissRecommendationByKey, type ListRecommendationsOptions } from '../../costops/recommendations-store.js'
 import type { RouteContext } from './types.js'
 
 export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
@@ -369,6 +370,51 @@ export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
     } catch (err) {
       logger.error({ err }, 'CostOps budget history failed')
       json(res, { error: 'Cost budget history failed' }, 500)
+    }
+    return true
+  }
+
+  // Phase 4 (GAP-17): aggregate cost optimization advisor. Reads only --
+  // recommendations are populated by optimization-capture.ts's future daily
+  // cycle (mirroring alerts-capture.ts), not by this route. Defaults to
+  // 'open' (unaddressed) recommendations, same convention as GET /api/costs/alerts.
+  if (path === '/api/costs/recommendations' && method === 'GET') {
+    try {
+      const status = (url.searchParams.get('status') || undefined) as ListRecommendationsOptions['status']
+      const type = url.searchParams.get('type') || undefined
+      const recommendations = listRecommendations(getDb(), { status, type })
+      json(res, { recommendations })
+    } catch (err) {
+      logger.error({ err }, 'CostOps recommendations failed')
+      json(res, { error: 'Cost recommendations failed' }, 500)
+    }
+    return true
+  }
+
+  if (path === '/api/costs/recommendations/accept' && method === 'POST') {
+    try {
+      const raw = await readBody(ctx.req)
+      const body = JSON.parse(raw.toString() || '{}')
+      const now = Math.floor(Date.now() / 1000)
+      const result = acceptRecommendationByKey(getDb(), body.dedup_key, body.actor, now)
+      json(res, result, result.ok ? 200 : (result.status || 500))
+    } catch (err) {
+      logger.error({ err }, 'CostOps recommendation accept failed')
+      json(res, { ok: false, error: 'recommendation accept failed' }, 500)
+    }
+    return true
+  }
+
+  if (path === '/api/costs/recommendations/dismiss' && method === 'POST') {
+    try {
+      const raw = await readBody(ctx.req)
+      const body = JSON.parse(raw.toString() || '{}')
+      const now = Math.floor(Date.now() / 1000)
+      const result = dismissRecommendationByKey(getDb(), body.dedup_key, body.actor, now)
+      json(res, result, result.ok ? 200 : (result.status || 500))
+    } catch (err) {
+      logger.error({ err }, 'CostOps recommendation dismiss failed')
+      json(res, { ok: false, error: 'recommendation dismiss failed' }, 500)
     }
     return true
   }

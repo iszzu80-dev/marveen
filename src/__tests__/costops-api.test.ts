@@ -334,4 +334,48 @@ describe('costops API (route smoke)', () => {
       await tryHandleCostOps(delCtx)
     })
   })
+
+  // Phase 4 (GAP-17): optimization advisor recommendation routes.
+  describe('recommendation list/accept/dismiss routes (GAP-17)', () => {
+    it('GET /api/costs/recommendations defaults to open, POST accept/dismiss change status', async () => {
+      const { reconcileAndPersistRecommendations } = await import('../costops/recommendations-store.js')
+      const now = Math.floor(Date.now() / 1000)
+      reconcileAndPersistRecommendations(getDb(), [{
+        type: 'unused_domain_or_storage', dedup_key: 'unused_domain_or_storage|old-domain.com',
+        evidence: { source_id: 'old-domain.com' }, current_monthly_cost: 500, estimated_monthly_saving: 500,
+        estimated_annual_saving: 6000, switching_cost: 0, risk: 'low', confidence: 'medium',
+        human_decision_required: 'Confirm safe to release', rollback_note: 'Can re-register later.',
+      }], now)
+
+      const { ctx: getCtx, out: getOut } = fakeCtx('/api/costs/recommendations')
+      expect(await tryHandleCostOps(getCtx)).toBe(true)
+      expect(getOut.body.recommendations).toHaveLength(1)
+      expect(getOut.body.recommendations[0].dedup_key).toBe('unused_domain_or_storage|old-domain.com')
+
+      const { ctx: acceptCtx, out: acceptOut } = fakeCtxWithBody('/api/costs/recommendations/accept', 'POST', {
+        dedup_key: 'unused_domain_or_storage|old-domain.com', actor: 'istvan',
+      })
+      expect(await tryHandleCostOps(acceptCtx)).toBe(true)
+      expect(acceptOut.body.ok).toBe(true)
+      expect(acceptOut.body.recommendation.status).toBe('accepted')
+
+      const { ctx: openCtx, out: openOut } = fakeCtx('/api/costs/recommendations')
+      await tryHandleCostOps(openCtx)
+      expect(openOut.body.recommendations).toHaveLength(0) // accepted, no longer 'open'
+
+      const { ctx: allCtx, out: allOut } = fakeCtx('/api/costs/recommendations?status=all')
+      await tryHandleCostOps(allCtx)
+      expect(allOut.body.recommendations).toHaveLength(1)
+    })
+
+    it('accept without an actor is a 400; accept/dismiss on an unknown dedup_key is a 404', async () => {
+      const { ctx: noActorCtx, out: noActorOut } = fakeCtxWithBody('/api/costs/recommendations/accept', 'POST', { dedup_key: 'ghost' })
+      expect(await tryHandleCostOps(noActorCtx)).toBe(true)
+      expect(noActorOut.status).toBe(400)
+
+      const { ctx: ghostCtx, out: ghostOut } = fakeCtxWithBody('/api/costs/recommendations/dismiss', 'POST', { dedup_key: 'ghost', actor: 'istvan' })
+      expect(await tryHandleCostOps(ghostCtx)).toBe(true)
+      expect(ghostOut.status).toBe(404)
+    })
+  })
 })
