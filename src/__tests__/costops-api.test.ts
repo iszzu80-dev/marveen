@@ -109,4 +109,44 @@ describe('costops API (route smoke)', () => {
     expect(out.body.snapshots[0]).toHaveProperty('method')
     expect(out.body.snapshots[0]).toHaveProperty('confidence')
   })
+
+  // Phase 1 (GAP-06): reconciliation route.
+  it('GET /api/costs/reconciliation returns a per-source reconciliation view', async () => {
+    getDb().prepare(`INSERT INTO cost_sources (id, name, provider, source_type, currency, active, created_at, updated_at) VALUES ('domain','Domain','other','domain','HUF',1,1,1)`).run()
+    const { ctx, out } = fakeCtx('/api/costs/reconciliation')
+    expect(await tryHandleCostOps(ctx)).toBe(true)
+    expect(Array.isArray(out.body.reconciliation)).toBe(true)
+    const domain = out.body.reconciliation.find((r: any) => r.source_id === 'domain')
+    expect(domain).toHaveProperty('status')
+    expect(domain).toHaveProperty('variance')
+  })
+
+  // Phase 1 (GAP-05/06/14): correction chain drill-down route.
+  it('GET /api/costs/corrections?chain= walks the correction chain via the route', async () => {
+    const { monthWindow } = await import('../costops/ledger.js')
+    const win = monthWindow(Math.floor(Date.now() / 1000))
+    getDb().prepare(`INSERT INTO cost_sources (id, name, provider, source_type, currency, active, created_at, updated_at) VALUES ('render-hosting','Render','render','usage','HUF',1,1,1)`).run()
+    const info = getDb().prepare(`
+      INSERT INTO cost_line_items (source_id, charge_period_start, charge_period_end, charge_category, billed_cost, currency, confidence, data_freshness, created_at, dedup_key, actual_source)
+      VALUES ('render-hosting', ?, ?, 'usage', 10000, 'HUF', 'provider_api', 1, 1, 'x', 'provider_api')
+    `).run(win.start, win.end)
+    const originalId = info.lastInsertRowid as number
+
+    // Drive the correction directly (the route is a thin JSON-body pass-through
+    // over createCorrection(), already fully unit-tested in
+    // costops-correction.test.ts) -- this test verifies the GET route wiring.
+    const { createCorrection } = await import('../costops/correction.js')
+    createCorrection(getDb(), { originalLineId: originalId, newAmount: 8500, reason: 'fix' }, { now: Math.floor(Date.now() / 1000) })
+
+    const { ctx: chainCtx, out: chainOut } = fakeCtx(`/api/costs/corrections?chain=${originalId}`)
+    expect(await tryHandleCostOps(chainCtx)).toBe(true)
+    expect(chainOut.body.chain).toHaveLength(2)
+    expect(chainOut.body.chain[1].billed_cost).toBe(8500)
+  })
+
+  it('GET /api/costs/corrections without ?chain= is a 400', async () => {
+    const { ctx, out } = fakeCtx('/api/costs/corrections')
+    expect(await tryHandleCostOps(ctx)).toBe(true)
+    expect(out.status).toBe(400)
+  })
 })

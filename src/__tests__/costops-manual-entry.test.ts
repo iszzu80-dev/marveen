@@ -37,6 +37,22 @@ describe('costops manual cost entry (card a1552362, item 3)', () => {
     expect(row.fx_estimated).toBe(true)
   })
 
+  it('Phase 1 (GAP-09): a converted manual entry also carries fx_source/conversion_method', () => {
+    const db = getDb()
+    createManualCost(db, { source_id: 'figma', name: 'Figma', provider: 'figma', amount: 15, currency: 'USD', month: '2026-07' }, { fxUsdHuf: 360, now: NOW })
+    const row = db.prepare(`SELECT fx_source, conversion_method FROM cost_line_items WHERE dedup_key = 'manual|figma|2026-07'`).get() as any
+    expect(row.fx_source).toBe('render_pricing_config')
+    expect(row.conversion_method).toBe('service_date_rate')
+  })
+
+  it('an already-HUF manual entry has null fx_source/conversion_method (nothing converted)', () => {
+    const db = getDb()
+    createManualCost(db, { source_id: 'notion', name: 'Notion', provider: 'notion', amount: 5000, currency: 'HUF', month: '2026-07' }, { fxUsdHuf: 360, now: NOW })
+    const row = db.prepare(`SELECT fx_source, conversion_method FROM cost_line_items WHERE dedup_key = 'manual|notion|2026-07'`).get() as any
+    expect(row.fx_source).toBeNull()
+    expect(row.conversion_method).toBeNull()
+  })
+
   it('rejects a second POST for the same source/month (409) -- PATCH is required to change it', () => {
     const db = getDb()
     createManualCost(db, { source_id: 'notion', name: 'Notion', provider: 'notion', amount: 5000, currency: 'HUF', month: '2026-07' }, { fxUsdHuf: 360, now: NOW })

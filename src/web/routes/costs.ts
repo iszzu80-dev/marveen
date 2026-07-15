@@ -20,6 +20,8 @@ import { getLimitStatus, getLiveCheckWarnings } from '../../costops/limits.js'
 import { buildSourceInventory } from '../../costops/inventory.js'
 import { captureReliabilitySnapshot, listReliabilitySnapshots, getLatestReliabilitySnapshot } from '../../costops/reliability-observation.js'
 import { listForecastSnapshots } from '../../costops/forecast-capture.js'
+import { buildReconciliation } from '../../costops/reconciliation.js'
+import { createCorrection, getCorrectionChain } from '../../costops/correction.js'
 import type { RouteContext } from './types.js'
 
 export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
@@ -174,6 +176,53 @@ export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
     } catch (err) {
       logger.error({ err }, 'CostOps forecast-snapshots list failed')
       json(res, { error: 'Forecast snapshots list failed' }, 500)
+    }
+    return true
+  }
+
+  // Phase 1 (GAP-06): per-source reconciliation view (expected/observed/
+  // invoice/operationally-selected amount + variance + status). Read-only.
+  if (path === '/api/costs/reconciliation' && method === 'GET') {
+    try {
+      const month = url.searchParams.get('month') || undefined
+      const now = Math.floor(Date.now() / 1000)
+      json(res, { reconciliation: buildReconciliation(getDb(), now, month) })
+    } catch (err) {
+      logger.error({ err }, 'CostOps reconciliation failed')
+      json(res, { error: 'Reconciliation failed' }, 500)
+    }
+    return true
+  }
+
+  // Phase 1 (GAP-05/GAP-06/GAP-14): correction relationship for any ledger
+  // line (extends Phase 0's manual-only void/archive). POST creates a
+  // correction (voids the original, links a new row via corrects_line_id);
+  // GET ?chain=<lineId> walks the full correction chain for drill-down.
+  if (path === '/api/costs/corrections' && method === 'POST') {
+    try {
+      const raw = await readBody(ctx.req)
+      const body = JSON.parse(raw.toString() || '{}')
+      const now = Math.floor(Date.now() / 1000)
+      const result = createCorrection(getDb(), {
+        originalLineId: Number(body.originalLineId), newAmount: Number(body.newAmount), reason: body.reason,
+      }, { now })
+      json(res, result, result.ok ? 200 : (result.status || 500))
+    } catch (err) {
+      logger.error({ err }, 'CostOps correction failed')
+      json(res, { ok: false, error: 'correction failed' }, 500)
+    }
+    return true
+  }
+  if (path === '/api/costs/corrections' && method === 'GET') {
+    try {
+      const lineId = Number(url.searchParams.get('chain'))
+      if (!Number.isFinite(lineId) || lineId <= 0) {
+        json(res, { error: 'missing or invalid ?chain=<lineId>' }, 400); return true
+      }
+      json(res, { chain: getCorrectionChain(getDb(), lineId) })
+    } catch (err) {
+      logger.error({ err }, 'CostOps correction-chain lookup failed')
+      json(res, { error: 'Correction chain lookup failed' }, 500)
     }
     return true
   }

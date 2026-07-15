@@ -10,6 +10,7 @@
 
 import type Database from 'better-sqlite3'
 import { initForecastSchema } from './forecast.js'
+import { initFxSchema } from './fx.js'
 
 export function initCostOpsSchema(db: Database.Database): void {
   // CostOps v0.2: model/provider enrichment on the CORE token_usage table
@@ -84,6 +85,16 @@ export function initCostOpsSchema(db: Database.Database): void {
   // that aggregates cost_line_items must filter `voided_at IS NULL`.
   try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN voided_at INTEGER`) } catch { /* already exists */ }
   try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN void_reason TEXT`) } catch { /* already exists */ }
+  // Phase 1 (GAP-05/GAP-06/GAP-14, docs/costops/phase0-73e8914a-void-vs-delete.md's
+  // deferred "no supersede/correction relationship" follow-up): a correction
+  // voids the wrong row (same mechanism as above) AND inserts a new row
+  // pointing back at it via corrects_line_id, so "what replaced this, and
+  // why" stays traceable instead of two unrelated void+POST rows correlated
+  // only by matching source_id/month/timing. See correction.ts.
+  try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN corrects_line_id INTEGER REFERENCES cost_line_items(id)`) } catch { /* already exists */ }
+  // Phase 1 (GAP-09, Anvil's fx.ts): fx_source/conversion_method columns +
+  // the fx_rates history table. Must run after cost_line_items exists.
+  initFxSchema(db)
   // Phase 1 (GAP-10, Anvil's forecast.ts): forecast_snapshots.source_id
   // references cost_sources(id) -- must run after that table exists, which it
   // already does at this point in initCostOpsSchema.

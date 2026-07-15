@@ -81,12 +81,12 @@ export function createManualCost(
       (source_id, charge_period_start, charge_period_end, charge_category, service_name,
        usage_type, consumed_quantity, consumed_unit, billed_cost, effective_cost, currency,
        confidence, data_freshness, source_ref, dedup_key, created_at, actual_source,
-       original_amount, original_currency, fx_rate, fx_date)
+       original_amount, original_currency, fx_rate, fx_date, fx_source, conversion_method)
     VALUES
       (@source_id, @start, @end, 'invoice', @name,
        NULL, NULL, NULL, @amount, NULL, 'HUF',
        'manual', @now, NULL, @dedup_key, @now, 'manual_entry',
-       @original_amount, @original_currency, @fx_rate, @fx_date)
+       @original_amount, @original_currency, @fx_rate, @fx_date, @fx_source, @conversion_method)
   `).run({
     source_id: input.source_id, start: win.start, end: win.end, name: input.name,
     amount: amountHuf, now: opts.now, dedup_key: dedup,
@@ -94,6 +94,11 @@ export function createManualCost(
     original_currency: wasConverted ? cur : null,
     fx_rate: wasConverted ? appliedFxRate : null,
     fx_date: wasConverted ? opts.now : null,
+    // Phase 1 (GAP-09): a manual entry has no invoice date to prefer --
+    // 'service_date_rate' (the entry's own month), same rate source as
+    // every other conversion in this codebase (Render pricing config).
+    fx_source: wasConverted ? 'render_pricing_config' : null,
+    conversion_method: wasConverted ? 'service_date_rate' : null,
   })
   return { ok: true }
 }
@@ -119,7 +124,7 @@ export function updateManualCost(
     UPDATE cost_line_items SET
       billed_cost = @amount, data_freshness = @now,
       original_amount = @original_amount, original_currency = @original_currency,
-      fx_rate = @fx_rate, fx_date = @fx_date
+      fx_rate = @fx_rate, fx_date = @fx_date, fx_source = @fx_source, conversion_method = @conversion_method
     WHERE dedup_key = @dedup_key
   `).run({
     amount: amountHuf, now: opts.now, dedup_key: dedup,
@@ -127,6 +132,8 @@ export function updateManualCost(
     original_currency: wasConverted ? cur : null,
     fx_rate: wasConverted ? appliedFxRate : null,
     fx_date: wasConverted ? opts.now : null,
+    fx_source: wasConverted ? 'render_pricing_config' : null,
+    conversion_method: wasConverted ? 'service_date_rate' : null,
   })
   return { ok: true }
 }

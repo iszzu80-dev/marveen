@@ -85,17 +85,20 @@ export function ingestEmailCosts(
       (source_id, charge_period_start, charge_period_end, charge_category, service_name,
        usage_type, consumed_quantity, consumed_unit, billed_cost, effective_cost, currency,
        confidence, data_freshness, source_ref, dedup_key, created_at,
-       original_amount, original_currency, fx_rate, fx_date, actual_source)
+       original_amount, original_currency, fx_rate, fx_date, actual_source,
+       fx_source, conversion_method)
     VALUES
       (@source_id, @start, @end, 'invoice', @name,
        NULL, NULL, NULL, @amount, NULL, 'HUF',
        @confidence, @now, @ref_hash, @dedup_key, @now,
-       @original_amount, @original_currency, @fx_rate, @fx_date, 'email_invoice')
+       @original_amount, @original_currency, @fx_rate, @fx_date, 'email_invoice',
+       @fx_source, @conversion_method)
     ON CONFLICT(dedup_key) DO UPDATE SET
       billed_cost=excluded.billed_cost, confidence=excluded.confidence,
       data_freshness=excluded.data_freshness, source_ref=excluded.source_ref,
       original_amount=excluded.original_amount, original_currency=excluded.original_currency,
-      fx_rate=excluded.fx_rate, fx_date=excluded.fx_date, actual_source=excluded.actual_source
+      fx_rate=excluded.fx_rate, fx_date=excluded.fx_date, actual_source=excluded.actual_source,
+      fx_source=excluded.fx_source, conversion_method=excluded.conversion_method
   `)
   const out: IngestResult = { ingested: 0, skipped: 0, errors: [] }
   const tx = db.transaction((list: EmailCostEntry[]) => {
@@ -124,6 +127,14 @@ export function ingestEmailCosts(
         original_currency: wasConverted ? cur : null,
         fx_rate: wasConverted ? appliedFxRate : null,
         fx_date: wasConverted ? opts.now : null,
+        // Phase 1 (GAP-09): fx.ts's FxSource/ConversionMethod provenance,
+        // alongside the pre-existing fx_rate/fx_date columns above. This is
+        // an email-derived invoice -- 'invoice_date_rate' reflects that the
+        // rate is tied to the invoice event, not a bare usage period.
+        // fxUsdHuf/fxEurHuf always come from the Render pricing config (the
+        // only rate source wired in today, see collectors/render.ts).
+        fx_source: wasConverted ? 'render_pricing_config' : null,
+        conversion_method: wasConverted ? 'invoice_date_rate' : null,
       })
       out.ingested++
     }
