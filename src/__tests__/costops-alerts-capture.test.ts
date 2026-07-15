@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import { monthWindow } from '../costops/ledger.js'
 import { initAlertsSchema } from '../costops/alerts.js'
+import { initInvoiceSchema } from '../costops/invoice.js'
 import {
   classifyErrorCode,
   gatherAlertCandidates,
@@ -11,6 +12,14 @@ import {
 import type { CostOpsConfig } from '../costops/config.js'
 
 const NOW = Math.floor(Date.UTC(2026, 6, 15, 12, 0, 0) / 1000) // 2026-07-15
+
+// gatherAlertCandidates always queries costops_invoices (GAP-14's
+// missing_invoice signal) -- every test that exercises it needs the table,
+// same assumed-precondition convention as costops_alerts itself.
+function initDb(): void {
+  initDatabase(':memory:')
+  initInvoiceSchema(getDb())
+}
 
 function cfg(over: Partial<CostOpsConfig> = {}): CostOpsConfig {
   return {
@@ -56,7 +65,7 @@ describe('classifyErrorCode', () => {
 })
 
 describe('gatherAlertCandidates -- budget signals', () => {
-  beforeEach(() => { initDatabase(':memory:') })
+  beforeEach(() => { initDb() })
 
   it('fires budget_threshold once spend crosses the hard threshold', () => {
     const db = getDb()
@@ -79,7 +88,7 @@ describe('gatherAlertCandidates -- budget signals', () => {
 })
 
 describe('gatherAlertCandidates -- balance exhaustion (entitlements)', () => {
-  beforeEach(() => { initDatabase(':memory:') })
+  beforeEach(() => { initDb() })
 
   it('fires critical once the stored forecast_exhaustion_at has passed', () => {
     const db = getDb()
@@ -105,7 +114,7 @@ describe('gatherAlertCandidates -- balance exhaustion (entitlements)', () => {
 })
 
 describe('gatherAlertCandidates -- sync/credential (import_runs)', () => {
-  beforeEach(() => { initDatabase(':memory:') })
+  beforeEach(() => { initDb() })
 
   it('fires failed_sync (critical) + credential_permission_error together for a 401', () => {
     const db = getDb()
@@ -137,7 +146,7 @@ describe('gatherAlertCandidates -- sync/credential (import_runs)', () => {
 })
 
 describe('gatherAlertCandidates -- reconciliation mismatch', () => {
-  beforeEach(() => { initDatabase(':memory:') })
+  beforeEach(() => { initDb() })
 
   it('fires when provider API and invoice amounts diverge past tolerance', () => {
     const db = getDb()
@@ -163,7 +172,7 @@ describe('gatherAlertCandidates -- reconciliation mismatch', () => {
 })
 
 describe('gatherAlertCandidates -- new source / long estimate-only', () => {
-  beforeEach(() => { initDatabase(':memory:') })
+  beforeEach(() => { initDb() })
 
   it('flags a source whose earliest activity is THIS month as new_unknown_source', () => {
     const db = getDb()
@@ -220,7 +229,7 @@ describe('gatherAlertCandidates -- new source / long estimate-only', () => {
 })
 
 describe('gatherAlertCandidates -- unusual spend growth', () => {
-  beforeEach(() => { initDatabase(':memory:') })
+  beforeEach(() => { initDb() })
 
   it('fires when current month spend grows past the threshold vs the previous month', () => {
     const db = getDb()
@@ -245,15 +254,55 @@ describe('gatherAlertCandidates -- unusual spend growth', () => {
 
 describe('gatherAlertCandidates -- subscription utilization with no config present', () => {
   it('is empty, never fabricated, when no costops-subscriptions.json exists', () => {
-    initDatabase(':memory:')
+    initDb()
     const db = getDb()
     const candidates = gatherAlertCandidates(db, cfg({ budgets: [] }), NOW)
     expect(candidates.filter(c => c.type === 'subscription_utilization')).toEqual([])
   })
 })
 
+describe('gatherAlertCandidates -- missing invoice (GAP-14 wiring)', () => {
+  beforeEach(() => { initDb() })
+
+  function insertInvoice(db: ReturnType<typeof getDb>, sourceId: string, periodEnd: number): void {
+    db.prepare(`
+      INSERT INTO costops_invoices (source_id, provider, billing_period_start, billing_period_end, currency, gross_amount, tax_amount, discount_amount, credit_amount, refund_amount, late_charge_amount, net_amount, status, dedup_key, recorded_at, created_at)
+      VALUES (?, 'render', ?, ?, 'HUF', 100, 0, 0, 0, 0, 0, 100, 'recorded', ?, ?, ?)
+    `).run(sourceId, periodEnd - 30 * 86400, periodEnd, `render|ref-${periodEnd}|x`, NOW, NOW)
+  }
+
+  it('is empty with fewer than 2 recorded invoices -- no inferable cadence', () => {
+    const db = getDb()
+    insertSource(db, 'render-hosting', 'render')
+    insertInvoice(db, 'render-hosting', NOW - 60 * 86400)
+    const candidates = gatherAlertCandidates(db, cfg({ budgets: [] }), NOW)
+    expect(candidates.find(c => c.type === 'missing_invoice')).toBeUndefined()
+  })
+
+  it('fires once the inferred next-invoice date has passed with no newer invoice recorded', () => {
+    const db = getDb()
+    insertSource(db, 'render-hosting', 'render')
+    insertInvoice(db, 'render-hosting', NOW - 120 * 86400) // ~4 months ago
+    insertInvoice(db, 'render-hosting', NOW - 90 * 86400)  // ~3 months ago, 30-day gap
+    const candidates = gatherAlertCandidates(db, cfg({ budgets: [] }), NOW)
+    const a = candidates.find(c => c.type === 'missing_invoice')
+    expect(a).toBeDefined()
+    expect(a?.evidence.source_id).toBe('render-hosting')
+  })
+
+  it('does not fire once a recent invoice pushes the inferred cadence past now', () => {
+    const db = getDb()
+    insertSource(db, 'render-hosting', 'render')
+    insertInvoice(db, 'render-hosting', NOW - 60 * 86400)
+    insertInvoice(db, 'render-hosting', NOW - 30 * 86400)
+    insertInvoice(db, 'render-hosting', NOW - 2 * 86400) // just landed
+    const candidates = gatherAlertCandidates(db, cfg({ budgets: [] }), NOW)
+    expect(candidates.find(c => c.type === 'missing_invoice')).toBeUndefined()
+  })
+})
+
 describe('captureAlerts persistence round-trip', () => {
-  beforeEach(() => { initDatabase(':memory:'); initAlertsSchema(getDb()) })
+  beforeEach(() => { initDb(); initAlertsSchema(getDb()) })
 
   it('inserts a new alert on first capture', () => {
     const db = getDb()

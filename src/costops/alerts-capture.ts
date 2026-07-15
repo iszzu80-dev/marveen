@@ -38,10 +38,12 @@
 // - subscription_utilization: subscriptions.ts + limits.ts's
 //   fromSubscriptions() (weekly_usage_pct and similar already-normalized
 //   percentages).
-// - missing_invoice: NO live expected-invoice-date data source exists yet
-//   in this codebase (no invoice-cadence config, GAP-14 not built) --
-//   gatherMissingInvoiceCandidates() returns [] rather than fabricate an
-//   assumed cadence. Wire this once GAP-14 lands.
+// - missing_invoice: invoice.ts's costops_invoices (GAP-14, landed) --
+//   inferExpectedInvoiceBy() projects the next expected invoice date from a
+//   source's OWN observed invoice-period history (median gap + grace days),
+//   never a fabricated "always monthly" assumption. A source with fewer
+//   than 2 recorded invoices has no inferable cadence and is honestly
+//   skipped (see the function below), not guessed at.
 
 import type Database from 'better-sqlite3'
 import type { CostOpsConfig } from './config.js'
@@ -51,6 +53,7 @@ import { buildReconciliation } from './reconciliation.js'
 import { loadSubscriptionsConfig, deriveLifecycle } from './subscriptions.js'
 import { fromSubscriptions } from './limits.js'
 import { getAllBudgetStatuses } from './budgets.js'
+import { inferExpectedInvoiceBy } from './invoice.js'
 import {
   detectBudgetThresholdAlert,
   detectForecastBudgetBreachAlert,
@@ -60,6 +63,7 @@ import {
   detectCredentialPermissionAlert,
   detectReconciliationMismatchAlert,
   detectManualProviderVarianceAlert,
+  detectMissingInvoiceAlert,
   detectUnusualSpendGrowthAlert,
   detectNewUnknownSourceAlert,
   detectLongEstimateOnlySourceAlert,
@@ -297,9 +301,30 @@ function gatherUtilizationCandidates(now: number): AlertCandidate[] {
   return out
 }
 
-/** No live expected-invoice-date source exists yet (see file header) -- honestly empty, not fabricated. */
-function gatherMissingInvoiceCandidates(): AlertCandidate[] {
-  return []
+/**
+ * Per active source: infer the next expected invoice date from that
+ * source's OWN recorded invoice history (invoice.ts's costops_invoices),
+ * then check whether it's overdue. A source with fewer than 2 recorded
+ * invoices has no inferable cadence -- honestly skipped, not guessed. Since
+ * this queries the FULL history fresh each capture round, a newly-arrived
+ * invoice becomes part of the history and naturally pushes the inferred
+ * expected-by date forward -- no separate "received" flag needed (see
+ * invoice.ts's inferExpectedInvoiceBy doc comment for why).
+ */
+function gatherMissingInvoiceCandidates(db: Database.Database, now: number): AlertCandidate[] {
+  const out: AlertCandidate[] = []
+  const sources = db.prepare(`SELECT DISTINCT source_id FROM costops_invoices`).all() as Array<{ source_id: string }>
+  for (const s of sources) {
+    const rows = db.prepare(`
+      SELECT billing_period_end FROM costops_invoices
+      WHERE source_id = ? AND status != 'voided' ORDER BY billing_period_end ASC
+    `).all(s.source_id) as Array<{ billing_period_end: number }>
+    const expectedBy = inferExpectedInvoiceBy(rows.map(r => r.billing_period_end))
+    if (expectedBy == null) continue
+    const c = detectMissingInvoiceAlert({ source_id: s.source_id, expected_by: expectedBy, received: false }, now)
+    if (c) out.push(c)
+  }
+  return out
 }
 
 /**
@@ -319,7 +344,7 @@ export function gatherAlertCandidates(db: Database.Database, config: CostOpsConf
     ...gatherUnusualSpendGrowthCandidates(db, config, now),
     ...gatherNewSourceAndEstimateOnlyCandidates(db, now),
     ...gatherUtilizationCandidates(now),
-    ...gatherMissingInvoiceCandidates(),
+    ...gatherMissingInvoiceCandidates(db, now),
   ]
 }
 
