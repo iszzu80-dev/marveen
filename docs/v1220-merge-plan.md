@@ -15,9 +15,23 @@ A real `git merge 6856fe7` (v1.22.0) into the current work branch conflicts in *
 | **Dashboard frontend** | `web/app.js`, `web/lang/en.js` (#596 BOT_NAME, #568 macOS channel) | our CostOps v1.0.1 dashboard vs upstream dashboard edits |
 | **Fleet scripts (trivial)** | `scripts/host-restart-watchdog.sh`, `scripts/unit-fail-notify.sh` | **#530** WSL host stability |
 
-**Headline:** the merge is dominated by a **cost/token subsystem collision** — upstream independently
-built a cost ledger + token-monitor overlapping our (much richer) CostOps. That is the real work.
-Everything else (2 scripts, db/web wiring, dashboard) is mechanical.
+**Headline:** the merge is dominated by a **cost/token subsystem collision**. But provenance analysis
+(2026-07-15, prompted by Istvan) shows **~half of it is our OWN upstreamed code boomeranging back**, not
+a third-party implementation:
+
+- **#524 cost ledger (011a2c4) is authored by `iszzu80-dev` = us.** It is our upstreamed CostOps base
+  (our local branch `upstream/costops-pr1` = commit 540fa2f, same content). Squash-merge on upstream
+  broke the ancestry link, so git shows a conflict where there is really only "our old base vs our newer
+  local superset". `src/costops/*` resolution = **take ours** (our local = base + collector framework +
+  invoice ingest + v1.0.1 dashboard; only 011a2c4 touched these files upstream-side). Low risk.
+- **#530 WSL host-stability (540578d, the 2 fleet scripts) is also authored by `iszzu80-dev` = us.** Take-ours / trivial.
+- **Genuinely third-party:** token-monitor **#573/#583** (author *Jónás Gergő*) — `token-usage.ts`,
+  `web/app.js` — this is the real reconciliation, overlapping our CostOps dashboard. Plus wiring drivers
+  from other contributors (#579 security in `db.ts`, hooks in `web.ts`, #545 memory recency).
+
+Szotasz/marveen is a **multi-contributor project (~15 authors; we are one, 2 of the 39 v1.22.0 commits).**
+Our collector framework (pr2, 4860a42) and the v1.0.1 dashboard did NOT land upstream — they are local-only,
+so they are cleanly ours. Net: the real merge work is narrower than the raw 13-file count suggests.
 
 ## The one real decision
 
