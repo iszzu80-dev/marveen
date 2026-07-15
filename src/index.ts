@@ -1,5 +1,7 @@
 import {
   readFileSync,
+  readlinkSync,
+  realpathSync,
   unlinkSync,
   mkdirSync,
   openSync,
@@ -9,7 +11,7 @@ import {
 import { join } from 'node:path'
 import { execFileSync, execSync } from 'node:child_process'
 import type { Server as HttpServer } from 'node:http'
-import { STORE_DIR, PID_FILENAME, WEB_PORT, ALLOWED_CHAT_ID, MAIN_AGENT_ID, RESPAWN_ENABLED, HEARTBEAT_AGENT_ENABLED } from './config.js'
+import { PROJECT_ROOT, STORE_DIR, PID_FILENAME, WEB_PORT, ALLOWED_CHAT_ID, MAIN_AGENT_ID, RESPAWN_ENABLED, HEARTBEAT_AGENT_ENABLED } from './config.js'
 import { initDatabase } from './db.js'
 import { runDecaySweep, runDailyDigest } from './memory.js'
 import { initHeartbeat, stopHeartbeat } from './heartbeat.js'
@@ -26,6 +28,7 @@ import { AGENTS_BASE_DIR } from './web/agent-config.js'
 import {
   acquirePortLock,
   acquirePidfileLock,
+  findOwnBinaryMatches,
   writeBufferFully,
   DeferToPeerError,
   type ProcessLockContext,
@@ -65,9 +68,30 @@ const DASHBOARD_BINARY_PATTERN = /(?:^|[\s/])(?:dist\/index\.js|src\/index\.ts)(
 // or node:fs directly.
 function buildProcessLockContext(): ProcessLockContext {
   const uid = typeof process.getuid === 'function' ? process.getuid() : null
+  // realpath so this compares equal against /proc/<pid>/cwd, which the
+  // kernel always reports fully symlink-resolved -- an un-resolved
+  // PROJECT_ROOT (e.g. reached via a symlinked path) would otherwise never
+  // match even for our own genuine predecessor.
+  let selfProjectRoot: string | null
+  try {
+    selfProjectRoot = realpathSync(PROJECT_ROOT)
+  } catch {
+    selfProjectRoot = null
+  }
   return {
     currentPid: process.pid,
     uid,
+    selfProjectRoot,
+    getProcessCwd(pid: number): string | null {
+      // Linux-only (/proc), consistent with the rest of this file's tooling
+      // (ps, lsof). Resolves symlinks so two different-looking paths to the
+      // same directory (e.g. via a bind mount) still compare equal.
+      try {
+        return readlinkSync(`/proc/${pid}/cwd`)
+      } catch {
+        return null
+      }
+    },
     listPortHolders(port: number): number[] {
       try {
         const raw = execSync(`lsof -ti :${port} 2>/dev/null || true`, { timeout: 3000, encoding: 'utf-8' }).trim()
@@ -171,7 +195,11 @@ function isLegitimateDashboardPid(pid: number, procCtx: ProcessLockContext): boo
     if (ownerUid == null || ownerUid !== procCtx.uid) return false
   }
   if (!/node|tsx/i.test(cmd)) return false
-  const matches = procCtx.listOwnProcessesMatching(DASHBOARD_BINARY_PATTERN)
+  // Scoped (via findOwnBinaryMatches -> selfProjectRoot), not the raw
+  // listOwnProcessesMatching call: the pattern alone can't distinguish this
+  // checkout's dashboard from another worktree's, even though a pidfile
+  // collision across worktrees is rare (each worktree has its own store/).
+  const matches = findOwnBinaryMatches(DASHBOARD_BINARY_PATTERN, procCtx)
   return matches.includes(pid)
 }
 
@@ -303,7 +331,16 @@ async function acquireLock(): Promise<void> {
   // anything running the dashboard binary (for the zombie case where the
   // port was released but the process survived). The pidfile alone can
   // lie under launchd KeepAlive because each restart overwrites it.
-  await acquirePortLock(WEB_PORT, procCtx, { binaryPattern: DASHBOARD_BINARY_PATTERN })
+  // Binary-pattern matching is scoped to this checkout's own selfProjectRoot
+  // (see process-lock.ts), but DASHBOARD_SKIP_BINARY_RECLAIM=1 is an explicit
+  // extra opt-out for one-off test/worktree instances that want zero
+  // participation in cross-instance reclaim at all, belt-and-braces on top
+  // of the scoping (e.g. if /proc/<pid>/cwd is ever unavailable).
+  const skipBinaryReclaim = process.env['DASHBOARD_SKIP_BINARY_RECLAIM'] === '1'
+  if (skipBinaryReclaim) {
+    logger.warn('DASHBOARD_SKIP_BINARY_RECLAIM=1 -- binary-pattern reclaim disabled for this instance')
+  }
+  await acquirePortLock(WEB_PORT, procCtx, skipBinaryReclaim ? {} : { binaryPattern: DASHBOARD_BINARY_PATTERN })
 
   // Atomic O_EXCL claim on PID_FILE. Serializes any two fresh startups
   // that race past the port check. `onLiveLegitimate: 'defer'` is a
