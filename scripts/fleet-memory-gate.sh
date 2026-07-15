@@ -56,6 +56,14 @@ STAGGER_SEC="${MARVEEN_STAGGER_SEC:-20}"   # consumed by fleet-safe-start.sh
 STATE_DIR="${MARVEEN_STORE:-$HOME/marveen/store}"
 SAFE_FLAG="$STATE_DIR/.fleet-safe-mode"
 ALERT_STAMP="$STATE_DIR/.fleet-memgate-alert"   # "band:epoch" of last alert
+OBSERVE_FLAG="$STATE_DIR/.fleet-memgate-observe"  # if present -> observe-only
+
+# OBSERVE-ONLY mode (Istvan standing directive 2026-07-09, re-confirmed 2026-07-15):
+# monitor + alert stay ON, but the gate NEVER blocks a start and NEVER writes the
+# safe-mode marker -- Istvan makes the throttle/rollback call himself. Toggle via the
+# file flag (touch/rm store/.fleet-memgate-observe) or MARVEEN_MEM_GATE_OBSERVE=1.
+OBSERVE=0
+if [[ "${MARVEEN_MEM_GATE_OBSERVE:-0}" == "1" || -f "$OBSERVE_FLAG" ]]; then OBSERVE=1; fi
 ENV_FILE="${TELEGRAM_ENV:-$HOME/.claude/channels/telegram/.env}"
 CHAT_ID="${MARVEEN_ALERT_CHAT_ID:-8942301795}"
 ALERT_COOLDOWN=600   # seconds; do not repeat the same band's alert within this
@@ -113,6 +121,7 @@ send_alert() {
 
 set_safe_mode() {
   (( DRY_RUN )) && return 0
+  (( OBSERVE )) && return 0   # observe-only: never persist the safe-mode marker
   [[ -f "$SAFE_FLAG" ]] || echo "$(date '+%Y-%m-%d %H:%M:%S') used=${used_pct}% avail=${avail_mb}MB" >"$SAFE_FLAG" 2>/dev/null || true
 }
 clear_safe_mode() {
@@ -135,6 +144,13 @@ else
 fi
 
 status_line="used=${used_pct}% avail=${avail_mb}MB running_agents=${running} cap=${AGENT_CAP} band=${band}"
+
+# Observe-only: alerts have already fired above; from here the gate only reports and
+# always ALLOWS -- no block exit (10), no cap-block. Istvan owns the throttle call.
+if (( OBSERVE )); then
+  echo "observe-only (monitor+alert, no block): $status_line"
+  exit 0
+fi
 
 case "$MODE" in
   status|verdict)
