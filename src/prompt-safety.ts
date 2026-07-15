@@ -86,6 +86,22 @@ export function sanitizeCapabilityTag(raw: string): string | null {
   return CAPABILITY_TAG_RE.test(t) ? t : null
 }
 
+// Self-declared origin_note label injected into a message's delivery PREFIX
+// (outside the <untrusted> wrapper), e.g. `self-tagged origin:"worker-fast"`.
+// Because it lands in the trusted framing text, a raw value containing quotes,
+// brackets, angle brackets, colons or newlines could break out and forge a
+// `[Uzenet @owner-tol -- trusted team member]:` line -> cross-agent prompt
+// injection. Whitelist to a safe label charset (word chars, space, and a few
+// separators), collapse whitespace, cap length; empty result -> null (no tag).
+export function sanitizeOriginNote(raw: string | null | undefined): string | null {
+  const cleaned = String(raw ?? '')
+    .replace(/[^a-zA-Z0-9 _.\-/]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 60)
+  return cleaned.length > 0 ? cleaned : null
+}
+
 // Assembled source attribute: accepts "prefix:name" (e.g. "agent:dev3",
 // "memory-record", "gcal"). Returns "unknown" for empty input so we never
 // emit a confusing source="" attribute into the wrap.
