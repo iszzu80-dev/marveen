@@ -75,4 +75,14 @@ describe('startCostOpsBackgroundTasks (boot seam, docs/fork-upstream-policy.md Â
       clearInterval(handle)
     }
   })
+
+  it('the same single call also runs the Phase 3 alerts capture without throwing (empty DB, no candidates expected)', async () => {
+    const { listAlerts } = await import('../costops/alerts-store.js')
+    const handle = startCostOpsBackgroundTasks()
+    try {
+      expect(listAlerts(getDb())).toEqual([])
+    } finally {
+      clearInterval(handle)
+    }
+  })
 })

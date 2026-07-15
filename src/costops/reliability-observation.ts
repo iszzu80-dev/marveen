@@ -12,6 +12,7 @@ import { getDb } from '../db.js'
 import { loadCostopsConfig, type CostOpsConfig } from './config.js'
 import { buildSourceInventory, type SourceInventoryEntry, type CredentialChecker } from './inventory.js'
 import { captureForecastSnapshots } from './forecast-capture.js'
+import { captureAlerts } from './alerts-capture.js'
 import { logger } from '../logger.js'
 
 const SNAPSHOT_INTERVAL_MS = 24 * 60 * 60 * 1000
@@ -69,6 +70,13 @@ function captureNowSafely(): void {
     captureForecastSnapshots(getDb(), now)
   } catch (err) {
     logger.warn({ err }, 'CostOps forecast snapshot capture failed')
+  }
+  // Phase 3 (GAP-12): alerts capture/reconcile, same daily cadence.
+  try {
+    const { config } = loadCostopsConfig()
+    captureAlerts(getDb(), config, now)
+  } catch (err) {
+    logger.warn({ err }, 'CostOps alerts capture failed')
   }
 }
 
