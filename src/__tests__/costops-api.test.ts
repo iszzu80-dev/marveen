@@ -378,4 +378,77 @@ describe('costops API (route smoke)', () => {
       expect(ghostOut.status).toBe(404)
     })
   })
+
+  // Phase 2 (GAP-14): invoice / credit / refund / void routes.
+  describe('invoice routes (GAP-14)', () => {
+    const win = monthWindow(Math.floor(Date.now() / 1000))
+
+    function insertSource(id: string, provider: string) {
+      getDb().prepare(`INSERT INTO cost_sources (id, name, provider, source_type, currency, active, created_at, updated_at) VALUES (?, ?, ?, 'hosting', 'HUF', 1, 1, 1)`).run(id, id, provider)
+    }
+
+    it('POST /api/costs/invoices records a first invoice (no existing line -> plain insert)', async () => {
+      insertSource('render-hosting', 'render')
+      const { ctx, out } = fakeCtxWithBody('/api/costs/invoices', 'POST', {
+        source_id: 'render-hosting', provider: 'render', invoice_ref: 'INV-001',
+        billing_period_start: win.start, billing_period_end: win.end, currency: 'HUF', gross_amount: 10000,
+      })
+      expect(await tryHandleCostOps(ctx)).toBe(true)
+      expect(out.body.ok).toBe(true)
+      expect(out.body.ledgerLineId).toBeTruthy()
+
+      const { ctx: listCtx, out: listOut } = fakeCtx('/api/costs/invoices')
+      expect(await tryHandleCostOps(listCtx)).toBe(true)
+      expect(listOut.body.invoices).toHaveLength(1)
+      expect(listOut.body.invoices[0].net_amount).toBe(10000)
+    })
+
+    it('a duplicate invoice (same provider+ref+period) is a 409', async () => {
+      insertSource('render-hosting', 'render')
+      const body = { source_id: 'render-hosting', provider: 'render', invoice_ref: 'INV-DUP', billing_period_start: win.start, billing_period_end: win.end, currency: 'HUF', gross_amount: 5000 }
+      const { ctx: c1 } = fakeCtxWithBody('/api/costs/invoices', 'POST', body)
+      await tryHandleCostOps(c1)
+      const { ctx: c2, out: o2 } = fakeCtxWithBody('/api/costs/invoices', 'POST', body)
+      expect(await tryHandleCostOps(c2)).toBe(true)
+      expect(o2.status).toBe(409)
+      expect(o2.body.duplicate).toBe(true)
+    })
+
+    it('POST .../adjust applies a credit and cascades through a correction; POST .../void marks it voided', async () => {
+      insertSource('render-hosting', 'render')
+      const { ctx: recCtx, out: recOut } = fakeCtxWithBody('/api/costs/invoices', 'POST', {
+        source_id: 'render-hosting', provider: 'render', invoice_ref: 'INV-002', billing_period_start: win.start, billing_period_end: win.end, currency: 'HUF', gross_amount: 10000,
+      })
+      await tryHandleCostOps(recCtx)
+      const invoiceId = recOut.body.invoiceId
+
+      const { ctx: adjCtx, out: adjOut } = fakeCtxWithBody('/api/costs/invoices/adjust', 'POST', { invoiceId, creditAmount: 1000, reason: 'promo credit' })
+      expect(await tryHandleCostOps(adjCtx)).toBe(true)
+      expect(adjOut.body.ok).toBe(true)
+
+      const { ctx: voidCtx, out: voidOut } = fakeCtxWithBody('/api/costs/invoices/void', 'POST', { invoiceId, reason: 'duplicate PDF' })
+      expect(await tryHandleCostOps(voidCtx)).toBe(true)
+      expect(voidOut.body.ok).toBe(true)
+    })
+
+    it('POST .../adjust without a reason is a 400', async () => {
+      const { ctx, out } = fakeCtxWithBody('/api/costs/invoices/adjust', 'POST', { invoiceId: 1, creditAmount: 100 })
+      expect(await tryHandleCostOps(ctx)).toBe(true)
+      expect(out.status).toBe(400)
+    })
+
+    it('GET /api/costs/invoices/reconciliation decorates the base reconciliation with invoice breakdown', async () => {
+      insertSource('render-hosting', 'render')
+      const { ctx: recCtx } = fakeCtxWithBody('/api/costs/invoices', 'POST', {
+        source_id: 'render-hosting', provider: 'render', invoice_ref: 'INV-003', billing_period_start: win.start, billing_period_end: win.end, currency: 'HUF', gross_amount: 7000,
+      })
+      await tryHandleCostOps(recCtx)
+
+      const { ctx, out } = fakeCtx('/api/costs/invoices/reconciliation')
+      expect(await tryHandleCostOps(ctx)).toBe(true)
+      const row = (out.body.reconciliation as any[]).find(r => r.source_id === 'render-hosting')
+      expect(row.invoice).toBeTruthy()
+      expect(row.invoice.gross_amount).toBe(7000)
+    })
+  })
 })

@@ -32,6 +32,7 @@ import { listAlerts, acknowledgeAlertByKey, resolveAlertByKey } from '../../cost
 import { getPeriodStatus, checkCloseReadiness, closePeriod, reopenPeriod, getPeriodCloseHistory, getCloseSnapshot } from '../../costops/period-close.js'
 import { getAllBudgetStatuses, upsertBudget, deleteBudget, getBudgetAuditHistory } from '../../costops/budgets.js'
 import { listRecommendations, acceptRecommendationByKey, dismissRecommendationByKey, type ListRecommendationsOptions } from '../../costops/recommendations-store.js'
+import { recordInvoice, applyInvoiceAdjustment, voidInvoice, listInvoices, buildInvoiceReconciliation } from '../../costops/invoice.js'
 import type { RouteContext } from './types.js'
 
 export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
@@ -415,6 +416,79 @@ export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
     } catch (err) {
       logger.error({ err }, 'CostOps recommendation dismiss failed')
       json(res, { ok: false, error: 'recommendation dismiss failed' }, 500)
+    }
+    return true
+  }
+
+  // Phase 2 (GAP-14): invoice / credit / refund / correction workflow.
+  // 'invoice-salt' matches this codebase's existing per-domain idSalt
+  // convention (collectors/openai.ts's 'openai-salt' etc.) -- a namespacing
+  // salt for hashRef, not a secret.
+  if (path === '/api/costs/invoices' && method === 'GET') {
+    try {
+      const sourceId = url.searchParams.get('source_id') || undefined
+      const month = url.searchParams.get('month') || undefined
+      const now = Math.floor(Date.now() / 1000)
+      const invoices = listInvoices(getDb(), { source_id: sourceId, month, now })
+      json(res, { invoices })
+    } catch (err) {
+      logger.error({ err }, 'CostOps invoices list failed')
+      json(res, { error: 'Cost invoices failed' }, 500)
+    }
+    return true
+  }
+
+  if (path === '/api/costs/invoices' && method === 'POST') {
+    try {
+      const raw = await readBody(ctx.req)
+      const body = JSON.parse(raw.toString() || '{}')
+      const now = Math.floor(Date.now() / 1000)
+      const result = recordInvoice(getDb(), body, { now, salt: 'invoice-salt' })
+      json(res, result, result.ok ? 200 : (result.status || 500))
+    } catch (err) {
+      logger.error({ err }, 'CostOps invoice record failed')
+      json(res, { ok: false, error: 'invoice record failed' }, 500)
+    }
+    return true
+  }
+
+  if (path === '/api/costs/invoices/adjust' && method === 'POST') {
+    try {
+      const raw = await readBody(ctx.req)
+      const body = JSON.parse(raw.toString() || '{}')
+      const now = Math.floor(Date.now() / 1000)
+      const result = applyInvoiceAdjustment(getDb(), body, { now })
+      json(res, result, result.ok ? 200 : (result.status || 500))
+    } catch (err) {
+      logger.error({ err }, 'CostOps invoice adjustment failed')
+      json(res, { ok: false, error: 'invoice adjustment failed' }, 500)
+    }
+    return true
+  }
+
+  if (path === '/api/costs/invoices/void' && method === 'POST') {
+    try {
+      const raw = await readBody(ctx.req)
+      const body = JSON.parse(raw.toString() || '{}')
+      const now = Math.floor(Date.now() / 1000)
+      const result = voidInvoice(getDb(), body.invoiceId, body.reason, now)
+      json(res, result, result.ok ? 200 : (result.status || 500))
+    } catch (err) {
+      logger.error({ err }, 'CostOps invoice void failed')
+      json(res, { ok: false, error: 'invoice void failed' }, 500)
+    }
+    return true
+  }
+
+  if (path === '/api/costs/invoices/reconciliation' && method === 'GET') {
+    try {
+      const now = Math.floor(Date.now() / 1000)
+      const month = url.searchParams.get('month') || undefined
+      const reconciliation = await buildInvoiceReconciliation(getDb(), now, month)
+      json(res, { reconciliation })
+    } catch (err) {
+      logger.error({ err }, 'CostOps invoice reconciliation failed')
+      json(res, { error: 'Cost invoice reconciliation failed' }, 500)
     }
     return true
   }
