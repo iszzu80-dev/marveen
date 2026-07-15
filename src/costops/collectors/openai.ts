@@ -1,6 +1,6 @@
 // CostOps -- OpenAI cost collector (LIVE, read-only).
 //
-// Uses the OpenAI Costs API (GET /v1/organizations/costs) which returns daily
+// Uses the OpenAI Costs API (GET /v1/organization/costs) which returns daily
 // USD cost buckets and REQUIRES an admin key. The mapper is a PURE function
 // tested offline against a fixture; collect() calls the INJECTED httpGetJson so
 // no network happens unless a real fetcher is passed. The admin key arrives via
@@ -10,7 +10,7 @@
 import { createHash } from 'node:crypto'
 import type { ProviderCollector, CollectOpts, NormalizedCostLine } from './types.js'
 
-const OPENAI_COSTS_URL = 'https://api.openai.com/v1/organizations/costs'
+const OPENAI_COSTS_URL = 'https://api.openai.com/v1/organization/costs'
 // All OpenAI API usage reconciles against this source id (matches the manual
 // 'openai-api' / 'openai-chatgpt' line family so estimate and actual share it).
 const OPENAI_API_SOURCE = 'openai-api'
@@ -25,7 +25,7 @@ interface OpenAiCostBucket { start_time?: number; end_time?: number; results?: O
 interface OpenAiCostsPage { object?: string; data?: OpenAiCostBucket[]; has_more?: boolean; next_page?: string | null }
 
 /**
- * PURE mapper: OpenAI /organizations/costs page -> a single aggregated
+ * PURE mapper: OpenAI /organization/costs page -> a single aggregated
  * provider_api line for the openai-api source for the requested period. Daily
  * USD amounts are summed and converted to HUF via fxUsdHuf. Deterministic; no
  * I/O. Returns [] if the page carries no cost results (so an all-zero month can
