@@ -262,6 +262,9 @@ function switchPage(pageId) {
   navLinks.forEach((l) => l.classList.toggle('active', l.dataset.page === pageId))
   // Kanban needs full-width layout (overrides main's max-width: 1200px)
   document.querySelector('main').classList.toggle('kanban-active', pageId === 'kanban')
+  // CostOps Command Center wide-workspace (UI-0 doc section 11.3); Costops.mount() itself
+  // re-adds the class (costops-shell.js), this only removes it when navigating away.
+  if (pageId !== 'costs-cc') document.querySelector('main').classList.remove('costs-cc-active')
   // Activity page runs a live poll; stop it whenever we navigate away.
   if (pageId !== 'activity') stopActivityPoll()
   if (pageId === 'activity') startActivityPoll()
@@ -288,6 +291,7 @@ function switchPage(pageId) {
   if (pageId === 'tokenUsage') loadTokenUsage()
   if (pageId === 'costs') loadCosts()
   if (pageId === 'costs-v2') loadCostsV2()
+  if (pageId === 'costs-cc') window.Costops.mount()
   if (pageId === 'ideas') loadIdeasPage()
   if (pageId === 'archived') loadArchivedPage()
   if (pageId === 'naplo') loadNaplo()

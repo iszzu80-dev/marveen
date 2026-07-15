@@ -1,0 +1,99 @@
+/* CostOps Command Center -- UI-1 shell + Áttekintés styles. Kept in its own stylesheet
+   (unlike costs-v2, which self-injects a <style> tag at runtime) so it's inspectable/editable
+   like any other static asset, per the UI-0 file plan. */
+
+main.costs-cc-active { max-width: 1500px; }
+
+.cc-shell { display: flex; flex-direction: column; gap: 16px; }
+
+.cc-topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+
+.cc-tabs { display: flex; gap: 4px; overflow-x: auto; }
+.cc-tab {
+  background: none; border: 1px solid var(--border, #333); border-radius: 8px;
+  padding: 6px 14px; cursor: pointer; color: var(--text, #ddd); font-size: 0.9em; white-space: nowrap;
+}
+.cc-tab.active { background: var(--accent, #6366f1); border-color: var(--accent, #6366f1); color: #fff; }
+
+.cc-month-select {
+  background: var(--bg-secondary, #1a1a1a); color: var(--text, #ddd); border: 1px solid var(--border, #333);
+  border-radius: 8px; padding: 6px 10px; font-size: 0.9em;
+}
+
+.cc-section { padding: 12px 0; border-top: 1px solid var(--border, #2a2a2a); }
+.cc-section:first-child { border-top: none; }
+.cc-section-title { font-size: 0.75em; font-weight: 600; letter-spacing: 0.04em; color: var(--text-muted, #888); margin-bottom: 10px; }
+
+.cc-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+@media (max-width: 900px) { .cc-grid-2 { grid-template-columns: 1fr; } }
+
+.cc-muted { color: var(--text-muted, #888); font-size: 0.9em; }
+.cc-error { color: #e5484d; padding: 16px 0; }
+.cc-loading { color: var(--text-muted, #888); padding: 24px 0; }
+
+/* Hero */
+.cc-hero { padding: 16px; border: 1px solid var(--border, #2a2a2a); border-radius: 12px; }
+.cc-hero-title { font-size: 0.8em; font-weight: 600; letter-spacing: 0.04em; color: var(--text-muted, #888); margin-bottom: 10px; }
+.cc-hero-row { display: flex; gap: 32px; flex-wrap: wrap; margin-bottom: 12px; }
+.cc-hero-value { font-size: 1.6em; font-weight: 700; font-variant-numeric: tabular-nums; }
+.cc-hero-label { font-size: 0.8em; color: var(--text-muted, #888); margin-top: 2px; }
+.cc-hero-budget-label { font-size: 0.85em; color: var(--text-muted, #888); margin-bottom: 4px; }
+.cc-hero-budget-track { height: 10px; }
+
+/* Bars (top sources) */
+.cc-bar-row { display: grid; grid-template-columns: 120px 1fr auto; gap: 10px; align-items: center; padding: 4px 0; }
+.cc-bar-label { font-size: 0.85em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cc-bar-track { background: var(--bg-secondary, #222); border-radius: 4px; height: 8px; overflow: hidden; }
+.cc-bar-fill { height: 100%; background: var(--accent, #6366f1); border-radius: 4px; }
+.cc-bar-fill.cc-ok { background: #2ecc71; }
+.cc-bar-fill.cc-warn { background: #f5a623; }
+.cc-bar-fill.cc-over { background: #e5484d; }
+.cc-bar-value { font-size: 0.82em; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.cc-bar-sub { display: block; font-size: 0.78em; color: var(--text-muted, #888); }
+
+/* Monthly trend */
+.cc-trend-chart { display: flex; align-items: flex-end; gap: 8px; height: 120px; padding-top: 8px; }
+.cc-trend-col { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; }
+.cc-trend-bar-track { width: 100%; height: 100px; display: flex; align-items: flex-end; }
+.cc-trend-bar { width: 100%; background: var(--accent, #6366f1); border-radius: 3px 3px 0 0; min-height: 2px; }
+.cc-trend-bar.cc-trend-nodata { background: var(--bg-secondary, #333); }
+.cc-trend-label { font-size: 0.7em; color: var(--text-muted, #888); margin-top: 4px; }
+
+/* Attention (alerts) */
+.cc-attn-row { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border, #232323); }
+.cc-attn-row:last-child { border-bottom: none; }
+.cc-attn-sev { font-size: 0.72em; font-weight: 600; text-transform: uppercase; padding: 2px 8px; border-radius: 6px; height: fit-content; white-space: nowrap; }
+.cc-sev-critical .cc-attn-sev { background: rgba(229,72,77,0.15); color: #e5484d; }
+.cc-sev-high .cc-attn-sev { background: rgba(229,72,77,0.15); color: #e5484d; }
+.cc-sev-warning .cc-attn-sev, .cc-sev-medium .cc-attn-sev { background: rgba(245,166,35,0.15); color: #f5a623; }
+.cc-sev-low .cc-attn-sev, .cc-sev-info .cc-attn-sev { background: rgba(136,136,136,0.15); color: var(--text-muted, #888); }
+.cc-attn-title { font-size: 0.88em; }
+.cc-attn-sub { font-size: 0.78em; color: var(--text-muted, #888); margin-top: 2px; }
+
+/* Data trust segmented bar */
+.cc-segbar { display: flex; height: 12px; border-radius: 6px; overflow: hidden; background: var(--bg-secondary, #222); }
+.cc-seg { height: 100%; }
+.cc-seg.cc-ok { background: #2ecc71; }
+.cc-seg.cc-neutral { background: #6366f1; }
+.cc-seg.cc-warn { background: #f5a623; }
+.cc-seg.cc-over { background: #e5484d; }
+.cc-seg.cc-muted-seg { background: #555; }
+.cc-segbar-legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px; font-size: 0.78em; color: var(--text-muted, #888); }
+.cc-seg-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
+.cc-seg-dot.cc-ok { background: #2ecc71; }
+.cc-seg-dot.cc-neutral { background: #6366f1; }
+.cc-seg-dot.cc-warn { background: #f5a623; }
+.cc-seg-dot.cc-over { background: #e5484d; }
+.cc-seg-dot.cc-muted-seg { background: #555; }
+
+/* Savings */
+.cc-savings-total { font-size: 1.1em; font-weight: 700; margin-bottom: 8px; font-variant-numeric: tabular-nums; }
+.cc-savings-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 0.88em; }
+.cc-savings-value { font-variant-numeric: tabular-nums; }
+
+@media (max-width: 768px) {
+  .cc-hero-row { gap: 16px; }
+  .cc-hero-value { font-size: 1.3em; }
+  .cc-bar-label { display: none; }
+  .cc-bar-row { grid-template-columns: 1fr auto; }
+}

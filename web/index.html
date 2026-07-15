@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Marveen</title>
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/costops/costops.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.css">
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10/lib/addon-fit.js"></script>
@@ -161,6 +162,11 @@
       <a href="#" class="sb-link" data-page="costs">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M18 17V9M13 17V5M8 17v-3"/></svg>
         <span class="sb-label">Költségek v1</span>
+      </a>
+      <!-- UI-1 Command Center, additive: not yet the default nav target (Marveen/Istvan decide the cutover after UI-4 parity). -->
+      <a href="#" class="sb-link" data-page="costs-cc">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+        <span class="sb-label">Költségek CC</span>
       </a>
       <a href="#" class="sb-link" data-page="updates" id="updatesNavLink">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
@@ -1635,6 +1641,17 @@
       </div>
     </div>
 
+    <!-- CostOps Command Center (UI-1, spec docs/costops/command-center-ui-spec-v1.0.md).
+         Additive: costs-v2/loadCostsV2() above stays the rollback target until UI-4 parity. -->
+    <div class="page" id="costs-ccPage" hidden>
+      <div class="page-header">
+        <h1>Költségek</h1>
+      </div>
+      <div id="costsCcBody" style="padding:16px 0;">
+        <p style="color:var(--text-muted,#888);">Betöltés...</p>
+      </div>
+    </div>
+
     <div class="page" id="tokenUsagePage" hidden>
       <div class="page-header">
         <div class="page-header-row" style="flex-wrap:wrap">
@@ -3019,5 +3036,13 @@
   </div>
 
   <script src="/app.js"></script>
+  <!-- CostOps Command Center (UI-1). Plain global-scope scripts, no bundler -- matches this
+       repo's existing convention (/lang/*.js). Load order matters: state/api/charts before
+       shell (which calls into all three), overview last (consumed by shell, not the reverse). -->
+  <script src="/costops/costops-state.js"></script>
+  <script src="/costops/costops-api.js"></script>
+  <script src="/costops/costops-charts.js"></script>
+  <script src="/costops/costops-overview.js"></script>
+  <script src="/costops/costops-shell.js"></script>
 </body>
 </html>
