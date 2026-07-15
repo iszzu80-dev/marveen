@@ -13,11 +13,9 @@
 //
 // NOT included: optimization recommendations (GAP-17) -- that engine does
 // not exist yet in this codebase (Phase 4, not built); no export function
-// fabricates one. Alerts export (GAP-12) is not wired here either --
-// alerts-capture.ts (the module that persists/reads costops_alerts) is not
-// yet merged onto this branch's base as of this writing; add
-// `exportAlerts()` here once it lands, following the same meta-wrapper
-// pattern as every function below.
+// fabricates one. Alerts export (GAP-12) IS included below (exportAlerts) --
+// alerts-capture.ts landed on this branch, reusing alerts-store.ts's
+// listAlerts() (the same read path GET /api/costs/alerts uses).
 
 import type Database from 'better-sqlite3'
 import { monthWindow, CONF_PRIORITY, getCostSummary, type CostSummary } from './ledger.js'
@@ -25,6 +23,9 @@ import type { CostOpsConfig } from './config.js'
 import { buildSourceInventory, type SourceInventoryEntry, type CredentialChecker, type Freshness } from './inventory.js'
 import { buildReconciliation, type SourceReconciliation } from './reconciliation.js'
 import { listForecastSnapshots, type ForecastSnapshotRow } from './forecast-capture.js'
+import { getPeriodStatus, type PeriodCloseStatus } from './period-close.js'
+import { listAlerts } from './alerts-store.js'
+import type { AlertRecord } from './alerts.js'
 
 export interface ExportRow {
   provider: string
@@ -261,6 +262,23 @@ export function exportForecastHistory(db: Database.Database, now: number, opts: 
   return { meta: buildMeta('forecast_history', now, opts.month ? { month: opts.month } : {}), snapshots: listForecastSnapshots(db, opts) }
 }
 
+// ---- 7b. alerts (GAP-12) --------------------------------------------------------------------
+
+export interface AlertsExport { meta: ExportMeta; alerts: AlertRecord[] }
+
+/** Active alerts by default (matches GET /api/costs/alerts' default view); includeResolved for the full history. */
+export function exportAlerts(db: Database.Database, now: number, opts: { includeResolved?: boolean } = {}): AlertsExport {
+  return {
+    meta: buildMeta(opts.includeResolved ? 'alerts_all' : 'alerts_active', now),
+    alerts: listAlerts(db, { status: opts.includeResolved ? 'all' : 'active' }),
+  }
+}
+
+export function alertsToCsv(rows: AlertRecord[]): string {
+  const headers = ['dedup_key', 'type', 'severity', 'first_seen', 'last_seen', 'acknowledged_at', 'resolved_at', 'recurrence_count']
+  return objectsToCsv(rows as unknown as Record<string, unknown>[], headers)
+}
+
 // ---- 8. data quality report --------------------------------------------------------------------
 
 export interface DataQualityExport {
@@ -290,6 +308,7 @@ export function exportDataQualityReport(db: Database.Database, config: CostOpsCo
 export interface MonthlySnapshotExport {
   meta: ExportMeta
   note: string
+  period_status: PeriodCloseStatus
   ledger: ExportRow[]
   provider_summary: CostSummary['operational']['provider_breakdown']
   category_summary: CategorySummaryRow[]
@@ -301,17 +320,23 @@ export interface MonthlySnapshotExport {
 /**
  * Bundles ledger + provider/category summary + budget + reconciliation +
  * data quality for one month into a single JSON artifact ("a month's state,
- * auditable without the dashboard" -- GAP-18's target). Deliberately NOT
- * labeled a "close snapshot": period close/reopen (GAP-13, open/provisional/
- * closed/reopened status, immutable close records) is not implemented
- * anywhere in this codebase yet -- calling this a "closed" snapshot would be
- * a fabricated status. `note` says so explicitly so a consumer never
- * mistakes this for an immutable record; re-running it later for the same
- * month can legitimately differ if new data lands (a late invoice, a
- * correction, a forecast recapture).
+ * auditable without the dashboard" -- GAP-18's target).
+ *
+ * This is a LIVE recomputation, not the immutable close record -- period
+ * close/reopen (GAP-13) landed on this branch (period-close.ts), so a real
+ * `period_status` is included here for honesty, but if the month is
+ * 'closed' the AUTHORITATIVE, frozen artifact is
+ * `getCloseSnapshot()`/`GET /api/costs/period-close?month=` (the CostSummary
+ * exactly as it was at close time). This bundle always reflects the
+ * CURRENT live state instead -- for an open/reopened month that's the only
+ * option; for a closed month it can still legitimately drift from the frozen
+ * close snapshot if a correction lands afterward, which is why `note` below
+ * says so explicitly rather than letting a consumer assume the two always
+ * agree.
  */
 export function exportMonthlySnapshot(db: Database.Database, config: CostOpsConfig, now: number, month?: string): MonthlySnapshotExport {
   const opts = month ? { month } : {}
+  const win = monthWindow(now, month)
   const ledger = exportCostRows(db, now, opts)
   const provider = exportProviderSummary(db, config, now, opts)
   const category = exportCategorySummary(db, now, opts)
@@ -320,7 +345,8 @@ export function exportMonthlySnapshot(db: Database.Database, config: CostOpsConf
   const dq = exportDataQualityReport(db, config, now, opts)
   return {
     meta: buildMeta('monthly_snapshot', now, opts),
-    note: 'Live snapshot, NOT an immutable closed-period record -- period close/reopen (GAP-13) is not yet implemented. Re-running this later for the same month can differ if new data lands (a late invoice, a correction, a forecast recapture).',
+    note: 'Live recomputation of the current state, not the frozen close record -- for a closed month, GET /api/costs/period-close?month= returns the immutable snapshot taken at close time instead; this bundle can drift from it if a correction lands afterward.',
+    period_status: getPeriodStatus(db, win.key),
     ledger,
     provider_summary: provider.provider_breakdown,
     category_summary: category.categories,

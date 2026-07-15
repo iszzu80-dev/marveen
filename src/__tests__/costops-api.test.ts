@@ -4,12 +4,18 @@ import { tryHandleCostOps } from '../web/routes/costs.js'
 import { monthWindow } from '../costops/ledger.js'
 import type { RouteContext } from '../web/routes/types.js'
 
-// Minimal fake ServerResponse capturing what json() writes.
-function fakeCtx(path: string, method = 'GET'): { ctx: RouteContext; out: { status: number; body: any } } {
-  const out: { status: number; body: any } = { status: 0, body: null }
+// Minimal fake ServerResponse capturing what json() writes. A non-JSON body
+// (e.g. a CSV export) falls back to the raw string in `out.body` instead of
+// throwing -- `out.raw` also always carries the untouched chunk for CSV
+// assertions.
+function fakeCtx(path: string, method = 'GET'): { ctx: RouteContext; out: { status: number; body: any; raw: string | undefined } } {
+  const out: { status: number; body: any; raw: string | undefined } = { status: 0, body: null, raw: undefined }
   const res: any = {
     writeHead(status: number) { out.status = status; return res },
-    end(chunk?: string) { if (chunk) out.body = JSON.parse(chunk) },
+    end(chunk?: string) {
+      out.raw = chunk
+      if (chunk) { try { out.body = JSON.parse(chunk) } catch { out.body = chunk } }
+    },
   }
   const url = new URL(`http://localhost:3420${path}`)
   const ctx = { req: {} as any, res, path: url.pathname, method, url } as RouteContext
@@ -218,5 +224,40 @@ describe('costops API (route smoke)', () => {
     const { ctx: c2, out: o2 } = fakeCtxWithBody('/api/costs/period-close/close', 'POST', { month: win.key, actor: 'istvan', reason: 'y' })
     expect(await tryHandleCostOps(c2)).toBe(true)
     expect(o2.status).toBe(409)
+  })
+
+  // Phase 1 (GAP-18): normalized export routes.
+  it('GET /api/costs/export/source-inventory returns JSON by default, CSV with ?format=csv', async () => {
+    getDb().prepare(`INSERT INTO cost_sources (id, name, provider, source_type, currency, active, created_at, updated_at) VALUES ('domain','Domain','other','domain','HUF',1,1,1)`).run()
+    const { ctx: jsonCtx, out: jsonOut } = fakeCtx('/api/costs/export/source-inventory')
+    expect(await tryHandleCostOps(jsonCtx)).toBe(true)
+    expect(jsonOut.body.meta.scope).toBe('source_inventory')
+    expect(Array.isArray(jsonOut.body.sources)).toBe(true)
+
+    const { ctx: csvCtx, out: csvOut } = fakeCtx('/api/costs/export/source-inventory?format=csv')
+    expect(await tryHandleCostOps(csvCtx)).toBe(true)
+    expect(csvOut.status).toBe(200)
+    expect(csvOut.raw).toContain('source_id') // a real CSV header row, not JSON
+  })
+
+  it('GET /api/costs/export/monthly-snapshot includes the real period_status (JSON-only, no CSV variant)', async () => {
+    const { ctx, out } = fakeCtx('/api/costs/export/monthly-snapshot')
+    expect(await tryHandleCostOps(ctx)).toBe(true)
+    expect(out.body.period_status).toBe('open')
+    expect(out.body).toHaveProperty('reconciliation')
+  })
+
+  it('GET /api/costs/export/alerts reflects the alerts store', async () => {
+    const { reconcileAndPersist } = await import('../costops/alerts-store.js')
+    reconcileAndPersist(getDb(), [{ type: 'budget_threshold', severity: 'warning', evidence: {}, dedup_key: 'a' }], Math.floor(Date.now() / 1000))
+    const { ctx, out } = fakeCtx('/api/costs/export/alerts')
+    expect(await tryHandleCostOps(ctx)).toBe(true)
+    expect(out.body.alerts).toHaveLength(1)
+  })
+
+  it('GET /api/costs/export/unknown-kind is a 404', async () => {
+    const { ctx, out } = fakeCtx('/api/costs/export/unknown-kind')
+    expect(await tryHandleCostOps(ctx)).toBe(true)
+    expect(out.status).toBe(404)
   })
 })

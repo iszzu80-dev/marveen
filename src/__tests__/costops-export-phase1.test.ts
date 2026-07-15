@@ -17,8 +17,11 @@ import {
   exportForecastHistory,
   exportDataQualityReport,
   exportMonthlySnapshot,
+  exportAlerts,
+  alertsToCsv,
   objectsToCsv,
 } from '../costops/export.js'
+import { reconcileAndPersist } from '../costops/alerts-store.js'
 import type { CostOpsConfig } from '../costops/config.js'
 
 const NOW = Math.floor(Date.UTC(2026, 6, 15, 12, 0, 0) / 1000) // 2026-07-15
@@ -202,15 +205,53 @@ describe('exportDataQualityReport', () => {
   })
 })
 
+describe('exportAlerts (GAP-12, added once alerts-capture landed on this branch)', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('defaults to active alerts only, matching listAlerts(status: active)', () => {
+    const db = getDb()
+    reconcileAndPersist(db, [{ type: 'budget_threshold', severity: 'warning', evidence: {}, dedup_key: 'a' }], NOW)
+    reconcileAndPersist(db, [{ type: 'stale_collector', severity: 'info', evidence: {}, dedup_key: 'b' }], NOW)
+    reconcileAndPersist(db, [{ type: 'budget_threshold', severity: 'warning', evidence: {}, dedup_key: 'a' }], NOW + 10) // 'b' drops off -> resolved
+    const exp = exportAlerts(db, NOW + 10)
+    expect(exp.meta.scope).toBe('alerts_active')
+    expect(exp.alerts.map(a => a.dedup_key)).toEqual(['a'])
+  })
+
+  it('includeResolved:true returns the full history', () => {
+    const db = getDb()
+    reconcileAndPersist(db, [{ type: 'budget_threshold', severity: 'warning', evidence: {}, dedup_key: 'a' }], NOW)
+    reconcileAndPersist(db, [], NOW + 10) // resolves it
+    const exp = exportAlerts(db, NOW + 10, { includeResolved: true })
+    expect(exp.meta.scope).toBe('alerts_all')
+    expect(exp.alerts).toHaveLength(1)
+    expect(exp.alerts[0].resolved_at).toBe(NOW + 10)
+  })
+
+  it('alertsToCsv produces a header row plus one row per alert, no secret/evidence leakage beyond the declared columns', () => {
+    const db = getDb()
+    reconcileAndPersist(db, [{ type: 'budget_threshold', severity: 'warning', evidence: { api_key: 'sk-should-not-appear' }, dedup_key: 'a' }], NOW)
+    const exp = exportAlerts(db, NOW)
+    const csv = alertsToCsv(exp.alerts)
+    expect(csv.split('\n')).toEqual(['dedup_key,type,severity,first_seen,last_seen,acknowledged_at,resolved_at,recurrence_count', expect.stringContaining('a,budget_threshold,warning'), ''])
+    expect(csv).not.toContain('sk-should-not-appear') // evidence is deliberately excluded from the CSV columns
+  })
+})
+
 describe('exportMonthlySnapshot', () => {
   beforeEach(() => { initDatabase(':memory:') })
 
-  it('bundles everything and explicitly disclaims being an immutable close record', () => {
+  it('bundles everything and explicitly disclaims being the frozen close record', () => {
     const db = getDb()
     syncFixedCostsToLedger(db, cfg(), NOW)
     const exp = exportMonthlySnapshot(db, cfg(), NOW, '2026-07')
     expect(exp.meta.scope).toBe('monthly_snapshot')
-    expect(exp.note).toMatch(/NOT an immutable closed-period record/)
+    // period-close.ts landed on this branch after this test was written --
+    // the bundle now reports the real period_status and points a consumer at
+    // the true immutable record (GET /api/costs/period-close) for a closed
+    // month, instead of a blanket "close doesn't exist yet" disclaimer.
+    expect(exp.note).toMatch(/not the frozen close record/)
+    expect(exp.period_status).toBe('open') // untouched month in this test
     expect(exp.ledger.length).toBe(2)
     expect(exp.provider_summary.length).toBeGreaterThan(0)
     expect(exp.category_summary.length).toBeGreaterThan(0)

@@ -12,7 +12,13 @@ import { syncFixedCostsToLedger, getCostSummary, getCostSources, monthWindow } f
 import { getPeriodTrend } from '../../costops/period.js'
 import { loadSubscriptionsConfig, deriveLifecycle } from '../../costops/subscriptions.js'
 import { getWarnings } from '../../costops/warnings.js'
-import { exportCostRows, rowsToCsv } from '../../costops/export.js'
+import {
+  exportCostRows, rowsToCsv, exportSourceInventory, sourceInventoryToCsv,
+  exportProviderSummary, providerSummaryToCsv, exportCategorySummary, categorySummaryToCsv,
+  exportBudgetVariance, exportReconciliationReport, reconciliationReportToCsv,
+  exportForecastHistory, exportDataQualityReport, exportMonthlySnapshot,
+  exportAlerts, alertsToCsv,
+} from '../../costops/export.js'
 import { ingestWorkspaceAlerts, buildWorkspaceAlertWarnings } from '../../costops/workspace-alerts.js'
 import { loadDomainsConfig } from '../../costops/expiry-checks.js'
 import { getTokenCostByAgent } from '../../costops/pricing.js'
@@ -456,6 +462,78 @@ export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
     } catch (err) {
       logger.error({ err }, 'CostOps export failed')
       json(res, { error: 'Cost export failed' }, 500)
+    }
+    return true
+  }
+
+  // Phase 1 (GAP-18): normalized export set beyond the ledger CSV/JSON above.
+  // Each reuses the exact function the dashboard/summary route itself calls,
+  // so export totals match dashboard totals by construction.
+  if (path.startsWith('/api/costs/export/') && method === 'GET') {
+    const wantCsv = url.searchParams.get('format') === 'csv'
+    const month = url.searchParams.get('month') || undefined
+    const now = Math.floor(Date.now() / 1000)
+    const sendCsvOrJson = (csv: string | null, jsonBody: unknown) => {
+      if (wantCsv && csv != null) {
+        res.writeHead(200, { 'Content-Type': 'text/csv; charset=utf-8', 'Cache-Control': 'private, no-store' })
+        res.end(csv)
+      } else {
+        json(res, jsonBody)
+      }
+    }
+    try {
+      const kind = path.slice('/api/costs/export/'.length)
+      const { config } = loadCostopsConfig()
+      const db = getDb()
+      switch (kind) {
+        case 'source-inventory': {
+          const exp = exportSourceInventory(db, config, now)
+          sendCsvOrJson(wantCsv ? sourceInventoryToCsv(exp.sources) : null, exp)
+          return true
+        }
+        case 'provider-summary': {
+          const exp = exportProviderSummary(db, config, now, { month })
+          sendCsvOrJson(wantCsv ? providerSummaryToCsv(exp.provider_breakdown) : null, exp)
+          return true
+        }
+        case 'category-summary': {
+          const exp = exportCategorySummary(db, now, { month })
+          sendCsvOrJson(wantCsv ? categorySummaryToCsv(exp.categories) : null, exp)
+          return true
+        }
+        case 'budget-variance': {
+          json(res, exportBudgetVariance(db, config, now, { month }))
+          return true
+        }
+        case 'reconciliation': {
+          const exp = exportReconciliationReport(db, now, month)
+          sendCsvOrJson(wantCsv ? reconciliationReportToCsv(exp.sources) : null, exp)
+          return true
+        }
+        case 'forecast-history': {
+          json(res, exportForecastHistory(db, now, { month }))
+          return true
+        }
+        case 'data-quality': {
+          json(res, exportDataQualityReport(db, config, now, { month }))
+          return true
+        }
+        case 'monthly-snapshot': {
+          json(res, exportMonthlySnapshot(db, config, now, month))
+          return true
+        }
+        case 'alerts': {
+          const exp = exportAlerts(db, now, { includeResolved: url.searchParams.get('resolved') === '1' })
+          sendCsvOrJson(wantCsv ? alertsToCsv(exp.alerts) : null, exp)
+          return true
+        }
+        default:
+          json(res, { error: `unknown export kind '${kind}'` }, 404)
+          return true
+      }
+    } catch (err) {
+      logger.error({ err }, 'CostOps normalized export failed')
+      json(res, { error: 'Normalized export failed' }, 500)
     }
     return true
   }
