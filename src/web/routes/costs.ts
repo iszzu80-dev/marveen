@@ -82,8 +82,13 @@ export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
         // LIVE read-only DeepSeek prepaid-balance sync; key from the Vault, never logged.
         const { syncDeepSeekBalance } = await import('../../costops/collectors/deepseek.js')
         result = await syncDeepSeekBalance(db, now)
+      } else if (provider === 'codex') {
+        // LIVE read-only Codex/ChatGPT-Plus weekly rate-limit sync via the codex
+        // app-server metadata read (account/rateLimits/read) -- zero quota, no LLM.
+        const { syncCodexRateLimit } = await import('../../costops/collectors/codex.js')
+        result = await syncCodexRateLimit(db, now)
       } else {
-        json(res, { error: `unsupported provider '${provider}' (supported: render, openai, github, deepseek)` }, 400); return true
+        json(res, { error: `unsupported provider '${provider}' (supported: render, openai, github, deepseek, codex)` }, 400); return true
       }
       json(res, result, result.ok ? 200 : 502)
     } catch (err) {

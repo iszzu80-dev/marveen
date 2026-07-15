@@ -138,6 +138,32 @@ export function fromDeepSeekBalance(db: Database.Database): LimitStatus[] {
   }]
 }
 
+// ---- 2b. Codex / ChatGPT Plus weekly rate-limit (metadata snapshot -> normalized) ----------
+// Latest usedPercent snapshot from provider_ratelimit_snapshots (written by the codex collector
+// via the app-server metadata read -- zero quota). No snapshot yet -> 'unknown' (never a guess),
+// same honest-gap rule as the no-numeric-ceiling subscription limits.
+export function fromCodexRateLimit(db: Database.Database): LimitStatus[] {
+  const rows = db.prepare(
+    `SELECT used_percent, resets_at, captured_at FROM provider_ratelimit_snapshots WHERE provider = 'codex' ORDER BY captured_at DESC LIMIT 1`,
+  ).all() as Array<{ used_percent: number; resets_at: number | null; captured_at: number }>
+  if (rows.length === 0) {
+    return [{
+      provider: 'codex', limit_type: 'weekly_usage_pct', current_usage: null, limit_value: null,
+      usage_pct: null, reset_date: null, paid_until: null, expiry_date: null,
+      status: 'unknown', source: 'ledger', sub_id: null, unit: null,
+    }]
+  }
+  const latest = rows[0]
+  const pct = latest.used_percent / 100
+  return [{
+    provider: 'codex', limit_type: 'weekly_usage_pct', current_usage: latest.used_percent, limit_value: 100,
+    usage_pct: pct,
+    reset_date: latest.resets_at !== null ? new Date(latest.resets_at * 1000).toISOString() : null,
+    paid_until: null, expiry_date: null,
+    status: tierForPct(pct), source: 'ledger', sub_id: null, unit: '%',
+  }]
+}
+
 // ---- 3. Workspace payment/suspension alerts -----------------------------------------------
 function fromWorkspaceAlerts(db: Database.Database, now: number): LimitStatus[] {
   const rows = getActiveWorkspaceAlerts(db, now)
@@ -241,6 +267,7 @@ export async function getLimitStatus(
   return [
     ...fromSubscriptions(subscriptions),
     ...fromDeepSeekBalance(db),
+    ...fromCodexRateLimit(db),
     ...fromWorkspaceAlerts(db, now),
     ...live,
   ]

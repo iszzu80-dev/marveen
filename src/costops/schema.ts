@@ -175,6 +175,25 @@ export function initCostOpsSchema(db: Database.Database): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_balance_snapshots_provider ON provider_balance_snapshots(provider, captured_at)`)
+  // CostOps: provider rate-limit / quota-usage snapshots. For providers that
+  // expose a percent-of-window usage (e.g. Codex / ChatGPT Plus via the codex
+  // app-server account/rateLimits/read metadata read -- NOT a model call, zero
+  // quota) rather than a dollar cost. One row per capture; limits.ts reads the
+  // latest per provider onto the shared threshold ladder, and a rise-rate
+  // forecast projects when the window hits 100%. No secret, no raw id.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS provider_ratelimit_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider TEXT NOT NULL,
+      limit_id TEXT,
+      used_percent REAL NOT NULL,
+      window_duration_mins INTEGER,
+      resets_at INTEGER,
+      plan_type TEXT,
+      captured_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_ratelimit_snapshots_provider ON provider_ratelimit_snapshots(provider, captured_at)`)
   // CostOps Phase 0: baseline for the 7-day source-reliability observation window
   // (gap-analysis P0.4). One row per capture -- the whole source inventory
   // (lifecycle + freshness + sync status per source) as a sanitized JSON snapshot,
