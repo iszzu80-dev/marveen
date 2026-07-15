@@ -23,6 +23,7 @@ import { listForecastSnapshots } from '../../costops/forecast-capture.js'
 import { buildReconciliation } from '../../costops/reconciliation.js'
 import { createCorrection, getCorrectionChain } from '../../costops/correction.js'
 import { listAlerts, acknowledgeAlertByKey, resolveAlertByKey } from '../../costops/alerts-store.js'
+import { getPeriodStatus, checkCloseReadiness, closePeriod, reopenPeriod, getPeriodCloseHistory, getCloseSnapshot } from '../../costops/period-close.js'
 import type { RouteContext } from './types.js'
 
 export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
@@ -191,6 +192,55 @@ export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
     } catch (err) {
       logger.error({ err }, 'CostOps reconciliation failed')
       json(res, { error: 'Reconciliation failed' }, 500)
+    }
+    return true
+  }
+
+  // Phase 2 (GAP-13): monthly close/reopen workflow. GET returns status +
+  // close-readiness checklist + audit history (+ the immutable snapshot if
+  // closed); POST /close and /reopen are the two audited state transitions.
+  if (path === '/api/costs/period-close' && method === 'GET') {
+    try {
+      const month = url.searchParams.get('month')
+      if (!month) { json(res, { error: 'missing ?month=YYYY-MM' }, 400); return true }
+      const { config } = loadCostopsConfig()
+      const now = Math.floor(Date.now() / 1000)
+      const db = getDb()
+      const status = getPeriodStatus(db, month)
+      const readiness = checkCloseReadiness(db, config, now, month)
+      const history = getPeriodCloseHistory(db, month)
+      const snapshot = status === 'closed' || status === 'reopened' ? getCloseSnapshot(db, month) : null
+      json(res, { month, status, readiness, history, snapshot })
+    } catch (err) {
+      logger.error({ err }, 'CostOps period-close status failed')
+      json(res, { error: 'Period-close status failed' }, 500)
+    }
+    return true
+  }
+  if (path === '/api/costs/period-close/close' && method === 'POST') {
+    try {
+      const raw = await readBody(ctx.req)
+      const body = JSON.parse(raw.toString() || '{}')
+      const { config } = loadCostopsConfig()
+      const now = Math.floor(Date.now() / 1000)
+      const result = closePeriod(getDb(), config, body.month, body.actor, body.reason ?? null, now, { force: body.force === true })
+      json(res, result, result.ok ? 200 : (result.status || 500))
+    } catch (err) {
+      logger.error({ err }, 'CostOps period close failed')
+      json(res, { ok: false, error: 'period close failed' }, 500)
+    }
+    return true
+  }
+  if (path === '/api/costs/period-close/reopen' && method === 'POST') {
+    try {
+      const raw = await readBody(ctx.req)
+      const body = JSON.parse(raw.toString() || '{}')
+      const now = Math.floor(Date.now() / 1000)
+      const result = reopenPeriod(getDb(), body.month, body.actor, body.reason, now)
+      json(res, result, result.ok ? 200 : (result.status || 500))
+    } catch (err) {
+      logger.error({ err }, 'CostOps period reopen failed')
+      json(res, { ok: false, error: 'period reopen failed' }, 500)
     }
     return true
   }

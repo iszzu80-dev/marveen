@@ -12,6 +12,7 @@ import type Database from 'better-sqlite3'
 import { initForecastSchema } from './forecast.js'
 import { initFxSchema } from './fx.js'
 import { initAlertsSchema } from './alerts.js'
+import { initPeriodCloseSchema } from './period-close.js'
 
 export function initCostOpsSchema(db: Database.Database): void {
   // CostOps v0.2: model/provider enrichment on the CORE token_usage table
@@ -102,6 +103,9 @@ export function initCostOpsSchema(db: Database.Database): void {
   // references cost_sources(id) -- must run after that table exists, which it
   // already does at this point in initCostOpsSchema.
   initForecastSchema(db)
+  // Phase 2 (GAP-13): period_status/period_close_events -- monthly close/
+  // reopen workflow. No FK dependency on any other CostOps table.
+  initPeriodCloseSchema(db)
   db.exec(`
     CREATE TABLE IF NOT EXISTS budgets (
       id TEXT PRIMARY KEY,

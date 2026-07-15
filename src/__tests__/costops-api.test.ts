@@ -16,6 +16,17 @@ function fakeCtx(path: string, method = 'GET'): { ctx: RouteContext; out: { stat
   return { ctx, out }
 }
 
+// Same as fakeCtx but with a JSON body, for POST routes that call readBody().
+function fakeCtxWithBody(path: string, method: string, body: unknown): { ctx: RouteContext; out: { status: number; body: any } } {
+  const { ctx, out } = fakeCtx(path, method)
+  ctx.req.on = ((event: string, cb: (...args: any[]) => void) => {
+    if (event === 'data') cb(Buffer.from(JSON.stringify(body)))
+    if (event === 'end') cb()
+    return ctx.req
+  }) as any
+  return { ctx, out }
+}
+
 describe('costops API (route smoke)', () => {
   beforeEach(() => { initDatabase(':memory:') })
 
@@ -158,17 +169,54 @@ describe('costops API (route smoke)', () => {
   })
 
   it('acknowledge/resolve routes 404 on an unknown dedup_key', async () => {
-    const { ctx, out } = fakeCtx('/api/costs/alerts/acknowledge', 'POST')
-    // Minimal fake IncomingMessage: readBody() registers 'data'/'end'/'error'
-    // listeners and reads the body via them -- invoking synchronously here is
-    // fine since readBody's Promise resolves off whatever chunks were pushed
-    // before 'end' fires, and both calls happen synchronously in sequence.
-    ctx.req.on = ((event: string, cb: (...args: any[]) => void) => {
-      if (event === 'data') cb(Buffer.from(JSON.stringify({ dedup_key: 'ghost', actor: 'x' })))
-      if (event === 'end') cb()
-      return ctx.req
-    }) as any
+    const { ctx, out } = fakeCtxWithBody('/api/costs/alerts/acknowledge', 'POST', { dedup_key: 'ghost', actor: 'x' })
     expect(await tryHandleCostOps(ctx)).toBe(true)
     expect(out.status).toBe(404)
+  })
+
+  // Phase 2 (GAP-13): period-close routes.
+  it('GET /api/costs/period-close returns open status + readiness for an untouched month', async () => {
+    const win = monthWindow(Math.floor(Date.now() / 1000))
+    const { ctx, out } = fakeCtx(`/api/costs/period-close?month=${win.key}`)
+    expect(await tryHandleCostOps(ctx)).toBe(true)
+    expect(out.body.status).toBe('open')
+    expect(out.body.readiness.ready).toBe(true)
+    expect(out.body.snapshot).toBeNull()
+  })
+
+  it('GET /api/costs/period-close without ?month= is a 400', async () => {
+    const { ctx, out } = fakeCtx('/api/costs/period-close')
+    expect(await tryHandleCostOps(ctx)).toBe(true)
+    expect(out.status).toBe(400)
+  })
+
+  it('POST .../close then GET reflects closed status + a snapshot; POST .../reopen reverts it', async () => {
+    const win = monthWindow(Math.floor(Date.now() / 1000))
+    const { ctx: closeCtx, out: closeOut } = fakeCtxWithBody('/api/costs/period-close/close', 'POST', { month: win.key, actor: 'istvan', reason: 'month end' })
+    expect(await tryHandleCostOps(closeCtx)).toBe(true)
+    expect(closeOut.body.ok).toBe(true)
+
+    const { ctx: statusCtx, out: statusOut } = fakeCtx(`/api/costs/period-close?month=${win.key}`)
+    expect(await tryHandleCostOps(statusCtx)).toBe(true)
+    expect(statusOut.body.status).toBe('closed')
+    expect(statusOut.body.snapshot).not.toBeNull()
+    expect(statusOut.body.history).toHaveLength(1)
+
+    const { ctx: reopenCtx, out: reopenOut } = fakeCtxWithBody('/api/costs/period-close/reopen', 'POST', { month: win.key, actor: 'istvan', reason: 'found an error' })
+    expect(await tryHandleCostOps(reopenCtx)).toBe(true)
+    expect(reopenOut.body.ok).toBe(true)
+
+    const { ctx: afterCtx, out: afterOut } = fakeCtx(`/api/costs/period-close?month=${win.key}`)
+    expect(await tryHandleCostOps(afterCtx)).toBe(true)
+    expect(afterOut.body.status).toBe('reopened')
+  })
+
+  it('POST .../close 409s on an already-closed month', async () => {
+    const win = monthWindow(Math.floor(Date.now() / 1000))
+    const { ctx: c1 } = fakeCtxWithBody('/api/costs/period-close/close', 'POST', { month: win.key, actor: 'istvan', reason: 'x' })
+    await tryHandleCostOps(c1)
+    const { ctx: c2, out: o2 } = fakeCtxWithBody('/api/costs/period-close/close', 'POST', { month: win.key, actor: 'istvan', reason: 'y' })
+    expect(await tryHandleCostOps(c2)).toBe(true)
+    expect(o2.status).toBe(409)
   })
 })

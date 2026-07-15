@@ -15,6 +15,7 @@
 
 import type Database from 'better-sqlite3'
 import { toHuf, fxRateFor } from './email-ingest.js'
+import { checkPeriodWritable } from './period-close.js'
 
 export interface ManualCostInput {
   source_id: string
@@ -62,6 +63,9 @@ export function createManualCost(
   if (!input.provider) return { ok: false, error: 'missing provider', status: 400 }
   const win = monthWindow(input.month)
   if (!win) return { ok: false, error: `bad month '${input.month}'`, status: 400 }
+  // Phase 2 (GAP-13): a closed month accepts no direct write -- use a correction instead.
+  const writable = checkPeriodWritable(db, input.month)
+  if (!writable.writable) return { ok: false, error: writable.reason, status: 409 }
   const cur = (input.currency || 'HUF').toUpperCase()
   const amountHuf = toHuf(Number(input.amount), cur, opts.fxUsdHuf, opts.fxEurHuf ?? 0)
   if (amountHuf === null || !isFinite(amountHuf)) return { ok: false, error: `unconvertible currency '${input.currency}'`, status: 400 }
@@ -115,6 +119,9 @@ export function updateManualCost(
   const existing = db.prepare(`SELECT confidence FROM cost_line_items WHERE dedup_key = ?`).get(dedup) as { confidence: string } | undefined
   if (!existing) return { ok: false, error: `no manual entry for '${patch.source_id}' / '${patch.month}' -- use POST to create one`, status: 404 }
   if (existing.confidence !== 'manual') return { ok: false, error: `'${patch.source_id}' / '${patch.month}' is not a manual entry (confidence='${existing.confidence}')`, status: 409 }
+  // Phase 2 (GAP-13): a closed month accepts no direct write -- use a correction instead.
+  const writable = checkPeriodWritable(db, patch.month)
+  if (!writable.writable) return { ok: false, error: writable.reason, status: 409 }
   const cur = (patch.currency || 'HUF').toUpperCase()
   const amountHuf = toHuf(Number(patch.amount), cur, opts.fxUsdHuf, opts.fxEurHuf ?? 0)
   if (amountHuf === null || !isFinite(amountHuf)) return { ok: false, error: `unconvertible currency '${patch.currency}'`, status: 400 }
@@ -162,6 +169,9 @@ export function deleteManualCost(
   if (!existing) return { ok: false, error: `no manual entry for '${input.source_id}' / '${input.month}'`, status: 404 }
   if (existing.confidence !== 'manual') return { ok: false, error: `'${input.source_id}' / '${input.month}' is not a manual entry (confidence='${existing.confidence}')`, status: 409 }
   if (existing.voided_at != null) return { ok: false, error: `'${input.source_id}' / '${input.month}' is already voided`, status: 409 }
+  // Phase 2 (GAP-13): a closed month accepts no direct write, including a void -- use a correction instead.
+  const writable = checkPeriodWritable(db, input.month)
+  if (!writable.writable) return { ok: false, error: writable.reason, status: 409 }
   db.prepare(`
     UPDATE cost_line_items SET voided_at = @now, void_reason = @reason, dedup_key = @voidedDedupKey
     WHERE dedup_key = @dedup

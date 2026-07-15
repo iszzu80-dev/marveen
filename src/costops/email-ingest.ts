@@ -11,6 +11,7 @@
 
 import { createHash } from 'node:crypto'
 import type Database from 'better-sqlite3'
+import { checkPeriodWritable } from './period-close.js'
 
 export interface EmailCostEntry {
   source_id: string          // stable id, e.g. 'anthropic-max' or 'aws'
@@ -106,6 +107,10 @@ export function ingestEmailCosts(
       if (!e || typeof e.source_id !== 'string' || !e.source_id) { out.errors.push({ source_id: String(e?.source_id), reason: 'missing source_id' }); continue }
       const win = monthWindow(e.month)
       if (!win) { out.errors.push({ source_id: e.source_id, reason: `bad month '${e.month}'` }); continue }
+      // Phase 2 (GAP-13): a closed month accepts no direct write (including an
+      // ON CONFLICT DO UPDATE for a late/re-sent invoice) -- use a correction instead.
+      const writable = checkPeriodWritable(db, e.month)
+      if (!writable.writable) { out.errors.push({ source_id: e.source_id, reason: writable.reason! }); continue }
       const amountHuf = toHuf(Number(e.amount), e.currency, opts.fxUsdHuf, fxEurHuf)
       if (amountHuf === null || !isFinite(amountHuf)) { out.errors.push({ source_id: e.source_id, reason: `uncconvertible currency '${e.currency}'` }); continue }
       const refHash = createHash('sha256').update(salt).update('|').update(String(e.message_ref)).digest('hex').slice(0, 32)
