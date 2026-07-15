@@ -58,7 +58,7 @@ export function exportCostRows(
            cli.currency as currency, cli.confidence as confidence,
            cli.original_amount as original_amount, cli.original_currency as original_currency
     FROM cost_line_items cli JOIN cost_sources cs ON cs.id = cli.source_id
-    WHERE cli.charge_period_start < @end AND cli.charge_period_end > @start
+    WHERE cli.charge_period_start < @end AND cli.charge_period_end > @start AND cli.voided_at IS NULL
     ORDER BY cli.charge_period_start ASC, cs.provider ASC
   `).all({ start, end }) as Row[]
 

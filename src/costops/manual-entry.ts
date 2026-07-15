@@ -10,8 +10,8 @@
 // POST creates a NEW entry (409 if one already exists for that key -- forces an
 // explicit PATCH to change a number someone already hand-entered, rather than a
 // second POST silently overwriting it). PATCH updates an existing entry (404 if
-// missing). Kept deliberately this simple per the a1552362 guardrail -- no new
-// provenance/estimate layers beyond what email-ingest.ts already established.
+// missing). DELETE voids it (card 73e8914a, Phase 0 decision) rather than hard-
+// deleting -- see deleteManualCost below.
 
 import type Database from 'better-sqlite3'
 import { toHuf, fxRateFor } from './email-ingest.js'
@@ -36,6 +36,10 @@ export interface ManualCostPatch {
 export interface ManualCostDeleteInput {
   source_id: string
   month: string
+  /** Free-text reason for the void, surfaced in the audit trail. Never
+   * required (a UI "remove" click may have no reason to give), but recorded
+   * verbatim when present. */
+  reason?: string
 }
 
 function monthWindow(month: string): { start: number; end: number } | null {
@@ -127,24 +131,34 @@ export function updateManualCost(
   return { ok: true }
 }
 
-// Card 73e8914a: create+patch had no way to remove a mistyped row -- only direct SQL on
-// cost_line_items could. Same guard as updateManualCost (404 if missing, 409 if the row isn't
-// actually a manual entry) so this door can never delete a live provider-fed row. Hard delete,
-// not soft-remove -- this file's own header rule is "no new provenance/estimate layers beyond
-// what email-ingest.ts already established," and a soft-delete flag would be exactly that; a
-// removed manual entry has no ongoing meaning worth retaining a tombstone for.
+// Card 73e8914a (Phase 0 decision, docs/costops/phase0-73e8914a-void-vs-delete.md): create+patch
+// had no way to remove a mistyped row -- only direct SQL on cost_line_items could. Same guard as
+// updateManualCost (404 if missing, 409 if the row isn't actually a manual entry) so this door can
+// never touch a live provider-fed row.
+//
+// VOID, not hard DELETE: a financial ledger row must stay auditable (accounting-integrity
+// principle, gap-analysis GAP-15) -- reversing the file header's original "no soft-delete layer"
+// stance, which predates the formal accounting-integrity requirements. Sets voided_at/void_reason
+// and RENAMES dedup_key (appends |voided|<now>) so (a) every aggregation read path can exclude it
+// via `voided_at IS NULL` and (b) the original dedup_key slot is free for a fresh, correct POST --
+// a re-entry after a mistaken void is a NEW audited entry, not a silent overwrite of the old one.
 export function deleteManualCost(
   db: Database.Database,
   input: ManualCostDeleteInput,
+  opts: { now: number },
 ): { ok: boolean; error?: string; status?: number } {
   if (!input || typeof input.source_id !== 'string' || !input.source_id) return { ok: false, error: 'missing source_id', status: 400 }
   const win = monthWindow(input.month)
   if (!win) return { ok: false, error: `bad month '${input.month}'`, status: 400 }
   const dedup = manualCostDedupKey(input.source_id, input.month)
-  const existing = db.prepare(`SELECT confidence FROM cost_line_items WHERE dedup_key = ?`).get(dedup) as { confidence: string } | undefined
+  const existing = db.prepare(`SELECT confidence, voided_at FROM cost_line_items WHERE dedup_key = ?`).get(dedup) as { confidence: string; voided_at: number | null } | undefined
   if (!existing) return { ok: false, error: `no manual entry for '${input.source_id}' / '${input.month}'`, status: 404 }
   if (existing.confidence !== 'manual') return { ok: false, error: `'${input.source_id}' / '${input.month}' is not a manual entry (confidence='${existing.confidence}')`, status: 409 }
-  db.prepare(`DELETE FROM cost_line_items WHERE dedup_key = ?`).run(dedup)
+  if (existing.voided_at != null) return { ok: false, error: `'${input.source_id}' / '${input.month}' is already voided`, status: 409 }
+  db.prepare(`
+    UPDATE cost_line_items SET voided_at = @now, void_reason = @reason, dedup_key = @voidedDedupKey
+    WHERE dedup_key = @dedup
+  `).run({ now: opts.now, reason: input.reason ?? null, voidedDedupKey: `${dedup}|voided|${opts.now}`, dedup })
   return { ok: true }
 }
 

@@ -31,7 +31,7 @@ function readMonth(db: Database.Database, win: MonthWindow, providerBySource: Ma
   const rows = db.prepare(`
     SELECT source_id, billed_cost, charge_category, confidence, data_freshness
     FROM cost_line_items
-    WHERE charge_period_start < @end AND charge_period_end > @start
+    WHERE charge_period_start < @end AND charge_period_end > @start AND voided_at IS NULL
   `).all({ start: win.start, end: win.end }) as LineRow[]
 
   if (rows.length === 0) {

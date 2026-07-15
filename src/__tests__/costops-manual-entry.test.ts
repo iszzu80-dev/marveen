@@ -83,26 +83,52 @@ describe('costops manual cost entry (card a1552362, item 3)', () => {
     expect(r.status).toBe(400)
   })
 
-  it('DELETE removes the manual cost_line_items row (card 73e8914a)', () => {
+  it('DELETE voids the manual cost_line_items row instead of hard-deleting it (card 73e8914a, Phase 0)', () => {
     const db = getDb()
     createManualCost(db, { source_id: 'notion', name: 'Notion', provider: 'notion', amount: 5000, currency: 'HUF', month: '2026-07' }, { fxUsdHuf: 360, now: NOW })
-    const r = deleteManualCost(db, { source_id: 'notion', month: '2026-07' })
+    const r = deleteManualCost(db, { source_id: 'notion', month: '2026-07', reason: 'entered wrong source by mistake' }, { now: NOW + 5 })
     expect(r.ok).toBe(true)
+    // The original row is NOT gone -- it survives with voided_at/void_reason set (auditability),
+    // just renamed off the active dedup_key so it never re-collides with a fresh POST.
+    const voided = db.prepare(`SELECT voided_at, void_reason, billed_cost FROM cost_line_items WHERE dedup_key = 'manual|notion|2026-07|voided|${NOW + 5}'`).get() as any
+    expect(voided).toBeTruthy()
+    expect(voided.voided_at).toBe(NOW + 5)
+    expect(voided.void_reason).toBe('entered wrong source by mistake')
+    expect(voided.billed_cost).toBe(5000) // amount preserved, not erased
     expect(db.prepare(`SELECT 1 FROM cost_line_items WHERE dedup_key = 'manual|notion|2026-07'`).get()).toBeUndefined()
-    // The cost_sources catalog entry itself is untouched by design (createManualCost upserts it
-    // separately from the line item) -- the source still shows up in all_sources, just back to
-    // no_data spend, same as any other source with no billing data in the query window.
+    // Voided means excluded from the ledger read paths -- same USER-VISIBLE effect as a hard
+    // delete (spend goes back to 0/no_data), but the financial history is retained, not erased.
     const s = getCostSummary(db, cfg, NOW)
     const row = s.all_sources.find(x => x.source_id === 'notion')!
     expect(row.spend).toBe(0)
     expect(row.actual_source).toBe('no_data')
   })
 
+  it('a fresh POST after a void creates a genuinely new entry, not blocked by the old dedup_key', () => {
+    const db = getDb()
+    createManualCost(db, { source_id: 'notion', name: 'Notion', provider: 'notion', amount: 5000, currency: 'HUF', month: '2026-07' }, { fxUsdHuf: 360, now: NOW })
+    deleteManualCost(db, { source_id: 'notion', month: '2026-07' }, { now: NOW + 5 })
+    const r2 = createManualCost(db, { source_id: 'notion', name: 'Notion', provider: 'notion', amount: 6000, currency: 'HUF', month: '2026-07' }, { fxUsdHuf: 360, now: NOW + 10 })
+    expect(r2.ok).toBe(true)
+    const s = getCostSummary(db, cfg, NOW)
+    const row = s.all_sources.find(x => x.source_id === 'notion')!
+    expect(row.spend).toBe(6000) // the new entry, not the voided 5000
+  })
+
   it('DELETE 404s when there is nothing to delete', () => {
     const db = getDb()
-    const r = deleteManualCost(db, { source_id: 'ghost', month: '2026-07' })
+    const r = deleteManualCost(db, { source_id: 'ghost', month: '2026-07' }, { now: NOW })
     expect(r.ok).toBe(false)
     expect(r.status).toBe(404)
+  })
+
+  it('DELETE 409s on an already-voided entry (not silently re-voidable)', () => {
+    const db = getDb()
+    createManualCost(db, { source_id: 'notion', name: 'Notion', provider: 'notion', amount: 5000, currency: 'HUF', month: '2026-07' }, { fxUsdHuf: 360, now: NOW })
+    deleteManualCost(db, { source_id: 'notion', month: '2026-07' }, { now: NOW + 5 })
+    const r2 = deleteManualCost(db, { source_id: 'notion', month: '2026-07' }, { now: NOW + 10 })
+    expect(r2.ok).toBe(false)
+    expect(r2.status).toBe(404) // the original dedup_key is gone (renamed), reads as "nothing to delete"
   })
 
   it('DELETE refuses to touch a non-manual (e.g. provider_api) line for the same key', () => {
@@ -113,7 +139,7 @@ describe('costops manual cost entry (card a1552362, item 3)', () => {
       INSERT INTO cost_line_items (source_id, charge_period_start, charge_period_end, charge_category, billed_cost, currency, confidence, data_freshness, created_at, dedup_key, actual_source)
       VALUES ('render-hosting', @start, @end, 'usage', 1000, 'HUF', 'provider_api', @now, @now, 'manual|render-hosting|2026-07', 'provider_api')
     `).run({ start: win.start, end: win.end, now: NOW })
-    const r = deleteManualCost(db, { source_id: 'render-hosting', month: '2026-07' })
+    const r = deleteManualCost(db, { source_id: 'render-hosting', month: '2026-07' }, { now: NOW })
     expect(r.ok).toBe(false)
     expect(r.status).toBe(409)
     const row = db.prepare(`SELECT 1 FROM cost_line_items WHERE dedup_key = 'manual|render-hosting|2026-07'`).get()

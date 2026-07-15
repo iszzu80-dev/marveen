@@ -214,7 +214,7 @@ export function getWarnings(
     SELECT DISTINCT cs.id as source_id, cs.name, cs.provider
     FROM cost_line_items cli JOIN cost_sources cs ON cs.id = cli.source_id
     WHERE cli.confidence = 'pending_permission'
-      AND cli.charge_period_start < @end AND cli.charge_period_end > @start
+      AND cli.charge_period_start < @end AND cli.charge_period_end > @start AND cli.voided_at IS NULL
   `).all({ start: win.start, end: win.end }) as Array<{ source_id: string; name: string; provider: string }>
   for (const p of pendingRows) {
     warnings.push({

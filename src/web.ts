@@ -25,6 +25,7 @@ import { startAutoRestartRunner } from './web/auto-restart-runner.js'
 import { startModelFallbackRunner } from './web/model-fallback-runner.js'
 import { startContextGuardRunner } from './web/context-guard-runner.js'
 import { collectTokenUsage } from './web/token-usage.js'
+import { startCostOpsBackgroundTasks } from './costops/reliability-observation.js'  // LOCAL-FORK: costops seam (keep on rebase)
 import { logger } from './logger.js'
 import { tryHandleProfiles } from './web/routes/profiles.js'
 import { tryHandleMessages } from './web/routes/messages.js'
@@ -52,7 +53,7 @@ import { tryHandleOnboarding } from './web/routes/onboarding.js'
 import { tryHandleStatus } from './web/routes/status.js'
 import { tryHandleAutonomy } from './web/routes/autonomy.js'
 import { tryHandleTokenUsage } from './web/routes/token-usage.js'
-import { tryHandleCosts } from './web/routes/costs.js'
+import { tryHandleCostOps } from './web/routes/costs.js'  // LOCAL-FORK: costops seam (keep on rebase)
 import { tryHandleIdeas } from './web/routes/ideas.js'
 import { tryHandleToolLog } from './web/routes/tool-log.js'
 import { tryHandleSettings } from './web/routes/settings.js'
@@ -187,7 +188,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleStatus(routeCtx)) return
       if (await tryHandleAutonomy(routeCtx)) return
       if (await tryHandleTokenUsage(routeCtx)) return
-      if (await tryHandleCosts(routeCtx)) return
+      if (await tryHandleCostOps(routeCtx)) return  // LOCAL-FORK: costops seam (keep on rebase)
       if (await tryHandleIdeas(routeCtx)) return
       if (await tryHandleToolLog(routeCtx)) return
       if (await tryHandleSettings(routeCtx)) return
@@ -374,6 +375,12 @@ export function startWebServer(port = 3420): http.Server {
     logger.info('Token usage auto-collect started (1h poll + startup)')
   }
 
+  // LOCAL-FORK: costops seam (keep on rebase). ALL CostOps background tasks
+  // (currently: the Phase 0 reliability-snapshot capture) are owned by this
+  // one call -- see src/costops/reliability-observation.ts.
+  const costOpsBackgroundInterval = webOnly ? undefined : startCostOpsBackgroundTasks()
+  if (!webOnly) logger.info('CostOps background tasks started (reliability-snapshot: 24h poll + startup)')
+
   // NOTE: startMcpListChecker() is intentionally NOT called here.
   //
   // Root cause: calling `claude mcp list` at boot time (30s delay) spawns the
@@ -463,6 +470,7 @@ export function startWebServer(port = 3420): http.Server {
     clearInterval(contextGuardInterval)
     clearInterval(updateCheckerInterval)
     clearInterval(tokenCollectInterval)
+    clearInterval(costOpsBackgroundInterval)
     return origClose(cb)
   }
 
