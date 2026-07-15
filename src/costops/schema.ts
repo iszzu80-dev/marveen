@@ -13,6 +13,7 @@ import { initForecastSchema } from './forecast.js'
 import { initFxSchema } from './fx.js'
 import { initAlertsSchema } from './alerts.js'
 import { initPeriodCloseSchema } from './period-close.js'
+import { initBudgetAuditSchema } from './budgets.js'
 
 export function initCostOpsSchema(db: Database.Database): void {
   // CostOps v0.2: model/provider enrichment on the CORE token_usage table
@@ -106,6 +107,9 @@ export function initCostOpsSchema(db: Database.Database): void {
   // Phase 2 (GAP-13): period_status/period_close_events -- monthly close/
   // reopen workflow. No FK dependency on any other CostOps table.
   initPeriodCloseSchema(db)
+  // Phase 3 (GAP-11): budget change audit trail. No FK dependency -- budget
+  // entries themselves stay in costops-config.json, not the DB.
+  initBudgetAuditSchema(db)
   db.exec(`
     CREATE TABLE IF NOT EXISTS budgets (
       id TEXT PRIMARY KEY,

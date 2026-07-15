@@ -17,6 +17,7 @@ import { getCostSummary, monthWindow, type CostSummary } from './ledger.js'
 import type { CostOpsConfig } from './config.js'
 import { loadSubscriptionsConfig, deriveLifecycle } from './subscriptions.js'
 import { buildReconciliation } from './reconciliation.js'
+import { getAllBudgetStatuses, type BudgetStatus } from './budgets.js'
 
 export type PeriodCloseStatus = 'open' | 'provisional' | 'closed' | 'reopened'
 
@@ -132,21 +133,28 @@ export function checkCloseReadiness(db: Database.Database, config: CostOpsConfig
   return { month: win.key, ready, checks }
 }
 
+/** The full immutable record taken at close time -- the CostSummary plus every configured budget's status, so a closed month's budget picture is frozen too (GAP-11: "budget-snapshot legyen resze a period-close-nak"). */
+export interface ImmutableCloseSnapshot {
+  summary: CostSummary
+  budgets: BudgetStatus[]
+}
+
 export interface CloseResult {
   ok: boolean
   error?: string
   status?: number
   readiness?: CloseReadinessResult
-  snapshot?: CostSummary
+  snapshot?: ImmutableCloseSnapshot
 }
 
 /**
- * Close a month: takes an immutable snapshot (the full CostSummary at close
- * time) and records the close event. Blocked by default if the readiness
- * checklist has a blocking issue -- `force: true` lets an operator
- * deliberately override (still fully audited: the reason is recorded either
- * way). Already-closed months 409 (must reopen first, never a silent
- * re-close that would overwrite the earlier immutable snapshot).
+ * Close a month: takes an immutable snapshot (the full CostSummary + every
+ * budget's status at close time) and records the close event. Blocked by
+ * default if the readiness checklist has a blocking issue -- `force: true`
+ * lets an operator deliberately override (still fully audited: the reason
+ * is recorded either way). Already-closed months 409 (must reopen first,
+ * never a silent re-close that would overwrite the earlier immutable
+ * snapshot).
  */
 export function closePeriod(
   db: Database.Database,
@@ -166,7 +174,9 @@ export function closePeriod(
     return { ok: false, error: 'close-readiness checklist has blocking issues -- pass force:true to override', status: 409, readiness }
   }
 
-  const snapshot = getCostSummary(db, config, now, { monthKey: month })
+  const summary = getCostSummary(db, config, now, { monthKey: month })
+  const budgets = getAllBudgetStatuses(db, config, now, month)
+  const snapshot: ImmutableCloseSnapshot = { summary, budgets }
   const tx = db.transaction(() => {
     db.prepare(`
       INSERT INTO period_close_events (month, event_type, actor, reason, snapshot_json, created_at)
@@ -221,11 +231,11 @@ export function getPeriodCloseHistory(db: Database.Database, month: string): Per
 }
 
 /** The immutable snapshot from the LATEST close event for a month, or null if it was never closed. */
-export function getCloseSnapshot(db: Database.Database, month: string): CostSummary | null {
+export function getCloseSnapshot(db: Database.Database, month: string): ImmutableCloseSnapshot | null {
   const row = db.prepare(`
     SELECT snapshot_json FROM period_close_events
     WHERE month = ? AND event_type = 'closed' ORDER BY created_at DESC LIMIT 1
   `).get(month) as { snapshot_json: string } | undefined
   if (!row) return null
-  return JSON.parse(row.snapshot_json) as CostSummary
+  return JSON.parse(row.snapshot_json) as ImmutableCloseSnapshot
 }

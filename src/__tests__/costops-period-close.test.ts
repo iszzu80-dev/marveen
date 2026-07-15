@@ -98,7 +98,8 @@ describe('closePeriod / reopenPeriod (CostOps Phase 2, GAP-13)', () => {
     expect(history[0].actor).toBe('istvan')
     const snap = getCloseSnapshot(db, MONTH)
     expect(snap).not.toBeNull()
-    expect(snap!.month).toBe(MONTH)
+    expect(snap!.summary.month).toBe(MONTH)
+    expect(Array.isArray(snap!.budgets)).toBe(true) // Phase 3 (GAP-11): budget statuses frozen into the close snapshot too
   })
 
   it('blocks close when readiness has a blocking issue, unless force:true', () => {
@@ -156,7 +157,7 @@ describe('closePeriod / reopenPeriod (CostOps Phase 2, GAP-13)', () => {
     createManualCost(db, { source_id: 'domain', name: 'Domain', provider: 'other', amount: 5000, currency: 'HUF', month: MONTH }, { fxUsdHuf: 360, now: NOW + 150 })
     closePeriod(db, cfg, MONTH, 'istvan', 'second close', NOW + 200)
     const secondSnap = getCloseSnapshot(db, MONTH)
-    expect(secondSnap!.current_spend).not.toBe(firstSnap!.current_spend)
+    expect(secondSnap!.summary.current_spend).not.toBe(firstSnap!.summary.current_spend)
     const history = getPeriodCloseHistory(db, MONTH)
     expect(history.map(h => h.event_type)).toEqual(['closed', 'reopened', 'closed'])
   })

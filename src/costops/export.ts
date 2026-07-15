@@ -26,6 +26,7 @@ import { listForecastSnapshots, type ForecastSnapshotRow } from './forecast-capt
 import { getPeriodStatus, type PeriodCloseStatus } from './period-close.js'
 import { listAlerts } from './alerts-store.js'
 import type { AlertRecord } from './alerts.js'
+import { resolveBudgetStatus, type BudgetStatus } from './budgets.js'
 
 export interface ExportRow {
   provider: string
@@ -227,7 +228,11 @@ export function categorySummaryToCsv(rows: CategorySummaryRow[]): string {
 
 export interface BudgetVarianceExport {
   meta: ExportMeta
+  // Legacy single global-budget shape (v0.4-era, kept for back-compat).
   budget: (NonNullable<CostSummary['budget']> & { spend_variance: number; forecast_variance: number }) | null
+  // Phase 3 (GAP-11): every configured budget -- global, provider, category,
+  // source -- each with its own current_spend/forecast/variance/status.
+  budgets: BudgetStatus[]
 }
 
 export function exportBudgetVariance(db: Database.Database, config: CostOpsConfig, now: number, opts: { month?: string } = {}): BudgetVarianceExport {
@@ -238,7 +243,8 @@ export function exportBudgetVariance(db: Database.Database, config: CostOpsConfi
     spend_variance: round2(summary.operational_spend - b.amount),
     forecast_variance: round2(summary.operational_forecast_month_end - b.amount),
   } : null
-  return { meta: buildMeta('budget_variance', now, opts), budget }
+  const budgets = config.budgets.map(entry => resolveBudgetStatus(entry, summary))
+  return { meta: buildMeta('budget_variance', now, opts), budget, budgets }
 }
 
 // ---- 6. reconciliation report ------------------------------------------------------------------

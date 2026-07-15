@@ -30,6 +30,7 @@ import { buildReconciliation } from '../../costops/reconciliation.js'
 import { createCorrection, getCorrectionChain } from '../../costops/correction.js'
 import { listAlerts, acknowledgeAlertByKey, resolveAlertByKey } from '../../costops/alerts-store.js'
 import { getPeriodStatus, checkCloseReadiness, closePeriod, reopenPeriod, getPeriodCloseHistory, getCloseSnapshot } from '../../costops/period-close.js'
+import { getAllBudgetStatuses, upsertBudget, deleteBudget, getBudgetAuditHistory } from '../../costops/budgets.js'
 import type { RouteContext } from './types.js'
 
 export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
@@ -326,13 +327,48 @@ export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
+  // Phase 3 (GAP-11): every configured budget's LIVE status (current_spend/
+  // forecast/variance/status against its scope), not just the raw config
+  // entries -- same shape as what period-close's immutable snapshot bundles.
   if (path === '/api/costs/budgets' && method === 'GET') {
     try {
+      const monthKey = url.searchParams.get('month') || undefined
+      const now = Math.floor(Date.now() / 1000)
       const { config } = loadCostopsConfig()
-      json(res, config.budgets)
+      const statuses = getAllBudgetStatuses(getDb(), config, now, monthKey)
+      json(res, statuses)
     } catch (err) {
       logger.error({ err }, 'CostOps budgets failed')
       json(res, { error: 'Cost budgets failed' }, 500)
+    }
+    return true
+  }
+
+  if (path === '/api/costs/budgets' && (method === 'POST' || method === 'PATCH' || method === 'DELETE')) {
+    try {
+      const raw = await readBody(ctx.req)
+      const body = JSON.parse(raw.toString() || '{}')
+      const now = Math.floor(Date.now() / 1000)
+      const { config } = loadCostopsConfig()
+      const result = (method === 'POST' || method === 'PATCH')
+        ? upsertBudget(getDb(), config, body, body.actor, now)
+        : deleteBudget(getDb(), config, body.id, body.actor, now)
+      json(res, result, result.ok ? 200 : (result.status || 500))
+    } catch (err) {
+      logger.error({ err }, 'CostOps budget change failed')
+      json(res, { ok: false, error: 'budget change failed' }, 500)
+    }
+    return true
+  }
+
+  if (path === '/api/costs/budgets/history' && method === 'GET') {
+    try {
+      const budgetId = url.searchParams.get('id') || undefined
+      const history = getBudgetAuditHistory(getDb(), budgetId)
+      json(res, history)
+    } catch (err) {
+      logger.error({ err }, 'CostOps budget history failed')
+      json(res, { error: 'Cost budget history failed' }, 500)
     }
     return true
   }

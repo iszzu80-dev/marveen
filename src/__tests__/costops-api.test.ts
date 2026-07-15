@@ -260,4 +260,78 @@ describe('costops API (route smoke)', () => {
     expect(await tryHandleCostOps(ctx)).toBe(true)
     expect(out.status).toBe(404)
   })
+
+  // Phase 3 (GAP-11): budget CRUD + history routes. Each test cleans up its
+  // own budget id at the end -- loadCostopsConfig() reads the real on-disk
+  // store/costops-config.json (same convention as every other CostOps config
+  // route), so leaving an id behind would leak into unrelated test runs.
+  describe('budget CRUD + history routes (GAP-11)', () => {
+    const BID = 'route-test-budget'
+
+    it('POST /api/costs/budgets creates a budget, GET reflects its live status', async () => {
+      const { ctx: postCtx, out: postOut } = fakeCtxWithBody('/api/costs/budgets', 'POST', {
+        id: BID, scope: 'global', amount: 10000, warning_threshold: 0.8, hard_threshold: 1.0, actor: 'istvan',
+      })
+      expect(await tryHandleCostOps(postCtx)).toBe(true)
+      expect(postOut.body.ok).toBe(true)
+      expect(postOut.body.budget.id).toBe(BID)
+
+      const { ctx: getCtx, out: getOut } = fakeCtx('/api/costs/budgets')
+      expect(await tryHandleCostOps(getCtx)).toBe(true)
+      const found = (getOut.body as any[]).find(b => b.id === BID)
+      expect(found).toBeTruthy()
+      expect(found.scope).toBe('global')
+      expect(found).toHaveProperty('current_spend')
+      expect(found).toHaveProperty('status')
+
+      const { ctx: delCtx, out: delOut } = fakeCtxWithBody('/api/costs/budgets', 'DELETE', { id: BID, actor: 'istvan' })
+      expect(await tryHandleCostOps(delCtx)).toBe(true)
+      expect(delOut.body.ok).toBe(true)
+    })
+
+    it('PATCH updates an existing budget in place (no duplicate entry)', async () => {
+      const { ctx: c1 } = fakeCtxWithBody('/api/costs/budgets', 'POST', { id: BID, amount: 10000, actor: 'istvan' })
+      await tryHandleCostOps(c1)
+      const { ctx: c2, out: o2 } = fakeCtxWithBody('/api/costs/budgets', 'PATCH', { id: BID, amount: 15000, actor: 'istvan' })
+      expect(await tryHandleCostOps(c2)).toBe(true)
+      expect(o2.body.budget.amount).toBe(15000)
+
+      const { ctx: getCtx, out: getOut } = fakeCtx('/api/costs/budgets')
+      await tryHandleCostOps(getCtx)
+      expect((getOut.body as any[]).filter(b => b.id === BID)).toHaveLength(1)
+
+      const { ctx: delCtx } = fakeCtxWithBody('/api/costs/budgets', 'DELETE', { id: BID, actor: 'istvan' })
+      await tryHandleCostOps(delCtx)
+    })
+
+    it('POST without an actor is a 400 (audit trail requires who made the change)', async () => {
+      const { ctx, out } = fakeCtxWithBody('/api/costs/budgets', 'POST', { id: BID, amount: 1000 })
+      expect(await tryHandleCostOps(ctx)).toBe(true)
+      expect(out.status).toBe(400)
+    })
+
+    it('DELETE on an unknown id is a 404', async () => {
+      const { ctx, out } = fakeCtxWithBody('/api/costs/budgets', 'DELETE', { id: 'ghost-budget-id', actor: 'istvan' })
+      expect(await tryHandleCostOps(ctx)).toBe(true)
+      expect(out.status).toBe(404)
+    })
+
+    it('GET /api/costs/budgets/history returns the audited before/after trail, filterable by id', async () => {
+      const { ctx: c1 } = fakeCtxWithBody('/api/costs/budgets', 'POST', { id: BID, amount: 10000, actor: 'istvan' })
+      await tryHandleCostOps(c1)
+      const { ctx: c2 } = fakeCtxWithBody('/api/costs/budgets', 'PATCH', { id: BID, amount: 20000, actor: 'istvan' })
+      await tryHandleCostOps(c2)
+
+      const { ctx, out } = fakeCtx(`/api/costs/budgets/history?id=${BID}`)
+      expect(await tryHandleCostOps(ctx)).toBe(true)
+      expect(out.body).toHaveLength(2)
+      expect(out.body[0].action).toBe('created')
+      expect(out.body[1].action).toBe('updated')
+      expect(out.body[1].before.amount).toBe(10000)
+      expect(out.body[1].after.amount).toBe(20000)
+
+      const { ctx: delCtx } = fakeCtxWithBody('/api/costs/budgets', 'DELETE', { id: BID, actor: 'istvan' })
+      await tryHandleCostOps(delCtx)
+    })
+  })
 })

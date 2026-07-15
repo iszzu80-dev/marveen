@@ -50,6 +50,7 @@ import { getPeriodTrend } from './period.js'
 import { buildReconciliation } from './reconciliation.js'
 import { loadSubscriptionsConfig, deriveLifecycle } from './subscriptions.js'
 import { fromSubscriptions } from './limits.js'
+import { getAllBudgetStatuses } from './budgets.js'
 import {
   detectBudgetThresholdAlert,
   detectForecastBudgetBreachAlert,
@@ -95,36 +96,44 @@ const ESTIMATE_ONLY_CONF = new Set(['manual', 'estimate', 'local_usage'])
 
 // ---- signal gathering ------------------------------------------------------------------
 
-function gatherBudgetCandidates(
-  config: CostOpsConfig,
-  budget: NonNullable<CostSummary['budget']>,
-  latestTotalForecast: number | null,
-): AlertCandidate[] {
+/**
+ * Phase 3 (GAP-11): every configured budget (global/provider/category/source),
+ * not just the legacy single global one -- getAllBudgetStatuses() already
+ * resolves each scope's real spend/forecast against the same CostSummary, so
+ * this just runs the two budget detectors per budget instead of once.
+ * dedup_key is keyed by budget_id (alerts.ts), so distinct budgets never
+ * collide even when several breach in the same capture pass.
+ */
+function gatherBudgetCandidates(db: Database.Database, config: CostOpsConfig, now: number): AlertCandidate[] {
   const out: AlertCandidate[] = []
-  const threshold = detectBudgetThresholdAlert({
-    budget_id: budget.id, scope: 'global',
-    used_pct: budget.operational_used_pct,
-    warning_threshold: budget.warning_threshold,
-    hard_threshold: budget.hard_threshold,
-  })
-  if (threshold) out.push(threshold)
+  const win = monthWindow(now)
+  const latestTotalForecastRow = db.prepare(`
+    SELECT forecast_amount FROM forecast_snapshots WHERE source_id IS NULL AND month = ? ORDER BY snapshot_at DESC LIMIT 1
+  `).get(win.key) as { forecast_amount: number } | undefined
 
-  // Prefer the Phase-1 forecast module's captured TOTAL snapshot (more accurate than
-  // getCostSummary's own naive proration) when one exists this month; fall back to
-  // getCostSummary's own operational_forecast_pct otherwise -- never fabricated, just less
-  // precise until the first daily capture has run.
-  const forecastPct = latestTotalForecast != null && budget.amount > 0
-    ? latestTotalForecast / budget.amount
-    : budget.operational_forecast_pct
-  const breach = detectForecastBudgetBreachAlert({
-    budget_id: budget.id, scope: 'global',
-    used_pct: budget.operational_used_pct, forecast_pct: forecastPct,
-    warning_threshold: budget.warning_threshold, hard_threshold: budget.hard_threshold,
-  })
-  if (breach) out.push(breach)
-  void config // budget scope is 'global' only today -- provider/category budgets aren't wired
-  // anywhere in the ledger yet (GAP-11 gap); accepting `config` documents the intent to extend
-  // this once scoped budgets exist, without fabricating scoped spend numbers now.
+  const statuses = getAllBudgetStatuses(db, config, now)
+  for (const b of statuses) {
+    const scopeLabel = b.scope_ref ? `${b.scope}:${b.scope_ref}` : b.scope
+    const threshold = detectBudgetThresholdAlert({
+      budget_id: b.id, scope: scopeLabel,
+      used_pct: b.used_pct, warning_threshold: b.warning_threshold, hard_threshold: b.hard_threshold,
+    })
+    if (threshold) out.push(threshold)
+
+    // Prefer the Phase-1 forecast module's captured TOTAL snapshot (more accurate than the
+    // naive per-scope forecast) for the global budget only -- provider/category/source scopes
+    // have no per-scope forecast snapshot yet, so they use resolveBudgetStatus's own
+    // forecast_pct (summed forecast_month_end across that scope's sources), never fabricated.
+    const forecastPct = (b.scope === 'global' && latestTotalForecastRow != null && b.amount > 0)
+      ? latestTotalForecastRow.forecast_amount / b.amount
+      : b.forecast_pct
+    const breach = detectForecastBudgetBreachAlert({
+      budget_id: b.id, scope: scopeLabel,
+      used_pct: b.used_pct, forecast_pct: forecastPct,
+      warning_threshold: b.warning_threshold, hard_threshold: b.hard_threshold,
+    })
+    if (breach) out.push(breach)
+  }
   return out
 }
 
@@ -300,13 +309,9 @@ function gatherMissingInvoiceCandidates(): AlertCandidate[] {
  */
 export function gatherAlertCandidates(db: Database.Database, config: CostOpsConfig, now: number): AlertCandidate[] {
   const summary = getCostSummary(db, config, now)
-  const win = monthWindow(now)
-  const latestTotalForecastRow = db.prepare(`
-    SELECT forecast_amount FROM forecast_snapshots WHERE source_id IS NULL AND month = ? ORDER BY snapshot_at DESC LIMIT 1
-  `).get(win.key) as { forecast_amount: number } | undefined
 
   return [
-    ...(summary.budget ? gatherBudgetCandidates(config, summary.budget, latestTotalForecastRow?.forecast_amount ?? null) : []),
+    ...gatherBudgetCandidates(db, config, now),
     ...gatherBalanceExhaustionCandidates(db, now),
     ...gatherSyncAndCredentialCandidates(db, now),
     ...gatherReconciliationCandidates(db, now),

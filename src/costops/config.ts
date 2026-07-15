@@ -62,12 +62,25 @@ export interface FixedCostEntry {
 export interface BudgetEntry {
   id: string
   name?: string
-  scope?: 'global' | 'source' | 'provider' | 'product' | 'agent'
+  // Phase 3 (GAP-11): 'category' added -- a cost_sources.source_type-level
+  // budget (e.g. all 'hosting' or all 'saas' spend), distinct from a single
+  // 'source' (one specific subscription/API/hosting/SaaS line item) and from
+  // 'provider' (one provider across all its sources). 'product'/'agent'
+  // remain in the union for backward compatibility with any config already
+  // using them, but GAP-11 explicitly excludes building product/agent
+  // budgets -- nothing in budgets.ts resolves those scopes.
+  scope?: 'global' | 'source' | 'provider' | 'category' | 'product' | 'agent'
   scope_ref?: string
   amount: number
   currency?: string
   warning_threshold?: number  // fraction, default 0.8
   hard_threshold?: number     // fraction, default 1.0
+  // Phase 3 (GAP-11): who owns this budget (governance, not enforcement --
+  // the hard threshold is an alert, never an automatic stop). Optional,
+  // never fabricated; defaults applied at read time in budgets.ts, same
+  // convention as FixedCostEntry.owner.
+  owner?: string
+  notes?: string
 }
 
 export interface CostOpsConfig {
@@ -140,6 +153,17 @@ export function ensureExampleConfig(): void {
 }
 
 /**
+ * Persist the config back to store/costops-config.json. Phase 3 (GAP-11):
+ * the only write path today is budgets.ts's upsertBudget/deleteBudget --
+ * fixed_costs remain manual-edit-only (no API mutates them). Whole-file
+ * rewrite, not a partial patch -- config.ts's own load path already
+ * round-trips the full object, so this stays consistent with it.
+ */
+export function saveCostopsConfig(config: CostOpsConfig): void {
+  writeFileSync(COSTOPS_CONFIG_PATH, JSON.stringify(config, null, 2) + '\n', 'utf-8')
+}
+
+/**
  * Pure validation of a parsed config object. Exported for unit tests.
  * Drops invalid entries (with an error note) rather than failing the whole load.
  */
@@ -186,6 +210,8 @@ export function validateConfig(raw: unknown): ConfigLoadResult {
       currency: typeof b.currency === 'string' ? b.currency : currency,
       warning_threshold: typeof b.warning_threshold === 'number' ? b.warning_threshold : 0.8,
       hard_threshold: typeof b.hard_threshold === 'number' ? b.hard_threshold : 1.0,
+      owner: typeof b.owner === 'string' ? b.owner : undefined,
+      notes: typeof b.notes === 'string' ? b.notes : undefined,
     })
   }
 
