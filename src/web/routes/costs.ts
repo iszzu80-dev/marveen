@@ -21,7 +21,7 @@ import { buildSourceInventory } from '../../costops/inventory.js'
 import { captureReliabilitySnapshot, listReliabilitySnapshots, getLatestReliabilitySnapshot } from '../../costops/reliability-observation.js'
 import type { RouteContext } from './types.js'
 
-export async function tryHandleCosts(ctx: RouteContext): Promise<boolean> {
+export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
   const { res, path, method, url } = ctx
 
   if (path === '/api/costs/summary' && method === 'GET') {

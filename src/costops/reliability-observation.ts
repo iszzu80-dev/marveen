@@ -8,8 +8,12 @@
 // keeping it independently testable.
 
 import type Database from 'better-sqlite3'
-import type { CostOpsConfig } from './config.js'
+import { getDb } from '../db.js'
+import { loadCostopsConfig, type CostOpsConfig } from './config.js'
 import { buildSourceInventory, type SourceInventoryEntry, type CredentialChecker } from './inventory.js'
+import { logger } from '../logger.js'
+
+const SNAPSHOT_INTERVAL_MS = 24 * 60 * 60 * 1000
 
 export interface ReliabilitySnapshot {
   captured_at: number
@@ -48,4 +52,26 @@ export function getLatestReliabilitySnapshot(db: Database.Database): Reliability
   `).get() as { captured_at: number; source_count: number; inventory_json: string } | undefined
   if (!row) return null
   return { captured_at: row.captured_at, source_count: row.source_count, inventory: JSON.parse(row.inventory_json) }
+}
+
+function captureNowSafely(): void {
+  try {
+    const { config } = loadCostopsConfig()
+    captureReliabilitySnapshot(getDb(), config, Math.floor(Date.now() / 1000))
+  } catch (err) {
+    logger.warn({ err }, 'CostOps reliability snapshot capture failed')
+  }
+}
+
+/**
+ * Boot-time seam entry point (docs/fork-upstream-policy.md §2a): the ONE
+ * call web.ts makes for every CostOps background task, present and future.
+ * Captures a reliability snapshot immediately, then every 24h. Returns the
+ * interval handle so the caller can clearInterval it on shutdown, matching
+ * every other start*Runner()/start*Monitor() in this codebase (e.g.
+ * startAutoRestartRunner).
+ */
+export function startCostOpsBackgroundTasks(): NodeJS.Timeout {
+  captureNowSafely()
+  return setInterval(captureNowSafely, SNAPSHOT_INTERVAL_MS)
 }

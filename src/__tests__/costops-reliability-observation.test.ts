@@ -1,6 +1,6 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
-import { captureReliabilitySnapshot, listReliabilitySnapshots, getLatestReliabilitySnapshot } from '../costops/reliability-observation.js'
+import { captureReliabilitySnapshot, listReliabilitySnapshots, getLatestReliabilitySnapshot, startCostOpsBackgroundTasks } from '../costops/reliability-observation.js'
 import type { CostOpsConfig } from '../costops/config.js'
 
 const NOW = Math.floor(Date.UTC(2026, 6, 15, 12, 0, 0) / 1000)
@@ -46,5 +46,21 @@ describe('reliability observation window (CostOps Phase 0, P0.4/P0.5)', () => {
     const latest = getLatestReliabilitySnapshot(db)
     expect(latest!.source_count).toBe(2)
     expect(latest!.captured_at).toBe(second.captured_at)
+  })
+})
+
+describe('startCostOpsBackgroundTasks (boot seam, docs/fork-upstream-policy.md §2a)', () => {
+  beforeEach(() => { initDatabase(':memory:'); vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  it('captures a snapshot immediately at boot, then again every 24h, via a single call', () => {
+    const handle = startCostOpsBackgroundTasks()
+    try {
+      expect(listReliabilitySnapshots(getDb())).toHaveLength(1) // immediate boot capture
+      vi.advanceTimersByTime(24 * 60 * 60 * 1000)
+      expect(listReliabilitySnapshots(getDb())).toHaveLength(2) // one interval tick later
+    } finally {
+      clearInterval(handle)
+    }
   })
 })

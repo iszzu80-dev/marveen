@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
-import { tryHandleCosts } from '../web/routes/costs.js'
+import { tryHandleCostOps } from '../web/routes/costs.js'
 import { monthWindow } from '../costops/ledger.js'
 import type { RouteContext } from '../web/routes/types.js'
 
@@ -26,7 +26,7 @@ describe('costops API (route smoke)', () => {
     getDb().prepare("INSERT INTO token_usage (agent,session_id,timestamp,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens) VALUES ('marveen','s',?,1234,5678,0,0)").run(w.start + 100)
 
     const { ctx, out } = fakeCtx('/api/costs/summary')
-    const handled = await tryHandleCosts(ctx)
+    const handled = await tryHandleCostOps(ctx)
     expect(handled).toBe(true)
     expect(out.status).toBe(200)
     // shape
@@ -50,21 +50,21 @@ describe('costops API (route smoke)', () => {
 
   it('GET /api/costs/sources returns an array', async () => {
     const { ctx, out } = fakeCtx('/api/costs/sources')
-    expect(await tryHandleCosts(ctx)).toBe(true)
+    expect(await tryHandleCostOps(ctx)).toBe(true)
     expect(out.status).toBe(200)
     expect(Array.isArray(out.body)).toBe(true)
   })
 
   it('falls through (returns false) for unrelated paths', async () => {
     const { ctx } = fakeCtx('/api/kanban')
-    expect(await tryHandleCosts(ctx)).toBe(false)
+    expect(await tryHandleCostOps(ctx)).toBe(false)
   })
 
   // Phase 0 (GAP-03/GAP-04): source inventory route.
   it('GET /api/costs/source-inventory returns the full inventory, additive to /summary', async () => {
     getDb().prepare(`INSERT INTO cost_sources (id, name, provider, source_type, currency, active, created_at, updated_at) VALUES ('domain','Domain','other','domain','HUF',1,1,1)`).run()
     const { ctx, out } = fakeCtx('/api/costs/source-inventory')
-    expect(await tryHandleCosts(ctx)).toBe(true)
+    expect(await tryHandleCostOps(ctx)).toBe(true)
     expect(out.status).toBe(200)
     expect(Array.isArray(out.body.sources)).toBe(true)
     const domain = out.body.sources.find((s: any) => s.source_id === 'domain')
@@ -80,16 +80,16 @@ describe('costops API (route smoke)', () => {
   // Phase 0 (P0.5): 7-day reliability observation window.
   it('POST then GET /api/costs/reliability-snapshots captures and lists a snapshot', async () => {
     const { ctx: postCtx, out: postOut } = fakeCtx('/api/costs/reliability-snapshots', 'POST')
-    expect(await tryHandleCosts(postCtx)).toBe(true)
+    expect(await tryHandleCostOps(postCtx)).toBe(true)
     expect(postOut.status).toBe(200)
     expect(typeof postOut.body.captured_at).toBe('number')
 
     const { ctx: listCtx, out: listOut } = fakeCtx('/api/costs/reliability-snapshots')
-    expect(await tryHandleCosts(listCtx)).toBe(true)
+    expect(await tryHandleCostOps(listCtx)).toBe(true)
     expect(listOut.body.snapshots).toHaveLength(1)
 
     const { ctx: latestCtx, out: latestOut } = fakeCtx('/api/costs/reliability-snapshots?latest=1')
-    expect(await tryHandleCosts(latestCtx)).toBe(true)
+    expect(await tryHandleCostOps(latestCtx)).toBe(true)
     expect(Array.isArray(latestOut.body.inventory)).toBe(true)
   })
 })
