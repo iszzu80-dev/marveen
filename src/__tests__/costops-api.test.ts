@@ -59,4 +59,37 @@ describe('costops API (route smoke)', () => {
     const { ctx } = fakeCtx('/api/kanban')
     expect(await tryHandleCosts(ctx)).toBe(false)
   })
+
+  // Phase 0 (GAP-03/GAP-04): source inventory route.
+  it('GET /api/costs/source-inventory returns the full inventory, additive to /summary', async () => {
+    getDb().prepare(`INSERT INTO cost_sources (id, name, provider, source_type, currency, active, created_at, updated_at) VALUES ('domain','Domain','other','domain','HUF',1,1,1)`).run()
+    const { ctx, out } = fakeCtx('/api/costs/source-inventory')
+    expect(await tryHandleCosts(ctx)).toBe(true)
+    expect(out.status).toBe(200)
+    expect(Array.isArray(out.body.sources)).toBe(true)
+    const domain = out.body.sources.find((s: any) => s.source_id === 'domain')
+    expect(domain).toBeTruthy()
+    expect(domain).toHaveProperty('lifecycle')
+    expect(domain).toHaveProperty('provenance')
+    expect(domain).toHaveProperty('owner')
+    expect(domain).toHaveProperty('sync_cadence')
+    expect(domain).toHaveProperty('manual_fallback')
+    expect(JSON.stringify(out.body)).not.toMatch(/secret|api[_-]?key|password/i)
+  })
+
+  // Phase 0 (P0.5): 7-day reliability observation window.
+  it('POST then GET /api/costs/reliability-snapshots captures and lists a snapshot', async () => {
+    const { ctx: postCtx, out: postOut } = fakeCtx('/api/costs/reliability-snapshots', 'POST')
+    expect(await tryHandleCosts(postCtx)).toBe(true)
+    expect(postOut.status).toBe(200)
+    expect(typeof postOut.body.captured_at).toBe('number')
+
+    const { ctx: listCtx, out: listOut } = fakeCtx('/api/costs/reliability-snapshots')
+    expect(await tryHandleCosts(listCtx)).toBe(true)
+    expect(listOut.body.snapshots).toHaveLength(1)
+
+    const { ctx: latestCtx, out: latestOut } = fakeCtx('/api/costs/reliability-snapshots?latest=1')
+    expect(await tryHandleCosts(latestCtx)).toBe(true)
+    expect(Array.isArray(latestOut.body.inventory)).toBe(true)
+  })
 })

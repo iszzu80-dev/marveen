@@ -17,6 +17,8 @@ import { ingestWorkspaceAlerts, buildWorkspaceAlertWarnings } from '../../costop
 import { loadDomainsConfig } from '../../costops/expiry-checks.js'
 import { getTokenCostByAgent } from '../../costops/pricing.js'
 import { getLimitStatus, getLiveCheckWarnings } from '../../costops/limits.js'
+import { buildSourceInventory } from '../../costops/inventory.js'
+import { captureReliabilitySnapshot, listReliabilitySnapshots, getLatestReliabilitySnapshot } from '../../costops/reliability-observation.js'
 import type { RouteContext } from './types.js'
 
 export async function tryHandleCosts(ctx: RouteContext): Promise<boolean> {
@@ -109,6 +111,54 @@ export async function tryHandleCosts(ctx: RouteContext): Promise<boolean> {
     } catch (err) {
       logger.error({ err }, 'CostOps sources failed')
       json(res, { error: 'Cost sources failed' }, 500)
+    }
+    return true
+  }
+
+  // Phase 0 (GAP-03/GAP-04): full source inventory -- lifecycle + provenance +
+  // freshness + sync cadence + owner + blocker per source, so period close/
+  // reconciliation/alerts (later phases) have an unambiguous per-source status
+  // to build on. Additive: does not change /summary's contract.
+  if (path === '/api/costs/source-inventory' && method === 'GET') {
+    try {
+      const { config } = loadCostopsConfig()
+      const now = Math.floor(Date.now() / 1000)
+      json(res, { sources: buildSourceInventory(getDb(), config, now), generated_at: now })
+    } catch (err) {
+      logger.error({ err }, 'CostOps source-inventory failed')
+      json(res, { error: 'Source inventory failed' }, 500)
+    }
+    return true
+  }
+
+  // Phase 0 (GAP-21 P0.5): 7-day source-reliability observation window. POST
+  // captures one snapshot (idempotent-ish in effect, not in storage -- each
+  // call adds a new dated row, matching "one observation per day" usage);
+  // GET lists the accumulated window so far, or returns just the latest full
+  // inventory with ?latest=1.
+  if (path === '/api/costs/reliability-snapshots' && method === 'POST') {
+    try {
+      const { config } = loadCostopsConfig()
+      const now = Math.floor(Date.now() / 1000)
+      const snap = captureReliabilitySnapshot(getDb(), config, now)
+      json(res, { captured_at: snap.captured_at, source_count: snap.source_count })
+    } catch (err) {
+      logger.error({ err }, 'CostOps reliability-snapshot capture failed')
+      json(res, { error: 'Reliability snapshot capture failed' }, 500)
+    }
+    return true
+  }
+  if (path === '/api/costs/reliability-snapshots' && method === 'GET') {
+    try {
+      const db = getDb()
+      if (url.searchParams.get('latest') === '1') {
+        json(res, getLatestReliabilitySnapshot(db) ?? { captured_at: null, source_count: 0, inventory: [] })
+      } else {
+        json(res, { snapshots: listReliabilitySnapshots(db) })
+      }
+    } catch (err) {
+      logger.error({ err }, 'CostOps reliability-snapshots list failed')
+      json(res, { error: 'Reliability snapshots list failed' }, 500)
     }
     return true
   }
@@ -275,7 +325,7 @@ export async function tryHandleCosts(ctx: RouteContext): Promise<boolean> {
         ? createManualCost(getDb(), body, { fxUsdHuf, fxEurHuf, now })
         : method === 'PATCH'
         ? updateManualCost(getDb(), body, { fxUsdHuf, fxEurHuf, now })
-        : deleteManualCost(getDb(), body)
+        : deleteManualCost(getDb(), body, { now })
       json(res, result, result.ok ? 200 : (result.status || 500))
     } catch (err) {
       logger.error({ err }, 'CostOps manual cost entry failed')

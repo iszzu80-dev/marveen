@@ -25,6 +25,9 @@ import { startAutoRestartRunner } from './web/auto-restart-runner.js'
 import { startModelFallbackRunner } from './web/model-fallback-runner.js'
 import { startContextGuardRunner } from './web/context-guard-runner.js'
 import { collectTokenUsage } from './web/token-usage.js'
+import { getDb } from './db.js'
+import { loadCostopsConfig } from './costops/config.js'
+import { captureReliabilitySnapshot } from './costops/reliability-observation.js'
 import { logger } from './logger.js'
 import { tryHandleProfiles } from './web/routes/profiles.js'
 import { tryHandleMessages } from './web/routes/messages.js'
@@ -374,6 +377,28 @@ export function startWebServer(port = 3420): http.Server {
     logger.info('Token usage auto-collect started (1h poll + startup)')
   }
 
+  // CostOps Phase 0 (gap-analysis P0.4/P0.5): daily source-reliability
+  // observation snapshot, building the 7-day baseline window. Captured once
+  // at boot + every 24h thereafter; failures are logged, never thrown (a
+  // missed capture just means one fewer data point, not a crash).
+  const reliabilitySnapshotInterval = webOnly ? undefined : setInterval(() => {
+    try {
+      const { config } = loadCostopsConfig()
+      captureReliabilitySnapshot(getDb(), config, Math.floor(Date.now() / 1000))
+    } catch (err) {
+      logger.warn({ err }, 'Periodic CostOps reliability snapshot failed')
+    }
+  }, 24 * 60 * 60 * 1000)
+  if (!webOnly) {
+    try {
+      const { config } = loadCostopsConfig()
+      captureReliabilitySnapshot(getDb(), config, Math.floor(Date.now() / 1000))
+    } catch (err) {
+      logger.warn({ err }, 'Startup CostOps reliability snapshot failed')
+    }
+    logger.info('CostOps reliability-snapshot capture started (24h poll + startup)')
+  }
+
   // NOTE: startMcpListChecker() is intentionally NOT called here.
   //
   // Root cause: calling `claude mcp list` at boot time (30s delay) spawns the
@@ -463,6 +488,7 @@ export function startWebServer(port = 3420): http.Server {
     clearInterval(contextGuardInterval)
     clearInterval(updateCheckerInterval)
     clearInterval(tokenCollectInterval)
+    clearInterval(reliabilitySnapshotInterval)
     return origClose(cb)
   }
 

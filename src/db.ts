@@ -716,6 +716,13 @@ export function initDatabase(dbPathOverride?: string): void {
   // (a category axis) cleanly carries this. Nullable, no default: every write site sets it
   // explicitly; a NULL row (pre-migration history) falls back to 'no_data' at read time, never guessed.
   try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN actual_source TEXT`) } catch { /* already exists */ }
+  // CostOps Phase 0 (card 73e8914a decision, docs/costops/phase0-73e8914a-void-vs-delete.md):
+  // a financial ledger row must never silently disappear -- void/archive instead of hard
+  // DELETE, so a mistaken/superseded manual entry stays auditable. NULL = active (the
+  // overwhelming majority of rows, including all pre-Phase-0 history); every read path
+  // that aggregates cost_line_items must filter `voided_at IS NULL`.
+  try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN voided_at INTEGER`) } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN void_reason TEXT`) } catch { /* already exists */ }
   db.exec(`
     CREATE TABLE IF NOT EXISTS budgets (
       id TEXT PRIMARY KEY,
@@ -796,6 +803,20 @@ export function initDatabase(dbPathOverride?: string): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_balance_snapshots_provider ON provider_balance_snapshots(provider, captured_at)`)
+  // CostOps Phase 0: baseline for the 7-day source-reliability observation window
+  // (gap-analysis P0.4). One row per capture -- the whole source inventory
+  // (lifecycle + freshness + sync status per source) as a sanitized JSON snapshot,
+  // so day-over-day reliability can be compared once several captures exist. No
+  // secret, no raw account ref (inventory.ts never includes either).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS costops_reliability_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      captured_at INTEGER NOT NULL,
+      source_count INTEGER NOT NULL,
+      inventory_json TEXT NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_reliability_snapshots_captured ON costops_reliability_snapshots(captured_at)`)
   // v0.7/v2 (card bea78483): Google Workspace payment-failure/suspension signal.
   // Gmail is NOT reachable from this backend process -- an agent-side read-only
   // sweep POSTs a structured, sanitized entry per detected signal (no raw email

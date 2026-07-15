@@ -49,6 +49,14 @@ export interface FixedCostEntry {
   confidence?: CostConfidence
   currency?: string
   notes?: string
+  // Phase 0 (source inventory, GAP-03): who is responsible for this source's config/credential.
+  // Optional -- defaults to 'Istvan' at read time (single-operator deployment today), never
+  // fabricated as anything more specific than that default.
+  owner?: string
+  // Phase 0: manual escape hatch for the two lifecycle states that can never be safely inferred
+  // from collector/activity signals alone -- "this provider genuinely has no billing API" or
+  // "this subscription was cancelled/retired". Absent (undefined) means "let the signals decide".
+  lifecycle_override?: 'unsupported' | 'deprecated'
 }
 
 export interface BudgetEntry {
@@ -158,6 +166,8 @@ export function validateConfig(raw: unknown): ConfigLoadResult {
       confidence: (typeof c.confidence === 'string' ? c.confidence : 'manual') as CostConfidence,
       currency: typeof c.currency === 'string' ? c.currency : currency,
       notes: typeof c.notes === 'string' ? c.notes : undefined,
+      owner: typeof c.owner === 'string' ? c.owner : undefined,
+      lifecycle_override: (c.lifecycle_override === 'unsupported' || c.lifecycle_override === 'deprecated') ? c.lifecycle_override : undefined,
     })
   }
 
