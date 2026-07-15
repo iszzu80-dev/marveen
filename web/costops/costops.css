@@ -91,9 +91,69 @@ main.costs-cc-active { max-width: 1500px; }
 .cc-savings-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 0.88em; }
 .cc-savings-value { font-variant-numeric: tabular-nums; }
 
+/* UI-2: Elemzés controls, chips, table, export */
+.cc-body-row { display: flex; gap: 20px; align-items: flex-start; }
+.cc-view { flex: 1; min-width: 0; }
+
+.cc-controls { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; }
+.cc-controls label { font-size: 0.8em; color: var(--text-muted, #888); display: flex; flex-direction: column; gap: 4px; }
+.cc-controls select {
+  background: var(--bg-secondary, #1a1a1a); color: var(--text, #ddd); border: 1px solid var(--border, #333);
+  border-radius: 6px; padding: 5px 8px; font-size: 0.95em;
+}
+
+.cc-chips { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+.cc-chip {
+  background: var(--bg-secondary, #222); border: 1px solid var(--border, #333); border-radius: 14px;
+  padding: 3px 10px; font-size: 0.78em; display: inline-flex; align-items: center; gap: 4px;
+}
+.cc-chip-x { background: none; border: none; color: var(--text-muted, #888); cursor: pointer; font-size: 1em; padding: 0; }
+.cc-chip-clear { background: none; border: none; color: var(--accent, #6366f1); cursor: pointer; font-size: 0.78em; text-decoration: underline; }
+
+.cc-bar-clickable { cursor: pointer; border-radius: 6px; }
+.cc-bar-clickable:hover { background: var(--bg-secondary, #1c1c1c); }
+.cc-bar-active { background: rgba(99,102,241,0.12); }
+
+.cc-pair-row { display: grid; grid-template-columns: 120px 1fr auto; gap: 10px; align-items: center; padding: 4px 0; }
+.cc-pair-tracks { display: flex; flex-direction: column; gap: 2px; }
+.cc-pair-prev { opacity: 0.6; }
+
+.cc-table-wrap { overflow-x: auto; }
+.cc-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+.cc-table th { text-align: left; font-weight: 600; color: var(--text-muted, #888); padding: 6px 10px; border-bottom: 1px solid var(--border, #2a2a2a); white-space: nowrap; }
+.cc-table td { padding: 6px 10px; border-bottom: 1px solid var(--border, #232323); }
+.cc-table td.cc-num, .cc-table th:nth-child(4), .cc-table th:nth-child(5) { text-align: right; font-variant-numeric: tabular-nums; }
+.cc-table-row { cursor: pointer; }
+.cc-table-row:hover { background: var(--bg-secondary, #1c1c1c); }
+
+.cc-export-bar { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.cc-export-link { font-size: 0.8em; color: var(--accent, #6366f1); text-decoration: none; }
+.cc-export-link:hover { text-decoration: underline; }
+
+/* Universal drawer (desktop: side column; mobile: full-screen overlay) */
+.cc-drawer { width: 0; overflow: hidden; transition: width 0.15s ease; }
+.cc-drawer.cc-drawer-open { width: 340px; flex: none; border-left: 1px solid var(--border, #2a2a2a); padding-left: 20px; }
+.cc-drawer-header { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+.cc-drawer-close { background: none; border: 1px solid var(--border, #333); border-radius: 6px; color: var(--text, #ddd); cursor: pointer; padding: 4px 10px; font-size: 0.8em; }
+.cc-drawer-title { font-size: 1.1em; font-weight: 700; margin-bottom: 12px; }
+.cc-drawer-section-title { font-size: 0.72em; font-weight: 600; letter-spacing: 0.04em; color: var(--text-muted, #888); margin: 16px 0 8px; }
+.cc-drawer-kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 0.85em; }
+.cc-drawer-kv div:nth-child(odd) { color: var(--text-muted, #888); }
+.cc-drawer-row { display: flex; justify-content: space-between; font-size: 0.82em; padding: 3px 0; }
+.cc-evidence { font-size: 0.75em; background: var(--bg-secondary, #1a1a1a); padding: 8px; border-radius: 6px; overflow-x: auto; }
+
+@media (max-width: 900px) {
+  .cc-body-row { flex-direction: column; }
+  .cc-drawer.cc-drawer-open {
+    width: auto; border-left: none; padding-left: 0; position: fixed; inset: auto 0 0 0; max-height: 80vh;
+    overflow-y: auto; background: var(--bg, #111); border-top: 1px solid var(--border, #333); padding: 16px; z-index: 50;
+  }
+}
+
 @media (max-width: 768px) {
   .cc-hero-row { gap: 16px; }
   .cc-hero-value { font-size: 1.3em; }
   .cc-bar-label { display: none; }
   .cc-bar-row { grid-template-columns: 1fr auto; }
+  .cc-pair-row { grid-template-columns: 1fr auto; }
 }

@@ -38,8 +38,14 @@ window.Costops = window.Costops || {}
   window.Costops.Api = {
     summary: (month) => getJson('/api/costs/summary' + qs({ month })),
     period: (months, month) => getJson('/api/costs/period' + qs({ months, month })),
-    alerts: (status) => getJson('/api/costs/alerts' + qs({ status: status || 'active' })),
-    recommendations: (status) => getJson('/api/costs/recommendations' + qs({ status: status || 'open' })),
+    alerts: (status) => getJson('/api/costs/alerts' + qs({ status: status || 'all' })),
+    recommendations: (status) => getJson('/api/costs/recommendations' + qs({ status: status || 'all' })),
+    sourceInventory: () => getJson('/api/costs/source-inventory'),
+    reconciliation: (month) => getJson('/api/costs/reconciliation' + qs({ month })),
+    budgets: (month) => getJson('/api/costs/budgets' + qs({ month })),
+    forecastSnapshots: (month) => getJson('/api/costs/forecast-snapshots' + qs({ month })),
+    invoices: (sourceId, month) => getJson('/api/costs/invoices' + qs({ source_id: sourceId, month })),
+    exportUrl: (kind, params) => '/api/costs/export/' + kind + qs(Object.assign({ format: 'csv' }, params)),
     invalidateAll,
   }
 })()

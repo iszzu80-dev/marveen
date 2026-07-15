@@ -13,7 +13,7 @@ window.Costops = window.Costops || {}
 
   function confidenceColorClass(key) {
     const k = String(key || '').toLowerCase()
-    if (k.includes('actual') || k === 'measured' || k === 'high') return 'cc-ok'
+    if (k.includes('actual') || k === 'provider_api' || k === 'measured' || k === 'high') return 'cc-ok'
     if (k.includes('manual')) return 'cc-neutral'
     if (k.includes('estimate') || k === 'medium') return 'cc-warn'
     if (k.includes('stale') || k.includes('no_api') || k === 'low') return 'cc-over'
@@ -67,7 +67,7 @@ window.Costops = window.Costops || {}
     return top.map((a) => {
       const d = describeAlert(a)
       return `
-        <div class="cc-attn-row cc-sev-${esc(a.severity)}">
+        <div class="cc-attn-row cc-sev-${esc(a.severity)} cc-bar-clickable" data-drawer-type="alert" data-drawer-id="${esc(a.dedup_key)}" tabindex="0" role="button">
           <div class="cc-attn-sev">${esc(a.severity)}</div>
           <div class="cc-attn-body">
             <div class="cc-attn-title">${d.title}</div>
@@ -85,7 +85,7 @@ window.Costops = window.Costops || {}
     return `
       <div class="cc-savings-total">${fmtHuf(total)}/hó</div>
       ${top.map((r) => `
-        <div class="cc-savings-row">
+        <div class="cc-savings-row cc-bar-clickable" data-drawer-type="recommendation" data-drawer-id="${esc(r.dedup_key)}" tabindex="0" role="button">
           <div class="cc-savings-label">${esc(r.type.replace(/_/g, ' '))}</div>
           <div class="cc-savings-value">${fmtHuf(r.estimated_monthly_saving)}/hó</div>
         </div>`).join('')}`
@@ -173,6 +173,10 @@ window.Costops = window.Costops || {}
         <div class="cc-section-title">TOP MEGTAKARÍTÁSI LEHETŐSÉG</div>
         ${renderSavings(recommendations.recommendations || [])}
       </div>`
+
+    root.querySelectorAll('[data-drawer-type]').forEach((el) => {
+      el.addEventListener('click', () => window.Costops.State.openDrawer(el.dataset.drawerType, el.dataset.drawerId))
+    })
   }
 
   window.Costops.Overview = { render }

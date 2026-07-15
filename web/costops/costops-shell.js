@@ -35,12 +35,15 @@ window.Costops = window.Costops || {}
             ${months.map((m) => `<option value="${m}">${m}</option>`).join('')}
           </select>
         </div>
-        <div class="cc-view" id="ccViewBody"></div>
+        <div class="cc-body-row">
+          <div class="cc-view" id="ccViewBody"></div>
+          <div class="cc-drawer" id="ccDrawer"></div>
+        </div>
       </div>`
   }
 
   function renderPlaceholder(root, label) {
-    root.innerHTML = `<div class="cc-muted" style="padding:32px 0;">${label} -- fejlesztés alatt (UI-2/UI-3).</div>`
+    root.innerHTML = `<div class="cc-muted" style="padding:32px 0;">${label} -- fejlesztés alatt (UI-3).</div>`
   }
 
   function renderActiveTab() {
@@ -49,10 +52,12 @@ window.Costops = window.Costops || {}
     const monthSelect = document.getElementById('ccMonthSelect')
     if (monthSelect) monthSelect.value = state.month || recentMonths(1)[0]
     const body = document.getElementById('ccViewBody')
+    const drawer = document.getElementById('ccDrawer')
     if (!body) return
     if (state.view === 'overview') window.Costops.Overview.render(body, state.month)
-    else if (state.view === 'analyze') renderPlaceholder(body, 'Elemzés')
+    else if (state.view === 'analyze') window.Costops.Analysis.render(body, state.month)
     else if (state.view === 'close') renderPlaceholder(body, 'Havi zárás')
+    if (drawer) window.Costops.Drawer.render(drawer, state.month)
   }
 
   function wireEvents(root) {
