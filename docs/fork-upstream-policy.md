@@ -43,6 +43,19 @@ This is the answer to "if we decide not to upstream something, how does it stay 
 3. **Keep the seam list SHORT and stable** (target: < 5 files, a few lines each). That thin list is the *only* thing you ever re-resolve on a pull, and it is trivial.
 4. Optional: keep local-private work on a long-lived branch that **only adds files** on top of upstream; forward-integrating upstream is then conflict-free except for the marked seams.
 
+### 2a. Concrete seam pattern for THIS upstream (no plugin/registry) — 2026-07-15
+
+Szotasz/marveen has **no route registry and no migration registry**: routes are hand-wired in `src/web.ts` (import + `tryHandleX()` in a dispatch chain), tables are inline `db.exec(CREATE TABLE ...)` in `src/db.ts`. So every table/route a local feature adds to those files is a future conflict line. **Hard constraint for a local feature: touch upstream-owned files ONLY through a fixed, minimal set of thin seams — target ~3:**
+1. **Schema** — ONE `initCostOpsSchema(db)` call in `db.ts`; ALL the feature's `CREATE TABLE`s live in `src/costops/schema.ts`. (Not N scattered `db.exec` lines in db.ts.)
+2. **Routes** — ONE `tryHandleCostOps(req,res)` mount in web.ts's chain; all route logic in the feature's own module. (Not inline edits to a shared route file.)
+3. **Background tasks / boot** — ONE `startCostOpsBackgroundTasks()` call in web.ts boot.
+
+Everything else lives in `src/costops/*`, which upstream never touches → zero conflict. Mark each seam with `// LOCAL-FORK: costops seam (keep on rebase)`. **Measurement:** a `git diff <upstream>` of upstream-owned files should show ≤ those seam lines. If a feature (e.g. Phase 0 as first built) edited db.ts/web.ts/costs.ts inline, refactor those wire-ins into the seams BEFORE building more on top.
+
+**Bigger optional play:** propose a tiny generic "feature-module registry" to upstream (web.ts iterates a registered list of `tryHandle*` + a migration list) so local features self-register with ZERO seams. Upstreamable, benefits everyone, permanently removes the conflict surface. Worth it once several local features exist.
+
+**Updatability guard (per gap-analysis GAP-21):** a periodic dry-run merge of latest upstream that asserts conflicts appear ONLY in the known seam files — catches drift early.
+
 ## 2b. Squash-merge ancestry hygiene
 
 Half of the v1.22.0 pain was our **own** upstreamed code coming back as a false conflict. Cause: when
