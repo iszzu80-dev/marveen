@@ -63,4 +63,16 @@ describe('startCostOpsBackgroundTasks (boot seam, docs/fork-upstream-policy.md Â
       clearInterval(handle)
     }
   })
+
+  it('the same single call also captures a Phase 1 forecast snapshot (TOTAL row, no sources yet)', async () => {
+    const { listForecastSnapshots } = await import('../costops/forecast-capture.js')
+    const handle = startCostOpsBackgroundTasks()
+    try {
+      const stored = listForecastSnapshots(getDb())
+      expect(stored.length).toBeGreaterThan(0)
+      expect(stored.some(s => s.source_id === null)).toBe(true) // whole-deployment TOTAL row
+    } finally {
+      clearInterval(handle)
+    }
+  })
 })

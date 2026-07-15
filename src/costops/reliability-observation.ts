@@ -11,6 +11,7 @@ import type Database from 'better-sqlite3'
 import { getDb } from '../db.js'
 import { loadCostopsConfig, type CostOpsConfig } from './config.js'
 import { buildSourceInventory, type SourceInventoryEntry, type CredentialChecker } from './inventory.js'
+import { captureForecastSnapshots } from './forecast-capture.js'
 import { logger } from '../logger.js'
 
 const SNAPSHOT_INTERVAL_MS = 24 * 60 * 60 * 1000
@@ -55,20 +56,29 @@ export function getLatestReliabilitySnapshot(db: Database.Database): Reliability
 }
 
 function captureNowSafely(): void {
+  const now = Math.floor(Date.now() / 1000)
   try {
     const { config } = loadCostopsConfig()
-    captureReliabilitySnapshot(getDb(), config, Math.floor(Date.now() / 1000))
+    captureReliabilitySnapshot(getDb(), config, now)
   } catch (err) {
     logger.warn({ err }, 'CostOps reliability snapshot capture failed')
+  }
+  // Phase 1 (GAP-10): forecast snapshots, same daily cadence. Independent
+  // try/catch so a failure in one capture never blocks the other.
+  try {
+    captureForecastSnapshots(getDb(), now)
+  } catch (err) {
+    logger.warn({ err }, 'CostOps forecast snapshot capture failed')
   }
 }
 
 /**
  * Boot-time seam entry point (docs/fork-upstream-policy.md §2a): the ONE
- * call web.ts makes for every CostOps background task, present and future.
- * Captures a reliability snapshot immediately, then every 24h. Returns the
- * interval handle so the caller can clearInterval it on shutdown, matching
- * every other start*Runner()/start*Monitor() in this codebase (e.g.
+ * call web.ts makes for every CostOps background task, present and future
+ * (currently: reliability-observation snapshots + Phase 1 forecast
+ * snapshots). Captures immediately, then every 24h. Returns the interval
+ * handle so the caller can clearInterval it on shutdown, matching every
+ * other start*Runner()/start*Monitor() in this codebase (e.g.
  * startAutoRestartRunner).
  */
 export function startCostOpsBackgroundTasks(): NodeJS.Timeout {

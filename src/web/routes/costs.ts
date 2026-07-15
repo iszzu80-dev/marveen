@@ -19,6 +19,7 @@ import { getTokenCostByAgent } from '../../costops/pricing.js'
 import { getLimitStatus, getLiveCheckWarnings } from '../../costops/limits.js'
 import { buildSourceInventory } from '../../costops/inventory.js'
 import { captureReliabilitySnapshot, listReliabilitySnapshots, getLatestReliabilitySnapshot } from '../../costops/reliability-observation.js'
+import { listForecastSnapshots } from '../../costops/forecast-capture.js'
 import type { RouteContext } from './types.js'
 
 export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
@@ -159,6 +160,20 @@ export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
     } catch (err) {
       logger.error({ err }, 'CostOps reliability-snapshots list failed')
       json(res, { error: 'Reliability snapshots list failed' }, 500)
+    }
+    return true
+  }
+
+  // Phase 1 (GAP-10): forecast snapshots -- Anvil's forecast.ts computation +
+  // Mason's forecast-capture.ts orchestration. ?month=YYYY-MM filters; default
+  // returns the most recent 200 rows across all months.
+  if (path === '/api/costs/forecast-snapshots' && method === 'GET') {
+    try {
+      const month = url.searchParams.get('month') || undefined
+      json(res, { snapshots: listForecastSnapshots(getDb(), { month }) })
+    } catch (err) {
+      logger.error({ err }, 'CostOps forecast-snapshots list failed')
+      json(res, { error: 'Forecast snapshots list failed' }, 500)
     }
     return true
   }

@@ -9,6 +9,7 @@
 // safe no-op, exactly like the individual statements were before the move.
 
 import type Database from 'better-sqlite3'
+import { initForecastSchema } from './forecast.js'
 
 export function initCostOpsSchema(db: Database.Database): void {
   // CostOps v0.2: model/provider enrichment on the CORE token_usage table
@@ -83,6 +84,10 @@ export function initCostOpsSchema(db: Database.Database): void {
   // that aggregates cost_line_items must filter `voided_at IS NULL`.
   try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN voided_at INTEGER`) } catch { /* already exists */ }
   try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN void_reason TEXT`) } catch { /* already exists */ }
+  // Phase 1 (GAP-10, Anvil's forecast.ts): forecast_snapshots.source_id
+  // references cost_sources(id) -- must run after that table exists, which it
+  // already does at this point in initCostOpsSchema.
+  initForecastSchema(db)
   db.exec(`
     CREATE TABLE IF NOT EXISTS budgets (
       id TEXT PRIMARY KEY,

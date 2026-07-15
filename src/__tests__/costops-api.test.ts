@@ -92,4 +92,21 @@ describe('costops API (route smoke)', () => {
     expect(await tryHandleCostOps(latestCtx)).toBe(true)
     expect(Array.isArray(latestOut.body.inventory)).toBe(true)
   })
+
+  // Phase 1 (GAP-10): forecast snapshots route.
+  it('GET /api/costs/forecast-snapshots returns an empty list before any capture, populated after', async () => {
+    const { ctx: emptyCtx, out: emptyOut } = fakeCtx('/api/costs/forecast-snapshots')
+    expect(await tryHandleCostOps(emptyCtx)).toBe(true)
+    expect(emptyOut.body.snapshots).toEqual([])
+
+    const { captureForecastSnapshots } = await import('../costops/forecast-capture.js')
+    getDb().prepare(`INSERT INTO cost_sources (id, name, provider, source_type, currency, active, created_at, updated_at) VALUES ('domain','Domain','other','domain','HUF',1,1,1)`).run()
+    captureForecastSnapshots(getDb(), Math.floor(Date.now() / 1000))
+
+    const { ctx, out } = fakeCtx('/api/costs/forecast-snapshots')
+    expect(await tryHandleCostOps(ctx)).toBe(true)
+    expect(out.body.snapshots.length).toBeGreaterThan(0)
+    expect(out.body.snapshots[0]).toHaveProperty('method')
+    expect(out.body.snapshots[0]).toHaveProperty('confidence')
+  })
 })
