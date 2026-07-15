@@ -63,18 +63,18 @@ window.Costops = window.Costops || {}
     if (!rows || !rows.length) return '<div class="cc-muted">Nincs reconciliation adat.</div>'
     const trs = rows.map((r) => `
       <tr>
-        <td>${esc(r.name || r.source_id)}</td>
-        <td class="cc-num">${r.expected_amount != null ? fmtHuf(r.expected_amount) : '–'}</td>
-        <td class="cc-num">${r.invoice?.net_amount != null ? fmtHuf(r.invoice.net_amount) : r.invoice_amount != null ? fmtHuf(r.invoice_amount) : '–'}</td>
-        <td class="cc-num">${r.observed_provider_amount != null ? fmtHuf(r.observed_provider_amount) : '–'}</td>
-        <td class="cc-num">${r.variance != null ? fmtHuf(r.variance) : '–'}</td>
-        <td><span class="cc-status-badge cc-status-${esc(r.status)}">${esc(r.status.replace(/_/g, ' '))}</span></td>
+        <td data-label="Source">${esc(r.name || r.source_id)}</td>
+        <td class="cc-num" data-label="Ledger">${r.expected_amount != null ? fmtHuf(r.expected_amount) : '–'}</td>
+        <td class="cc-num" data-label="Invoice">${r.invoice?.net_amount != null ? fmtHuf(r.invoice.net_amount) : r.invoice_amount != null ? fmtHuf(r.invoice_amount) : '–'}</td>
+        <td class="cc-num" data-label="Provider">${r.observed_provider_amount != null ? fmtHuf(r.observed_provider_amount) : '–'}</td>
+        <td class="cc-num" data-label="Delta">${r.variance != null ? fmtHuf(r.variance) : '–'}</td>
+        <td data-label="Status"><span class="cc-status-badge cc-status-${esc(r.status)}">${esc(r.status.replace(/_/g, ' '))}</span></td>
       </tr>`).join('')
     return `<table class="cc-table"><thead><tr><th>Source</th><th>Ledger</th><th>Invoice</th><th>Provider</th><th>Delta</th><th>Status</th></tr></thead><tbody>${trs}</tbody></table>`
   }
 
   function summaryHtml(summary, label) {
-    if (!summary) return ''
+    if (!summary) return '<div class="cc-muted">Az élő összefoglaló jelenleg nem elérhető.</div>'
     return `
       <div class="cc-close-summary">
         <div class="cc-close-summary-title">${esc(label)}</div>
@@ -146,17 +146,21 @@ window.Costops = window.Costops || {}
   async function render(root, month) {
     root.innerHTML = '<div class="cc-loading">Betöltés...</div>'
     const resolvedMonth = resolveMonth(month)
+    // Only period-close is critical (the whole view is built around its status/readiness) --
+    // invoice-reconciliation and summary degrade to an empty/partial state on their own failure
+    // instead of blanking the entire view, matching the same partial-load convention Overview
+    // and Analysis already use for their own non-critical fetches.
     let periodClose, invRecon, summary
     try {
-      [periodClose, invRecon, summary] = await Promise.all([
-        window.Costops.Api.periodClose(resolvedMonth),
-        window.Costops.Api.invoiceReconciliation(resolvedMonth),
-        window.Costops.Api.summary(month),
-      ])
+      periodClose = await window.Costops.Api.periodClose(resolvedMonth)
     } catch (e) {
       root.innerHTML = `<div class="cc-error">Betöltés sikertelen: ${esc(e.message)}</div>`
       return
     }
+    ;[invRecon, summary] = await Promise.all([
+      window.Costops.Api.invoiceReconciliation(resolvedMonth).catch(() => ({ reconciliation: [] })),
+      window.Costops.Api.summary(month).catch(() => null),
+    ])
 
     const okCount = Object.values(periodClose.readiness.checks).filter((c) => c.ok).length
     const totalChecks = Object.keys(periodClose.readiness.checks).length

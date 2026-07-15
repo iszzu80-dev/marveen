@@ -39,6 +39,7 @@ window.Costops = window.Costops || {}
           <div class="cc-view" id="ccViewBody"></div>
           <div class="cc-drawer" id="ccDrawer"></div>
         </div>
+        <div class="cc-drawer-backdrop" id="ccDrawerBackdrop"></div>
       </div>`
   }
 
@@ -49,11 +50,27 @@ window.Costops = window.Costops || {}
     if (monthSelect) monthSelect.value = state.month || recentMonths(1)[0]
     const body = document.getElementById('ccViewBody')
     const drawer = document.getElementById('ccDrawer')
+    const backdrop = document.getElementById('ccDrawerBackdrop')
     if (!body) return
     if (state.view === 'overview') window.Costops.Overview.render(body, state.month)
     else if (state.view === 'analyze') window.Costops.Analysis.render(body, state.month)
     else if (state.view === 'close') window.Costops.Close.render(body, state.month)
     if (drawer) window.Costops.Drawer.render(drawer, state.month)
+    if (backdrop) backdrop.classList.toggle('cc-drawer-backdrop-open', !!state.drawer)
+  }
+
+  // Keyboard operability for the string-templated role="button" rows (bar/table/attention/
+  // savings) -- a plain <div tabindex="0" role="button"> is focusable but, unlike a real
+  // <button>, does NOT activate on Enter/Space by default. One delegated listener covers every
+  // such row across all views instead of duplicating the same handler at each render site.
+  function wireKeyboardActivation(root) {
+    root.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return
+      const el = e.target.closest('[role="button"]')
+      if (!el || !root.contains(el)) return
+      e.preventDefault()
+      el.click()
+    })
   }
 
   function wireEvents(root) {
@@ -62,6 +79,11 @@ window.Costops = window.Costops || {}
     })
     const monthSelect = root.querySelector('#ccMonthSelect')
     if (monthSelect) monthSelect.addEventListener('change', () => window.Costops.State.setMonth(monthSelect.value))
+    root.querySelector('#ccDrawerBackdrop')?.addEventListener('click', () => window.Costops.State.closeDrawer())
+    wireKeyboardActivation(root)
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && window.Costops.State.get().drawer) window.Costops.State.closeDrawer()
+    })
   }
 
   function mount() {

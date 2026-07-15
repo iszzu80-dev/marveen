@@ -126,10 +126,10 @@ window.Costops = window.Costops || {}
     if (!snapshots || !snapshots.length) return '<div class="cc-muted">Nincs forecast-snapshot ehhez a hónaphoz.</div>'
     const rows = snapshots.slice(0, 20).map((s) => `
       <tr>
-        <td>${esc(s.source_id)}</td><td>${esc(s.method)}</td>
-        <td class="cc-num">${fmtHuf(s.forecast_amount)}</td>
-        <td class="cc-num">${s.actual_amount != null ? fmtHuf(s.actual_amount) : '–'}</td>
-        <td class="cc-num">${s.forecast_error_percent != null ? Math.round(s.forecast_error_percent) + '%' : '–'}</td>
+        <td data-label="Forrás">${esc(s.source_id)}</td><td data-label="Módszer">${esc(s.method)}</td>
+        <td class="cc-num" data-label="Forecast">${fmtHuf(s.forecast_amount)}</td>
+        <td class="cc-num" data-label="Actual">${s.actual_amount != null ? fmtHuf(s.actual_amount) : '–'}</td>
+        <td class="cc-num" data-label="Hiba %">${s.forecast_error_percent != null ? Math.round(s.forecast_error_percent) + '%' : '–'}</td>
       </tr>`).join('')
     return `<table class="cc-table"><thead><tr><th>Forrás</th><th>Módszer</th><th>Forecast</th><th>Actual</th><th>Hiba %</th></tr></thead><tbody>${rows}</tbody></table>`
   }
@@ -142,14 +142,14 @@ window.Costops = window.Costops || {}
       const rec = reconciliationBySourceId.get(s.source_id)
       return `
         <tr class="cc-table-row" data-source-id="${esc(s.source_id)}" tabindex="0" role="button">
-          <td>${esc(s.name || s.source_id)}</td>
-          <td>${esc(s.provider)}</td>
-          <td>${esc(humanize(s.source_type))}</td>
-          <td class="cc-num">${fmtHuf(s.spend)}</td>
-          <td class="cc-num">${s.forecast_month_end != null ? fmtHuf(s.forecast_month_end) : '–'}</td>
-          <td>${esc(humanize(s.confidence))}</td>
-          <td>${inv ? esc(inv.freshness) : '–'}</td>
-          <td>${rec ? esc(rec.status) : '–'}</td>
+          <td data-label="Forrás">${esc(s.name || s.source_id)}</td>
+          <td data-label="Provider">${esc(s.provider)}</td>
+          <td data-label="Típus">${esc(humanize(s.source_type))}</td>
+          <td class="cc-num" data-label="Költés">${fmtHuf(s.spend)}</td>
+          <td class="cc-num" data-label="Forecast">${s.forecast_month_end != null ? fmtHuf(s.forecast_month_end) : '–'}</td>
+          <td data-label="Provenance">${esc(humanize(s.confidence))}</td>
+          <td data-label="Freshness">${inv ? `<span class="${inv.freshness === 'stale' ? 'cc-stale-flag' : ''}">${esc(inv.freshness)}</span>` : '–'}</td>
+          <td data-label="Reconciliation">${rec ? esc(rec.status) : '–'}</td>
         </tr>`
     }).join('')
     return `
