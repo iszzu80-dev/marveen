@@ -23,10 +23,12 @@ Everything below follows from that one fact:
 
 | Type | What it is | Where it goes |
 | --- | --- | --- |
-| **Upstream-bound** | Generic fixes/features useful to everyone (fleet/infra fixes, bug fixes, general capability) | A small, focused **PR to upstream** `Szotasz/marveen` develop. Once merged, it returns to us on the next pull with **zero conflict** and shrinks our local delta. |
-| **Local-private** | Istvan-specific product code upstream would not accept (e.g. CostOps) | Stays in the fork, **structured so it never needs rebasing** (section 2). |
+| **Upstream-bound** | Anything generic AND secret-free: fleet/infra fixes, bug fixes, general capability, **and features upstream has already accepted** | A small, focused **PR to upstream** `Szotasz/marveen` develop. Once merged, it returns to us with **zero conflict** (if squash-hygiene, section 2b, is followed) and shrinks our local delta. **Finish upstreaming it — do not keep building a rich local-only copy.** |
+| **Local-private** | Genuinely Istvan-specific code upstream would not accept, or that must not leave the host | Stays in the fork, **structured so it never needs rebasing** (section 2). |
 
 Default bias: if a change is even plausibly generic, upstream it. The smaller the local delta, the cheaper every future sync.
+
+**Classification is about the CODE, not the data.** A feature whose *code* is secret-free is upstream-bound even if it operates on private data, as long as the private data lives in a **gitignored local config** (which never conflicts). Worked example: **CostOps is upstream-bound, not local-private** — its base already landed upstream (#524), and its real amounts/account refs live in a gitignored config. The correct path is to **finish upstreaming CostOps** (collector framework, dashboard as follow-up PRs) so it stops being a divergence at all — NOT to maintain a rich fork copy and reconcile keep-ours on every pull. We mis-classified it once; the 2026-07 v1.22.0 pain was the result.
 
 ## 2. How local-private code stays separate WITHOUT perpetual rebasing
 
@@ -40,6 +42,24 @@ This is the answer to "if we decide not to upstream something, how does it stay 
      `// LOCAL-FORK: <feature> mount (re-apply on rebase)`.
 3. **Keep the seam list SHORT and stable** (target: < 5 files, a few lines each). That thin list is the *only* thing you ever re-resolve on a pull, and it is trivial.
 4. Optional: keep local-private work on a long-lived branch that **only adds files** on top of upstream; forward-integrating upstream is then conflict-free except for the marked seams.
+
+## 2b. Squash-merge ancestry hygiene
+
+Half of the v1.22.0 pain was our **own** upstreamed code coming back as a false conflict. Cause: when
+our PR is **squash-merged** upstream (GitHub's default), the merged commit gets a **new SHA unrelated**
+to our local commits. Our local branch still holds the pre-squash originals, so the next upstream pull
+sees the squashed version as unrelated content and reports a conflict against code that is really ours.
+
+Rules:
+
+1. **After a PR of ours is squash-merged upstream, immediately realign local.** Drop our local
+   pre-squash commits for that feature and continue from the upstreamed commit (rebase/reset onto it),
+   so our local history and upstream share a real ancestor again.
+2. Prefer **not squashing our own PRs** where the project allows a merge commit — that preserves ancestry
+   and avoids the problem entirely.
+3. When a pull conflicts, **check `git show -s --format='%an' <commit>` on the upstream driver first.**
+   If the author is `iszzu80-dev` (us), it is almost certainly our own returning code → resolve **take-ours**,
+   do not treat it as a third-party reconciliation.
 
 ## 3. Sync cadence (the real fix)
 
