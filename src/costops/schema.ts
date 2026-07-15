@@ -126,6 +126,16 @@ export function initCostOpsSchema(db: Database.Database): void {
   // v0.5: sanitized per-run detail (service_count, plan breakdown, not_covered) as JSON.
   // NO raw service/account IDs -- the breakdown carries only type/plan labels + counts.
   try { db.exec(`ALTER TABLE import_runs ADD COLUMN detail_json TEXT`) } catch { /* already exists */ }
+  // Phase 1 (GAP-07): per-provider import lock, so two concurrent syncs of the
+  // same provider (e.g. a manual "sync now" racing the scheduled one) never
+  // race each other's upserts. See collectors/import-durability.ts.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS import_locks (
+      provider TEXT PRIMARY KEY,
+      locked_at INTEGER NOT NULL,
+      lock_token TEXT NOT NULL
+    )
+  `)
   // CostOps: provider prepaid-balance snapshots. For prepaid providers (e.g.
   // DeepSeek) that expose remaining balance but not per-period cost, MTD spend
   // is derived from the balance DROP across snapshots. No secret, no raw id.

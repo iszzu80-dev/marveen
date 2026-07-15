@@ -8,6 +8,7 @@
 
 import type Database from 'better-sqlite3'
 import type { ProviderCollector, CollectOpts, NormalizedCostLine, ImportRunResult, ImportStatus, ShapeNode, DryRunReport } from './types.js'
+import { buildDbImportLockContext, withImportLock } from './import-durability.js'
 
 /** Redact anything that looks like a key/token before it can reach a log/DB. */
 export function sanitizeError(err: unknown): { code: string; message: string } {
@@ -165,6 +166,12 @@ export async function dryRunCollector(args: DryRunArgs): Promise<DryRunReport> {
  * Run a collector end to end and record an import_runs row. Never throws on a
  * collector error -- it records a sanitized failure and imports nothing. Returns
  * the run result (also secret-free).
+ *
+ * Phase 1 (GAP-07): wrapped in a per-provider import lock -- a concurrent
+ * call for the SAME provider (e.g. a manual "sync now" racing the scheduled
+ * one) never runs; it records a 'locked' row and returns immediately,
+ * touching no data. Different providers never block each other (the lock is
+ * per-provider, not global).
  */
 export async function runCollector(args: RunCollectorArgs): Promise<ImportRunResult> {
   const { db, collector, opts, now } = args
@@ -174,22 +181,41 @@ export async function runCollector(args: RunCollectorArgs): Promise<ImportRunRes
     VALUES (@provider, @collector, @started, @finished, @status,
       @ps, @pe, @count, @ecode, @emsg, @fresh, @detail)
   `)
-  let status: ImportStatus = 'ok'
-  let importedCount = 0
-  let errorCode: string | null = null
-  let errorMsg: string | null = null
-  let freshness: number | null = null
-  try {
-    const lines = await collector.collect(opts)
-    importedCount = upsertProviderLines(db, lines, now)
-    freshness = lines.reduce((m, l) => Math.max(m, l.data_freshness_at), 0) || now
-  } catch (err) {
-    status = 'error'
-    const s = sanitizeError(err)
-    errorCode = s.code
-    errorMsg = s.message
-    // IMPORTANT: delete nothing. Last good data stays.
+
+  const lockResult = await withImportLock(buildDbImportLockContext(db), collector.provider, now, async () => {
+    let status: ImportStatus = 'ok'
+    let importedCount = 0
+    let errorCode: string | null = null
+    let errorMsg: string | null = null
+    let freshness: number | null = null
+    try {
+      const lines = await collector.collect(opts)
+      importedCount = upsertProviderLines(db, lines, now)
+      freshness = lines.reduce((m, l) => Math.max(m, l.data_freshness_at), 0) || now
+    } catch (err) {
+      status = 'error'
+      const s = sanitizeError(err)
+      errorCode = s.code
+      errorMsg = s.message
+      // IMPORTANT: delete nothing. Last good data stays.
+    }
+    return { status, importedCount, errorCode, errorMsg, freshness }
+  })
+
+  if (!lockResult.ok) {
+    insertRun.run({
+      provider: collector.provider, collector: collector.collectorName,
+      started: now, finished: now, status: 'locked' as ImportStatus,
+      ps: opts.periodStart, pe: opts.periodEnd, count: 0,
+      ecode: null, emsg: 'a concurrent sync for this provider was already running', fresh: null, detail: null,
+    })
+    return {
+      provider: collector.provider, collectorName: collector.collectorName,
+      status: 'locked', importedCount: 0, errorCode: null, errorMessageSanitized: 'a concurrent sync for this provider was already running', dataFreshnessAt: null,
+    }
   }
+
+  const { status, importedCount, errorCode, errorMsg, freshness } = lockResult.result
   insertRun.run({
     provider: collector.provider, collector: collector.collectorName,
     started: now, finished: now, status,

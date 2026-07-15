@@ -48,7 +48,10 @@ export interface ProviderCollector {
 }
 
 // 'dry_run' marks a preview run that imported NOTHING (imported_count always 0).
-export type ImportStatus = 'ok' | 'partial' | 'rate_limited' | 'error' | 'dry_run'
+// Phase 1 (GAP-07): 'locked' added -- a concurrent run for the same provider
+// was already in flight, so this run skipped entirely without touching any
+// data (see import-durability.ts's withImportLock).
+export type ImportStatus = 'ok' | 'partial' | 'rate_limited' | 'error' | 'dry_run' | 'locked'
 
 // A sanitized description of a value's STRUCTURE -- types, object keys, and
 // array lengths ONLY. It carries NO scalar values, so no secret, account id,
