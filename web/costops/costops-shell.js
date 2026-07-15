@@ -42,10 +42,6 @@ window.Costops = window.Costops || {}
       </div>`
   }
 
-  function renderPlaceholder(root, label) {
-    root.innerHTML = `<div class="cc-muted" style="padding:32px 0;">${label} -- fejlesztés alatt (UI-3).</div>`
-  }
-
   function renderActiveTab() {
     const state = window.Costops.State.get()
     document.querySelectorAll('.cc-tab').forEach((btn) => btn.classList.toggle('active', btn.dataset.view === state.view))
@@ -56,7 +52,7 @@ window.Costops = window.Costops || {}
     if (!body) return
     if (state.view === 'overview') window.Costops.Overview.render(body, state.month)
     else if (state.view === 'analyze') window.Costops.Analysis.render(body, state.month)
-    else if (state.view === 'close') renderPlaceholder(body, 'Havi zárás')
+    else if (state.view === 'close') window.Costops.Close.render(body, state.month)
     if (drawer) window.Costops.Drawer.render(drawer, state.month)
   }
 

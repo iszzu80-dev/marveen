@@ -135,7 +135,7 @@ export async function tryHandleStatic(ctx: RouteContext, webDir: string): Promis
     const COSTOPS_FILES = new Set([
       'costops-state.js', 'costops-api.js', 'costops-charts.js',
       'costops-shell.js', 'costops-overview.js', 'costops-analysis.js',
-      'costops-drawer.js', 'costops.css',
+      'costops-drawer.js', 'costops-close.js', 'costops.css',
     ])
     if (COSTOPS_FILES.has(costopsFile)) {
       serveFile(req, res, join(webDir, 'costops', costopsFile))

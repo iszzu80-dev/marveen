@@ -25,6 +25,16 @@ window.Costops = window.Costops || {}
 
   function invalidateAll() { cache.clear() }
 
+  // POSTs are never cached, and always clear the read cache afterward -- a close/reopen changes
+  // period-close status, the readiness checklist, and (on close) freezes a snapshot, all of which
+  // would otherwise serve stale cached GETs for up to CACHE_TTL_MS.
+  async function postJson(url, body) {
+    const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const json = await res.json().catch(() => ({}))
+    invalidateAll()
+    return { ok: res.ok, status: res.status, body: json }
+  }
+
   function qs(params) {
     const sp = new URLSearchParams()
     Object.keys(params || {}).forEach((k) => {
@@ -45,7 +55,12 @@ window.Costops = window.Costops || {}
     budgets: (month) => getJson('/api/costs/budgets' + qs({ month })),
     forecastSnapshots: (month) => getJson('/api/costs/forecast-snapshots' + qs({ month })),
     invoices: (sourceId, month) => getJson('/api/costs/invoices' + qs({ source_id: sourceId, month })),
+    periodClose: (month) => getJson('/api/costs/period-close' + qs({ month })),
+    invoiceReconciliation: (month) => getJson('/api/costs/invoices/reconciliation' + qs({ month })),
+    closePeriod: (month, actor, reason, force) => postJson('/api/costs/period-close/close', { month, actor, reason, force }),
+    reopenPeriod: (month, actor, reason) => postJson('/api/costs/period-close/reopen', { month, actor, reason }),
     exportUrl: (kind, params) => '/api/costs/export/' + kind + qs(Object.assign({ format: 'csv' }, params)),
+    exportUrlJson: (kind, params) => '/api/costs/export/' + kind + qs(params),
     invalidateAll,
   }
 })()

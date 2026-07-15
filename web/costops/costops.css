@@ -130,6 +130,36 @@ main.costs-cc-active { max-width: 1500px; }
 .cc-export-link { font-size: 0.8em; color: var(--accent, #6366f1); text-decoration: none; }
 .cc-export-link:hover { text-decoration: underline; }
 
+/* UI-3: Havi zárás */
+.cc-close-header { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
+.cc-close-month { font-size: 1.3em; font-weight: 700; }
+
+.cc-status-badge { font-size: 0.72em; font-weight: 600; text-transform: uppercase; padding: 3px 10px; border-radius: 6px; letter-spacing: 0.03em; }
+.cc-status-open, .cc-status-provisional { background: rgba(99,102,241,0.15); color: #6366f1; }
+.cc-status-closed { background: rgba(46,204,113,0.15); color: #2ecc71; }
+.cc-status-reopened { background: rgba(245,166,35,0.15); color: #f5a623; }
+.cc-status-matched { background: rgba(46,204,113,0.15); color: #2ecc71; }
+.cc-status-variance { background: rgba(245,166,35,0.15); color: #f5a623; }
+.cc-status-missing_invoice, .cc-status-missing_provider_data { background: rgba(229,72,77,0.15); color: #e5484d; }
+.cc-status-estimate_only, .cc-status-no_data { background: rgba(136,136,136,0.15); color: var(--text-muted, #888); }
+
+.cc-checklist-group { margin-bottom: 12px; }
+.cc-checklist-group-title { font-size: 0.72em; font-weight: 600; color: var(--text-muted, #888); text-transform: uppercase; margin-bottom: 6px; }
+.cc-check-row { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; font-size: 0.88em; }
+.cc-check-icon { width: 16px; text-align: center; font-weight: 700; }
+.cc-check-ok .cc-check-icon { color: #2ecc71; }
+.cc-check-fail .cc-check-icon, .cc-check-fail { color: #f5a623; }
+.cc-check-detail { color: var(--text-muted, #888); font-size: 0.85em; }
+
+.cc-close-summary-title { font-size: 0.8em; font-weight: 600; margin-bottom: 8px; color: var(--text-muted, #888); }
+
+.cc-close-action { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.cc-input {
+  background: var(--bg-secondary, #1a1a1a); color: var(--text, #ddd); border: 1px solid var(--border, #333);
+  border-radius: 6px; padding: 6px 10px; font-size: 0.88em; min-width: 160px;
+}
+.cc-close-blockers { flex-basis: 100%; font-size: 0.85em; }
+
 /* Universal drawer (desktop: side column; mobile: full-screen overlay) */
 .cc-drawer { width: 0; overflow: hidden; transition: width 0.15s ease; }
 .cc-drawer.cc-drawer-open { width: 340px; flex: none; border-left: 1px solid var(--border, #2a2a2a); padding-left: 20px; }
