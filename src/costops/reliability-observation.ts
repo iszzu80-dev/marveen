@@ -13,6 +13,7 @@ import { loadCostopsConfig, type CostOpsConfig } from './config.js'
 import { buildSourceInventory, type SourceInventoryEntry, type CredentialChecker } from './inventory.js'
 import { captureForecastSnapshots } from './forecast-capture.js'
 import { captureAlerts } from './alerts-capture.js'
+import { captureRecommendations } from './optimization-capture.js'
 import { logger } from '../logger.js'
 
 const SNAPSHOT_INTERVAL_MS = 24 * 60 * 60 * 1000
@@ -77,6 +78,12 @@ function captureNowSafely(): void {
     captureAlerts(getDb(), config, now)
   } catch (err) {
     logger.warn({ err }, 'CostOps alerts capture failed')
+  }
+  // Phase 4 (GAP-17): optimization recommendation capture/reconcile, same daily cadence.
+  try {
+    captureRecommendations(getDb(), now)
+  } catch (err) {
+    logger.warn({ err }, 'CostOps optimization recommendation capture failed')
   }
 }
 

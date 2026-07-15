@@ -1,8 +1,18 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import { resolveBudgetStatus, getAllBudgetStatuses, upsertBudget, deleteBudget, getBudgetAuditHistory } from '../costops/budgets.js'
 import { getCostSummary, monthWindow } from '../costops/ledger.js'
 import type { CostOpsConfig } from '../costops/config.js'
+
+// upsertBudget/deleteBudget call the real saveCostopsConfig(), which writes
+// store/costops-config.json on disk -- mocked here so these unit tests never
+// touch that real file (a prior version of this file didn't mock this and
+// left 'a'/'b' budget entries behind in the actual config, which would have
+// shown up as fake budgets on a real dashboard -- flagged by Marveen 2026-07-15).
+vi.mock('../costops/config.js', async () => {
+  const actual = await vi.importActual<typeof import('../costops/config.js')>('../costops/config.js')
+  return { ...actual, saveCostopsConfig: vi.fn() }
+})
 
 const NOW = Math.floor(Date.UTC(2026, 6, 15, 12, 0, 0) / 1000)
 const MONTH = monthWindow(NOW).key

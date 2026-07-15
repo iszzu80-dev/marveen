@@ -85,4 +85,14 @@ describe('startCostOpsBackgroundTasks (boot seam, docs/fork-upstream-policy.md Â
       clearInterval(handle)
     }
   })
+
+  it('the same single call also runs the Phase 4 optimization recommendation capture without throwing (empty DB, no candidates expected)', async () => {
+    const { listAllRecommendations } = await import('../costops/recommendations-store.js')
+    const handle = startCostOpsBackgroundTasks()
+    try {
+      expect(listAllRecommendations(getDb())).toEqual([])
+    } finally {
+      clearInterval(handle)
+    }
+  })
 })
