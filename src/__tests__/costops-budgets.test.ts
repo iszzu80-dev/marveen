@@ -98,11 +98,11 @@ describe('resolveBudgetStatus / getAllBudgetStatuses (CostOps Phase 3, GAP-11)',
     expect(status.variance).toBe(500)
   })
 
-  it('owner defaults to Istvan when not configured on the budget entry', () => {
+  it('owner defaults to operator when not configured on the budget entry', () => {
     const db = getDb()
     const config = baseConfig({ budgets: [{ id: 'b', scope: 'global', amount: 1000 }] })
     const [status] = getAllBudgetStatuses(db, config, NOW)
-    expect(status.owner).toBe('Istvan')
+    expect(status.owner).toBe('operator')
   })
 })
 

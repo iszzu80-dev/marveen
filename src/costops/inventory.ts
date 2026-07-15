@@ -53,7 +53,7 @@ const CREDENTIAL_REGISTRY: Record<string, { checkKind: 'vault' | 'env'; id: stri
   render: { checkKind: 'env', id: 'RENDER_API_KEY' },
 }
 
-const DEFAULT_OWNER = 'Istvan'
+const DEFAULT_OWNER = process.env.COSTOPS_DEFAULT_OWNER || 'operator'
 
 // Freshness thresholds -- not business-specified (same flagged-placeholder
 // convention as warnings.ts's LARGE_INCREASE_FRACTION), tune once real 7-day

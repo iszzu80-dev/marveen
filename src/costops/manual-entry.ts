@@ -2,7 +2,7 @@
 //
 // Every other cost_line_items/entitlements write path in this file is an automated
 // collector or an agent-side Gmail sweep. There was no way to hand-enter a cost or
-// entitlement Istvan already knows (e.g. a provider with no API/no invoice yet) --
+// entitlement the operator already knows (e.g. a provider with no API/no invoice yet) --
 // this is that one manual door. Same conventions as email-ingest.ts: idempotent
 // upsert by dedup_key, HUF-normalized amount with original-currency retention,
 // confidence/actual_source explicitly 'manual'/'manual_entry' (never guessed).

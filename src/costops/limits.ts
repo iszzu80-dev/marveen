@@ -80,7 +80,7 @@ export function fromSubscriptions(subs: SubscriptionLifecycle[]): LimitStatus[] 
         source: 'config', sub_id: s.id, unit: null,
       })
     }
-    // Optional token ceiling (v0.8): only emitted when Istvan has actually supplied one --
+    // Optional token ceiling (v0.8): only emitted when the operator has actually supplied one --
     // never a fabricated limit_value. Current usage cross-referencing against token_usage by
     // agent is future work (no agent<->subscription mapping exists yet) -- honestly unknown
     // for now, matching the spec's "recommend, don't build speculatively" instruction.

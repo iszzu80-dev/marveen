@@ -94,14 +94,14 @@ describe('buildSourceInventory (CostOps Phase 0, GAP-03/GAP-04)', () => {
     expect(s.lifecycle).toBe('deprecated')
   })
 
-  it('owner defaults to Istvan when not configured, honors an explicit config owner otherwise', () => {
+  it('owner defaults to operator when not configured, honors an explicit config owner otherwise', () => {
     const db = getDb()
     insertSource(db, 'domain', 'other', 'domain')
     insertSource(db, 'github-plan', 'github', 'saas')
     const cfg = emptyConfig({ fixed_costs: [{ source_id: 'domain', name: 'Domain', provider: 'other', source_type: 'domain', amount: 0, owner: 'DevOps' }] })
     const inv = buildSourceInventory(db, cfg, NOW, { credentialChecker: () => true })
     expect(inv.find(s => s.source_id === 'domain')!.owner).toBe('DevOps')
-    expect(inv.find(s => s.source_id === 'github-plan')!.owner).toBe('Istvan')
+    expect(inv.find(s => s.source_id === 'github-plan')!.owner).toBe('operator')
   })
 
   it('freshness classifies fresh/aging/stale/unknown by age of the last observed line', () => {

@@ -33,7 +33,7 @@ export function initBudgetAuditSchema(db: Database.Database): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_budget_audit_budget ON costops_budget_audit(budget_id, created_at)`)
 }
 
-const DEFAULT_OWNER = 'Istvan'  // matches inventory.ts's single-operator-deployment default
+const DEFAULT_OWNER = process.env.COSTOPS_DEFAULT_OWNER || 'operator'
 
 export interface BudgetStatus {
   id: string

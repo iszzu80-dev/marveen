@@ -224,9 +224,9 @@ export function getTokenCostEstimate(
 // GROUP BY agent, model instead of model alone. No new columns needed: token_usage already has
 // agent/model/provider on every row (db.ts). limit_usage_pct is always null here (honest, not
 // invented) -- this function has no subscription-limit context; a caller can overlay a real
-// ceiling (e.g. SubscriptionEntry.weekly_limit_tokens, if Istvan ever supplies one) separately.
+// ceiling (e.g. SubscriptionEntry.weekly_limit_tokens, if the operator ever supplies one) separately.
 
-// v0.8.1 (card d9739cf3, Istvan tg3540): label/naming polish, no math change. The token-runrate
+// v0.8.1 (card d9739cf3, label/naming polish): label/naming polish, no math change. The token-runrate
 // number is an ESTIMATE, never an invoice -- "actual_cost" was misleading (implied a confirmed
 // charge). Renamed to estimated_cost_mtd; billed_status/source are new explicit per-row fields
 // so a reader doesn't have to infer "is this actually charged?" from card-header prose.

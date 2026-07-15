@@ -68,7 +68,7 @@ export function initCostOpsSchema(db: Database.Database): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cost_line_items_period ON cost_line_items(charge_period_start, charge_period_end)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cost_line_items_source ON cost_line_items(source_id)`)
-  // v0.7 currency-retention (additive, Phase-3 per Marveen's spec): when a line's
+  // v0.7 currency-retention (additive, Phase-3 per the spec): when a line's
   // billed_cost is HUF-converted from a foreign-currency invoice, keep the original
   // amount/currency/fx_rate/fx_date alongside it so the UI can show "11.15 USD ->
   // 4014 HUF" instead of just the converted number. NULL for lines that were never

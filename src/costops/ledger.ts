@@ -88,7 +88,7 @@ export const RENDER_NOT_COVERED: string[] = [
 // manual fallback, per source's provider: provider_api_actual > provider_plan_estimate
 // > local_usage > manual/estimate. A provider that HAS a provider-derived line drops
 // its manual/estimate lines from operational (they become fallback/comparison only),
-// so manual + provider are never double-counted (e.g. Render: plan 37080 wins over manual 40000).
+// so manual + provider are never double-counted (e.g. a provider-plan estimate wins over a manual entry for the same source).
 export const OPERATIONAL_TIER: Record<string, number> = {
   actual_invoice: 4, provider_api: 4, billing_export: 4,
   provider_plan_estimate: 3,

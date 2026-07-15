@@ -50,7 +50,7 @@ export interface FixedCostEntry {
   currency?: string
   notes?: string
   // Phase 0 (source inventory, GAP-03): who is responsible for this source's config/credential.
-  // Optional -- defaults to 'Istvan' at read time (single-operator deployment today), never
+  // Optional -- defaults to 'operator' at read time (single-operator deployment), never
   // fabricated as anything more specific than that default.
   owner?: string
   // Phase 0: manual escape hatch for the two lifecycle states that can never be safely inferred

@@ -4,7 +4,7 @@
 // acknowledgement. The actual SIGNAL-GATHERING orchestration (running all 13
 // detectors against real ledger/forecast/fx/sync data each round) is a
 // separate, larger piece -- deferred to alerts-capture.ts (Anvil, per
-// Marveen's dispatch) so this module can land now and alerts-capture.ts
+// alert dispatch) so this module can land now and alerts-capture.ts
 // slots in later without touching this file's contract.
 
 import type Database from 'better-sqlite3'
