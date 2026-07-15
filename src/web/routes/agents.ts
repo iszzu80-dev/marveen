@@ -742,7 +742,13 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const name = decodeURIComponent(avatarUploadMatch[1])
     const avatarPath = findAvatarForAgent(name)
     if (avatarPath) { serveFile(req, res, avatarPath); return true }
-    res.writeHead(404); res.end()
+    // No custom avatar — return a monogram placeholder so <img> tags
+    // (e.g. the overview agent list) don't trigger a 404 on every page
+    // load for every agent without a custom avatar. Cached for 1h.
+    const initial = name[0]?.toUpperCase() || '?'
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40"><rect width="40" height="40" fill="#374151" rx="8"/><text x="20" y="27" text-anchor="middle" fill="#9ca3af" font-size="18" font-family="sans-serif">${initial}</text></svg>`
+    res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=3600' })
+    res.end(svg)
     return true
   }
 

@@ -125,6 +125,7 @@ export function startWebServer(port = 3420): http.Server {
     // via <img src> which can't carry headers -- these are non-sensitive assets).
     const isPublicApi =
       (path === '/api/auth/status' && method === 'GET') ||
+      (path === '/api/settings' && method === 'GET') ||
       (method === 'GET' && (
         path === '/api/marveen/avatar' ||
         /^\/api\/agents\/[^/]+\/avatar$/.test(path)
