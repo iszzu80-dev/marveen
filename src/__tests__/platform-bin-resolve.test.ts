@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 
 // Regression cover for the 04:00 auto-update boot crash: a transient PATH gap
 // makes `which claude` fail, and a module-level `resolveFromPath('claude')`
@@ -43,6 +45,23 @@ describe('tryResolveFromPath', () => {
     mockExecSync.mockImplementation(() => { throw new Error('which failed') })
     mockExistsSync.mockImplementation((p: string) => p === '/usr/local/bin/tmux')
     expect(tryResolveFromPath('tmux')).toBe('/usr/local/bin/tmux')
+  })
+
+  it('probes the user-level install dirs (~/.local/bin native, ~/.bun/bin bun) -- the bootcamp/AVX-fallback layout', () => {
+    const home = homedir()
+    mockExecSync.mockImplementation(() => { throw new Error('which failed') })
+    mockExistsSync.mockImplementation((p: string) => p === join(home, '.local', 'bin', 'claude'))
+    expect(tryResolveFromPath('claude')).toBe(join(home, '.local', 'bin', 'claude'))
+    mockExistsSync.mockImplementation((p: string) => p === join(home, '.bun', 'bin', 'claude'))
+    expect(tryResolveFromPath('claude')).toBe(join(home, '.bun', 'bin', 'claude'))
+  })
+
+  it('user-level dirs win over system dirs (PATH-precedence parity)', () => {
+    const home = homedir()
+    mockExecSync.mockImplementation(() => { throw new Error('which failed') })
+    mockExistsSync.mockImplementation((p: string) =>
+      p === join(home, '.local', 'bin', 'claude') || p === '/usr/bin/claude')
+    expect(tryResolveFromPath('claude')).toBe(join(home, '.local', 'bin', 'claude'))
   })
 
   it('returns null (does NOT throw) when the binary is absent everywhere', () => {

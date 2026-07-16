@@ -1,6 +1,7 @@
 import { execSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { homedir } from 'node:os'
 
 export type PlatformType = 'macos' | 'linux-server' | 'linux-gui'
 
@@ -23,7 +24,18 @@ export const PLATFORM: PlatformType = detect()
 // /opt/homebrew/bin (where `claude` and `tmux` live) is briefly absent and
 // `which claude` fails -- even though the binary is present on disk. Probing
 // these dirs recovers the real path instead of hard-failing.
-const KNOWN_BIN_DIRS = ['/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin']
+// The user-level dirs cover the two most common `claude` install locations
+// (native installer -> ~/.local/bin, bun -> ~/.bun/bin) -- exactly the layout
+// on bootcamp/AVX-fallback boxes, which would otherwise still hard-fail during
+// a PATH gap (#632 follow-up).
+const KNOWN_BIN_DIRS = [
+  join(homedir(), '.local', 'bin'),
+  join(homedir(), '.bun', 'bin'),
+  '/opt/homebrew/bin',
+  '/usr/local/bin',
+  '/usr/bin',
+  '/bin',
+]
 
 // Resolve a binary to an absolute path, or null if it cannot be found on PATH
 // or in any known install dir. Never throws for a missing binary (only for an
