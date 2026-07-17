@@ -11703,7 +11703,15 @@ window.costopsSyncNow = async function () {
   const btn = document.getElementById('costsSyncBtn')
   if (btn) { btn.disabled = true; btn.textContent = 'Frissítés...' }
   try {
-    const r = await fetch('/api/costs/sync?provider=render', { method: 'POST', headers: authHeaders() })
+    // Card d2631bad: this called a nonexistent authHeaders() (ReferenceError, no such function
+    // anywhere in this file) -- the fetch never even reached the network, so the "Render
+    // frissítés" button showed a bare "Hiba" on EVERY click regardless of session state. Not a
+    // re-auth/401 issue as previously assumed (that diagnosis was wrong -- verified live: even a
+    // freshly-authenticated ?token= session still hit this). The patched window.fetch above
+    // already auto-injects the Authorization header on every same-origin /api/* call, matching
+    // every other route in this file (none of them pass an explicit headers option either) --
+    // no manual header needed here at all.
+    const r = await fetch('/api/costs/sync?provider=render', { method: 'POST' })
     const d = await r.json().catch(() => ({}))
     if (btn) btn.textContent = d && d.ok ? 'Frissítve' : ('Hiba: ' + ((d && d.error) || r.status))
   } catch (e) {
@@ -11952,6 +11960,49 @@ async function loadCosts() {
     + '<div style="font-size:1.25em;font-weight:600;margin-top:6px;">' + relAge(freshTs) + ' ' + sBadge(ageState(freshTs)) + '</div>'
     + '<div style="font-size:0.75em;color:var(--text-muted,#888);margin-top:4px;">' + fmtDate(freshTs) + '</div></div>')
 
+  // ---- 1a-2. Aggregated provenance summary (card d2631bad, pt. 2) ----
+  // Per-source badges (actualSrcBadge/forecastBasisLabel per row, below) already answer "where
+  // did THIS ONE source's number come from" -- this answers the coarser question the headline
+  // cards above don't: "what's the actual+forecast data-mix behind the TOTAL". Shared with the
+  // collapsed Diagnosztika section's own confidence-breakdown table (below), so the wording
+  // stays consistent between the two views instead of drifting into two separate copies.
+  // Card d2631bad follow-up fix: this map was missing actual_invoice/billing_export/local_usage
+  // -- all 3 are real confidence codes ledger.ts's CONFIDENCE_PRIORITY actually produces
+  // (src/costops/ledger.ts) -- a real live breakdown showed 'actual_invoice' rendering as its
+  // raw, untranslated key instead of a label before this fix, caught while verifying this card
+  // live (a pre-existing gap in both this map and the Diagnosztika copy below, not new).
+  const confLabel = {
+    manual: 'Kézi fix', estimate: 'Kézi becslés', provider_plan_estimate: 'API plan estimate',
+    provider_api: 'Billing API', billing: 'Billing API', local_token_estimate: 'Tokenbecslés',
+    actual_invoice: 'Számla', billing_export: 'Billing export', local_usage: 'Helyi becslés',
+  }
+  const confBreakdown = s.confidence_breakdown || {}
+  const confTotal = Object.values(confBreakdown).reduce((a, b) => a + (Number(b) || 0), 0)
+  const confParts = Object.entries(confBreakdown)
+    .filter(([, v]) => Number(v) > 0)
+    .sort((a, b) => Number(b[1]) - Number(a[1]))
+    .map(([k, v]) => Math.round(Number(v) / (confTotal || 1) * 100) + '% ' + (confLabel[k] || k))
+  // Forecast side has no ready-made aggregate field -- derived here from all_sources'
+  // per-row forecast_basis + forecast_month_end (same raw data every row's own badge already
+  // renders below), same forecastBasisLabel() this function already defines for per-row use.
+  const provSources = Array.isArray(s.all_sources) ? s.all_sources : []
+  const fcByBasis = {}
+  for (const it of provSources) {
+    const bkey = it.forecast_basis || 'no_forecast'
+    fcByBasis[bkey] = (fcByBasis[bkey] || 0) + (Number(it.forecast_month_end) || 0)
+  }
+  const fcTotal = Object.values(fcByBasis).reduce((a, b) => a + b, 0)
+  const fcParts = Object.entries(fcByBasis)
+    .filter(([k, v]) => k !== 'no_forecast' && v > 0)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => Math.round(v / (fcTotal || 1) * 100) + '% ' + (forecastBasisLabel(k) || k))
+  const provenanceBlock = (confParts.length || fcParts.length)
+    ? '<div style="font-size:0.82em;color:var(--text-muted,#888);margin:-4px 0 18px;padding:10px 14px;border:1px solid var(--border,#e2e2e2);border-radius:10px;">'
+      + (confParts.length ? '<div><strong style="color:var(--text-muted,#888);">Aktuális adat-összetétel:</strong> ' + esc(confParts.join(' · ')) + '</div>' : '')
+      + (fcParts.length ? '<div style="margin-top:4px;"><strong style="color:var(--text-muted,#888);">Előrejelzés alapja:</strong> ' + esc(fcParts.join(' · ')) + '</div>' : '')
+      + '</div>'
+    : ''
+
   // ---- 1b. Teendők (typed warnings, top zone + drill-down) ----
   const warningsArr = warningsResp.slice()
   warningsArr.sort((a, b2) => (sevRank[a.severity] ?? 9) - (sevRank[b2.severity] ?? 9))
@@ -12133,8 +12184,10 @@ async function loadCosts() {
     + '<div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border,#e2e2e2);"><div style="font-weight:600;font-size:0.88em;margin-bottom:4px;">Limitek / kvóták</div>' + limitRows + '</div>')
 
   // ---- 6. Diagnostics / debug (collapsed, bottom) ----
+  // confLabel is defined above (card d2631bad) -- was a separate, now-stale inline copy of the
+  // same map here; reusing the one const so a future new confidence code only needs one edit.
   const conf = Object.entries(s.confidence_breakdown || {}).map(([k, v]) => {
-    const label = { manual: 'Kézi fix', estimate: 'Kézi becslés', provider_plan_estimate: 'API plan estimate', provider_api: 'Billing API', billing: 'Billing API', local_token_estimate: 'Tokenbecslés' }[k] || k
+    const label = confLabel[k] || k
     return '<tr><td style="padding:3px 12px 3px 0;">' + esc(label) + '</td><td style="padding:3px 0;text-align:right;">' + fmt(v) + '</td></tr>'
   }).join('') || '<tr><td colspan="2" style="color:var(--text-muted,#888);">—</td></tr>'
   const bd = s.breakdown || {}
@@ -12176,6 +12229,7 @@ async function loadCosts() {
   body.innerHTML = ''
     + '<div style="font-size:0.85em;color:var(--text-muted,#888);margin-bottom:14px;">Ahol van API-adat, azt használjuk. Becslés csak fallback, ha nincs API-adat.</div>'
     + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:18px;">' + cards.join('') + '</div>'
+    + provenanceBlock
     + warningsBlock
     + providerTable
     + renderCard
