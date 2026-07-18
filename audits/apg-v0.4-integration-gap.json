@@ -1,0 +1,82 @@
+{
+  "methodology_version": "0.4.0",
+  "generated": "2026-07-16",
+  "mode": "read-only-audit",
+  "conformance_verdict": "PASS",
+  "capability_counts": {
+    "available": 3,
+    "available_partial": 3,
+    "adapter": 4,
+    "upstream_gap": 3,
+    "product_local": 1,
+    "blocked": 0
+  },
+  "gaps": [
+    {
+      "id": "GAP-APG-01",
+      "capability": "token usage APG-origin decomposition",
+      "class": "ADAPTER",
+      "have": "raw input/output/cache_creation/cache_read via Claude API usage + CostOps token_usage",
+      "need": "tag tokens by APG origin: system_and_tools / inherited_context / apg_packet_fresh / on_demand_fresh / cache_creation / cache_read / output",
+      "effort": "small",
+      "risk_if_skipped": "cannot measure the 3000/5000 fresh-input budget targets; APG context-budget policy is unenforceable"
+    },
+    {
+      "id": "GAP-APG-02",
+      "capability": "commit -> build -> deploy -> runtime evidence chain",
+      "class": "ADAPTER",
+      "have": "git commits, Render deploy-history API, /health runtime (as separate sources)",
+      "need": "link them per change into one execution-receipt (tested_commit -> build_digest -> deployment -> runtime_smoke)",
+      "effort": "small-medium",
+      "risk_if_skipped": "release_ready gate 'tested_build_deploy_commit_chain_consistent' cannot be checked deterministically"
+    },
+    {
+      "id": "GAP-APG-03",
+      "capability": "structured identity marker propagation",
+      "class": "ADAPTER",
+      "have": "origin_note on the bus (self-declared, unauthenticated, card 06f062e4)",
+      "need": "structured actor_class/tenant_class/data_class/test_run_id/environment carried through the trace; KPI-exclusion + billing/comms suppress + cleanup for test identities",
+      "effort": "medium",
+      "risk_if_skipped": "P0.A test-identity isolation cannot be asserted; test runs can pollute KPIs / trigger real comms",
+      "related": "authenticated-identity is a separate UPSTREAM hardening (GAP-APG-06)"
+    },
+    {
+      "id": "GAP-APG-04",
+      "capability": "CostOps <-> APG control-plane mapping",
+      "class": "ADAPTER",
+      "have": "CostOps ledger/limits/forecast + collectors (incl. codex rate-limit)",
+      "need": "expose CostOps as the provider/capacity resolver the methodology delegates to (agent-routing.yaml: 'provider_resolution delegated to CostOps/capacity router'); methodology stores capability class only",
+      "effort": "small",
+      "risk_if_skipped": "capability-class -> concrete provider resolution stays ad-hoc (tonight's DeepSeek/Max/gpt-5.6-sol routing was manual)"
+    },
+    {
+      "id": "GAP-APG-05",
+      "capability": "intel registry adapter",
+      "class": "UPSTREAM_GAP",
+      "have": "ad-hoc research/market deliverable files under agents/*/deliverables",
+      "need": "a queryable intel registry (market/competitor/VoC) the methodology can reference by id instead of loading full documents (context-budget rule: 'use references first')",
+      "effort": "medium",
+      "risk_if_skipped": "research context cannot be reference-pulled within the token budget; S3 research packets bloat"
+    },
+    {
+      "id": "GAP-APG-06",
+      "capability": "staging / canary release stage",
+      "class": "UPSTREAM_GAP",
+      "have": "Render production + preview envs (preview cost-excluded) + manual reversible rollback",
+      "need": "a risk-based staging/canary stage for safe-release profile (production synthetic canary for high-risk); low-risk stays smoke+rollback",
+      "effort": "medium",
+      "risk_if_skipped": "safe-release profile high-risk path (synthetic canary) has no substrate; only smoke+rollback available"
+    },
+    {
+      "id": "GAP-APG-07",
+      "capability": "per-product surface state model",
+      "class": "PRODUCT_LOCAL",
+      "have": "each product has landing/demo/(pre)registration/login/app but in different launch states",
+      "need": "a per-product surface descriptor APG reads (not one assumed shape); already partially implied by product configs",
+      "effort": "small-per-product",
+      "risk_if_skipped": "product-surface P0.B checks assume a uniform shape that does not exist"
+    }
+  ],
+  "blocked": [],
+  "note": "Zero BLOCKED. All gaps are ADAPTER (thin mapping, no new infra) or UPSTREAM_GAP (shared-layer build) or PRODUCT_LOCAL (per-product read). The shadow replay can run today without closing any gap; the gaps determine what a REAL (non-shadow) APG run would need."
+}

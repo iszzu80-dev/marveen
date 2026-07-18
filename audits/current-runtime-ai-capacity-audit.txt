@@ -1,0 +1,74 @@
+=== DATE ===
+Wed Jul  1 23:52:36 CEST 2026
+
+=== PWD ===
+/home/iszzu/marveen
+
+=== GIT STATUS ===
+?? .env.backup-20260630-1947
+?? .env.backup-max-20260630-215248
+?? audits/
+?? scripts/inter-agent-evidence-gate.py
+?? scripts/inter-agent-evidence-gate.sh
+?? scripts/stale-instructions-detect.sh
+?? scripts/stale-instructions-guard.sh
+?? shared-dev/
+
+=== PROCESSES ===
+root         168  0.0  0.0  43952  5088 ?        Ss   Jun27   0:00 /usr/bin/python3 /usr/bin/networkd-dispatcher --run-startup-triggers
+root         318  0.0  0.0 123464  6332 ?        Ssl  Jun27   0:00 /usr/bin/python3 /usr/share/unattended-upgrades/unattended-upgrade-shutdown --wait-for-signal
+iszzu     273008  1.5  5.0 74019848 390148 pts/4 Ssl+ 09:52  13:12 /home/iszzu/.local/bin/claude --dangerously-skip-permissions --model deepseek-v4-pro --channels plugin:telegram@claude-plugins-official
+iszzu     361380  6.9  2.1 12478812 166784 ?     Ssl  10:37  55:11 /usr/bin/node /home/iszzu/marveen/dist/index.js
+iszzu     500058  0.9  4.9 74083840 382332 pts/12 Ssl+ 11:48   6:31 /home/iszzu/.local/bin/claude --dangerously-skip-permissions --model deepseek-v4-pro
+iszzu    2150848 11.0  5.8 74013532 450336 pts/8 Ssl+ 23:15   4:04 /home/iszzu/.local/bin/claude --dangerously-skip-permissions --model deepseek-v4-pro
+iszzu    2159363  0.0  0.0   5076  2124 ?        S    23:22   0:00 /bin/bash -c source /home/iszzu/.claude-deepseek/shell-snapshots/snapshot-bash-1782940580605-tghv25.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && eval 'cd /home/iszzu/marveen-legacy-20260630-013023 && PORT=4500 node apps/api/dist/server.js & sleep 3 curl -s http://localhost:4500/ 2>&1 || echo "Healthcheck failed" curl -s http://localhost:4500/api/eskuvo/guests?tenantId=test 2>&1 || echo "Eskuvo route not available (expected without DB)"' < /dev/null && pwd -P >| /tmp/claude-e543-cwd
+iszzu    2159364  0.0  1.0 1099080 82128 ?       Sl   23:22   0:00 node apps/api/dist/server.js
+iszzu    2173096 16.6  5.3 73974704 413636 pts/13 Ssl+ 23:38   2:22 /home/iszzu/.local/bin/claude --dangerously-skip-permissions --model deepseek-v4-pro
+iszzu    2189733 65.4  5.6 74119228 436080 pts/23 Ssl+ 23:52   0:07 /home/iszzu/.local/bin/claude --continue --dangerously-skip-permissions --model sonnet --channels plugin:telegram@claude-plugins-official
+iszzu    2189789  0.0  0.1 1147376 10448 pts/23  S+   23:52   0:00 bun run --cwd /home/iszzu/.claude/plugins/cache/claude-plugins-official/telegram/0.0.6 --shell=bun --silent start
+root     2190045  0.0  0.0  35256  4292 ?        S    23:52   0:00 (udev-worker)
+root     2190046  0.0  0.0  35256  3888 ?        S    23:52   0:00 (udev-worker)
+iszzu    2309021  0.9  0.0  23672  5764 ?        Ss   Jun30  26:31 /usr/bin/tmux new-session -d -s marveen-worker -c /home/iszzu/.marveen-worker bash -lc export CLAUDE_CONFIG_DIR='/home/iszzu/.marveen-worker/.claude-config'; cd '/home/iszzu/.marveen-worker' && claude --dangerously-skip-permissions --model 'claude-opus-4-8[1m]'
+iszzu    2309882  0.4  2.7 73940064 210764 pts/6 Ssl+ Jun30  11:02 /home/iszzu/.local/bin/claude --continue --dangerously-skip-permissions --model deepseek-v4-pro
+iszzu    2310677  0.4  3.3 74007868 258908 pts/9 Ssl+ Jun30  11:59 /home/iszzu/.local/bin/claude --continue --dangerously-skip-permissions --model deepseek-v4-pro
+iszzu    2310846  0.4  2.9 73925504 230248 pts/10 Ssl+ Jun30  11:05 /home/iszzu/.local/bin/claude --continue --dangerously-skip-permissions --model deepseek-v4-pro
+iszzu    2311957  0.4  2.9 73947744 229688 pts/14 Ssl+ Jun30  11:26 /home/iszzu/.local/bin/claude --continue --dangerously-skip-permissions --model deepseek-v4-pro
+iszzu    2312518  0.4  3.3 73976580 257664 pts/15 Ssl+ Jun30  11:42 /home/iszzu/.local/bin/claude --continue --dangerously-skip-permissions --model deepseek-v4-flash
+iszzu    2312909  0.4  2.8 74011616 223408 pts/17 Ssl+ Jun30  11:25 /home/iszzu/.local/bin/claude --continue --dangerously-skip-permissions --model deepseek-v4-pro
+iszzu    2313812  0.4  2.8 74010068 220200 pts/21 Ssl+ Jun30  11:07 /home/iszzu/.local/bin/claude --continue --dangerously-skip-permissions --model deepseek-v4-flash
+iszzu    2372882  0.4  3.4 73938000 270416 pts/7 Ssl+ Jun30  11:41 /home/iszzu/.local/bin/claude --dangerously-skip-permissions --model deepseek-v4-pro --channels plugin:telegram@claude-plugins-official
+iszzu    2383088  0.4  3.5 74007864 275876 pts/18 Ssl+ Jun30  12:18 /home/iszzu/.local/bin/claude --dangerously-skip-permissions --model deepseek-v4-pro --channels plugin:telegram@claude-plugins-official
+iszzu    2395471  0.4  3.5 74007864 274928 pts/19 Ssl+ Jun30  11:45 /home/iszzu/.local/bin/claude --dangerously-skip-permissions --model deepseek-v4-pro --channels plugin:telegram@claude-plugins-official
+iszzu    3539247  0.0  1.7 32739864 137876 ?     Sl   Jun30   0:02 node /home/iszzu/.npm-global/bin/ccr start
+iszzu    3572200  0.0  0.0   5080  3268 ?        Ss   Jun30   0:33 /bin/bash /home/iszzu/marveen/scripts/channels.sh
+iszzu    3635175  0.0  0.0   5080  3128 pts/22   Ss+  Jun30   0:00 bash -lc export CLAUDE_CONFIG_DIR='/home/iszzu/.marveen-worker/.claude-config'; cd '/home/iszzu/.marveen-worker' && claude --dangerously-skip-permissions --model 'claude-opus-4-8[1m]'
+iszzu    3635185  0.2  4.3 74044108 334420 pts/22 Sl+ Jun30   4:19 claude --dangerously-skip-permissions --model claude-opus-4-8[1m]
+iszzu    3643890  0.6  4.7 74009656 366756 pts/2 Ssl+ Jun30   9:42 /home/iszzu/.local/bin/claude --dangerously-skip-permissions --model deepseek-v4-pro
+iszzu    3871160  0.4  4.2 74007992 326096 pts/11 Ssl+ 03:00   5:52 /home/iszzu/.local/bin/claude --dangerously-skip-permissions --model deepseek-v4-pro --channels plugin:telegram@claude-plugins-official
+iszzu    4192402  0.8  4.8 74082556 375564 pts/5 Ssl+ 07:09   8:24 /home/iszzu/.local/bin/claude --dangerously-skip-permissions --model deepseek-v4-pro
+iszzu    4192754  0.6  4.4 73971444 345024 pts/3 Ssl+ 07:09   6:36 /home/iszzu/.local/bin/claude --dangerously-skip-permissions --model deepseek-v4-flash
+
+=== TMUX ===
+agent-architect: 1 windows (created Wed Jul  1 07:09:21 2026)
+agent-ba: 1 windows (created Tue Jun 30 02:00:46 2026)
+agent-broker: 1 windows (created Tue Jun 30 02:54:28 2026)
+agent-buildfejleszto: 1 windows (created Wed Jul  1 23:15:39 2026)
+agent-bursar: 1 windows (created Tue Jun 30 02:01:33 2026)
+agent-business: 1 windows (created Tue Jun 30 02:01:49 2026)
+agent-codeworker: 1 windows (created Wed Jul  1 07:09:26 2026)
+agent-deliverylead: 1 windows (created Wed Jul  1 09:52:46 2026)
+agent-frontendfejleszto: 1 windows (created Wed Jul  1 11:48:39 2026)
+agent-fullstackfejleszto: 1 windows (created Tue Jun 30 23:09:34 2026)
+agent-jogasz: 1 windows (created Tue Jun 30 02:02:50 2026)
+agent-marketing: 1 windows (created Tue Jun 30 02:03:06 2026)
+agent-qa: 1 windows (created Wed Jul  1 23:38:19 2026)
+agent-research: 1 windows (created Tue Jun 30 02:03:36 2026)
+agent-sentinel: 1 windows (created Tue Jun 30 03:02:32 2026)
+agent-steward: 1 windows (created Tue Jun 30 03:12:32 2026)
+agent-thrinintee: 1 windows (created Wed Jul  1 03:00:10 2026)
+agent-uxuidesigner: 1 windows (created Tue Jun 30 02:04:40 2026)
+marveen-channels: 1 windows (created Tue Jun 30 21:56:39 2026)
+marveen-worker: 1 windows (created Tue Jun 30 23:00:30 2026)
+
+=== ENV ===
+PWD=/home/iszzu/marveen

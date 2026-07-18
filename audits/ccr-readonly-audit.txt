@@ -1,0 +1,50 @@
+=== CCR PROCESSES ===
+2757942 tee audits/ccr-readonly-audit.txt
+3539247 node /home/iszzu/.npm-global/bin/ccr start
+
+=== CCR SYSTEMD USER UNITS ===
+
+=== CCR REFERENCES IN TRACKED REPO FILES ===
+package-lock.json:328:      "integrity": "sha512-s6nPv2QkSupJwLYyfS+gwdirm0ukyTFNl3KTgZEAiJDd+iHZcbTPPcWCcRYH+WlNbwChgH2QkE9NSlNrMT8Gfw==",
+src/__tests__/background-tasks.test.ts:102:    const atomicCreate = db.transaction((id: string, agentId: string, prompt: string, session: string) => {
+src/__tests__/background-tasks.test.ts:110:    expect(atomicCreate('C1000001', 'agent1', 'p1', 'bg-C1000001')).toBeTruthy()
+src/__tests__/background-tasks.test.ts:111:    expect(atomicCreate('C2000002', 'agent1', 'p2', 'bg-C2000002')).toBeTruthy()
+src/__tests__/background-tasks.test.ts:112:    expect(atomicCreate('C3000003', 'agent1', 'p3', 'bg-C3000003')).toBeTruthy()
+src/__tests__/background-tasks.test.ts:113:    expect(atomicCreate('C4000004', 'agent1', 'p4', 'bg-C4000004')).toBeNull()
+src/__tests__/background-tasks.test.ts:115:    expect(atomicCreate('C5000005', 'agent2', 'p5', 'bg-C5000005')).toBeTruthy()
+Binary file web/avatars/02_wizard_girl.png matches
+Binary file web/avatars/03_knight.png matches
+Binary file web/avatars/05_pirate.png matches
+Binary file web/avatars/06_scientist_girl.png matches
+Binary file web/avatars/10_detective.png matches
+Binary file web/avatars/12_witch.png matches
+Binary file web/avatars/18_dj.png matches
+
+=== PACKAGE SCRIPTS ===
+{
+  build: 'tsc',
+  start: 'node dist/index.js',
+  dev: 'tsx src/index.ts',
+  setup: 'tsx scripts/setup.ts',
+  status: 'tsx scripts/status.ts',
+  schedule: 'tsx src/schedule-cli.ts',
+  test: 'vitest run',
+  typecheck: 'tsc --noEmit',
+  'syntax-check': 'node --check web/app.js web/sw.js',
+  smoke: 'playwright test --config=playwright.config.ts'
+}
+
+=== DASHBOARD STATUS ===
+● marveen-dashboard.service - Marveen Dashboard
+     Loaded: loaded (/home/iszzu/.config/systemd/user/marveen-dashboard.service; enabled; preset: enabled)
+     Active: active (running) since Thu 2026-07-02 07:54:43 CEST; 18min ago
+ Invocation: b210ab0eae2845e2b3929f733a113965
+   Main PID: 2743807 (node)
+      Tasks: 13 (limit: 9056)
+     Memory: 159.5M (peak: 292.8M, swap: 444K, swap peak: 4.9M)
+        CPU: 1min 23.972s
+     CGroup: /user.slice/user-1000.slice/user@1000.service/app.slice/marveen-dashboard.service
+             ├─2309021 /usr/bin/tmux new-session -d -s marveen-worker -c /home/iszzu/.marveen-worker bash -lc "export CLAUDE_CONFIG_DIR='/home/iszzu/.marveen-worker/.claude-config'; cd '/home/iszzu/.marveen-worker' && claude --dangerously-skip-permissions --model 'claude-opus-4-8[1m]'"
+             └─2743807 /usr/bin/node /home/iszzu/marveen/dist/index.js
+
+Jul 02 07:54:43 LAPTOP-9GEEIM7F systemd[332]: Started marveen-dashboard.service - Marveen Dashboard.

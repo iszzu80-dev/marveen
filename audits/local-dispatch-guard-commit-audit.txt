@@ -1,0 +1,62 @@
+=== LOCAL COMMIT STAT ===
+47f73b3 dispatch: block context-saturated agents before prompt injection
+ scripts/dispatch-guard.sh        | 147 +++++++++++++++++++++++++++++++++++++++
+ src/__tests__/pane-state.test.ts |  58 +++++++++++++++
+ src/pane-state.ts                |  25 +++++++
+ src/web/agent-process.ts         |  59 +++++++++++++++-
+ src/web/schedule-runner.ts       |  17 ++++-
+ 5 files changed, 303 insertions(+), 3 deletions(-)
+
+=== LOCAL COMMIT FILES ===
+47f73b3 dispatch: block context-saturated agents before prompt injection
+scripts/dispatch-guard.sh
+src/__tests__/pane-state.test.ts
+src/pane-state.ts
+src/web/agent-process.ts
+src/web/schedule-runner.ts
+
+=== LOCAL COMMIT PATCH SUMMARY ===
+commit 47f73b3896e1a5c34ff2e81c509679230488f3a6
+Author: Istvan (Marveen fleet) <iszzu@freemail.hu>
+Date:   Wed Jul 1 10:45:10 2026 +0200
+
+    dispatch: block context-saturated agents before prompt injection
+    
+    Three agents (Mason/Atlas/Cog/Pixel/Falcon/deliverylead, across the
+    2026-06-30/07-01 night) hit 100% context while still presenting an
+    idle, ready-looking pane -- isSessionReadyForPrompt() kept treating
+    them as dispatchable, so new tasks landed on sessions that could not
+    actually process them.
+    
+    - Add paneShowsContextSaturation() (src/pane-state.ts): pure, zero-
+      import predicate scoped to the live footer region (avoids self-
+      referential false positives from scrollback quoting the same
+      phrase, including this commit's own diff).
+    - isSessionReadyForPrompt() now returns false when the pane shows
+      context saturation, closing the gap for both the inter-agent
+      message-router and the scheduled-task runner in one place.
+    - On detection, auto-trigger scripts/dispatch-guard.sh (evidence
+      capture -> loop-guard -> fresh restart -> recovery-context brief),
+      debounced 5 minutes per session so repeated polling ticks don't
+      spawn concurrent recoveries.
+    - 5 new unit tests in src/__tests__/pane-state.test.ts, including a
+      case built from tonight's real captured incident shape.
+    
+    Known gap (documented, not closed): forceSend=true scheduled tasks
+    bypass isSessionReadyForPrompt entirely, including this guard --
+    follow-up tracked on the kanban board.
+    
+    Deployment evidence / rollback path: store/deploy-rollback/20260701-103737/
+    (pre-deploy commit, diff, service status, dist/ backup). Verified live:
+    tsc clean, 1515/1515 tests green, controlled restart, smoke tests
+    (normal delivery + synthetic saturated-session block + auto-recovery
+    trigger log + watchdog health) all passed post-restart.
+    
+    Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+
+ scripts/dispatch-guard.sh        | 147 +++++++++++++++++++++++++++++++++++++++
+ src/__tests__/pane-state.test.ts |  58 +++++++++++++++
+ src/pane-state.ts                |  25 +++++++
+ src/web/agent-process.ts         |  59 +++++++++++++++-
+ src/web/schedule-runner.ts       |  17 ++++-
+ 5 files changed, 303 insertions(+), 3 deletions(-)

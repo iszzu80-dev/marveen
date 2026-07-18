@@ -1,0 +1,20 @@
+e7d5502 (HEAD -> feat/costops-ledger-token-estimates, backup/costops-v1.19.0-integrated) Merge branch 'main' into feat/costops-ledger-token-estimates
+6789f9c feat(costops): API sync spine -- Render sync endpoint + freshness/sync-state (v0.5)
+0768dc5 feat(costops): provider-preferred operational spend (v0.4)
+15d8d7a feat(costops): add Render plan-based infra cost collector
+c396514 (tag: v1.19.0, origin/main, main) chore(release): v1.19.0 -- SSH Vault (#521), owner-gated terminal-input toggle (#522), Messages BOT_NAME fix (#520), kanban card-event audit trail (#518)
+dc238c0 feat(vault): SSH Vault -- central SSH server & key management (#521)
+cbda72f feat(dashboard): owner-gated opt-in terminal-input toggle + per-call audit (#522)
+577868f fix(dashboard): show main agent BOT_NAME in Messages view, not its routing id (#520)
+5896a3c feat(costops): add offline dry-run mode for provider collectors
+bb0206f feat(costops): add provider collector framework
+c93060d feat(costops): add local ledger and token estimates
+cf009a9 feat(kanban): add card status-change audit trail (#518)
+aa53a24 (worktree-agent-a51e44734a770b70e) fix(dashboard): send CORS headers for same-origin proxied requests + allow Authorization
+fd0f00e fix(dashboard): keep auth token in-memory, not only localStorage
+dc7f296 fix(pwa): fully disable service worker (unregister on load, no re-register)
+6596685 fix(pwa): replace caching service worker with self-unregistering kill-switch
+6fc6afc fix(pwa): service worker must not resolve respondWith to null on cache miss
+0941322 (tag: v1.18.7) chore(release): v1.18.7 -- Gantt view, iOS PWA, shared-config alert, scheduler parked-defer + saturation-refuse fixes, Linux native rebuild (#497 #505 #491 #501 #515 #516)
+f9d7797 fix(dispatch): refuse prompts to context-saturated sessions (#516)
+f5ece66 fix(startup): rebuild better-sqlite3 native binding before services start (#515)

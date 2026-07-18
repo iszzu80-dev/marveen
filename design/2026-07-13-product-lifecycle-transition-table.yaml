@@ -1,0 +1,706 @@
+# Marveen Autonomous Product Graph — Product Lifecycle Transition Table (TO-BE)
+# ============================================================================
+# Type:        DESIGN-ONLY target architecture (TO-BE). Not implemented, not wired.
+# Date:        2026-07-13
+# Author:      architect (design track). Peer authors architecture.md + the canonical
+#              JSON schema `design/2026-07-13-product-graph-artifact-schema-draft.json`.
+# Companion:   design/2026-07-13-context-packet-contract.md (same design set).
+#
+# WHAT THIS IS
+#   A deterministic finite state machine for one `product`'s lifecycle. Each state
+#   is a schema-validated position in the Product Graph, NOT a kanban status
+#   (design principle 6: kanban status is a work-item tracker, never a lifecycle
+#   state). Transitions fire on schema-validated OBJECTS, never on prose, memory,
+#   or a summary (principle 4). MD/HTML are projections only, never authoritative.
+#
+# SOURCE-OF-TRUTH RECONCILIATION NOTE
+#   The peer's canonical schema file did not exist at authoring time. This table
+#   references the 19 canonical object names from the shared brief:
+#     product, opportunity, market_fact, hypothesis, business_definition, change,
+#     requirement, scenario, decision, design_node, task, test, build, deployment,
+#     runtime_evidence, metric_definition, metric_observation, product_review, approval.
+#   FIELD-NAME RECONCILIATION REQUIRED: field references below (e.g. change.id,
+#   approval.decision_type, deployment.execution_id, *.content_hash) are the
+#   author's proposed names. When the schema draft lands, reconcile every
+#   `<object>.<field>` token here against it before this table is treated as
+#   canonical. Object NAMES are already aligned to the brief and should not drift.
+#
+# THE 9 DESIGN PRINCIPLES, encoded structurally in every state:
+#   P1 deterministic gate ALWAYS runs before any LLM/semantic verifier.
+#   P2 the producing agent NEVER finally accepts its own work (accept_agent != responsible_agent).
+#   P3 no re-read/re-verify when content_hash is unchanged (gates are hash-keyed, skip-if-equal).
+#   P4 memory/summary is NOT source of truth — gates read canonical objects only.
+#   P5 embedding/KG is a secondary index only — never a gate input.
+#   P6 kanban status is NOT a lifecycle state — `task` objects carry kanban status; the
+#      lifecycle state lives on `product.lifecycle_state`.
+#   P7 every side effect carries an idempotent execution_id (build/deployment/publish/delete).
+#   P8 the next step is normally auto-created AND auto-started (see next_task_generation_rule).
+#   P9 human interrupt ONLY at a pre-defined owner decision (exactly the 8 approval gates).
+#
+# GATE VOCABULARY
+#   deterministic : pure code/SQL check on objects (existence, schema-valid, hash match,
+#                   referential integrity, execution_id present). Runs first (P1). Cannot be
+#                   overridden by an LLM. A failed deterministic gate NEVER reaches the verifier.
+#   semantic      : LLM verifier, runs ONLY after the deterministic gate passes, and ONLY when
+#                   content_hash changed since last verdict (P3). Produces a `product_review`
+#                   or `decision` object with a verdict; by P2 the verifier agent != producer.
+#   human         : owner (Istvan) interrupt. Emits an `approval` object. Present on exactly the
+#                   8 transitions in the autonomy matrix; everywhere else human_approval = false.
+#
+# COUNTS (see meta block at end):
+#   total lifecycle states .................. 16
+#   human-approval-gated transitions ........ 8
+# ============================================================================
+
+meta:
+  version: "0.1-draft"
+  total_lifecycle_states: 16
+  human_approval_transitions: 8
+  terminal_branch_states: [repricing, scaling, pivot, sunset]
+  # The 8 owner-decision types (P9). Every human gate below cites exactly one.
+  owner_decision_types:
+    - new_or_increasing_recurring_cost
+    - pricing_go_live
+    - external_publish
+    - legal_privacy_commitment
+    - destructive_prod_or_data_deletion
+    - product_pivot
+    - product_sunset
+    - material_change_of_accepted_business_intent
+  # Global failure-routing convention (LangGraph error-routing pattern):
+  #   gate-fail  -> route to failure_destination with a `change` object describing the defect.
+  #   timeout    -> escalate per the state's escalation rule; lifecycle_state is NOT advanced.
+  #   retry      -> idempotent by execution_id (P7); a retried side effect with an existing
+  #                 execution_id is a no-op that returns the prior result.
+  global_defaults:
+    idempotency: "execution_id on every build/deployment/publish/delete side effect (P7)"
+    hash_skip: "any gate whose inputs' content_hash is unchanged returns cached verdict (P3)"
+    accept_rule: "accept_agent MUST differ from the object's producing agent (P2)"
+    kanban_mapping: "each generated task is a kanban_card; kanban status tracks the task only, never the lifecycle_state (P6)"
+
+# ============================================================================
+# STATES
+# ============================================================================
+states:
+
+  # ------------------------------------------------------------------ 1
+  market_scouting:
+    description: "Continuous/recurring scan of market + competitors; produces evidence objects."
+    entry_condition: "product exists AND (product.lifecycle_state == 'market_scouting' OR a recurring scout tick fired for this product)."
+    required_artifacts:
+      must_exist: [product]
+      produced_here: [market_fact, opportunity]     # opportunity is a draft candidate
+    required_gates:
+      deterministic:
+        - "≥1 market_fact object created this cycle, schema-valid, with source_url + observed_at."
+        - "each market_fact.content_hash computed; unchanged facts are deduped, not re-verified (P3)."
+      semantic:
+        - "research agent verifier scores each opportunity candidate for novelty vs the existing opportunity set; emits product_review(verdict). Runs only on changed hashes (P3)."
+      human: none
+    responsible_agent: research
+    accept_agent: business          # P2: research produces facts, business accepts the opportunity candidate
+    allowed_automatic_transitions:
+      - to: opportunity
+        when: "≥1 opportunity candidate passes deterministic+semantic gate"
+      - to: market_scouting
+        when: "recurring tick, no qualifying opportunity (self-loop, stays scouting)"
+    failure_destination: market_scouting     # no facts / all stale -> remain, retry next tick
+    timeout: "72h with no market_fact for an active product"
+    escalation: "emit decision(needs_attention) to deliverylead; do NOT escalate to human (research is fully automatic)."
+    human_approval_requirement:
+      required: false
+    next_task_generation_rule: >
+      On gate-pass, auto-create task(kind='opportunity_frame', product_id, source_opportunity_id)
+      assigned to business, execution_id=hash(product_id,opportunity_id,'opportunity'); auto-start (P8).
+
+  # ------------------------------------------------------------------ 2
+  opportunity:
+    description: "Frame and score a specific opportunity; go/no-go candidate."
+    entry_condition: "opportunity object exists AND referenced by a passing market_scouting transition."
+    required_artifacts:
+      must_exist: [product, opportunity, market_fact]
+      produced_here: [hypothesis]
+    required_gates:
+      deterministic:
+        - "opportunity schema-valid; links ≥1 market_fact (referential integrity)."
+        - "≥1 hypothesis object with a testable statement + target metric_definition ref."
+      semantic:
+        - "business verifier scores opportunity (TAM/fit/differentiation) -> product_review(verdict) (P2: != research)."
+      human: none
+    responsible_agent: business
+    accept_agent: deliverylead
+    allowed_automatic_transitions:
+      - to: business_definition
+        when: "opportunity scored GO by semantic gate"
+      - to: market_scouting
+        when: "scored NO-GO / needs more evidence (step-back, automatic per matrix)"
+    failure_destination: market_scouting
+    timeout: "48h"
+    escalation: "decision(needs_attention) -> deliverylead."
+    human_approval_requirement:
+      required: false
+    next_task_generation_rule: >
+      On GO, auto-create task(kind='business_define', opportunity_id) for business; on NO-GO,
+      auto-create task(kind='rescout', product_id) for research. execution_id=hash(opportunity_id, verdict). Auto-start.
+
+  # ------------------------------------------------------------------ 3
+  business_definition:
+    description: "Authoritative living business intent: value-prop, unit-economics, GTM, success + kill criteria."
+    entry_condition: "opportunity scored GO OR a `change` targets an existing business_definition."
+    required_artifacts:
+      must_exist: [product, opportunity]
+      produced_here: [business_definition, change, decision]
+    required_gates:
+      deterministic:
+        - "business_definition schema-valid; contains success_criteria AND kill_criteria (non-null) bound to metric_definition refs."
+        - "if this revises an accepted business_definition, a `change` object exists with change.material (bool) computed deterministically (diff of intent fields)."
+      semantic:
+        - "ba+business verifier confirms internal consistency (value-prop <-> unit-economics <-> GTM) -> product_review. P2: accept_agent below != producer."
+        - "jogasz verifier flags any legal/privacy COMMITMENT introduced -> sets change.carries_legal_commitment."
+      human:
+        - id: HG-1
+          decision_type: material_change_of_accepted_business_intent
+          fires_when: "change.material == true against an already-accepted business_definition"
+    responsible_agent: business
+    accept_agent: ba
+    allowed_automatic_transitions:
+      - to: product_definition
+        when: "business_definition validates AND change.material == false (first definition, or non-material revision) — automatic"
+    human_gated_transitions:
+      - to: product_definition
+        when: "change.material == true"
+        gate: HG-1                     # owner must approve the material intent change
+    failure_destination: opportunity   # inconsistent/invalid intent -> step back to opportunity (automatic)
+    timeout: "24h automatic path; human gate has no auto-timeout (waits on owner) but raises escalation clock"
+    escalation: "if HG-1 pending >24h, determ escalation-clock re-pings owner (fixes AS-IS FM-15/no-escalation-clock)."
+    human_approval_requirement:
+      required: conditional
+      condition: "true ONLY when change.material == true (HG-1); false for first definition and non-material edits"
+      owner_decision: material_change_of_accepted_business_intent
+      approval_object: "approval(decision_type='material_change_of_accepted_business_intent', change_id, verdict)"
+    next_task_generation_rule: >
+      On validate (auto or post-approval), auto-create task(kind='product_define', business_definition_id) for ba;
+      execution_id=hash(business_definition_id, business_definition.content_hash). Auto-start (P8).
+
+  # ------------------------------------------------------------------ 4
+  product_definition:
+    description: "Requirements + scenarios + roadmap slice for the accepted business intent."
+    entry_condition: "business_definition validated (and approved if it was a material change)."
+    required_artifacts:
+      must_exist: [business_definition]
+      produced_here: [requirement, scenario, decision]
+    required_gates:
+      deterministic:
+        - "≥1 requirement object; each requirement links to ≥1 scenario (acceptance scenario) — closes AS-IS 'no AC field' gap."
+        - "each requirement traces to business_definition.success_criteria (referential integrity)."
+      semantic:
+        - "ba verifier confirms scenarios are testable + cover the requirement's happy+edge paths -> product_review. Producer=ba here, so accept_agent=architect (P2)."
+      human: none
+    responsible_agent: ba
+    accept_agent: architect
+    allowed_automatic_transitions:
+      - to: design
+        when: "requirements+scenarios validate"
+      - to: business_definition
+        when: "requirements contradict business intent (step-back, automatic per matrix)"
+    failure_destination: business_definition
+    timeout: "24h"
+    escalation: "decision(needs_attention) -> deliverylead."
+    human_approval_requirement:
+      required: false
+    next_task_generation_rule: >
+      On validate, auto-create task(kind='design', requirement_ids[]) for uxuidesigner + a paired
+      task(kind='arch_design') for architect; execution_id=hash(requirement_set_hash,'design'). Auto-start.
+
+  # ------------------------------------------------------------------ 5
+  design:
+    description: "UX/UI + architecture design nodes satisfying requirements; may introduce legal/privacy commitments."
+    entry_condition: "requirements+scenarios validated."
+    required_artifacts:
+      must_exist: [requirement, scenario]
+      produced_here: [design_node, decision, change]
+    required_gates:
+      deterministic:
+        - "every requirement has ≥1 design_node covering it (coverage check, no orphan requirement)."
+        - "each design_node schema-valid + content_hash set."
+        - "if a design_node introduces external data collection / retention, change.carries_legal_commitment is set deterministically from the field."
+      semantic:
+        - "uxuidesigner+architect cross-verify design vs requirements/scenarios AND vs the thick proto (proto = floor) -> product_review. P2: accept_agent=architect for uxui nodes, uxuidesigner for arch nodes (mutual, non-self)."
+        - "jogasz verifier confirms whether any design_node is a binding legal/privacy commitment."
+      human:
+        - id: HG-2
+          decision_type: legal_privacy_commitment
+          fires_when: "change.carries_legal_commitment == true (e.g. new PII processing, retention, external DPA)"
+    responsible_agent: uxuidesigner
+    accept_agent: architect
+    allowed_automatic_transitions:
+      - to: implementation
+        when: "design validates AND carries_legal_commitment == false — automatic"
+      - to: product_definition
+        when: "design reveals a requirement gap/contradiction (step-back, automatic)"
+    human_gated_transitions:
+      - to: implementation
+        when: "carries_legal_commitment == true"
+        gate: HG-2
+    failure_destination: product_definition
+    timeout: "48h automatic path; human gate on escalation-clock"
+    escalation: "HG-2 pending >24h -> escalation-clock re-ping owner + jogasz."
+    human_approval_requirement:
+      required: conditional
+      condition: "true ONLY when a design_node is a binding legal/privacy commitment (HG-2)"
+      owner_decision: legal_privacy_commitment
+      approval_object: "approval(decision_type='legal_privacy_commitment', design_node_id, change_id)"
+    next_task_generation_rule: >
+      On validate (auto or post-approval), auto-create task(kind='task_breakdown', design_node_ids[]) for
+      deliverylead which fans out impl tasks to fullstackfejleszto/frontendfejleszto;
+      execution_id=hash(design_set_hash,'impl'). Auto-start (P8).
+
+  # ------------------------------------------------------------------ 6
+  implementation:
+    description: "Task-breakdown + code implementing the design. Task breakdown + implementation are automatic (matrix)."
+    entry_condition: "design validated (and legal commitment approved if applicable)."
+    required_artifacts:
+      must_exist: [design_node, requirement, scenario]
+      produced_here: [task, change]
+    required_gates:
+      deterministic:
+        - "each design_node maps to ≥1 task (breakdown coverage)."
+        - "each completed task references a change with a non-empty diff (commit/patch ref) — implementation actually happened, not self-declared 'done' (fixes AS-IS self-reported done)."
+        - "tsc/lint/build-preflight passes deterministically on the change."
+      semantic:
+        - "architect code-review verifier reviews the change vs design_node + scenario -> product_review. P2: reviewer=architect != implementer (fullstack/frontend)."
+      human: none
+    responsible_agent: fullstackfejleszto      # + frontendfejleszto for UI-only tasks
+    accept_agent: architect                     # producing agent never accepts own work (P2)
+    allowed_automatic_transitions:
+      - to: verification
+        when: "all tasks have accepted changes AND preflight green"
+      - to: design
+        when: "implementation infeasible against current design (step-back, automatic)"
+    failure_destination: design
+    timeout: "per-task 24h idle; epic 96h"
+    escalation: "determ resume-guard nudges the assignee (fixes AS-IS waiting-but-workable gap: nudge covers task in ANY non-terminal kanban status, not only in_progress)."
+    human_approval_requirement:
+      required: false
+    next_task_generation_rule: >
+      On all-accepted, auto-create task(kind='verify', change_ids[]) for qa;
+      execution_id=hash(change_set_hash,'verify'). Auto-start.
+
+  # ------------------------------------------------------------------ 7
+  verification:
+    description: "QA/test execution against scenarios; QA-return is automatic (matrix)."
+    entry_condition: "all implementation changes accepted by reviewer."
+    required_artifacts:
+      must_exist: [change, requirement, scenario]
+      produced_here: [test, product_review, decision]
+    required_gates:
+      deterministic:
+        - "each scenario has ≥1 test object with a recorded pass/fail result + execution_id."
+        - "no test.result == 'fail' remains open; test suite ran against the exact change_set_hash (P3: skip re-run if hash unchanged)."
+      semantic:
+        - "qa verifier confirms tests actually exercise the scenario intent (not vacuous) -> product_review. P2: qa != implementer."
+      human: none
+    responsible_agent: qa
+    accept_agent: deliverylead
+    allowed_automatic_transitions:
+      - to: build
+        when: "all tests pass AND coverage gate green"
+      - to: implementation
+        when: "any test fails (QA-return, automatic per matrix + LangGraph error-routing)"
+    failure_destination: implementation      # test-fail routes back with a `change` describing the defect
+    timeout: "24h"
+    escalation: "decision(needs_attention) -> deliverylead."
+    human_approval_requirement:
+      required: false
+    next_task_generation_rule: >
+      On all-pass, auto-create task(kind='build', change_set_hash) for buildfejleszto;
+      execution_id=hash(change_set_hash,'build'). Auto-start.
+
+  # ------------------------------------------------------------------ 8
+  build:
+    description: "Produce the deployable artifact; build is automatic (matrix)."
+    entry_condition: "verification passed for the change_set."
+    required_artifacts:
+      must_exist: [change, test]
+      produced_here: [build]
+    required_gates:
+      deterministic:
+        - "build object created with execution_id (P7); artifact_ref present; source_commit == verified change_set commit (source==build check, fixes AS-IS no source-vs-build verify)."
+        - "build.content_hash recorded; identical build is not re-run (P3)."
+      semantic: none                         # build correctness is deterministic; no LLM verifier needed (P1: determ suffices)
+      human: none
+    responsible_agent: buildfejleszto
+    accept_agent: devops
+    allowed_automatic_transitions:
+      - to: deploy
+        when: "build succeeds AND target env is pre-approved AND deploy introduces no new/increasing recurring cost"
+      - to: implementation
+        when: "build fails (error-routing back to fix source)"
+    human_gated_transitions:
+      - to: deploy
+        when: "deploy would introduce new or increasing recurring cost (e.g. new paid service/tier)"
+        gate: HG-3
+    failure_destination: implementation
+    timeout: "30m build wall-clock"
+    escalation: "build-fail -> decision(needs_attention) + auto-return; repeated fail (3x same hash) -> escalation-clock."
+    human_approval_requirement:
+      required: false
+    next_task_generation_rule: >
+      On build success, auto-create task(kind='deploy', build_id, target_env) for devops;
+      execution_id=hash(build_id, target_env). Auto-start.
+
+  # ------------------------------------------------------------------ 9
+  deploy:
+    description: "Deploy build to a PRE-APPROVED env (automatic). New/increasing recurring cost OR external publish = human."
+    entry_condition: "build succeeded; target env resolved."
+    required_artifacts:
+      must_exist: [build]
+      produced_here: [deployment, change]
+    required_gates:
+      deterministic:
+        - "deployment object with execution_id (P7); target_env is in the pre-approved allowlist."
+        - "cost-delta computed deterministically from CostOps: recurring_cost_delta >= 0 flagged; > 0 sets deployment.increases_recurring_cost."
+        - "publish_scope computed: internal vs external-facing (external => requires HG-5)."
+      semantic:
+        - "devops verifier confirms deployment config matches build target -> product_review. P2: devops != buildfejleszto."
+      human:
+        - id: HG-3
+          decision_type: new_or_increasing_recurring_cost
+          fires_when: "deployment.increases_recurring_cost == true"
+        - id: HG-5
+          decision_type: external_publish
+          fires_when: "deployment.publish_scope == 'external' (public launch / external endpoint / marketing go-live)"
+    responsible_agent: devops
+    accept_agent: deliverylead
+    allowed_automatic_transitions:
+      - to: runtime_evidence
+        when: "deploy to pre-approved env, no cost increase, not external-publish — automatic"
+    human_gated_transitions:
+      - to: runtime_evidence
+        when: "increases_recurring_cost == true"
+        gate: HG-3
+      - to: runtime_evidence
+        when: "publish_scope == 'external'"
+        gate: HG-5
+    failure_destination: build              # deploy/migration fail -> back to build (error-routing)
+    timeout: "20m deploy; human gates on escalation-clock"
+    escalation: "deploy-fail auto-rollback via execution_id (P7 idempotent); HG-3/HG-5 pending >12h -> re-ping owner."
+    human_approval_requirement:
+      required: conditional
+      condition: "true when increases_recurring_cost (HG-3) OR external publish (HG-5); false for internal redeploy to pre-approved env at flat cost"
+      owner_decision: [new_or_increasing_recurring_cost, external_publish]
+      approval_object: "approval(decision_type in {new_or_increasing_recurring_cost, external_publish}, deployment_id)"
+    next_task_generation_rule: >
+      On live (auto or post-approval), auto-create task(kind='runtime_smoke', deployment_id) for uat;
+      execution_id=hash(deployment_id,'smoke'). Auto-start (P8).
+
+  # ------------------------------------------------------------------ 10
+  runtime_evidence:
+    description: "Automatic runtime smoke + feature-reachability; produces runtime_evidence objects. (Fixes AS-IS 'deployed-not-reachable' gap.)"
+    entry_condition: "deployment live."
+    required_artifacts:
+      must_exist: [deployment]
+      produced_here: [runtime_evidence]
+    required_gates:
+      deterministic:
+        - "≥1 runtime_evidence object per critical scenario: HTTP reachability + feature-present assertion, with execution_id + observed_at."
+        - "runtime_evidence.deployment_id == current deployment (not stale)."
+      semantic:
+        - "uat verifier confirms the reachable feature matches the scenario intent (real, not a shell/Potemkin) -> product_review. P2: uat != devops."
+      human: none
+    responsible_agent: uat
+    accept_agent: qa
+    allowed_automatic_transitions:
+      - to: measurement
+        when: "all critical scenarios reachable + feature-present"
+      - to: implementation
+        when: "runtime shows missing/broken feature (error-routing back to fix)"
+    failure_destination: implementation
+    timeout: "2h post-deploy"
+    escalation: "no runtime_evidence within 2h of a live deployment -> decision(needs_attention) -> devops+deliverylead."
+    human_approval_requirement:
+      required: false
+    next_task_generation_rule: >
+      On reachable, auto-create task(kind='measure', deployment_id, metric_definition_ids[]) for deliverylead;
+      execution_id=hash(deployment_id,'measure'). Auto-start.
+
+  # ------------------------------------------------------------------ 11
+  measurement:
+    description: "Collect business-KPI observations against metric_definitions. (Fixes AS-IS keystone gap: value is now measured, not just cost.)"
+    entry_condition: "feature reachable in runtime_evidence."
+    required_artifacts:
+      must_exist: [metric_definition, runtime_evidence]
+      produced_here: [metric_observation]
+    required_gates:
+      deterministic:
+        - "each metric_definition bound to this product has ≥1 metric_observation this window (schema-valid, timestamped, source-attributed)."
+        - "observation source is a real collector (analytics/revenue/CostOps), NOT memory (P4)."
+      semantic: none                          # collection is deterministic; interpretation happens in optimization
+      human: none
+    responsible_agent: deliverylead
+    accept_agent: business
+    allowed_automatic_transitions:
+      - to: optimization
+        when: "observations recorded for the measurement window"
+      - to: measurement
+        when: "recurring measurement tick, window not yet closed (self-loop)"
+    failure_destination: runtime_evidence     # no data flowing -> re-check reachability of the analytics path
+    timeout: "measurement window per metric_definition.cadence (e.g. 24h/7d/30d)"
+    escalation: "collector silent past 1.5x cadence -> decision(needs_attention) -> devops (broken analytics pipe)."
+    human_approval_requirement:
+      required: false
+    next_task_generation_rule: >
+      On window close, auto-create task(kind='kpi_gap_analysis', metric_observation_ids[]) for business;
+      execution_id=hash(window_id,'optimize'). Auto-start.
+
+  # ------------------------------------------------------------------ 12
+  optimization:
+    description: "KPI-gap analysis + roadmap/pricing/marketing PROPOSALS (all automatic). Routes to a terminal branch."
+    entry_condition: "metric_observations recorded for a closed window."
+    required_artifacts:
+      must_exist: [metric_definition, metric_observation, business_definition]
+      produced_here: [hypothesis, product_review, change, decision]
+    required_gates:
+      deterministic:
+        - "each active metric_definition compared to its target/threshold; kpi_gap computed deterministically (observation vs success_criteria/kill_criteria)."
+        - "a product_review object summarizes gaps with references to the exact metric_observation ids (P4: from objects, not memory)."
+      semantic:
+        - "business+marketing verifier turns gaps into ranked PROPOSALS (roadmap change / pricing change / scaling / pivot / sunset) -> decision(proposal). All PROPOSALS are automatic; only their EXECUTION may gate (below)."
+      human: none                             # producing proposals is automatic; the branch-execution carries the human gate
+    responsible_agent: business
+    accept_agent: deliverylead
+    allowed_automatic_transitions:
+      - to: product_definition
+        when: "gap => new/changed requirement (continue-improve loop, automatic step-forward)"
+      - to: market_scouting
+        when: "gap => needs fresh market evidence (step-back to research, automatic per matrix)"
+      - to: repricing
+        when: "proposal = pricing change (enters repricing to PROPOSE; go-live still gated there)"
+      - to: scaling
+        when: "proposal = scale (enters scaling; cost-increasing scale gated there)"
+    human_gated_transitions:
+      - to: pivot
+        when: "proposal = product pivot"
+        gate: HG-7
+      - to: sunset
+        when: "proposal = product sunset"
+        gate: HG-8
+    failure_destination: measurement          # insufficient/ambiguous data -> collect more
+    timeout: "per optimization cadence (e.g. weekly)"
+    escalation: "kill_criteria breached (deterministic) -> force a sunset PROPOSAL + escalate to owner even if the loop is quiet."
+    human_approval_requirement:
+      required: conditional
+      condition: "false for proposals + non-destructive loops; true only for the pivot (HG-7) and sunset (HG-8) BRANCH ENTRIES"
+      owner_decision: [product_pivot, product_sunset]
+      approval_object: "approval(decision_type in {product_pivot, product_sunset}, product_id, proposal_decision_id)"
+    next_task_generation_rule: >
+      On branch selection, auto-create the branch entry task (repricing/scaling automatically;
+      pivot/sunset only AFTER approval); execution_id=hash(product_id, window_id, branch). Auto-start
+      the automatic branches; hold pivot/sunset tasks in kanban 'waiting' until approval (P9).
+
+  # ------------------------------------------------------------------ 13  (terminal branch)
+  repricing:
+    description: "Pricing PROPOSAL is automatic; pricing GO-LIVE requires owner approval."
+    entry_condition: "optimization selected a pricing change proposal."
+    required_artifacts:
+      must_exist: [business_definition, metric_observation, decision]
+      produced_here: [change, approval, decision]
+    required_gates:
+      deterministic:
+        - "price change object cost-linked: new price vs per-product COGS/margin from CostOps computed (fixes AS-IS 'pricing not cost-aware')."
+        - "pricing-drift guard: proposed price checked against sibling products (no cross-product contamination)."
+      semantic:
+        - "business+marketing verifier validates price vs WTP/competitor facts -> product_review. P2: != the proposer."
+      human:
+        - id: HG-4
+          decision_type: pricing_go_live
+          fires_when: "always, before any live price takes effect"
+    responsible_agent: business
+    accept_agent: deliverylead
+    allowed_automatic_transitions:
+      - to: measurement
+        when: "AFTER HG-4 approval + price applied -> back to measurement to observe the new price's effect"
+    human_gated_transitions:
+      - to: measurement
+        when: "price go-live"
+        gate: HG-4
+    failure_destination: optimization
+    timeout: "proposal auto path 24h; HG-4 waits on owner + escalation-clock"
+    escalation: "HG-4 pending >48h -> re-ping owner; proposal auto-expires to optimization if abandoned 7d."
+    human_approval_requirement:
+      required: true
+      owner_decision: pricing_go_live
+      approval_object: "approval(decision_type='pricing_go_live', change_id, product_id)"
+    next_task_generation_rule: >
+      On approval, execution_id=hash(change_id,'apply_price') applies price (idempotent, P7) and
+      auto-creates task(kind='measure') to observe effect. Auto-start post-approval.
+
+  # ------------------------------------------------------------------ 14  (terminal branch)
+  scaling:
+    description: "Scale capacity/reach. Automatic when flat-cost; owner-gated when it increases recurring cost."
+    entry_condition: "optimization selected a scaling proposal."
+    required_artifacts:
+      must_exist: [metric_observation, deployment, decision]
+      produced_here: [change, deployment, approval]
+    required_gates:
+      deterministic:
+        - "recurring_cost_delta computed from CostOps for the scale action; >0 sets increases_recurring_cost."
+        - "scale change carries execution_id (P7)."
+      semantic:
+        - "devops+business verifier confirms scale matches the demand signal in metric_observations -> product_review. P2 mutual."
+      human:
+        - id: HG-6
+          decision_type: new_or_increasing_recurring_cost
+          fires_when: "increases_recurring_cost == true"
+    responsible_agent: devops
+    accept_agent: deliverylead
+    allowed_automatic_transitions:
+      - to: measurement
+        when: "flat-cost scale applied (increases_recurring_cost == false) — automatic"
+    human_gated_transitions:
+      - to: measurement
+        when: "increases_recurring_cost == true"
+        gate: HG-6
+    failure_destination: optimization
+    timeout: "auto path 24h; HG-6 on escalation-clock"
+    escalation: "HG-6 pending >48h -> re-ping owner."
+    human_approval_requirement:
+      required: conditional
+      condition: "true only when the scale increases recurring cost (HG-6); false for flat-cost scaling"
+      owner_decision: new_or_increasing_recurring_cost
+      approval_object: "approval(decision_type='new_or_increasing_recurring_cost', change_id)"
+    next_task_generation_rule: >
+      On applied (auto or post-approval), execution_id=hash(change_id,'scale'); auto-create task(kind='measure')
+      to observe scaled behavior. Auto-start.
+
+  # ------------------------------------------------------------------ 15  (terminal branch)
+  pivot:
+    description: "Redirect product intent. Branch ENTRY already owner-approved at optimization (HG-7); executes the pivot."
+    entry_condition: "optimization pivot proposal APPROVED (HG-7 approval object exists)."
+    required_artifacts:
+      must_exist: [approval, decision, business_definition]
+      produced_here: [change, business_definition, decision]
+    required_gates:
+      deterministic:
+        - "approval(decision_type='product_pivot') exists and references this product/proposal (no pivot without the owner approval object)."
+        - "a new/superseding business_definition draft is created carrying the pivoted intent."
+      semantic:
+        - "business+architect verifier confirms the pivot's new intent is coherent -> product_review. P2 mutual."
+      human: none                             # the owner decision already happened at HG-7; execution is automatic
+    responsible_agent: business
+    accept_agent: architect
+    allowed_automatic_transitions:
+      - to: business_definition
+        when: "pivot accepted -> re-enter business_definition with the new (pivoted) intent, re-running the forward lifecycle"
+    failure_destination: optimization
+    timeout: "24h"
+    escalation: "decision(needs_attention) -> deliverylead."
+    human_approval_requirement:
+      required: true
+      owner_decision: product_pivot
+      note: "The human interrupt (HG-7) fires at the optimization->pivot BRANCH ENTRY (P9). This state executes an already-approved pivot; it does not re-ask."
+      approval_object: "approval(decision_type='product_pivot', product_id) — created at HG-7, consumed here"
+    next_task_generation_rule: >
+      On accept, auto-create task(kind='business_define', new_business_definition_id) re-entering the loop;
+      execution_id=hash(product_id,'pivot',new_business_definition_id). Auto-start.
+
+  # ------------------------------------------------------------------ 16  (terminal branch)
+  sunset:
+    description: "Retire the product. Branch ENTRY owner-approved (HG-8). Any destructive prod/data deletion is a SEPARATE owner approval."
+    entry_condition: "optimization sunset proposal APPROVED (HG-8 approval object exists) OR kill_criteria breached + owner-confirmed."
+    required_artifacts:
+      must_exist: [approval, decision, metric_observation]
+      produced_here: [change, deployment, decision, approval]
+    required_gates:
+      deterministic:
+        - "approval(decision_type='product_sunset') exists (no sunset without owner approval)."
+        - "dependency-map check: enumerate dependent services before teardown (fixes AS-IS zombie/separate-service-suspension gap)."
+        - "any destructive delete step (DB rows, service teardown, data purge) carries its OWN execution_id AND requires a distinct approval (destructive_prod_or_data_deletion)."
+      semantic:
+        - "devops+deliverylead verifier confirms teardown plan touches only this product's resources -> product_review. P2 mutual."
+      human:
+        - id: HG-8
+          decision_type: product_sunset
+          fires_when: "at optimization->sunset branch entry (already fired to reach this state)"
+        - id: HG-8b
+          decision_type: destructive_prod_or_data_deletion
+          fires_when: "before any irreversible prod-data deletion step within sunset"
+    responsible_agent: devops
+    accept_agent: deliverylead
+    allowed_automatic_transitions:
+      - to: TERMINAL_ARCHIVED
+        when: "non-destructive retirement (disable/hide) completes; product.lifecycle_state='archived'"
+    human_gated_transitions:
+      - to: TERMINAL_ARCHIVED
+        when: "retirement requires destructive prod/data deletion"
+        gate: HG-8b
+    failure_destination: optimization         # abort sunset -> back to optimization (product kept alive)
+    timeout: "no auto-timeout on destructive step; waits on HG-8b indefinitely (never auto-deletes)"
+    escalation: "HG-8b is hard-blocking: destructive deletion NEVER proceeds without the owner approval object, regardless of timeout (P9 + irreversible-delete-gate)."
+    human_approval_requirement:
+      required: true
+      owner_decision: [product_sunset, destructive_prod_or_data_deletion]
+      note: >
+        product_sunset (HG-8) is counted among the 8 lifecycle-transition human gates (optimization->sunset).
+        destructive_prod_or_data_deletion (HG-8b) is the SAME owner-decision TYPE as the 8th matrix category and
+        is enforced here as a hard, non-timeout-able sub-gate on the irreversible step. It does not add a 9th
+        distinct owner-decision type; it instantiates the 'destructive_prod_or_data_deletion' matrix category at
+        the only place a destructive deletion actually occurs in the lifecycle.
+      approval_object: "approval(decision_type='product_sunset'|'destructive_prod_or_data_deletion', product_id, execution_id)"
+    next_task_generation_rule: >
+      On archived, emit final decision(lifecycle_closed); NO next task auto-created (terminal).
+      A future re-entry is a new opportunity, not a continuation.
+
+# ============================================================================
+# HUMAN-APPROVAL GATE INDEX  (P9 — exactly the 8 owner-decision types; 8 gated transitions)
+# ============================================================================
+# Each row = one gated transition. Count of gated transitions = 8.
+human_gates:
+  - id: HG-1
+    state: business_definition
+    transition: "business_definition -> product_definition (only when change.material)"
+    owner_decision: material_change_of_accepted_business_intent
+  - id: HG-2
+    state: design
+    transition: "design -> implementation (only when a legal/privacy commitment is introduced)"
+    owner_decision: legal_privacy_commitment
+  - id: HG-3
+    state: deploy
+    transition: "deploy -> runtime_evidence (only when it increases recurring cost)"
+    owner_decision: new_or_increasing_recurring_cost
+  - id: HG-4
+    state: repricing
+    transition: "repricing -> measurement (price go-live, always)"
+    owner_decision: pricing_go_live
+  - id: HG-5
+    state: deploy
+    transition: "deploy -> runtime_evidence (only when publish_scope == external)"
+    owner_decision: external_publish
+  - id: HG-6
+    state: scaling
+    transition: "scaling -> measurement (only when it increases recurring cost)"
+    owner_decision: new_or_increasing_recurring_cost
+  - id: HG-7
+    state: optimization
+    transition: "optimization -> pivot (product pivot, always)"
+    owner_decision: product_pivot
+  - id: HG-8
+    state: optimization
+    transition: "optimization -> sunset (product sunset, always)"
+    owner_decision: product_sunset
+  # NOTE: HG-8b (destructive_prod_or_data_deletion) is a hard SUB-gate inside the sunset
+  # state on the irreversible-delete side effect. It enforces the 8th matrix owner-decision
+  # type at its point of occurrence and is NOT counted as a 9th distinct lifecycle transition
+  # (the 8 gated lifecycle TRANSITIONS are HG-1..HG-8). All 8 matrix owner-decision types are
+  # covered: material-intent(HG-1), legal(HG-2), recurring-cost(HG-3/HG-6),
+  # external-publish(HG-5), pricing-go-live(HG-4), pivot(HG-7), sunset(HG-8),
+  # destructive-deletion(HG-8b sub-gate).
+
+# ============================================================================
+# EDGE COMPLETENESS  (every state has explicit success AND failure edges)
+# ============================================================================
+edge_summary:
+  success_edges: "each state lists allowed_automatic_transitions (+ human_gated_transitions where owner-gated)."
+  failure_edges: "each state lists failure_destination (LangGraph error-routing) — gate/QA/build/deploy/runtime fail all route deterministically, never silently drop (fixes AS-IS FM-16 failure-without-return)."
+  step_back_edges: "market_scouting/business_definition/product_definition/design/optimization all expose automatic step-back edges per the autonomy matrix."
+  terminal: "sunset -> TERMINAL_ARCHIVED is the only terminal exit; pivot re-enters at business_definition; repricing/scaling re-enter at measurement."
