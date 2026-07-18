@@ -20,6 +20,7 @@ import {
 import { setLastInboundModality } from './voice-modality.js'
 import { classifyAgentMessage, wrapAgentMessageForDelivery } from './agent-message-wrap.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
+import { checkDispatchGate } from './data-sensitivity-gate-runner.js'
 
 // A message that cannot be delivered within this window (target session never
 // exists / stays busy) is marked failed so it stops clogging the pending
@@ -386,6 +387,28 @@ export async function runMessageRouterTick(): Promise<void> {
         // msgId passed so receiving agents can write back via PUT /api/messages/:id.
         const content = isChannelInbound ? deliveryContent : msg.content
         const { prefix, wrapped } = wrapAgentMessageForDelivery(category, safeFromAgent, msg.from_agent, content, msg.id, msg.origin_note)
+
+        // ---- data-sensitivity dispatch gate (card 6bf535bf) -----------------
+        // Check before tmux injection: is restricted content heading to a
+        // non-trusted provider? Observe-only for now (never blocks, only logs).
+        const gateCheck = checkDispatchGate({
+          content: prefix + wrapped,
+          targetAgent: msg.to_agent,
+          messageId: msg.id,
+        })
+        if (gateCheck.shouldBlock) {
+          // Enforce mode — block delivery entirely.
+          logger.warn({ id: msg.id, to: msg.to_agent, audit: gateCheck.auditEntry },
+            'data-sensitivity-gate: BLOCKED restricted content to non-trusted provider')
+          if (!markMessageFailed(msg.id, `Blocked by data-sensitivity gate: ${gateCheck.result.reason}`)) {
+            logger.warn({ id: msg.id }, 'markMessageFailed affected 0 rows (deleted concurrently?)')
+          }
+          routerLoggedMisses.delete(msg.id)
+          continue
+        }
+        // Observe-only: gateCheck.auditEntry already logged by checkDispatchGate.
+        // Delivery proceeds normally.
+
         // Inline preamble so a fresh session (post hard-restart) doesn't miss
         // the context that explains the tag semantics.
         sendPromptToSession(session, prefix + wrapped, host)
