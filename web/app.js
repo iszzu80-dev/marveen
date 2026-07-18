@@ -33,15 +33,31 @@
   // Initialise from localStorage; server default fetched async below.
   applyLang(localStorage.getItem(LS_KEY) || 'hu')
 
-  // Fetch server default (DASHBOARD_LANG) and apply only if localStorage not set.
-  fetch('/api/settings')
-    .then(r => r.ok ? r.json() : null)
-    .then(data => {
-      if (!data || localStorage.getItem(LS_KEY)) return
-      const entry = (data.settings || []).find(s => s.key === 'DASHBOARD_LANG')
-      if (entry && VALID.has(entry.value)) applyLang(entry.value)
-    })
-    .catch(() => {})
+  // Fetch server default (DASHBOARD_LANG) and apply only if localStorage not
+  // set. Deferred to a MICROTASK: this IIFE evaluates before the fetch-wrapper
+  // IIFE installs the Bearer-injecting window.fetch, so an eager call here
+  // went out with the native fetch, got 401 from the /api gate, and the
+  // server default was silently dead code. Microtasks run after the whole
+  // classic script has evaluated, when window.fetch is the wrapped version.
+  queueMicrotask(() => {
+    fetch('/api/settings')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (!data || localStorage.getItem(LS_KEY)) return
+        const entry = (data.settings || []).find(s => s.key === 'DASHBOARD_LANG')
+        if (!entry || !VALID.has(entry.value) || entry.value === window._lang) return
+        // Apply WITHOUT persisting (localStorage must keep overriding the
+        // server default), and re-run the render dance: the initial
+        // DOMContentLoaded render almost always beats this response, so a
+        // plain applyLang would leave the page painted in the old language.
+        applyLang(entry.value)
+        if (typeof renderNav === 'function') renderNav()
+        if (typeof renderStaticI18n === 'function') renderStaticI18n()
+        const activeLink = document.querySelector('.sb-link.active[data-page]')
+        if (activeLink && typeof switchPage === 'function') switchPage(activeLink.dataset.page)
+      })
+      .catch(() => {})
+  })
 
   window.setLang = function setLang(lang) {
     if (!VALID.has(lang)) return
@@ -262,9 +278,6 @@ function switchPage(pageId) {
   navLinks.forEach((l) => l.classList.toggle('active', l.dataset.page === pageId))
   // Kanban needs full-width layout (overrides main's max-width: 1200px)
   document.querySelector('main').classList.toggle('kanban-active', pageId === 'kanban')
-  // CostOps Command Center wide-workspace (UI-0 doc section 11.3); Costops.mount() itself
-  // re-adds the class (costops-shell.js), this only removes it when navigating away.
-  if (pageId !== 'costs-cc') document.querySelector('main').classList.remove('costs-cc-active')
   // Activity page runs a live poll; stop it whenever we navigate away.
   if (pageId !== 'activity') stopActivityPoll()
   if (pageId === 'activity') startActivityPoll()
@@ -283,18 +296,17 @@ function switchPage(pageId) {
   if (pageId === 'recall') loadRecallPage()
   if (pageId === 'bgTasks') loadBgTasksPage()
   if (pageId === 'vault') loadVaultPage()
-  if (pageId === 'autonomy') loadAutonomy()
+  if (pageId === 'approvals') loadApprovalsPage()
   if (pageId === 'settings') loadSettings()
   if (pageId === 'updates') loadUpdates()
   if (pageId === 'team') { loadTeamGraph() }
   if (pageId === 'messages') loadMessagesPage()
   if (pageId === 'tokenUsage') loadTokenUsage()
   if (pageId === 'costs') loadCosts()
-  if (pageId === 'costs-v2') loadCostsV2()
-  if (pageId === 'costs-cc') window.Costops.mount()
   if (pageId === 'ideas') loadIdeasPage()
   if (pageId === 'archived') loadArchivedPage()
   if (pageId === 'naplo') loadNaplo()
+  if (pageId === 'federation') loadFederationPage()
 }
 
 // Mobile off-canvas sidebar toggle. No-op visual effect on desktop (the
@@ -335,9 +347,9 @@ const NAV_I18N = {
   messages: 'nav.messages', tasks: 'nav.tasks', memories: 'nav.memories',
   recall: 'nav.recall', naplo: 'nav.recall', bgTasks: 'nav.bgTasks',
   skills: 'nav.skills', connectors: 'nav.connectors', migrate: 'nav.migrate',
-  docs: 'nav.docs', status: 'nav.status', autonomy: 'nav.autonomy',
+  approvals: 'nav.approvals',
   settings: 'nav.settings', vault: 'nav.vault', tokenUsage: 'nav.tokenUsage',
-  ideas: 'nav.ideas', updates: 'nav.updates', costs: 'nav.costs',
+  ideas: 'nav.ideas', federation: 'nav.federation', updates: 'nav.updates', costs: 'nav.costs',
 }
 
 function renderNav() {
@@ -373,7 +385,6 @@ const PAGE_HEADER_I18N = {
   statusPage:     { title: 'status.page_title',      sub: 'status.page_subtitle' },
   teamPage:       { title: 'team.page_title',        sub: 'team.page_subtitle' },
   messagesPage:   { title: 'messages.page_title',    sub: 'messages.page_subtitle' },
-  autonomyPage:   { title: 'autonomy.page_title',    sub: 'autonomy.page_subtitle' },
   settingsPage:   { title: 'settings.page_title',    sub: 'settings.page_subtitle' },
   ideasPage:      { title: 'ideas.page_title',       sub: 'ideas.page_subtitle' },
   vaultPage:      { title: 'vault.page_title',       sub: 'vault.page_subtitle' },
@@ -381,6 +392,8 @@ const PAGE_HEADER_I18N = {
   updatesPage:    { title: 'updates.page_title',     sub: null },
   naploPage:      { title: 'naplo.page_title',       sub: 'naplo.page_subtitle' },
   costsPage:      { title: 'costs.page_title',       sub: 'costs.page_subtitle' },
+  federationPage: { title: 'federation.page_title',  sub: 'federation.page_subtitle' },
+  approvalsPage:  { title: 'approvals.page_title',   sub: 'approvals.page_subtitle' },
 }
 
 function renderStaticI18n() {
@@ -434,11 +447,6 @@ function renderStaticI18n() {
   if (overviewTeamMeta) overviewTeamMeta.textContent = t('overview.meta.live')
   const overviewActivityH3 = document.querySelector('#overviewPage .overview-grid .overview-card:nth-child(2) h3')
   if (overviewActivityH3) overviewActivityH3.textContent = t('overview.card.activity')
-  const overviewAgentH3 = document.querySelector('#overviewPage .overview-grid .overview-card:nth-child(3) h3')
-  if (overviewAgentH3) overviewAgentH3.textContent = t('overview.card.agent_activity')
-  const overviewAgentMeta = document.querySelector('#overviewPage .overview-grid .overview-card:nth-child(3) .overview-card-meta')
-  if (overviewAgentMeta) overviewAgentMeta.textContent = t('overview.meta.messages')
-
   // Kanban filter labels
   const kanbanProjectLabel = document.querySelector('label[for="kanbanProjectFilter"]')
   if (kanbanProjectLabel) kanbanProjectLabel.textContent = t('kanban.filter.project_label')
@@ -1254,7 +1262,7 @@ function createCardEl(card, embeddedChildren = []) {
     const shown = card.labels.slice(0, 3)
     const overflow = card.labels.length - shown.length
     const pills = shown.map((l) =>
-      `<span class="kanban-card-label-pill" data-label-id="${escapeHtml(l.id)}" style="--label-color:${escapeHtml(l.color)};max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(l.name)}">#${escapeHtml(l.name)}</span>`
+      `<span class="kanban-card-label-pill" data-label-id="${escapeHtml(l.id)}" style="--label-color:${escapeHtml(l.color)}" title="${t('kanban.label.filter_tooltip', { name: escapeHtml(l.name) })}">#${escapeHtml(l.name)}</span>`
     ).join('')
     const overflowHtml = overflow > 0
       ? `<span class="kanban-card-label-pill kanban-card-label-overflow" title="${t('kanban.label.overflow_tooltip', { n: overflow })}">+${overflow}</span>`
@@ -2385,11 +2393,16 @@ function showToast(msg, duration = 3000) {
 // === Agents API ===
 async function loadAgents() {
   try {
-    const [agentsRes, marveenRes] = await Promise.all([
+    // The federation status fetch is deliberately failure-proof (.catch ->
+    // null): it must NEVER take down the Agents page -- including on an
+    // older backend where the route 404s.
+    const [agentsRes, marveenRes, fedStatus] = await Promise.all([
       fetch('/api/agents'),
       fetch('/api/marveen'),
+      fetch('/api/federation/status').then((r) => (r.ok ? r.json() : null)).catch(() => null),
     ])
     agents = await agentsRes.json()
+    if (fedStatus && Array.isArray(fedStatus.peers)) federatedPeerStatus = fedStatus.peers
     if (marveenRes.ok) {
       window._marveen = await marveenRes.json()
       // A backend CHANNEL_PROVIDER-éhez igazitsuk a kliens-default-ot,
@@ -2485,7 +2498,27 @@ async function openMarveenDetail() {
   // Sync the settings tab model select with Marveen's actual model so it
   // doesn't carry over the previously opened sub-agent's selection.
   const marveenModelSelect = document.getElementById('editAgentModel')
-  if (marveenModelSelect) marveenModelSelect.value = m.activeModel || m.model || ''
+  if (marveenModelSelect) {
+    // The main agent's real model (e.g. 'claude-opus-4-8') may not match any
+    // static option verbatim (the option is 'claude-opus-4-8[1m]'), so a plain
+    // .value assignment finds no match and the select silently displays the
+    // first option (Fable 5), misrepresenting what the agent actually runs.
+    // Inject the real id as an option so the (read-only) select shows the truth
+    // -- same trick as the sub-agent panel's dynamic-model-opt.
+    const mv = m.activeModel || m.model || ''
+    Array.from(marveenModelSelect.querySelectorAll('option.dynamic-model-opt')).forEach(o => o.remove())
+    if (mv && !Array.from(marveenModelSelect.options).some(o => o.value === mv)) {
+      const opt = document.createElement('option')
+      opt.value = mv
+      opt.className = 'dynamic-model-opt'
+      opt.textContent = mv
+      marveenModelSelect.appendChild(opt)
+    }
+    marveenModelSelect.value = mv
+  }
+  // Populate the model dropdown groups (auto/manual) AND surface the OpenRouter
+  // curation button -- this is the main agent, the only place curation lives.
+  loadAvailableModels()
   // Surface the "channels restart" button -- destructive, but mobile-safe
   // when the Telegram plugin wedges and you're away from a terminal.
   document.getElementById('marveenRestartBtn').hidden = false
@@ -2732,6 +2765,68 @@ function renderAgents() {
     if (isRunning) attachTmuxCopyButtons(card, agent)
     agentsGrid.insertBefore(card, addBtn)
   }
+  renderFederatedAgentCards(agentsGrid, addBtn)
+}
+
+// Federated (remote-system) agents from the manifest-poller cache. Kept in a
+// SEPARATE array from `agents`: that global feeds the team editor and the
+// create-wizard, where qualified ids would be selectable-and-invalid.
+// "remote" already means SSH agents in this codebase -- these are FEDERATED.
+let federatedPeerStatus = []
+
+// System/plumbing agent names never shown as message targets.
+const FEDERATED_HIDDEN_AGENTS = new Set(['heartbeat', 'telegram-coordinator', 'channel-coordinator'])
+
+function federatedAgentEntries() {
+  const out = []
+  for (const peer of federatedPeerStatus) {
+    const manifest = peer && peer.manifest
+    if (!manifest || !Array.isArray(manifest.agents)) continue
+    for (const a of manifest.agents) {
+      if (!a || typeof a.id !== 'string' || FEDERATED_HIDDEN_AGENTS.has(a.id.split('/').pop())) continue
+      out.push({ peer: peer.id, peerState: peer.state, qualified: `${peer.id}/${a.id}`, displayName: a.displayName || a.id, model: a.model || '' })
+    }
+  }
+  return out
+}
+
+function renderFederatedAgentCards(agentsGrid, addBtn) {
+  for (const fa of federatedAgentEntries()) {
+    const card = document.createElement('div')
+    card.className = 'agent-card federated-agent-card'
+    const reachable = fa.peerState === 'ok'
+    // SECURITY: every manifest-derived string is peer-controlled. Text nodes
+    // go through escapeHtml; NOTHING peer-controlled may land in an attribute
+    // (escapeHtml does not encode quotes). The model badge is a plain text
+    // span WITHOUT a model-derived class.
+    const gradientClass = 'gradient-' + ((fa.qualified.charCodeAt(0) % 3) + 1)
+    card.innerHTML = `
+      <div class="agent-card-top">
+        <div class="agent-avatar ${gradientClass}">${escapeHtml(fa.displayName.charAt(0).toUpperCase())}</div>
+        <div class="agent-card-info">
+          <div class="agent-name">${escapeHtml(fa.displayName)} <span class="federated-badge">${t('federation.badge', { peer: fa.peer })}</span></div>
+          <div class="agent-desc">${escapeHtml(fa.qualified)}</div>
+        </div>
+      </div>
+      <div class="agent-card-footer">
+        <span class="agent-model-badge">${escapeHtml(fa.model)}</span>
+        <span class="tg-status"><span class="tg-dot ${reachable ? 'connected' : 'disconnected'}"></span> ${reachable ? t('federation.peer_state.ok') : t('federation.peer_state.' + (fa.peerState || 'unknown'))}</span>
+      </div>
+      <div class="agent-card-actions">
+        <button class="btn-secondary btn-compact federated-message-btn">${t('federation.btn.message')}</button>
+      </div>`
+    card.querySelector('.federated-message-btn').addEventListener('click', (e) => {
+      e.stopPropagation()
+      openFederatedThread(fa.qualified)
+    })
+    agentsGrid.insertBefore(card, addBtn)
+  }
+}
+
+function openFederatedThread(qualifiedId) {
+  chatSelectedAgent = qualifiedId
+  if (location.hash === '#messages') switchPage('messages')
+  else location.hash = 'messages'
 }
 
 // === Agent Detail ===
@@ -2769,7 +2864,22 @@ async function openAgentDetail(agentName) {
   // Settings tab - load Ollama + DeepSeek models then set value
   loadAvailableModels()
   loadOllamaModels().then(() => {
-    document.getElementById('editAgentModel').value = currentAgent.activeModel || currentAgent.model || 'claude-opus-4-8[1m]'
+    const sel = document.getElementById('editAgentModel')
+    const mv = currentAgent.activeModel || currentAgent.model || 'claude-opus-4-8[1m]'
+    // The model <select> is one shared element reused per agent. A manual
+    // OpenRouter id (or openrouter-auto:tier) may not be among the static/auto
+    // options, so setting .value would silently show nothing. Inject THIS
+    // agent's model as a selectable option (cleaning any stale injected ones
+    // first) so every agent always displays its own model, per-agent.
+    Array.from(sel.querySelectorAll('option.dynamic-model-opt')).forEach(o => o.remove())
+    if (!Array.from(sel.options).some(o => o.value === mv)) {
+      const opt = document.createElement('option')
+      opt.value = mv
+      opt.className = 'dynamic-model-opt'
+      opt.textContent = mv.startsWith('openrouter-auto:') ? `🔀 ${mv}` : `🔀 ${mv}`
+      sel.appendChild(opt)
+    }
+    sel.value = mv
   })
   populateProfileSelect(
     document.getElementById('editAgentProfile'),
@@ -3264,8 +3374,188 @@ async function loadAvailableModels() {
       }
     }
     if (hint) hint.style.display = deepseekModels.length === 0 ? 'block' : 'none'
+
+    // OpenRouter: two optgroups per select (Auto = weekly-fresh tier
+    // recommendation, value `openrouter-auto:<tier>`; Manual = the 2 concrete
+    // ids per tier). Backend gates the whole block behind the vault key, so a
+    // null payload means OpenRouter is not connected -> keep the groups hidden.
+    const or = data.openrouter
+    const orTiers = or && Array.isArray(or.tiers) ? or.tiers : []
+    // Auto = one entry per tier in the dropdown (weekly-fresh recommendation).
+    const autoGroups = [document.getElementById('openrouterAutoGroup'), document.getElementById('agentModelOpenrouterAutoGroup')]
+    for (const g of autoGroups) {
+      if (!g) continue
+      g.innerHTML = ''
+      if (orTiers.length === 0) { g.style.display = 'none'; continue }
+      g.style.display = ''
+      for (const t of orTiers) {
+        const opt = document.createElement('option')
+        opt.value = t.autoId
+        opt.textContent = `${t.label} - auto (${t.auto})`
+        g.appendChild(opt)
+      }
+    }
+    // Manual = the user-curated list -> "OpenRouter - kézi" optgroup in every
+    // select. Curated once (main agent's browse popup, checkboxes); assignable
+    // per agent here. Empty list -> group hidden.
+    const orManual = Array.isArray(data.openrouterManual) ? data.openrouterManual : []
+    openrouterCurated = new Set(orManual.map(m => m.id))
+    const manualGroups = [document.getElementById('openrouterManualGroup'), document.getElementById('agentModelOpenrouterManualGroup')]
+    for (const g of manualGroups) {
+      if (!g) continue
+      g.innerHTML = ''
+      if (orManual.length === 0) { g.style.display = 'none'; continue }
+      g.style.display = ''
+      for (const m of orManual) {
+        const opt = document.createElement('option')
+        opt.value = m.id
+        opt.textContent = `🔀 ${m.name || m.id}`
+        g.appendChild(opt)
+      }
+    }
+    // Browse popup = the curation UI (tick/untick which manual models exist).
+    // MAIN AGENT ONLY -- sub-agents just pick from the curated dropdown above.
+    // The main agent opens via openMarveenDetail(), whose currentAgent comes
+    // from window._marveen and has NO `role` field -- so detect it by name too.
+    const mid = (typeof mainAgentId === 'function') ? mainAgentId() : ''
+    const isMainAgent = !!currentAgent && (
+      currentAgent.role === 'main' ||
+      currentAgent.name === mid ||
+      currentAgent.agentId === mid
+    )
+    const orBtn = document.getElementById('openrouterBrowseBtn')
+    if (orBtn) orBtn.style.display = (data.openrouterConfigured && isMainAgent) ? '' : 'none'
   } catch { /* dashboard not available */ }
 }
+
+// --- OpenRouter manual-list curation (tick models into the shared dropdown) ---
+let openrouterAllModels = null
+let openrouterCurated = new Set()  // ids currently in the curated manual list
+
+async function openOpenrouterModal() {
+  const modal = document.getElementById('openrouterModal')
+  const listEl = document.getElementById('openrouterModalList')
+  const agentEl = document.getElementById('openrouterModalAgent')
+  const searchEl = document.getElementById('openrouterModalSearch')
+  const freeEl = document.getElementById('openrouterModalFreeOnly')
+  if (!modal || !listEl) return
+  // The modal markup lives inside the (hidden) connectors page; reparent it to
+  // <body> so it renders full-viewport regardless of which tab is active.
+  if (modal.parentElement !== document.body) document.body.appendChild(modal)
+  if (agentEl) agentEl.textContent = (currentAgent && (currentAgent.displayName || currentAgent.name)) || 'ágens'
+  // Two competing .modal-overlay CSS rules: one hides via [hidden], the other
+  // via opacity/visibility (toggled by .active). Set both so the modal shows
+  // regardless of which rule wins the cascade.
+  modal.hidden = false
+  modal.classList.add('active')
+  listEl.innerHTML = '<div style="padding:14px;color:var(--text-muted);font-size:13px">Modellek betöltése…</div>'
+  if (searchEl) searchEl.value = ''
+  if (freeEl) freeEl.checked = false
+  try {
+    // Load the full model list (cached) and the current curated set in parallel
+    // so the checkboxes render already ticked for the manual models in the list.
+    const [allRes, curRes] = await Promise.all([
+      openrouterAllModels ? Promise.resolve(null) : fetch('/api/openrouter/models'),
+      fetch('/api/openrouter/manual'),
+    ])
+    if (allRes) {
+      if (!allRes.ok) throw new Error('fetch failed')
+      const data = await allRes.json()
+      openrouterAllModels = Array.isArray(data.models) ? data.models : []
+    }
+    if (curRes && curRes.ok) {
+      const cur = await curRes.json()
+      openrouterCurated = new Set((Array.isArray(cur.models) ? cur.models : []).map(m => m.id))
+    }
+    renderOpenrouterList()
+  } catch {
+    listEl.innerHTML = '<div style="padding:14px;color:var(--danger,#dc2626);font-size:13px">Nem sikerült betölteni az OpenRouter modelleket.</div>'
+  }
+}
+
+function renderOpenrouterList() {
+  const listEl = document.getElementById('openrouterModalList')
+  const countEl = document.getElementById('openrouterModalCount')
+  const q = (document.getElementById('openrouterModalSearch')?.value || '').toLowerCase().trim()
+  const freeOnly = !!document.getElementById('openrouterModalFreeOnly')?.checked
+  if (!listEl || !openrouterAllModels) return
+  const rows = openrouterAllModels.filter(m => {
+    if (freeOnly && !m.free) return false
+    if (!q) return true
+    return (m.id + ' ' + m.name).toLowerCase().includes(q)
+  })
+  // Ticked (curated) models float to the top so the current selection is visible.
+  rows.sort((a, b) => {
+    const ca = openrouterCurated.has(a.id), cb = openrouterCurated.has(b.id)
+    if (ca !== cb) return ca ? -1 : 1
+    return a.id.localeCompare(b.id)
+  })
+  if (countEl) countEl.textContent = `${rows.length} modell · ${openrouterCurated.size} kézi listán`
+  listEl.innerHTML = ''
+  for (const m of rows.slice(0, 400)) {
+    const checked = openrouterCurated.has(m.id)
+    const row = document.createElement('label')
+    row.className = 'openrouter-model-row'
+    row.style.cssText = 'display:flex;align-items:flex-start;gap:10px;padding:8px 10px;border-bottom:1px solid var(--border);cursor:pointer;font-size:13px'
+    const price = m.free ? '<span style="color:var(--success,#16a34a);font-weight:600">ingyenes</span>'
+      : `$${m.promptPrice.toFixed(2)}/$${m.completionPrice.toFixed(2)} /M`
+    const ctx = m.contextLength ? ` · ${Math.round(m.contextLength / 1000)}k ctx` : ''
+    const cb = document.createElement('input')
+    cb.type = 'checkbox'
+    cb.checked = checked
+    cb.style.cssText = 'margin-top:3px;flex:0 0 auto'
+    cb.addEventListener('change', () => toggleCuratedModel(m.id, m.name, cb.checked))
+    const info = document.createElement('div')
+    info.style.cssText = 'flex:1 1 auto;min-width:0'
+    info.innerHTML = `<div style="font-weight:600">${escapeHtml(m.name)}</div>`
+      + `<div style="color:var(--text-muted);font-size:11.5px"><code>${escapeHtml(m.id)}</code> · ${price}${ctx}</div>`
+    row.appendChild(cb)
+    row.appendChild(info)
+    row.addEventListener('mouseenter', () => { row.style.background = 'var(--surface-hover, #f1f5f9)' })
+    row.addEventListener('mouseleave', () => { row.style.background = '' })
+    listEl.appendChild(row)
+  }
+  if (rows.length === 0) listEl.innerHTML = '<div style="padding:14px;color:var(--text-muted);font-size:13px">Nincs találat.</div>'
+}
+
+// Tick/untick a model into the curated manual list. Persists server-side, then
+// refreshes the shared dropdown so the "kézi" optgroup reflects the change.
+async function toggleCuratedModel(id, name, checked) {
+  // Optimistic local update so the checkbox + counter feel instant.
+  if (checked) openrouterCurated.add(id); else openrouterCurated.delete(id)
+  const countEl = document.getElementById('openrouterModalCount')
+  if (countEl) {
+    const total = countEl.textContent.split('·')[0].trim()
+    countEl.textContent = `${total} · ${openrouterCurated.size} kézi listán`
+  }
+  try {
+    const res = await fetch('/api/openrouter/manual', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, name, checked }),
+    })
+    if (!res.ok) throw new Error('save failed')
+    const data = await res.json()
+    openrouterCurated = new Set((Array.isArray(data.models) ? data.models : []).map(m => m.id))
+    // Repopulate the dropdown "kézi" optgroups without disturbing selections.
+    loadAvailableModels()
+  } catch {
+    // Roll back the optimistic change on failure.
+    if (checked) openrouterCurated.delete(id); else openrouterCurated.add(id)
+    renderOpenrouterList()
+  }
+}
+
+function closeOpenrouterModal() {
+  const modal = document.getElementById('openrouterModal')
+  if (modal) { modal.hidden = true; modal.classList.remove('active') }
+}
+
+document.getElementById('openrouterBrowseBtn')?.addEventListener('click', openOpenrouterModal)
+document.getElementById('openrouterModalClose')?.addEventListener('click', closeOpenrouterModal)
+document.getElementById('openrouterModalCancel')?.addEventListener('click', closeOpenrouterModal)
+document.getElementById('openrouterModalSearch')?.addEventListener('input', renderOpenrouterList)
+document.getElementById('openrouterModalFreeOnly')?.addEventListener('change', renderOpenrouterList)
 
 let modelRestartPollTimer = null
 let modelRestartPollName = null
@@ -4764,6 +5054,14 @@ document.getElementById('scheduleType').addEventListener('change', () => {
   }
 })
 
+// Resolved once at page load: the server's actual bind port (WEB_PORT), not
+// window.location.port which reflects the browser-side URL (e.g. 8443 for a
+// tailscale-serve HTTPS PWA) and would be wrong in agent curl prompts.
+let __serverPort = 3420
+fetch('/api/network-info').then(r => r.ok ? r.json() : {}).then(info => {
+  if (info.port) __serverPort = info.port
+}).catch(() => {})
+
 // Heartbeat templates
 const HEARTBEAT_TEMPLATES = {
   calendar: {
@@ -4778,7 +5076,7 @@ const HEARTBEAT_TEMPLATES = {
   },
   kanban: {
     desc: () => t('tasks.heartbeat.tpl.kanban'),
-    prompt: 'Ellenorizd a kanban tablat (curl -s http://localhost:3420/api/kanban). Ha van olyan kartya aminek ma jar le a hatrideje vagy urgent prioritasu es meg nincs done, szolj Telegramon. Ha minden rendben, ne irj semmit.',
+    prompt: () => `Ellenorizd a kanban tablat (curl -s http://localhost:${__serverPort}/api/kanban). Ha van olyan kartya aminek ma jar le a hatrideje vagy urgent prioritasu es meg nincs done, szolj Telegramon. Ha minden rendben, ne irj semmit.`,
     schedule: '0 */2 * * *',
   },
   full: {
@@ -4792,7 +5090,7 @@ document.getElementById('heartbeatTemplate').addEventListener('change', () => {
   const tpl = HEARTBEAT_TEMPLATES[document.getElementById('heartbeatTemplate').value]
   if (!tpl) return
   document.getElementById('scheduleDesc').value = typeof tpl.desc === 'function' ? tpl.desc() : tpl.desc
-  document.getElementById('schedulePrompt').value = tpl.prompt
+  document.getElementById('schedulePrompt').value = typeof tpl.prompt === 'function' ? tpl.prompt() : tpl.prompt
   document.getElementById('scheduleCustomCron').value = tpl.schedule
   scheduleFrequency.value = 'custom'
   customScheduleGroup.hidden = false
@@ -8766,7 +9064,11 @@ document.getElementById('saveConnectorBtn').addEventListener('click', async () =
 function escapeHtml(str) {
   const d = document.createElement('div')
   d.textContent = str
-  return d.innerHTML
+  // textContent->innerHTML escapes & < > but NOT quotes. Encode quotes too so
+  // the result is safe in ATTRIBUTE contexts as well as text nodes -- several
+  // renderers interpolate escapeHtml() output into data-*/title/value="..."
+  // attributes, where a surviving " would allow an attribute breakout.
+  return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;')
 }
 
 // ============================================================
@@ -9250,6 +9552,200 @@ document.getElementById('migrateNewBtn').addEventListener('click', () => {
 })
 
 // ============================================================
+// === Fleet Migration ===
+// ============================================================
+
+// Holds the last successfully parsed fleet JSON text (for apply after dry-run)
+let fleetLastBody = null
+
+document.getElementById('fleetExportBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('fleetExportBtn')
+  const password = document.getElementById('fleetExportPassword').value.trim()
+
+  btn.disabled = true
+  btn.querySelector('.btn-text').hidden = true
+  btn.querySelector('.btn-loading').hidden = false
+
+  try {
+    const headers = {}
+    if (password) headers['X-Vault-Password'] = password
+
+    const res = await fetch('/api/fleet/export', { headers })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      showToast(data.error || t('fleet.export.error'))
+      return
+    }
+
+    const blob = await res.blob()
+    const cd = res.headers.get('Content-Disposition') || ''
+    const nameMatch = cd.match(/filename="?([^";\s]+)"?/)
+    const filename = nameMatch ? nameMatch[1] : `fleet-export-${new Date().toISOString().slice(0, 10)}.json`
+
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+
+    showToast(t('fleet.export.success'))
+  } catch (err) {
+    showToast(`${t('fleet.export.error')}: ${err.message}`)
+  } finally {
+    btn.disabled = false
+    btn.querySelector('.btn-text').hidden = false
+    btn.querySelector('.btn-loading').hidden = true
+  }
+})
+
+document.getElementById('fleetDryRunBtn').addEventListener('click', async () => {
+  const fileInput = document.getElementById('fleetImportFile')
+  if (!fileInput.files.length) {
+    showToast(t('fleet.import.no_file'))
+    return
+  }
+
+  const btn = document.getElementById('fleetDryRunBtn')
+  btn.disabled = true
+  btn.querySelector('.btn-text').hidden = true
+  btn.querySelector('.btn-loading').hidden = false
+
+  const applyBtn = document.getElementById('fleetApplyBtn')
+  applyBtn.disabled = true
+  fleetLastBody = null
+
+  const resultEl = document.getElementById('fleetDryRunResult')
+  resultEl.hidden = true
+  resultEl.innerHTML = ''
+
+  try {
+    const text = await fileInput.files[0].text()
+    // Validate JSON client-side first
+    try { JSON.parse(text) } catch { showToast(t('fleet.import.invalid_json')); return }
+
+    const password = document.getElementById('fleetImportPassword').value.trim()
+    const headers = { 'Content-Type': 'application/json' }
+    if (password) headers['X-Vault-Password'] = password
+
+    const res = await fetch('/api/fleet/import', { method: 'POST', headers, body: text })
+    const data = await res.json()
+
+    const wc = data.wouldCreate || {}
+    const hasErrors = data.errors && data.errors.length > 0
+    const hasWarnings = data.warnings && data.warnings.length > 0
+
+    resultEl.className = `fleet-dry-run-result ${hasErrors ? 'has-errors' : 'ok'}`
+    resultEl.hidden = false
+
+    const agentNames = Array.isArray(wc.agents) ? wc.agents : []
+    const agentLabel = agentNames.length
+      ? `${agentNames.length} (${agentNames.join(', ')})`
+      : '0'
+
+    resultEl.innerHTML = `
+      <div class="fleet-dry-run-title">${hasErrors ? '❌ ' + t('fleet.import.dryrun_errors') : '✅ ' + t('fleet.import.dryrun_ok')}</div>
+      ${!hasErrors ? `
+      <div class="fleet-dry-run-grid">
+        <div class="fleet-dry-run-stat">
+          <div class="fleet-dry-run-stat-value">${wc.mainAgent ? '✓' : '—'}</div>
+          <div class="fleet-dry-run-stat-label">${t('fleet.stat.main_agent')}</div>
+        </div>
+        <div class="fleet-dry-run-stat">
+          <div class="fleet-dry-run-stat-value">${agentNames.length}</div>
+          <div class="fleet-dry-run-stat-label">${t('fleet.stat.agents')}</div>
+        </div>
+        <div class="fleet-dry-run-stat">
+          <div class="fleet-dry-run-stat-value">${wc.memories ?? 0}</div>
+          <div class="fleet-dry-run-stat-label">${t('fleet.stat.memories')}</div>
+        </div>
+        <div class="fleet-dry-run-stat">
+          <div class="fleet-dry-run-stat-value">${wc.kanbanCards ?? 0}</div>
+          <div class="fleet-dry-run-stat-label">${t('fleet.stat.kanban')}</div>
+        </div>
+        <div class="fleet-dry-run-stat">
+          <div class="fleet-dry-run-stat-value">${wc.globalSkills ?? 0}</div>
+          <div class="fleet-dry-run-stat-label">${t('fleet.stat.skills')}</div>
+        </div>
+        <div class="fleet-dry-run-stat">
+          <div class="fleet-dry-run-stat-value">${wc.scheduledTasks ?? 0}</div>
+          <div class="fleet-dry-run-stat-label">${t('fleet.stat.tasks')}</div>
+        </div>
+      </div>
+      ${agentNames.length ? `<div style="font-size:12px;color:var(--text-muted);margin-bottom:6px">${t('fleet.stat.agent_names')}: ${escapeHtml(agentNames.join(', '))}</div>` : ''}
+      ` : ''}
+      ${hasErrors ? `<div class="fleet-dry-run-errors">${data.errors.map(e => escapeHtml(e)).join('<br>')}</div>` : ''}
+      ${hasWarnings ? `<div class="fleet-dry-run-warnings">⚠️ ${data.warnings.map(w => escapeHtml(w)).join('<br>')}</div>` : ''}
+    `
+
+    if (!hasErrors) {
+      fleetLastBody = text
+      applyBtn.disabled = false
+    }
+  } catch (err) {
+    showToast(`${t('fleet.import.error')}: ${err.message}`)
+  } finally {
+    btn.disabled = false
+    btn.querySelector('.btn-text').hidden = false
+    btn.querySelector('.btn-loading').hidden = true
+  }
+})
+
+document.getElementById('fleetApplyBtn').addEventListener('click', async () => {
+  if (!fleetLastBody) return
+
+  if (!confirm(t('fleet.import.apply_confirm'))) return
+
+  const btn = document.getElementById('fleetApplyBtn')
+  btn.disabled = true
+  btn.querySelector('.btn-text').hidden = true
+  btn.querySelector('.btn-loading').hidden = false
+
+  const resultEl = document.getElementById('fleetDryRunResult')
+
+  try {
+    const password = document.getElementById('fleetImportPassword').value.trim()
+    const headers = { 'Content-Type': 'application/json' }
+    if (password) headers['X-Vault-Password'] = password
+
+    const res = await fetch('/api/fleet/import?apply=true', { method: 'POST', headers, body: fleetLastBody })
+    const data = await res.json()
+
+    if (!res.ok) throw new Error(data.error || t('fleet.import.error'))
+
+    const imp = data.imported || {}
+    const agentNames = Array.isArray(imp.agents) ? imp.agents : []
+
+    resultEl.className = 'fleet-apply-result'
+    resultEl.hidden = false
+    resultEl.innerHTML = `
+      <div class="fleet-apply-result-title">✅ ${t('fleet.import.apply_success')}</div>
+      <div>
+        ${imp.mainAgent ? `<div>${t('fleet.stat.main_agent')}: ✓</div>` : ''}
+        ${agentNames.length ? `<div>${t('fleet.stat.agents')}: ${escapeHtml(agentNames.join(', '))}</div>` : ''}
+        <div>${t('fleet.stat.memories')}: ${imp.memories ?? 0}</div>
+        <div>${t('fleet.stat.kanban')}: ${imp.kanbanCards ?? 0}</div>
+        <div>${t('fleet.stat.skills')}: ${imp.globalSkills ?? 0}</div>
+        <div>${t('fleet.stat.tasks')}: ${imp.scheduledTasks ?? 0}</div>
+      </div>
+    `
+
+    fleetLastBody = null
+    btn.disabled = true
+  } catch (err) {
+    showToast(`${t('fleet.import.error')}: ${err.message}`)
+    btn.disabled = false
+    btn.querySelector('.btn-text').hidden = false
+    btn.querySelector('.btn-loading').hidden = true
+  } finally {
+    btn.querySelector('.btn-text').hidden = false
+    btn.querySelector('.btn-loading').hidden = true
+  }
+})
+
+// ============================================================
 // === Skills Page ===
 // ============================================================
 
@@ -9259,6 +9755,25 @@ const skillsEmpty = document.getElementById('skillsEmpty')
 const skillDetailOverlay = document.getElementById('skillDetailOverlay')
 
 let globalSkills = []
+let localAgentSkills = []
+let skillsActiveFilter = 'all'
+let skillsSearchQuery = ''
+let skillsActiveCategory = 'all'
+
+function deriveSkillCategory(name) {
+  // Use the first dash-separated segment as the category group.
+  // "fleet-dashboard-api" -> "fleet", "morning-chain" -> "morning",
+  // "handoff" -> "handoff"
+  const seg = name.split(':').pop() || name  // strip plugin prefix
+  return seg.split('-')[0] || seg
+}
+
+function formatMtime(ms) {
+  if (!ms) return ''
+  const d = new Date(ms)
+  const pad = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}.${pad(d.getMonth() + 1)}.${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
 
 document.getElementById('skillDetailClose').addEventListener('click', () => closeModal(skillDetailOverlay))
 skillDetailOverlay.addEventListener('click', (e) => { if (e.target === skillDetailOverlay) closeModal(skillDetailOverlay) })
@@ -9293,14 +9808,56 @@ async function loadGlobalSkills() {
   skillsGrid.innerHTML = `<div class="connector-loading"><span class="spinner"></span> ${t('skills.loading')}</div>`
   skillsStats.innerHTML = ''
   try {
-    const res = await fetch('/api/skills')
-    globalSkills = await res.json()
+    const [globalRes, localRes] = await Promise.all([
+      fetch('/api/skills'),
+      fetch('/api/skills/local'),
+    ])
+    globalSkills = await globalRes.json()
+    localAgentSkills = localRes.ok ? await localRes.json() : []
     renderGlobalSkills()
   } catch (err) {
     console.error('Skills betoltes hiba:', err)
     skillsGrid.innerHTML = `<div class="connector-loading">${t('skills.error')}</div>`
   }
 }
+
+// Wire search, filter, and export controls once DOM is ready
+;(() => {
+  const searchEl = document.getElementById('skillsSearch')
+  if (searchEl) {
+    searchEl.addEventListener('input', () => {
+      skillsSearchQuery = searchEl.value.toLowerCase().trim()
+      renderSkillsSidebar()
+      renderGlobalSkillsGrid()
+    })
+  }
+
+  const filterBtns = document.getElementById('skillsFilterBtns')
+  if (filterBtns) {
+    filterBtns.addEventListener('click', (e) => {
+      const btn = e.target.closest('.skills-filter-btn')
+      if (!btn) return
+      filterBtns.querySelectorAll('.skills-filter-btn').forEach(b => b.classList.remove('active'))
+      btn.classList.add('active')
+      skillsActiveFilter = btn.dataset.filter || 'all'
+      skillsActiveCategory = 'all'
+      renderSkillsSidebar()
+      renderGlobalSkillsGrid()
+    })
+  }
+
+  const exportBtn = document.getElementById('skillsExportBtn')
+  if (exportBtn) {
+    exportBtn.addEventListener('click', () => {
+      const a = document.createElement('a')
+      a.href = '/api/skills/export'
+      a.download = 'skills-export.zip'
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+    })
+  }
+})()
 
 function getSkillIcon(name) {
   if (name.includes('factory') || name.includes('creator')) return '\u{1F3ED}'
@@ -9314,10 +9871,48 @@ function getSkillIcon(name) {
   return '\u2699\uFE0F'
 }
 
-function renderGlobalSkills() {
-  skillsGrid.innerHTML = ''
+function renderSkillsSidebar() {
+  const sidebar = document.getElementById('skillsCategorySidebar')
+  if (!sidebar) return
 
-  const withSkillMd = globalSkills.filter(s => s.description)
+  // For the 'agent' filter, category counts come from localAgentSkills so the
+  // sidebar stays populated. All other filters draw from globalSkills as before.
+  const sourceFiltered = skillsActiveFilter === 'agent'
+    ? localAgentSkills
+    : skillsActiveFilter === 'all'
+      ? globalSkills
+      : globalSkills.filter(s => s.source === skillsActiveFilter)
+
+  const catCounts = new Map()
+  for (const s of sourceFiltered) {
+    const cat = deriveSkillCategory(s.name)
+    catCounts.set(cat, (catCounts.get(cat) || 0) + 1)
+  }
+
+  const cats = [...catCounts.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+
+  sidebar.innerHTML = `
+    <div class="skills-cat-title">${t('skills.category.title')}</div>
+    <button class="skills-cat-btn${skillsActiveCategory === 'all' ? ' active' : ''}" data-cat="all">
+      ${t('skills.filter.all')} <span class="skills-cat-count">${sourceFiltered.length}</span>
+    </button>
+    ${cats.map(([cat, count]) => `
+      <button class="skills-cat-btn${skillsActiveCategory === cat ? ' active' : ''}" data-cat="${escapeHtml(cat)}">
+        ${escapeHtml(cat)} <span class="skills-cat-count">${count}</span>
+      </button>
+    `).join('')}
+  `
+
+  sidebar.addEventListener('click', (e) => {
+    const btn = e.target.closest('.skills-cat-btn')
+    if (!btn) return
+    skillsActiveCategory = btn.dataset.cat || 'all'
+    renderSkillsSidebar()
+    renderGlobalSkillsGrid()
+  })
+}
+
+function renderGlobalSkills() {
   const userCount = globalSkills.filter(s => s.source === 'user').length
   const pluginCount = globalSkills.filter(s => s.source === 'plugin').length
 
@@ -9325,55 +9920,140 @@ function renderGlobalSkills() {
     <div class="stat-card"><div class="stat-value">${globalSkills.length}</div><div class="stat-label">${t('skills.stat.total')}</div></div>
     <div class="stat-card"><div class="stat-value" style="color:var(--info)">${userCount}</div><div class="stat-label">${t('skills.stat.user')}</div></div>
     ${pluginCount ? `<div class="stat-card"><div class="stat-value" style="color:var(--accent)">${pluginCount}</div><div class="stat-label">${t('skills.stat.plugin')}</div></div>` : ''}
-    <div class="stat-card"><div class="stat-value" style="color:var(--success)">${withSkillMd.length}</div><div class="stat-label">${t('skills.stat.documented')}</div></div>
+    ${localAgentSkills.length ? `<div class="stat-card"><div class="stat-value" style="color:var(--warning)">${localAgentSkills.length}</div><div class="stat-label">${t('skills.stat.agent_local')}</div></div>` : ''}
   `
 
-  if (globalSkills.length === 0) {
+  skillsActiveCategory = 'all'
+  renderSkillsSidebar()
+  renderGlobalSkillsGrid()
+}
+
+function renderGlobalSkillsGrid() {
+  skillsGrid.innerHTML = ''
+
+  const isAgentFilter = skillsActiveFilter === 'agent'
+
+  // When 'agent' filter is active, show only local agent skills; otherwise show global/plugin.
+  const filteredGlobal = isAgentFilter ? [] : globalSkills.filter(s => {
+    if (skillsActiveFilter !== 'all' && s.source !== skillsActiveFilter) return false
+    if (skillsActiveCategory !== 'all' && deriveSkillCategory(s.name) !== skillsActiveCategory) return false
+    if (!skillsSearchQuery) return true
+    const haystack = [s.name, s.label, s.description, ...(s.keywords || [])].join(' ').toLowerCase()
+    return haystack.includes(skillsSearchQuery)
+  })
+
+  // Local agent skills: always merged in for 'all' or filtered to 'agent'.
+  const filteredLocal = (skillsActiveFilter === 'all' || isAgentFilter) ? localAgentSkills.filter(s => {
+    if (skillsActiveCategory !== 'all' && deriveSkillCategory(s.name) !== skillsActiveCategory) return false
+    if (!skillsSearchQuery) return true
+    const haystack = [s.name, s.label, s.description, s.agentId, ...(s.keywords || [])].join(' ').toLowerCase()
+    return haystack.includes(skillsSearchQuery)
+  }) : []
+
+  const allFiltered = [...filteredGlobal, ...filteredLocal]
+
+  if (allFiltered.length === 0) {
     skillsEmpty.hidden = false
     return
   }
   skillsEmpty.hidden = true
 
-  const sourceLabels = { user: 'user', plugin: 'plugin' }
+  const sourceLabels = { user: 'user', plugin: 'plugin', agent: t('skills.filter.agent') }
 
-  for (const skill of globalSkills) {
+  const renderCard = (skill, isLocal) => {
     const card = document.createElement('div')
-    card.className = 'skills-card'
+    card.className = isLocal ? 'skills-card skills-card--local' : 'skills-card'
     const icon = getSkillIcon(skill.name)
-    const sourceBadge = skill.source
-      ? `<span class="connector-source-badge">${escapeHtml(sourceLabels[skill.source] || skill.source)}</span>`
+    const sourceBadge = isLocal
+      ? `<span class="connector-source-badge skills-badge--agent">${escapeHtml(skill.agentId)}</span>`
+      : (skill.source ? `<span class="connector-source-badge">${escapeHtml(sourceLabels[skill.source] || skill.source)}</span>` : '')
+
+    const hasDesc = !!skill.description
+    const healthClass = hasDesc ? 'skill-health-ok' : 'skill-health-warn'
+    const healthTitle = hasDesc ? t('skills.health.ok') : t('skills.health.nodesc')
+
+    const kws = (skill.keywords || []).slice(0, 3)
+    const kwTags = kws.map(k => `<span class="skill-keyword-tag">${escapeHtml(k)}</span>`).join('')
+
+    const agents = skill.agents || []
+    const agentBadges = agents.length > 0
+      ? `<span class="skills-agent-badge skill-agent-count" title="${escapeHtml(agents.join(', '))}">&#x1F916; ${agents.length} ${t('skills.agents.count')}</span>`
       : ''
+
+    const mtimeStr = skill.mtime ? formatMtime(skill.mtime) : ''
 
     const displayName = skill.label || skill.name
     card.innerHTML = `
       <div class="skills-card-header">
         <div class="skills-card-icon">${icon}</div>
         <div class="skills-card-info">
-          <div class="skills-card-name">${escapeHtml(displayName)} ${sourceBadge}</div>
+          <div class="skills-card-name">
+            ${escapeHtml(displayName)} ${sourceBadge}
+            <span class="skill-health-dot ${healthClass}" title="${escapeHtml(healthTitle)}"></span>
+          </div>
           <div class="skills-card-desc">${escapeHtml(skill.description || t('skills.no_description'))}</div>
         </div>
       </div>
+      ${(kwTags || agentBadges || mtimeStr) ? `
+      <div class="skills-card-footer">
+        ${kwTags}
+        ${agentBadges}
+        ${mtimeStr ? `<span class="skill-card-mtime" title="${t('skills.mtime.title')}">${escapeHtml(mtimeStr)}</span>` : ''}
+      </div>` : ''}
     `
-    card.addEventListener('click', () => openSkillDetail(skill.name, skill.label))
+    card.addEventListener('click', () => openSkillDetail(skill.name, skill.label, skill.agentId || null))
     skillsGrid.appendChild(card)
   }
+
+  for (const skill of filteredGlobal) renderCard(skill, false)
+  for (const skill of filteredLocal) renderCard(skill, true)
 }
 
-async function openSkillDetail(skillName, displayLabel) {
+let _skillDetailCurrentName = null
+let _skillDetailCurrentAgentId = null
+let _skillDetailIsPlugin = false
+
+function _skillDetailExitEdit() {
+  const editor = document.getElementById('skillDetailEditor')
+  const contentEl = document.getElementById('skillDetailContent')
+  const editActions = document.getElementById('skillDetailEditActions')
+  const editBtn = document.getElementById('skillDetailEditBtn')
+  editor.hidden = true
+  contentEl.hidden = false
+  editActions.hidden = true
+  editBtn.disabled = false
+}
+
+async function openSkillDetail(skillName, displayLabel, agentId = null) {
+  _skillDetailCurrentName = skillName
+  _skillDetailCurrentAgentId = agentId
+  _skillDetailExitEdit()
+
   document.getElementById('skillDetailTitle').textContent = displayLabel || skillName
 
+  const editBtn = document.getElementById('skillDetailEditBtn')
+  if (editBtn) {
+    editBtn.hidden = false
+    editBtn.disabled = false
+  }
+
   try {
-    const res = await fetch(`/api/skills/${encodeURIComponent(skillName)}`)
+    const detailUrl = agentId
+      ? `/api/skills/${encodeURIComponent(skillName)}?agent=${encodeURIComponent(agentId)}`
+      : `/api/skills/${encodeURIComponent(skillName)}`
+    const res = await fetch(detailUrl)
     if (!res.ok) throw new Error('Failed to fetch skill detail')
     const detail = await res.json()
+    _skillDetailIsPlugin = detail.source === 'plugin'
+
+    // Hide edit button for plugin skills
+    if (editBtn) editBtn.hidden = _skillDetailIsPlugin
 
     // Description
     const descEl = document.getElementById('skillDetailDesc')
     descEl.textContent = detail.description || t('skills.no_description')
 
-    // Meta line: source + path. Replaces the old per-agent assignment
-    // UI -- sub-agents share the caller's HOME, so the skill is already
-    // available to every agent without any copy-to-agent action.
+    // Meta: source + mtime
     const metaEl = document.getElementById('skillDetailMeta')
     if (metaEl) {
       const sourceLabel = detail.source === 'plugin'
@@ -9381,26 +10061,130 @@ async function openSkillDetail(skillName, displayLabel) {
         : detail.source === 'user'
         ? t('skills.source.user')
         : t('skills.source.unknown')
+      const mtimeStr = detail.mtime ? formatMtime(detail.mtime) : ''
       metaEl.innerHTML = `
-        <div class="skill-detail-source">${t('skills.detail.source_label')} <strong>${sourceLabel}</strong></div>
+        <div class="skill-detail-source">${t('skills.detail.source_label')} <strong>${sourceLabel}</strong>${mtimeStr ? ` &middot; <span title="${escapeHtml(t('skills.mtime.title'))}">${escapeHtml(mtimeStr)}</span>` : ''}</div>
         <div class="skill-detail-note">${t('skills.detail.auto_available')}</div>
       `
     }
 
-    // Content
+    // Keywords
+    const kwEl = document.getElementById('skillDetailKeywords')
+    if (kwEl) {
+      const kws = detail.keywords || []
+      if (kws.length > 0) {
+        kwEl.hidden = false
+        kwEl.innerHTML = `<span class="skill-kw-label">${t('skills.keywords.label')}</span> ` +
+          kws.map(k => `<span class="skill-keyword-tag">${escapeHtml(k)}</span>`).join(' ')
+      } else {
+        kwEl.hidden = true
+      }
+    }
+
+    // Agent coverage
+    const agentsEl = document.getElementById('skillDetailAgentsCoverage')
+    if (agentsEl) {
+      const agents = detail.agents || []
+      if (agents.length > 0) {
+        agentsEl.hidden = false
+        agentsEl.innerHTML = `<span class="skill-kw-label">${t('skills.agents.label')}</span> ` +
+          agents.map(a => `<span class="skills-agent-badge">${escapeHtml(a)}</span>`).join(' ')
+      } else {
+        agentsEl.hidden = true
+      }
+    }
+
+    // Health indicator
+    const healthEl = document.getElementById('skillDetailHealth')
+    if (healthEl) {
+      const hasDesc = !!detail.description
+      const hasContent = !!detail.content
+      if (hasDesc && hasContent) {
+        healthEl.className = 'skill-health-label skill-health-ok'
+        healthEl.textContent = t('skills.health.ok')
+      } else if (hasContent) {
+        healthEl.className = 'skill-health-label skill-health-warn'
+        healthEl.textContent = t('skills.health.nodesc')
+      } else {
+        healthEl.className = 'skill-health-label skill-health-err'
+        healthEl.textContent = t('skills.health.empty')
+      }
+    }
+
+    // Content: render as markdown
     const contentEl = document.getElementById('skillDetailContent')
-    contentEl.textContent = detail.content || t('skills.content_not_found')
+    const rawContent = detail.content || t('skills.content_not_found')
+    contentEl.innerHTML = renderMarkdown(rawContent)
+
+    // Prefill editor
+    const editor = document.getElementById('skillDetailEditor')
+    if (editor) editor.value = rawContent
 
   } catch (err) {
     console.error('Skill detail hiba:', err)
     document.getElementById('skillDetailDesc').textContent = t('connectors.error_list')
-    document.getElementById('skillDetailContent').textContent = ''
+    document.getElementById('skillDetailContent').innerHTML = ''
     const metaEl = document.getElementById('skillDetailMeta')
     if (metaEl) metaEl.innerHTML = ''
+    if (editBtn) editBtn.hidden = true
   }
 
   openModal(skillDetailOverlay)
 }
+
+// Inline edit wiring
+;(() => {
+  const editBtn = document.getElementById('skillDetailEditBtn')
+  const saveBtn = document.getElementById('skillDetailSaveBtn')
+  const cancelBtn = document.getElementById('skillDetailCancelEditBtn')
+  const editor = document.getElementById('skillDetailEditor')
+  const contentEl = document.getElementById('skillDetailContent')
+  const editActions = document.getElementById('skillDetailEditActions')
+
+  if (editBtn) {
+    editBtn.addEventListener('click', () => {
+      if (_skillDetailIsPlugin) return
+      contentEl.hidden = true
+      editor.hidden = false
+      editActions.hidden = false
+      editBtn.disabled = true
+      editor.focus()
+    })
+  }
+
+  if (cancelBtn) {
+    cancelBtn.addEventListener('click', _skillDetailExitEdit)
+  }
+
+  if (saveBtn) {
+    saveBtn.addEventListener('click', async () => {
+      if (!_skillDetailCurrentName || _skillDetailIsPlugin) return
+      const newContent = editor.value
+      saveBtn.disabled = true
+      try {
+        const putUrl = _skillDetailCurrentAgentId
+          ? `/api/skills/${encodeURIComponent(_skillDetailCurrentName)}?agent=${encodeURIComponent(_skillDetailCurrentAgentId)}`
+          : `/api/skills/${encodeURIComponent(_skillDetailCurrentName)}`
+        const res = await fetch(putUrl, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: newContent }),
+        })
+        if (!res.ok) throw new Error('PUT failed: ' + res.status)
+        contentEl.innerHTML = renderMarkdown(newContent)
+        _skillDetailExitEdit()
+        showToast(t('skills.toast.saved'))
+        // Refresh list to pick up new description/keywords
+        loadGlobalSkills()
+      } catch (err) {
+        console.error('Skill mentés hiba:', err)
+        showToast(t('skills.toast.save_error'))
+      } finally {
+        saveBtn.disabled = false
+      }
+    })
+  }
+})()
 
 // === Team page ===
 async function loadTeamGraph() {
@@ -9622,18 +10406,29 @@ async function loadChatAgentList() {
   const sidebar = document.getElementById('chatAgentList')
   if (!sidebar) return
   try {
-    // Load fleet agents + threads in parallel
-    const [agentsRes, threadsRes] = await Promise.all([
+    // Load fleet agents + threads in parallel (the federation status fetch is
+    // failure-proof: it must never take down the Messages page)
+    const [agentsRes, threadsRes, fedStatus] = await Promise.all([
       fetch('/api/agents'),
       fetch('/api/messages/threads'),
+      fetch('/api/federation/status').then((r) => (r.ok ? r.json() : null)).catch(() => null),
     ])
     const agentsRaw = agentsRes.ok ? await agentsRes.json() : []
     const threads = threadsRes.ok ? await threadsRes.json() : []
+    if (fedStatus && Array.isArray(fedStatus.peers)) federatedPeerStatus = fedStatus.peers
 
-    // Build fleet list: API agents + marveen, minus system agents
+    // Build fleet list: API agents + marveen, minus system agents; plus
+    // federated agents from the poller cache so a remote conversation can be
+    // STARTED without prior history. The system-agent filter runs on the
+    // unqualified segment too ('teodor/heartbeat' is just as much noise).
     const fleetNames = [mainAgentId(), ...agentsRaw.map(a => a.name || a)]
       .filter(n => !CHAT_SYSTEM_AGENTS.has(n))
       .filter((n, i, arr) => arr.indexOf(n) === i)
+    for (const fa of federatedAgentEntries()) {
+      if (!fleetNames.includes(fa.qualified) && !CHAT_SYSTEM_AGENTS.has(fa.qualified.split('/').pop())) {
+        fleetNames.push(fa.qualified)
+      }
+    }
 
     // Populate avatar map from API data
     chatAgentHasAvatar.clear()
@@ -9698,7 +10493,14 @@ async function loadChatAgentList() {
       })
     })
 
-    if (!chatSelectedAgent) {
+    if (chatSelectedAgent && chatThreadState.agent !== chatSelectedAgent) {
+      // Preselected target (e.g. the federated card's message button): open
+      // its thread. Direct loadChatThread fallback covers targets with no
+      // sidebar entry yet (composer + history render for any id).
+      const el = sidebar.querySelector(`.chat-agent-item[data-agent="${CSS.escape(chatSelectedAgent)}"]`)
+      if (el) el.click()
+      else loadChatThread(chatSelectedAgent)
+    } else if (!chatSelectedAgent) {
       const first = sidebar.querySelector('.chat-agent-item')
       if (first) first.click()
     }
@@ -9789,6 +10591,7 @@ function buildBubbleHtml(m) {
         ${!isOutgoing ? `<span class="bubble-sender">${escapeHtml(senderLabel)}</span>` : ''}
         <span class="bubble-id-chip">#${m.id}</span>
         <span class="badge ${statusMeta.cls}" style="font-size:10px">${escapeHtml(statusMeta.label)}</span>
+        ${m.status === 'pending' && m.to_agent === mainAgentId() ? `<span style="font-size:10px;color:var(--text-muted)">${escapeHtml(t('messages.pending_main_hint'))}</span>` : ''}
         ${m.origin_note ? `<span class="badge" style="font-size:10px" title="Self-declared by the sender, not verified (card 06f062e4)">origin: ${escapeHtml(m.origin_note)}</span>` : ''}
       </div>
       <div class="bubble-text">${escapeHtml(m.content || '')}</div>
@@ -10066,66 +10869,18 @@ async function loadOverview() {
 // distinct from the main agent's display name; the backend defaults brandName to
 // BOT_NAME, so a brand-unaware install keeps showing the agent name. If the
 // field is absent (legacy backend) the existing HTML default text is kept.
-// brandLogoUrl (when set) replaces the monogram with an <img>; brandAccent sets
-// --qq-accent / --qq-accent-dark / --qq-accent-light on :root.
-function hexToRgb(hex) {
-  var h = String(hex).replace('#', '')
-  return { r: parseInt(h.substring(0,2),16), g: parseInt(h.substring(2,4),16), b: parseInt(h.substring(4,6),16) }
-}
-function rgbToHex(r,g,b) { return '#' + [r,g,b].map(function(c) { return Math.max(0,Math.min(255,c)).toString(16).padStart(2,'0') }).join('') }
-function lightenHex(hex, pct) {
-  var rgb = hexToRgb(hex)
-  return rgbToHex(rgb.r + Math.round((255-rgb.r)*pct), rgb.g + Math.round((255-rgb.g)*pct), rgb.b + Math.round((255-rgb.b)*pct))
-}
-function darkenHex(hex, pct) {
-  var rgb = hexToRgb(hex)
-  return rgbToHex(Math.round(rgb.r*(1-pct)), Math.round(rgb.g*(1-pct)), Math.round(rgb.b*(1-pct)))
-}
-function applyBrandAccent(hex) {
-  var accent = String(hex || '#d97757')
-  var dark = darkenHex(accent, 0.12)
-  var rgb = hexToRgb(accent)
-  var light = 'rgba(' + rgb.r + ',' + rgb.g + ',' + rgb.b + ',0.1)'
-  var root = document.documentElement.style
-  root.setProperty('--qq-accent', accent)
-  root.setProperty('--qq-accent-dark', dark)
-  root.setProperty('--qq-accent-light', light)
-  root.setProperty('--accent', accent)
-  root.setProperty('--accent-hover', dark)
-  root.setProperty('--accent-soft', light)
-  root.setProperty('--border-focus', accent)
-}
-function applyBrandLogo(url) {
-  var mark = document.getElementById('sidebarBrandMark')
-  if (!mark) return
-  if (url && String(url).trim()) {
-    var img = document.createElement('img')
-    img.src = String(url).trim()
-    img.alt = ''
-    img.style.width = '100%'; img.style.height = '100%'; img.style.objectFit = 'contain'
-    img.onerror = function() {
-      var brand = (window._brandTokens && window._brandTokens.brand) || 'Marveen'
-      mark.textContent = brand.charAt(0).toUpperCase()
-    }
-    mark.textContent = ''
-    mark.appendChild(img)
-  }
-}
 async function initSidebarBrand() {
   try {
-    var avatarImg = document.createElement('img')
-    avatarImg.src = '/api/marveen/avatar?t=' + Date.now()
-    avatarImg.onload = function() {
-      var mark = document.getElementById('sidebarBrandMark')
-      // Only replace with avatar if no brand logo is set.
-      if (mark && !(window._brandConfig && window._brandConfig.logoUrl)) {
-        mark.textContent = ''; mark.appendChild(avatarImg)
-      }
+    const img = document.createElement('img')
+    img.src = '/api/marveen/avatar?t=' + Date.now()
+    img.onload = () => {
+      const mark = document.getElementById('sidebarBrandMark')
+      if (mark) { mark.textContent = ''; mark.appendChild(img) }
     }
-    var res = await fetch('/api/marveen')
+    const res = await fetch('/api/marveen')
     if (res.ok) {
-      var m = await res.json()
-      var brand = m.brandName || m.name
+      const m = await res.json()
+      const brand = m.brandName || m.name
       // Publish the brand tokens so every t() call ({brand}/{bot}/{agentId})
       // renders the configured names, then re-apply the static i18n so any
       // label painted before this fetch resolved picks up the real brand.
@@ -10137,26 +10892,15 @@ async function initSidebarBrand() {
       if (typeof renderStaticI18n === 'function') renderStaticI18n()
       if (brand) {
         document.title = brand
-        var appleTitle = document.querySelector('meta[name="apple-mobile-web-app-title"]')
+        const appleTitle = document.querySelector('meta[name="apple-mobile-web-app-title"]')
         if (appleTitle) appleTitle.setAttribute('content', brand)
-        var topbar = document.getElementById('mobileTopbarTitle')
+        const topbar = document.getElementById('mobileTopbarTitle')
         if (topbar) topbar.textContent = brand
-        var name = document.getElementById('sidebarBrandName')
+        const name = document.getElementById('sidebarBrandName')
         if (name) name.textContent = brand
-        var subtitle = document.getElementById('updatesSubtitle')
-        if (subtitle) subtitle.textContent = brand + ' ' + t('overview.updates_subtitle')
-        // Update the monogram to match the brand name.
-        var mark = document.getElementById('sidebarBrandMark')
-        if (mark && !(window._brandConfig && window._brandConfig.logoUrl)) {
-          mark.textContent = brand.charAt(0).toUpperCase()
-        }
+        const subtitle = document.getElementById('updatesSubtitle')
+        if (subtitle) subtitle.textContent = `${brand} ` + t('overview.updates_subtitle')
       }
-      // Apply brand accent if configured.
-      if (m.brandAccent) applyBrandAccent(m.brandAccent)
-      // Apply brand logo URL (with monogram fallback built-in).
-      if (m.brandLogoUrl) applyBrandLogo(m.brandLogoUrl)
-      // Publish so the brand settings panel can read the current state.
-      window._brandConfig = { logoUrl: m.brandLogoUrl || '', accent: m.brandAccent || '#d97757' }
     }
   } catch {}
 }
@@ -10431,12 +11175,27 @@ async function fetchOnboardingStatus() {
   try { return await (await fetch('/api/onboarding/status')).json() } catch { return null }
 }
 function onboardingCurrentStep(s) {
-  if (!s.claudeAuthPresent || !s.agentsRunning) return 1
-  if (!s.telegramConfigured) return 2
-  if (!s.paired) return 3
+  if (!s.identityConfirmed) return 1
+  if (!s.claudeAuthPresent || !s.agentsRunning) return 2
+  if (!s.channelConfigured) return 3
+  if (!s.paired) return 4
   return 0
 }
+// Operator can dismiss the wizard (skip/close). A false positive must never
+// lock the dashboard, so the choice persists across reloads; normal UI still
+// covers any real setup that remains.
+const ONBOARDING_DISMISS_KEY = 'mvOnboardingDismissed'
+function onboardingDismissed() {
+  try { return localStorage.getItem(ONBOARDING_DISMISS_KEY) === '1' } catch { return false }
+}
+function dismissOnboarding() {
+  try { localStorage.setItem(ONBOARDING_DISMISS_KEY, '1') } catch { /* private mode */ }
+  const overlay = document.getElementById('onboardingOverlay')
+  if (overlay) { overlay.classList.remove('active'); overlay.hidden = true }
+  document.body.style.overflow = ''
+}
 async function initOnboarding() {
+  if (onboardingDismissed()) return
   const s = await fetchOnboardingStatus()
   if (!s || !s.needsOnboarding) return
   renderOnboarding(s)
@@ -10446,6 +11205,7 @@ async function refreshOnboarding() {
   if (s) renderOnboarding(s)
 }
 function renderOnboarding(s) {
+  if (onboardingDismissed()) return
   const overlay = document.getElementById('onboardingOverlay')
   if (!overlay) return
   const step = onboardingCurrentStep(s)
@@ -10459,14 +11219,25 @@ function renderOnboarding(s) {
     el.classList.toggle('done', n < step)
   })
   const body = document.getElementById('onboardingBody')
-  if (step === 1) body.innerHTML = onbStep1Html(s)
-  else if (step === 2) body.innerHTML = onbStep2Html()
+  if (step === 1) body.innerHTML = onbIdentityHtml(s)
+  else if (step === 2) body.innerHTML = onbStep1Html(s)
+  else if (step === 3) body.innerHTML = onbStep2Html()
   else body.innerHTML = onbStep3Html()
   wireOnboarding(step)
 }
 function onbMsg(text, isErr) {
   const el = document.getElementById('onbMsg')
   if (el) { el.textContent = text; el.className = 'onb-msg' + (isErr ? ' err' : ' ok') }
+}
+function onbIdentityHtml(s) {
+  return `<p>${escapeHtml(t('onboarding.identity.desc'))}</p>`
+    + `<label class="form-label-sm">${escapeHtml(t('onboarding.identity.agent_label'))}</label>`
+    + `<input id="onbAgentName" type="text" class="onb-input" maxlength="40" value="${escapeHtml(s.currentAgentName || '')}" autocomplete="off">`
+    + `<label class="form-label-sm">${escapeHtml(t('onboarding.identity.owner_label'))}</label>`
+    + `<input id="onbOwnerName" type="text" class="onb-input" maxlength="60" value="${escapeHtml(s.currentOwnerName || '')}" autocomplete="off">`
+    + `<div class="onb-hint">${escapeHtml(t('onboarding.identity.hint'))}</div>`
+    + `<button class="btn-primary btn-compact" id="onbIdentityBtn">${escapeHtml(t('onboarding.identity.save_btn'))}</button>`
+    + `<div id="onbMsg" class="onb-msg"></div>`
 }
 function onbStep1Html(s) {
   return `<p>${escapeHtml(t('onboarding.step1.desc'))}</p>`
@@ -10498,6 +11269,23 @@ function onbStep3Html() {
 }
 function wireOnboarding(step) {
   if (step === 1) {
+    const idBtn = document.getElementById('onbIdentityBtn')
+    if (idBtn) idBtn.addEventListener('click', async () => {
+      const agentName = (document.getElementById('onbAgentName').value || '').trim()
+      const ownerName = (document.getElementById('onbOwnerName').value || '').trim()
+      if (!agentName || !ownerName) { onbMsg(t('onboarding.identity.empty'), true); return }
+      idBtn.disabled = true; onbMsg(t('onboarding.saving'))
+      try {
+        const res = await fetch('/api/onboarding/identity', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agentName, ownerName }) })
+        const d = await res.json().catch(() => ({}))
+        if (!res.ok) { idBtn.disabled = false; onbMsg(d.error || t('onboarding.error'), true); return }
+        onbMsg(t('onboarding.identity.saved'))
+        await refreshOnboarding()
+      } catch (e) { idBtn.disabled = false; onbMsg((e && e.message) || t('onboarding.error'), true) }
+    })
+    return
+  }
+  if (step === 2) {
     const authBtn = document.getElementById('onbAuthBtn')
     if (authBtn) authBtn.addEventListener('click', async () => {
       const token = (document.getElementById('onbToken').value || '').trim()
@@ -10522,7 +11310,7 @@ function wireOnboarding(step) {
         setTimeout(refreshOnboarding, 2500)
       } catch (e) { launchBtn.disabled = false; onbMsg((e && e.message) || t('onboarding.error'), true) }
     })
-  } else if (step === 2) {
+  } else if (step === 3) {
     const botBtn = document.getElementById('onbBotBtn')
     if (botBtn) botBtn.addEventListener('click', async () => {
       const botToken = (document.getElementById('onbBotToken').value || '').trim()
@@ -10536,24 +11324,30 @@ function wireOnboarding(step) {
         setTimeout(refreshOnboarding, 2000)
       } catch (e) { botBtn.disabled = false; onbMsg((e && e.message) || t('onboarding.error'), true) }
     })
-  } else if (step === 3) {
+  } else if (step === 4) {
     const refreshBtn = document.getElementById('onbRefreshBtn')
     const loadPending = async () => {
       try {
         const p = await (await fetch(`/api/agents/${encodeURIComponent(mainAgentId())}/channels/telegram/pending`)).json()
-        const list = Array.isArray(p) ? p : (p.pending || [])
+        // Backend contract: [{code, senderId, chatId, createdAt, expiresAt}].
+        // `code` is the approve key (the same code the bot sent the user) --
+        // POSTing anything else gets a 400 and the pairing never completes.
+        const now = Date.now()
+        const list = (Array.isArray(p) ? p : (p.pending || [])).filter((x) => x && x.code && (!x.expiresAt || x.expiresAt > now))
         const box = document.getElementById('onbPending')
         if (!box) return
         if (!list.length) { box.innerHTML = `<span class="onb-hint">${escapeHtml(t('onboarding.step3.no_pending'))}</span>`; return }
         box.innerHTML = list.map((x) => {
-          const id = escapeHtml(String(x.id || x.chatId || x.userId || ''))
-          const label = escapeHtml(String(x.name || x.username || id))
-          return `<div class="onb-pending-row"><span>${label}</span><button class="btn-primary btn-compact onb-approve" data-id="${id}">${escapeHtml(t('onboarding.step3.approve_btn'))}</button></div>`
+          const code = escapeHtml(String(x.code))
+          const label = escapeHtml(String(x.senderId || x.chatId || '?')) + ' · ' + code
+          return `<div class="onb-pending-row"><span>${label}</span><button class="btn-primary btn-compact onb-approve" data-code="${code}">${escapeHtml(t('onboarding.step3.approve_btn'))}</button></div>`
         }).join('')
         box.querySelectorAll('.onb-approve').forEach((b) => b.addEventListener('click', async () => {
           b.disabled = true
           try {
-            await fetch(`/api/agents/${encodeURIComponent(mainAgentId())}/channels/telegram/approve`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: b.dataset.id }) })
+            const res = await fetch(`/api/agents/${encodeURIComponent(mainAgentId())}/channels/telegram/approve`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: b.dataset.code }) })
+            const d = await res.json().catch(() => ({}))
+            if (!res.ok) { b.disabled = false; onbMsg(d.error || t('onboarding.error'), true); return }
             onbMsg(t('onboarding.step3.approved'))
             setTimeout(refreshOnboarding, 1500)
           } catch (e) { b.disabled = false; onbMsg((e && e.message) || t('onboarding.error'), true) }
@@ -10570,6 +11364,10 @@ populateAvatarGrid()
 loadMemAgents()
 loadOverview()
 loadAvailableModels()
+{
+  const onbClose = document.getElementById('onboardingClose')
+  if (onbClose) onbClose.addEventListener('click', dismissOnboarding)
+}
 initOnboarding()
 
 // "DeepSeek API kulcs hozzáadása" link az agent edit panel-en --
@@ -11026,19 +11824,15 @@ async function cancelBgTask(id) {
 // === Autonomy ===
 // ============================================================
 
-document.getElementById('refreshAutonomyBtn').addEventListener('click', loadAutonomy)
-
-async function loadAutonomy() {
-  const grid = document.getElementById('autonomyGrid')
-  const footer = document.getElementById('autonomyUpdatedAt')
-  grid.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${t('autonomy.loading')}</p>`
+async function renderAutonomyContent(gridEl, footerEl) {
+  gridEl.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${t('autonomy.loading')}</p>`
 
   try {
     const res = await fetch('/api/autonomy')
     if (!res.ok) throw new Error('fetch failed')
     const config = await res.json()
 
-    grid.innerHTML = ''
+    gridEl.innerHTML = ''
     for (const cat of config.categories) {
       const isCapped = !cat.locked && cat.maxLevel < 3
       const row = document.createElement('div')
@@ -11077,18 +11871,20 @@ async function loadAutonomy() {
         row.appendChild(cap)
       }
       row.appendChild(levels)
-      grid.appendChild(row)
+      gridEl.appendChild(row)
     }
 
-    if (config.updated_at > 0) {
-      const d = new Date(config.updated_at * 1000)
-      footer.textContent = t('autonomy.last_modified', { date: d.toLocaleString('hu-HU') })
-    } else {
-      footer.textContent = t('autonomy.not_modified')
+    if (footerEl) {
+      if (config.updated_at > 0) {
+        const d = new Date(config.updated_at * 1000)
+        footerEl.textContent = t('autonomy.last_modified', { date: d.toLocaleString('hu-HU') })
+      } else {
+        footerEl.textContent = t('autonomy.not_modified')
+      }
     }
   } catch (err) {
-    grid.innerHTML = `<p style="color:var(--danger)">${t('autonomy.error')}</p>`
-    footer.textContent = ''
+    gridEl.innerHTML = `<p style="color:var(--danger)">${t('autonomy.error')}</p>`
+    if (footerEl) footerEl.textContent = ''
   }
 }
 
@@ -11104,9 +11900,220 @@ async function setAutonomyLevel(key, level) {
       showToast(data.error || 'Hiba')
       return
     }
-    loadAutonomy()
+    // Refresh the settings tab autonomy grid if it is visible
+    const tabGrid = document.getElementById('settingsAutonomyGrid')
+    const tabFooter = document.getElementById('settingsAutonomyUpdatedAt')
+    if (tabGrid) renderAutonomyContent(tabGrid, tabFooter)
   } catch {
     showToast(t('kanban.toast.save_error'))
+  }
+}
+
+// ============================================================
+// === Approvals ===
+// ============================================================
+
+const APPROVALS_PAGE_LIMIT = 50
+
+let _approvalsCountdownInterval = null
+const _approvalsState = { status: '', agent: '', category: '', offset: 0 }
+
+document.getElementById('refreshApprovalsBtn').addEventListener('click', loadApprovalsPage)
+document.getElementById('approvalsFilterStatus').addEventListener('change', (e) => {
+  _approvalsState.status = e.target.value
+  _approvalsState.offset = 0
+  _renderApprovalsTable()
+})
+document.getElementById('approvalsFilterAgent').addEventListener('input', (e) => {
+  _approvalsState.agent = e.target.value.trim()
+  _approvalsState.offset = 0
+  _renderApprovalsTable()
+})
+document.getElementById('approvalsFilterCategory').addEventListener('input', (e) => {
+  _approvalsState.category = e.target.value.trim()
+  _approvalsState.offset = 0
+  _renderApprovalsTable()
+})
+
+let _approvalsAll = []
+
+async function loadApprovalsPage() {
+  const tbody = document.getElementById('approvalsTbody')
+  const statsEl = document.getElementById('approvalsStats')
+  tbody.innerHTML = `<tr><td colspan="7" style="color:var(--text-muted);padding:24px;text-align:center">${t('approvals.loading')}</td></tr>`
+  statsEl.innerHTML = ''
+  if (_approvalsCountdownInterval) { clearInterval(_approvalsCountdownInterval); _approvalsCountdownInterval = null }
+
+  try {
+    const res = await fetch('/api/approvals?limit=500')
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    _approvalsAll = await res.json()
+    _renderApprovalsStats()
+    _renderApprovalsTable()
+    _approvalsCountdownInterval = setInterval(_updateCountdowns, 1000)
+  } catch (err) {
+    tbody.innerHTML = `<tr><td colspan="7" style="color:var(--danger);padding:24px;text-align:center">${t('approvals.error')}</td></tr>`
+  }
+}
+
+function _renderApprovalsStats() {
+  const counts = { pending: 0, approved: 0, rejected: 0, timeout: 0 }
+  for (const a of _approvalsAll) counts[a.status] = (counts[a.status] || 0) + 1
+  const statsEl = document.getElementById('approvalsStats')
+  statsEl.innerHTML = `
+    <div class="stat-card"><div class="stat-value" style="color:var(--warning)">${counts.pending}</div><div class="stat-label">${t('approvals.stat.pending')}</div></div>
+    <div class="stat-card"><div class="stat-value" style="color:var(--success)">${counts.approved}</div><div class="stat-label">${t('approvals.stat.approved')}</div></div>
+    <div class="stat-card"><div class="stat-value" style="color:var(--danger)">${counts.rejected}</div><div class="stat-label">${t('approvals.stat.rejected')}</div></div>
+    <div class="stat-card"><div class="stat-value" style="color:var(--text-muted)">${counts.timeout}</div><div class="stat-label">${t('approvals.stat.timeout')}</div></div>
+  `
+
+  // Sidebar badge: show pending count, hidden when zero
+  const badge = document.getElementById('approvalsPendingBadge')
+  if (badge) {
+    badge.textContent = counts.pending
+    badge.hidden = counts.pending === 0
+  }
+
+  // Pending notice banner above stat cards
+  const banner = document.getElementById('approvalsPendingBanner')
+  if (banner) {
+    if (counts.pending === 0) {
+      banner.hidden = true
+    } else {
+      const pendingRows = _approvalsAll.filter(a => a.status === 'pending')
+      const oldest = pendingRows.reduce((min, a) => a.requested_at < min.requested_at ? a : min, pendingRows[0])
+      const ageMin = Math.round((Date.now() / 1000 - oldest.requested_at) / 60)
+      const timeoutMin = oldest.timeout_at ? Math.max(0, Math.round((oldest.timeout_at - Date.now() / 1000) / 60)) : null
+      const timeoutPart = timeoutMin !== null ? ` ${t('approvals.banner.timeout', { n: timeoutMin })}` : ''
+      banner.hidden = false
+      banner.textContent = `${t('approvals.banner.notice', { n: counts.pending, age: ageMin, agent: oldest.agent_id, category: oldest.category })}${timeoutPart}`
+    }
+  }
+}
+
+function _filterApprovals() {
+  const { status, agent, category } = _approvalsState
+  return _approvalsAll.filter(a => {
+    if (status && a.status !== status) return false
+    if (agent && !a.agent_id.includes(agent)) return false
+    if (category && !a.category.includes(category)) return false
+    return true
+  })
+}
+
+function _renderApprovalsTable() {
+  const filtered = _filterApprovals()
+  const { offset } = _approvalsState
+  const page = filtered.slice(offset, offset + APPROVALS_PAGE_LIMIT)
+  const tbody = document.getElementById('approvalsTbody')
+
+  if (!page.length) {
+    tbody.innerHTML = `<tr><td colspan="7" style="color:var(--text-muted);padding:24px;text-align:center">${t('approvals.empty')}</td></tr>`
+    _renderApprovalsPagination(filtered.length)
+    return
+  }
+
+  tbody.innerHTML = page.map(a => {
+    const isPending = a.status === 'pending'
+    const rowStyle = isPending ? 'background:color-mix(in srgb, var(--warning) 8%, transparent)' : ''
+    const time = a.requested_at ? new Date(a.requested_at * 1000).toLocaleString('hu-HU', { dateStyle: 'short', timeStyle: 'short' }) : '-'
+    const badge = _approvalBadge(a.status)
+    const countdown = isPending && a.timeout_at ? `<span class="approvals-countdown" data-timeout="${a.timeout_at}" id="cd-${a.id}"></span>` : (a.timeout_at ? '-' : '')
+    const actions = isPending
+      ? `<div style="display:flex;gap:4px">
+           <button class="btn-primary btn-compact approvals-decide" data-id="${escapeAttr(a.id)}" data-decision="approved" style="font-size:11px">${t('approvals.btn.approve')}</button>
+           <button class="btn-danger btn-compact approvals-decide" data-id="${escapeAttr(a.id)}" data-decision="rejected" style="font-size:11px">${t('approvals.btn.reject')}</button>
+         </div>`
+      : (() => {
+          const resolvedBy = escapeHtml(a.resolved_by || '')
+          if (!a.resolved_at) return `<span style="font-size:12px;color:var(--text-muted)">${resolvedBy}</span>`
+          const resolvedDate = new Date(a.resolved_at * 1000)
+          const requestedDate = a.requested_at ? new Date(a.requested_at * 1000) : null
+          const sameDay = requestedDate && resolvedDate.toDateString() === requestedDate.toDateString()
+          const resolvedStr = resolvedDate.toLocaleString('hu-HU', sameDay ? { timeStyle: 'short' } : { dateStyle: 'short', timeStyle: 'short' })
+          return `<span style="font-size:12px;color:var(--text-muted)">${resolvedBy}<br><span style="font-size:11px;opacity:0.7">${escapeHtml(resolvedStr)}</span></span>`
+        })()
+    return `<tr style="${rowStyle}">
+      <td style="white-space:nowrap;font-size:12px">${escapeHtml(time)}</td>
+      <td><code style="font-size:12px">${escapeHtml(a.agent_id)}</code></td>
+      <td style="font-size:12px">${escapeHtml(a.category)}</td>
+      <td style="max-width:280px;font-size:12px" title="${escapeAttr(a.action_description)}">${escapeHtml(a.action_description.length > 80 ? a.action_description.slice(0, 80) + '...' : a.action_description)}</td>
+      <td>${badge}</td>
+      <td style="font-size:12px;white-space:nowrap">${countdown}</td>
+      <td>${actions}</td>
+    </tr>`
+  }).join('')
+
+  _updateCountdowns()
+  _renderApprovalsPagination(filtered.length)
+
+  tbody.querySelectorAll('.approvals-decide').forEach(btn => {
+    btn.addEventListener('click', () => _resolveApproval(btn.dataset.id, btn.dataset.decision))
+  })
+}
+
+function _approvalBadge(status) {
+  const colors = { pending: 'var(--warning)', approved: 'var(--success)', rejected: 'var(--danger)', timeout: 'var(--text-muted)' }
+  const color = colors[status] || 'var(--text-muted)'
+  return `<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;background:color-mix(in srgb,${color} 15%,transparent);color:${color}">${t('approvals.status.' + status) || status}</span>`
+}
+
+function _updateCountdowns() {
+  const now = Math.floor(Date.now() / 1000)
+  document.querySelectorAll('.approvals-countdown[data-timeout]').forEach(el => {
+    const timeout = parseInt(el.dataset.timeout, 10)
+    const diff = timeout - now
+    if (diff <= 0) {
+      el.textContent = t('approvals.countdown.expired')
+      el.style.color = 'var(--danger)'
+    } else {
+      const h = Math.floor(diff / 3600)
+      const m = Math.floor((diff % 3600) / 60)
+      const s = diff % 60
+      el.textContent = h > 0 ? `${h}h ${m}m` : `${m}m ${s}s`
+      el.style.color = diff < 300 ? 'var(--danger)' : 'var(--text-muted)'
+    }
+  })
+}
+
+function _renderApprovalsPagination(total) {
+  const pager = document.getElementById('approvalsPagination')
+  if (total <= APPROVALS_PAGE_LIMIT) { pager.innerHTML = ''; return }
+  const { offset } = _approvalsState
+  const hasPrev = offset > 0
+  const hasNext = offset + APPROVALS_PAGE_LIMIT < total
+  pager.innerHTML = `
+    <button class="btn-secondary btn-compact" ${hasPrev ? '' : 'disabled'} id="approvalsPrev">&#8592; Előző</button>
+    <span style="font-size:12px;color:var(--text-muted)">${offset + 1}-${Math.min(offset + APPROVALS_PAGE_LIMIT, total)} / ${total}</span>
+    <button class="btn-secondary btn-compact" ${hasNext ? '' : 'disabled'} id="approvalsNext">Következő &#8594;</button>
+  `
+  pager.querySelector('#approvalsPrev')?.addEventListener('click', () => {
+    _approvalsState.offset = Math.max(0, offset - APPROVALS_PAGE_LIMIT)
+    _renderApprovalsTable()
+  })
+  pager.querySelector('#approvalsNext')?.addEventListener('click', () => {
+    _approvalsState.offset = offset + APPROVALS_PAGE_LIMIT
+    _renderApprovalsTable()
+  })
+}
+
+async function _resolveApproval(id, decision) {
+  try {
+    const res = await fetch(`/api/approvals/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: decision, resolved_by: 'dashboard' }),
+    })
+    const data = await res.json()
+    if (!res.ok) { showToast(t('approvals.toast.error', { msg: data.error || ('HTTP ' + res.status) })); return }
+    showToast(t(decision === 'approved' ? 'approvals.toast.approved' : 'approvals.toast.rejected'))
+    // Update in-place to avoid full reload flicker
+    const idx = _approvalsAll.findIndex(a => a.id === id)
+    if (idx !== -1) _approvalsAll[idx] = data
+    _renderApprovalsStats()
+    _renderApprovalsTable()
+  } catch (err) {
+    showToast(t('approvals.toast.error', { msg: String(err.message || err) }))
   }
 }
 
@@ -11124,7 +12131,7 @@ window.addEventListener('beforeunload', (e) => {
 // entry never requires a frontend change just to render a sane heading.
 function settingsModuleLabel(mod) {
   const key = `settings.module.${mod}`
-  const known = { kanban: true, system: true, heartbeat: true, audit: true, ideabox: true, brand: true, channels: true }
+  const known = { kanban: true, system: true, heartbeat: true, audit: true, ideabox: true, channels: true }
   return known[mod] ? t(key) : (mod.charAt(0).toUpperCase() + mod.slice(1))
 }
 
@@ -11158,9 +12165,15 @@ function markSettingDirty(key, input, originalValue, type, errorEl) {
   updateSettingsSaveBar()
 }
 
+const SETTINGS_ACTIVE_TAB_KEY = 'settings-active-tab'
+
 async function loadSettings() {
-  const container = document.getElementById('settingsGroups')
-  container.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${t('settings.loading')}</p>`
+  const tabNav = document.getElementById('settingsTabNav')
+  const tabPanels = document.getElementById('settingsTabPanels')
+  if (!tabNav || !tabPanels) return
+
+  tabNav.innerHTML = `<span style="color:var(--text-muted);font-size:13px;padding:12px 0;display:inline-block">${t('settings.loading')}</span>`
+  tabPanels.innerHTML = ''
   settingsDirty.clear()
   updateSettingsSaveBar()
 
@@ -11175,28 +12188,105 @@ async function loadSettings() {
       byModule.get(s.module).push(s)
     }
 
-    container.innerHTML = ''
+    tabNav.innerHTML = ''
+    tabPanels.innerHTML = ''
+
     if (byModule.size === 0) {
-      container.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${t('settings.empty')}</p>`
+      tabPanels.innerHTML = `<p style="padding:24px;color:var(--text-muted);font-size:13px">${t('settings.empty')}</p>`
       return
     }
 
+    const allModules = [...byModule.keys(), 'autonomy']
+    const savedTab = localStorage.getItem(SETTINGS_ACTIVE_TAB_KEY) || allModules[0]
+    const activeTab = allModules.includes(savedTab) ? savedTab : allModules[0]
+
+    // Build a tab button + panel for each settings module
     for (const [mod, defs] of byModule) {
+      const btn = document.createElement('button')
+      btn.className = 'tab-btn' + (mod === activeTab ? ' active' : '')
+      btn.dataset.tab = mod
+      btn.textContent = settingsModuleLabel(mod)
+      btn.addEventListener('click', () => activateSettingsTab(mod))
+      tabNav.appendChild(btn)
+
+      const panel = document.createElement('div')
+      panel.className = 'tab-panel'
+      panel.id = `settings-panel-${mod}`
+      panel.hidden = mod !== activeTab
+
       const group = document.createElement('div')
       group.className = 'settings-group'
-
-      const heading = document.createElement('h3')
-      heading.className = 'settings-group-title'
-      heading.textContent = settingsModuleLabel(mod)
-      group.appendChild(heading)
-
       for (const def of defs) {
         group.appendChild(buildSettingRow(def))
       }
-      container.appendChild(group)
+      panel.appendChild(group)
+      tabPanels.appendChild(panel)
+    }
+
+    // Autonomy tab
+    {
+      const mod = 'autonomy'
+      const btn = document.createElement('button')
+      btn.className = 'tab-btn' + (mod === activeTab ? ' active' : '')
+      btn.dataset.tab = mod
+      btn.textContent = settingsModuleLabel(mod)
+      btn.addEventListener('click', () => activateSettingsTab(mod))
+      tabNav.appendChild(btn)
+
+      const panel = document.createElement('div')
+      panel.className = 'tab-panel'
+      panel.id = `settings-panel-${mod}`
+      panel.hidden = mod !== activeTab
+
+      const legend = document.createElement('div')
+      legend.className = 'autonomy-legend'
+      legend.innerHTML = `
+        <div class="autonomy-legend-item"><span class="autonomy-level-dot" style="background:var(--text-muted)"></span><span><strong>1</strong> ${t('autonomy.level.1')}</span></div>
+        <div class="autonomy-legend-item"><span class="autonomy-level-dot" style="background:var(--accent)"></span><span><strong>2</strong> ${t('autonomy.level.2')}</span></div>
+        <div class="autonomy-legend-item"><span class="autonomy-level-dot" style="background:var(--success)"></span><span><strong>3</strong> ${t('autonomy.level.3')}</span></div>
+      `
+      panel.appendChild(legend)
+
+      const grid = document.createElement('div')
+      grid.className = 'autonomy-grid'
+      grid.id = 'settingsAutonomyGrid'
+      panel.appendChild(grid)
+
+      const footer = document.createElement('p')
+      footer.className = 'autonomy-footer'
+      footer.id = 'settingsAutonomyUpdatedAt'
+      panel.appendChild(footer)
+
+      const refreshBtn = document.createElement('button')
+      refreshBtn.className = 'btn-secondary btn-compact'
+      refreshBtn.textContent = t('common.btn.refresh')
+      refreshBtn.addEventListener('click', () => renderAutonomyContent(grid, footer))
+      panel.appendChild(refreshBtn)
+
+      tabPanels.appendChild(panel)
+
+      if (mod === activeTab) {
+        renderAutonomyContent(grid, footer)
+      }
     }
   } catch (err) {
-    container.innerHTML = `<p style="color:var(--danger)">${t('settings.error')}</p>`
+    tabPanels.innerHTML = `<p style="padding:24px;color:var(--danger)">${t('settings.error')}</p>`
+  }
+}
+
+function activateSettingsTab(mod) {
+  document.querySelectorAll('#settingsTabNav .tab-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.tab === mod)
+  })
+  document.querySelectorAll('#settingsTabPanels .tab-panel').forEach(panel => {
+    panel.hidden = panel.id !== `settings-panel-${mod}`
+  })
+  localStorage.setItem(SETTINGS_ACTIVE_TAB_KEY, mod)
+
+  if (mod === 'autonomy') {
+    const grid = document.getElementById('settingsAutonomyGrid')
+    const footer = document.getElementById('settingsAutonomyUpdatedAt')
+    if (grid && !grid.innerHTML.trim()) renderAutonomyContent(grid, footer)
   }
 }
 
@@ -11348,159 +12438,6 @@ function resetAllSettings() {
 
 document.getElementById('settingsSaveAllBtn')?.addEventListener('click', saveAllSettings)
 document.getElementById('settingsResetBtn')?.addEventListener('click', resetAllSettings)
-
-// === Brand settings panel: logo URL + accent colour picker with live preview ===
-var BRAND_ACCENT_PRESETS = ['#d97757', '#e85c2e', '#2563eb', '#10b981', '#8b5cf6', '#f59e0b']
-var _brandSettingsLoaded = false
-
-function initBrandSettingsPanel() {
-  if (_brandSettingsLoaded) return
-  _brandSettingsLoaded = true
-
-  var logoInput = document.getElementById('brandLogoUrlInput')
-  var accentColor = document.getElementById('brandAccentColorInput')
-  var accentHex = document.getElementById('brandAccentHexInput')
-  var presetsContainer = document.getElementById('brandAccentPresets')
-  var previewMark = document.getElementById('brandPreviewMark')
-  var previewName = document.getElementById('brandPreviewName')
-  var previewSub = document.getElementById('brandPreviewSub')
-  var saveBtn = document.getElementById('brandSettingsSaveBtn')
-  var resetBtn = document.getElementById('brandSettingsResetBtn')
-
-  if (!logoInput || !accentColor) return
-
-  // Seed from /api/marveen (already loaded by initSidebarBrand).
-  var config = window._brandConfig || { logoUrl: '', accent: '#d97757' }
-  logoInput.value = config.logoUrl || ''
-  accentColor.value = config.accent || '#d97757'
-  accentHex.value = config.accent || '#d97757'
-
-  // Build preset swatches.
-  if (presetsContainer) {
-    presetsContainer.innerHTML = ''
-    for (var i = 0; i < BRAND_ACCENT_PRESETS.length; i++) {
-      var swatch = document.createElement('button')
-      swatch.type = 'button'
-      swatch.style.cssText = 'width:28px;height:28px;border-radius:6px;border:2px solid transparent;background:' + BRAND_ACCENT_PRESETS[i] + ';cursor:pointer;padding:0;transition:transform 0.15s, border-color 0.15s'
-      swatch.title = BRAND_ACCENT_PRESETS[i]
-      swatch.setAttribute('aria-label', BRAND_ACCENT_PRESETS[i])
-      ;(function(preset) {
-        swatch.addEventListener('click', function() {
-          accentColor.value = preset
-          accentHex.value = preset
-          updateBrandPreview(preset)
-          highlightActivePreset(presetsContainer, preset)
-        })
-      })(BRAND_ACCENT_PRESETS[i])
-      presetsContainer.appendChild(swatch)
-    }
-    highlightActivePreset(presetsContainer, config.accent || '#d97757')
-  }
-
-  // Sync the three accent controls.
-  accentColor.addEventListener('input', function() {
-    accentHex.value = accentColor.value
-    updateBrandPreview(accentColor.value)
-    highlightActivePreset(presetsContainer, accentColor.value)
-  })
-  accentHex.addEventListener('input', function() {
-    var val = accentHex.value.trim()
-    if (/^#[0-9a-fA-F]{6}$/.test(val)) {
-      accentColor.value = val
-      updateBrandPreview(val)
-      highlightActivePreset(presetsContainer, val)
-    }
-  })
-
-  // Live preview.
-  logoInput.addEventListener('input', function() { updateBrandPreview(null, logoInput.value) })
-
-  // Initial preview.
-  updateBrandPreview(config.accent || '#d97757', config.logoUrl)
-
-  // Save.
-  if (saveBtn) {
-    saveBtn.addEventListener('click', function() {
-      saveBtn.disabled = true; saveBtn.textContent = (t('brand.saving') || 'Mentés...')
-      var errs = []
-      var p1 = fetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({key:'BRAND_ACCENT',value:accentColor.value}) })
-        .then(function(r) { if (!r.ok) return r.json().then(function(d){ throw new Error('Szín: ' + (d.error || 'hiba')) }) })
-        .catch(function(e) { errs.push(e.message || 'Szín: kapcsolati hiba') })
-      var p2 = fetch('/api/settings', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({key:'BRAND_LOGO_URL',value:logoInput.value.trim()}) })
-        .then(function(r) { if (!r.ok) return r.json().then(function(d){ throw new Error('Logo: ' + (d.error || 'hiba')) }) })
-        .catch(function(e) { errs.push(e.message || 'Logo: kapcsolati hiba') })
-
-      Promise.all([p1, p2]).then(function() {
-        saveBtn.disabled = false; saveBtn.textContent = (t('brand.save_btn') || 'Brand mentése')
-        if (errs.length) { showToast(errs.join('; '), 'error') }
-        else {
-          applyBrandAccent(accentColor.value)
-          if (logoInput.value.trim()) applyBrandLogo(logoInput.value.trim())
-          else {
-            var mark = document.getElementById('sidebarBrandMark')
-            if (mark) { mark.textContent = ''; mark.textContent = ((window._brandTokens && window._brandTokens.brand) || 'Marveen').charAt(0).toUpperCase() }
-          }
-          window._brandConfig = { logoUrl: logoInput.value.trim(), accent: accentColor.value }
-          showToast(t('brand.saved') || 'Brand beállítások mentve')
-        }
-      })
-    })
-  }
-
-  // Reset.
-  if (resetBtn) {
-    resetBtn.addEventListener('click', function() {
-      logoInput.value = config.logoUrl || ''
-      accentColor.value = config.accent || '#d97757'
-      accentHex.value = config.accent || '#d97757'
-      updateBrandPreview(config.accent || '#d97757', config.logoUrl)
-      highlightActivePreset(presetsContainer, config.accent || '#d97757')
-    })
-  }
-}
-
-function highlightActivePreset(container, hex) {
-  if (!container) return
-  var swatches = container.querySelectorAll('button')
-  for (var i = 0; i < swatches.length; i++) {
-    var s = swatches[i]
-    s.style.borderColor = s.style.background.replace(/ /g,'') === hex ? 'var(--text)' : 'transparent'
-    s.style.transform = s.style.background.replace(/ /g,'') === hex ? 'scale(1.15)' : 'scale(1)'
-  }
-}
-
-function updateBrandPreview(accentHex, logoUrl) {
-  var mark = document.getElementById('brandPreviewMark')
-  var name = document.getElementById('brandPreviewName')
-  var sub = document.getElementById('brandPreviewSub')
-  if (accentHex && mark) {
-    mark.style.background = accentHex
-  }
-  if (logoUrl !== undefined && mark) {
-    // Show image or monogram in the preview.
-    if (logoUrl && logoUrl.trim()) {
-      mark.textContent = ''
-      var img = document.createElement('img')
-      img.src = logoUrl.trim()
-      img.style.width = '100%'; img.style.height = '100%'; img.style.objectFit = 'contain'
-      img.onerror = function() { mark.textContent = '!' }
-      mark.appendChild(img)
-    } else {
-      mark.textContent = ((window._brandTokens && window._brandTokens.brand) || 'Marveen').charAt(0).toUpperCase()
-    }
-  }
-  if (name) name.textContent = (window._brandTokens && window._brandTokens.brand) || 'Marveen'
-  if (sub) sub.textContent = 'online'
-}
-
-// Hook into loadSettings so the brand panel initialises each time Settings opens.
-var _origLoadSettings = loadSettings
-loadSettings = function() {
-  var p = _origLoadSettings.apply(this, arguments)
-  // initBrandSettingsPanel is sync and safe to call immediately.
-  initBrandSettingsPanel()
-  return p
-}
 
 // === connectors.hu install banner ===
 ;(function () {
@@ -11696,1220 +12633,6 @@ function tuGetTimeRange() {
   if (period === '7d') return { from: now - 7 * 86400, to: now }
   if (period === '30d') return { from: now - 30 * 86400, to: now }
   return { from: undefined, to: undefined }
-}
-
-// --- Költségek: API-first havi költség-összesítő ---
-window.costopsSyncNow = async function () {
-  const btn = document.getElementById('costsSyncBtn')
-  if (btn) { btn.disabled = true; btn.textContent = 'Frissítés...' }
-  try {
-    // Card d2631bad: this called a nonexistent authHeaders() (ReferenceError, no such function
-    // anywhere in this file) -- the fetch never even reached the network, so the "Render
-    // frissítés" button showed a bare "Hiba" on EVERY click regardless of session state. Not a
-    // re-auth/401 issue as previously assumed (that diagnosis was wrong -- verified live: even a
-    // freshly-authenticated ?token= session still hit this). The patched window.fetch above
-    // already auto-injects the Authorization header on every same-origin /api/* call, matching
-    // every other route in this file (none of them pass an explicit headers option either) --
-    // no manual header needed here at all.
-    const r = await fetch('/api/costs/sync?provider=render', { method: 'POST' })
-    const d = await r.json().catch(() => ({}))
-    if (btn) btn.textContent = d && d.ok ? 'Frissítve' : ('Hiba: ' + ((d && d.error) || r.status))
-  } catch (e) {
-    if (btn) btn.textContent = 'Hiba'
-  }
-  setTimeout(() => { if (typeof loadCosts === 'function') loadCosts() }, 1200)
-}
-
-async function loadCosts() {
-  const body = document.getElementById('costsBody')
-  if (!body) return
-  let s
-  try {
-    const res = await fetch('/api/costs/summary')
-    if (!res.ok) { body.innerHTML = '<p style="color:#c0392b;">Nem sikerült betölteni a költség-összesítőt.</p>'; return }
-    s = await res.json()
-  } catch (e) {
-    body.innerHTML = '<p style="color:#c0392b;">Hálózati hiba.</p>'
-    return
-  }
-  // Typed + generic warnings live on a separate endpoint (not embedded in /api/costs/summary).
-  let warningsResp = []
-  try {
-    const wres = await fetch('/api/costs/warnings')
-    if (wres.ok) { const wj = await wres.json(); warningsResp = Array.isArray(wj.warnings) ? wj.warnings : [] }
-  } catch (e) { /* non-fatal -- Teendők just shows empty */ }
-  // Non-PAYG AI subscription lifecycle (Claude Pro/Max, ChatGPT Plus) -- separate endpoint,
-  // this is the "AI subscription / token-limit" view Istvan doesn't currently see.
-  let subsResp = []
-  try {
-    const sres = await fetch('/api/costs/subscriptions')
-    if (sres.ok) { const sj = await sres.json(); subsResp = Array.isArray(sj.subscriptions) ? sj.subscriptions : [] }
-  } catch (e) { /* non-fatal -- AI subscription card just shows empty */ }
-  // v0.8: agent-grouped token cost + normalized limits/quota (subscriptions, DeepSeek balance,
-  // Workspace alerts, Render build-minutes, SSL/domain expiry) -- one shared "Token & limit
-  // monitor" section below is built from this instead of two separate cards.
-  let tokenByAgent = []
-  let limitsResp = []
-  try {
-    const lres = await fetch('/api/costs/limits')
-    if (lres.ok) {
-      const lj = await lres.json()
-      tokenByAgent = Array.isArray(lj.token_by_agent) ? lj.token_by_agent : []
-      limitsResp = Array.isArray(lj.limits) ? lj.limits : []
-    }
-  } catch (e) { /* non-fatal -- token/limit monitor just shows empty */ }
-
-  const cur = s.currency || 'HUF'
-  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
-  // Unified HUF format: "153 004 HUF" -- never doubles the currency suffix.
-  const fmt = (n) => (Number(n) || 0).toLocaleString('hu-HU') + ' ' + cur
-  const pct = (n) => (Math.round((Number(n) || 0) * 1000) / 10) + '%'
-  const nowSec = Number(s.generated_at) || Math.floor(Date.now() / 1000)
-  const fmtDate = (unixSec) => {
-    if (!unixSec) return '—'
-    try { return new Date(unixSec * 1000).toLocaleString('hu-HU', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) } catch (e) { return '—' }
-  }
-  const ageState = (unixSec) => {
-    if (!unixSec) return 'nodata'
-    const age = nowSec - Number(unixSec)
-    if (age < 26 * 3600) return 'ok'
-    if (age < 8 * 86400) return 'stale'
-    return 'stale'
-  }
-  const relAge = (unixSec) => {
-    if (!unixSec) return '—'
-    const age = Math.max(0, nowSec - Number(unixSec))
-    if (age < 3600) return Math.max(1, Math.round(age / 60)) + ' perce'
-    if (age < 86400) return Math.round(age / 3600) + ' órája'
-    return Math.round(age / 86400) + ' napja'
-  }
-
-  // Data-quality badge (theme-safe rgba backgrounds).
-  const qBadge = (q) => {
-    const m = {
-      billing: ['Billing API', '#2ecc71', 'rgba(46,204,113,0.15)'],
-      plan: ['API plan estimate', '#5b9dff', 'rgba(45,108,223,0.16)'],
-      local: ['Local estimate', '#e0a800', 'rgba(224,168,0,0.16)'],
-      manual: ['Manual fallback', '#9aa0a6', 'rgba(150,150,150,0.16)'],
-    }[q] || ['—', '#9aa0a6', 'rgba(150,150,150,0.16)']
-    return '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.74em;font-weight:600;color:' + m[1] + ';background:' + m[2] + ';white-space:nowrap;">' + m[0] + '</span>'
-  }
-  const sBadge = (state) => {
-    const m = {
-      ok: ['friss', '#2ecc71', 'rgba(46,204,113,0.15)'],
-      stale: ['elavult', '#e0a800', 'rgba(224,168,0,0.16)'],
-      failed: ['hiba', '#e74c3c', 'rgba(231,76,60,0.16)'],
-      nodata: ['nincs adat', '#9aa0a6', 'rgba(150,150,150,0.16)'],
-    }[state] || ['nincs adat', '#9aa0a6', 'rgba(150,150,150,0.16)']
-    return '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.74em;font-weight:600;color:' + m[1] + ';background:' + m[2] + ';white-space:nowrap;">' + m[0] + '</span>'
-  }
-  // Map an internal confidence code to a user-facing data source + quality badge.
-  const sourceOf = (conf) => {
-    switch (conf) {
-      case 'provider_api':
-      case 'billing': return { src: 'Billing API', q: 'billing', note: 'számlaadat' }
-      case 'provider_plan_estimate': return { src: 'API plan estimate', q: 'plan', note: 'plan-alapú, nem számla' }
-      case 'local_token_estimate': return { src: 'Tokenbecslés', q: 'local', note: 'lokális tokenhasználatból' }
-      case 'estimate': return { src: 'Kézi becslés', q: 'manual', note: 'nincs API collector' }
-      case 'pending_permission': return { src: 'Nincs hozzáférés', q: 'manual', note: 'hozzáférés/engedély hiányzik' }
-      case 'manual':
-      default: return { src: 'Kézi fallback', q: 'manual', note: 'nincs API collector' }
-    }
-  }
-
-  // Cost/quota/expiry warnings (v0.7 + sec-16 typed extension, /api/costs/warnings).
-  // v0.8 (card 6f4d1332 §6): WarningSeverity widened to 5 tiers -- 'critical'/'blocked' added
-  // above the pre-existing 'high'/'medium'/'low' for the new generic tiered-limit rule (70/80/
-  // 90/100%). The old Render-100% special case (isHardBlock below) predates this and still works
-  // standalone, but most future 100%-consumed signals now arrive as severity:'blocked' directly.
-  const sevRank = { blocked: -1, critical: 0, high: 1, medium: 2, low: 3 }
-  const sevStyle = (sev) => ({
-    blocked: ['Blokkolva', '#e74c3c', 'rgba(231,76,60,0.16)'],
-    critical: ['Kritikus', '#e74c3c', 'rgba(231,76,60,0.14)'],
-    high: ['Magas', '#e0a800', 'rgba(224,168,0,0.16)'],
-    medium: ['Közepes', '#e0a800', 'rgba(224,168,0,0.12)'],
-    low: ['Alacsony', '#5b9dff', 'rgba(45,108,223,0.14)'],
-  }[sev] || ['Info', '#9aa0a6', 'rgba(150,150,150,0.16)'])
-  const isHardBlock = (w) => w.code === 'render_build_minutes_exhausted' && w.threshold === 100 && w.current_value === 100 && w.unit === '%'
-  const catLabel = (c) => ({
-    hosting: 'Webservice / hosting', webservice: 'Webservice / hosting', 'webservice/hosting': 'Webservice / hosting',
-    'ai/llm': 'AI / LLM', ai: 'AI / LLM',
-    productivity: 'Productivity / subscriptions', 'productivity/subscriptions': 'Productivity / subscriptions',
-    domains: 'Domains', domain: 'Domains',
-  }[String(c || '').toLowerCase()] || (c || 'Egyéb'))
-  const fmtAnyDate = (v) => {
-    if (v == null) return null
-    if (typeof v === 'number') return fmtDate(v)
-    try { const d = new Date(v); if (!isNaN(d.getTime())) return d.toLocaleDateString('hu-HU', { year: 'numeric', month: 'short', day: 'numeric' }) } catch (e) { /* fallthrough */ }
-    return String(v)
-  }
-  const dueOf = (w) => w.due_date || w.reset_date || w.expiry_date || null
-  const isPendingWarn = (w) => w.confidence === 'no_api_or_no_access'
-  const warnValStr = (w) => w.current_value == null ? null : String(w.current_value) + (w.unit ? (w.unit === '%' ? '%' : ' ' + w.unit) : '')
-  const daysRemaining = (dateStr) => {
-    if (!dateStr) return null
-    try { const d = new Date(dateStr); if (isNaN(d.getTime())) return null; return Math.ceil((d.getTime() - Date.now()) / 86400000) } catch (e) { return null }
-  }
-  const daysStr = (n) => n == null ? '' : (n < 0 ? ' (' + Math.abs(n) + ' napja lejárt)' : n === 0 ? ' (ma)' : ' (' + n + ' nap múlva)')
-  // Source/confidence badges -- makes API-verified (render_api/workspace_alert) vs computed
-  // (ledger) vs static/no-data (config) visually distinct, per Istvan's addendum.
-  const srcBadge = (src) => {
-    const m = {
-      render_api: ['Render API', '#2ecc71', 'rgba(46,204,113,0.15)'],
-      workspace_alert: ['Gmail (Workspace)', '#2ecc71', 'rgba(46,204,113,0.15)'],
-      ledger: ['Ledger', '#5b9dff', 'rgba(45,108,223,0.14)'],
-      config: ['Config', '#9aa0a6', 'rgba(150,150,150,0.16)'],
-    }[src] || [(src || '—'), '#9aa0a6', 'rgba(150,150,150,0.16)']
-    return '<span style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:0.68em;font-weight:600;color:' + m[1] + ';background:' + m[2] + ';white-space:nowrap;">' + esc(m[0]) + '</span>'
-  }
-  const confBadge = (c) => {
-    const m = {
-      measured: ['Mért', '#2ecc71', 'rgba(46,204,113,0.15)'],
-      estimated: ['Becsült', '#e0a800', 'rgba(224,168,0,0.14)'],
-      manual: ['Kézi', '#9aa0a6', 'rgba(150,150,150,0.16)'],
-    }[c]
-    if (!m) return ''
-    return '<span style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:0.68em;font-weight:600;color:' + m[1] + ';background:' + m[2] + ';white-space:nowrap;">' + esc(m[0]) + '</span>'
-  }
-  // v0.8: actual_source distinguishes HOW a cost was captured (orthogonal to confidence's
-  // priority axis) -- live API poll vs an email invoice vs a config-driven fixed cost vs
-  // genuinely no data yet. Labels are Istvan's own exact requirements-doc wording
-  // (audits/costops-v08-cost-control-spec.md §1), not a paraphrase.
-  const actualSrcBadge = (a) => {
-    const m = {
-      provider_api: ['Lekérdezett adat', '#2ecc71', 'rgba(46,204,113,0.15)'],
-      email_invoice: ['Email számla', '#5b9dff', 'rgba(45,108,223,0.14)'],
-      manual_entry: ['Manuális felvétel', '#9aa0a6', 'rgba(150,150,150,0.16)'],
-      pending_permission: ['Jogosultság kell', '#e0a800', 'rgba(224,168,0,0.14)'],
-      no_data: ['Nincs adat', '#9aa0a6', 'rgba(150,150,150,0.16)'],
-    }[a] || null
-    if (!m) return ''
-    return '<span style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:0.68em;font-weight:600;color:' + m[1] + ';background:' + m[2] + ';white-space:nowrap;">' + esc(m[0]) + '</span>'
-  }
-  // Labels per audits/costops-v08-cost-control-spec.md §2's exact wording.
-  const forecastBasisLabel = (b) => ({
-    run_rate: 'Run-rate extrapoláció',
-    fixed_subscription: 'Fix havi előfizetés',
-    manual_forecast: 'Manuális forecast',
-    token_runrate: 'Tokenhasználat alapján',
-    no_forecast: null,
-  }[b] || null)
-  const origCurrencyStr = (t) => (t.original_amount != null && t.original_currency)
-    ? (Number(t.original_amount) || 0).toLocaleString('hu-HU') + ' ' + esc(t.original_currency)
-      + (t.fx_rate ? ' (árf. ' + esc(String(t.fx_rate)) + (t.fx_date ? ', ' + fmtAnyDate(t.fx_date) : '') + ')' : '')
-    : null
-
-  const warnItem = (w) => {
-    let [sevLabel, sevColor, sevBg] = sevStyle(w.severity)
-    if (isHardBlock(w)) { sevLabel = 'Blokkolva'; sevColor = '#e74c3c'; sevBg = 'rgba(231,76,60,0.16)' }
-    const pending = isPendingWarn(w)
-    const due = fmtAnyDate(dueOf(w))
-    const dueDays = daysRemaining(dueOf(w))
-    const val = warnValStr(w)
-    return '<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-top:1px solid var(--border,#eee);">'
-      + '<span style="flex:none;display:inline-block;margin-top:5px;width:8px;height:8px;border-radius:50%;background:' + (pending ? '#9aa0a6' : sevColor) + ';"></span>'
-      + '<div style="flex:1;min-width:0;">'
-      + '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">'
-      + '<span style="font-weight:600;font-size:0.9em;">' + esc(w.message || w.warning_type || w.code || 'Ismeretlen figyelmeztetés') + '</span>'
-      + (pending
-        ? '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.72em;font-weight:600;color:#9aa0a6;background:rgba(150,150,150,0.16);white-space:nowrap;">nincs adatforrás</span>'
-        : '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.72em;font-weight:600;color:' + sevColor + ';background:' + sevBg + ';white-space:nowrap;">' + sevLabel + '</span>')
-      + (w.source ? srcBadge(w.source) : '') + (!pending && w.confidence ? confBadge(w.confidence) : '')
-      + '</div>'
-      + '<div style="font-size:0.8em;color:var(--text-muted,#888);margin-top:2px;">'
-      + esc(catLabel(w.category)) + (w.provider ? ' · ' + esc(w.provider) : '')
-      + (val ? ' · ' + esc(val) + (w.threshold != null ? ' (küszöb ' + esc(String(w.threshold)) + (w.unit === '%' ? '%' : '') + ')' : '') : '')
-      + (due ? ' · határidő: ' + due + daysStr(dueDays) : '')
-      + '</div>'
-      + (w.action ? '<div style="font-size:0.82em;margin-top:4px;">' + esc(w.action) + '</div>' : '')
-      + '</div></div>'
-  }
-
-  const card = (title, inner, extraHead) => '<div style="border:1px solid var(--border,#e2e2e2);border-radius:12px;padding:16px;margin-bottom:16px;">'
-    + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;">'
-    + '<h3 style="margin:0;font-size:1em;">' + title + '</h3>' + (extraHead || '') + '</div>' + inner + '</div>'
-  const tableWrap = (inner) => '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch;">' + inner + '</div>'
-
-  const opv = s.operational || {}
-  const b = s.budget
-  const rp = s.render_plan
-
-  // ---- 1. Top summary cards ----
-  const freshTs = opv.data_freshness || (rp && rp.last_sync) || null
-  const budgetPct = b ? (b.operational_used_pct != null ? b.operational_used_pct : b.used_pct) : null
-  const budgetColor = !b ? '#9aa0a6' : b.status === 'hard' ? '#e74c3c' : b.status === 'warning' ? '#e0a800' : '#2ecc71'
-  const cards = []
-  cards.push('<div style="border:2px solid #2d6cdf;border-radius:12px;padding:16px;">'
-    + '<div style="color:#5b9dff;font-size:0.82em;font-weight:600;">Aktuális havi költés · ' + esc(s.month) + '</div>'
-    + '<div style="font-size:1.7em;font-weight:700;margin-top:4px;">' + fmt(s.operational_spend) + '</div>'
-    + '<div style="font-size:0.75em;color:var(--text-muted,#888);margin-top:2px;">ahol van API-adat, azt használjuk</div></div>')
-  cards.push('<div style="border:1px solid var(--border,#e2e2e2);border-radius:12px;padding:16px;">'
-    + '<div style="color:var(--text-muted,#888);font-size:0.82em;">Várható hó végi költés</div>'
-    + '<div style="font-size:1.7em;font-weight:700;margin-top:4px;">' + fmt(s.operational_forecast_month_end) + '</div>'
-    + '<div style="font-size:0.75em;color:var(--text-muted,#888);margin-top:2px;">a hónap eddigi ütemével számolva</div></div>')
-  cards.push('<div style="border:1px solid var(--border,#e2e2e2);border-radius:12px;padding:16px;">'
-    + '<div style="color:var(--text-muted,#888);font-size:0.82em;">Keret kihasználtság</div>'
-    + (b
-      ? '<div style="font-size:1.7em;font-weight:700;margin-top:4px;color:' + budgetColor + ';">' + pct(budgetPct) + '</div>'
-        + '<div style="background:rgba(150,150,150,0.2);border-radius:6px;height:8px;overflow:hidden;margin-top:6px;"><div style="background:' + budgetColor + ';height:100%;width:' + Math.min(100, (Number(budgetPct) || 0) * 100) + '%;"></div></div>'
-        + '<div style="font-size:0.75em;color:var(--text-muted,#888);margin-top:4px;">' + fmt(s.operational_spend) + ' / ' + fmt(b.amount) + ' · csak jelzés</div>'
-      : '<div style="font-size:1.1em;font-weight:600;margin-top:8px;color:var(--text-muted,#888);">nincs beállítva</div>')
-    + '</div>')
-  cards.push('<div style="border:1px solid var(--border,#e2e2e2);border-radius:12px;padding:16px;">'
-    + '<div style="color:var(--text-muted,#888);font-size:0.82em;">Adatfrissesség</div>'
-    + '<div style="font-size:1.25em;font-weight:600;margin-top:6px;">' + relAge(freshTs) + ' ' + sBadge(ageState(freshTs)) + '</div>'
-    + '<div style="font-size:0.75em;color:var(--text-muted,#888);margin-top:4px;">' + fmtDate(freshTs) + '</div></div>')
-
-  // ---- 1a-2. Aggregated provenance summary (card d2631bad, pt. 2) ----
-  // Per-source badges (actualSrcBadge/forecastBasisLabel per row, below) already answer "where
-  // did THIS ONE source's number come from" -- this answers the coarser question the headline
-  // cards above don't: "what's the actual+forecast data-mix behind the TOTAL". Shared with the
-  // collapsed Diagnosztika section's own confidence-breakdown table (below), so the wording
-  // stays consistent between the two views instead of drifting into two separate copies.
-  // Card d2631bad follow-up fix: this map was missing actual_invoice/billing_export/local_usage
-  // -- all 3 are real confidence codes ledger.ts's CONFIDENCE_PRIORITY actually produces
-  // (src/costops/ledger.ts) -- a real live breakdown showed 'actual_invoice' rendering as its
-  // raw, untranslated key instead of a label before this fix, caught while verifying this card
-  // live (a pre-existing gap in both this map and the Diagnosztika copy below, not new).
-  const confLabel = {
-    manual: 'Kézi fix', estimate: 'Kézi becslés', provider_plan_estimate: 'API plan estimate',
-    provider_api: 'Billing API', billing: 'Billing API', local_token_estimate: 'Tokenbecslés',
-    actual_invoice: 'Számla', billing_export: 'Billing export', local_usage: 'Helyi becslés',
-  }
-  const confBreakdown = s.confidence_breakdown || {}
-  const confTotal = Object.values(confBreakdown).reduce((a, b) => a + (Number(b) || 0), 0)
-  const confParts = Object.entries(confBreakdown)
-    .filter(([, v]) => Number(v) > 0)
-    .sort((a, b) => Number(b[1]) - Number(a[1]))
-    .map(([k, v]) => Math.round(Number(v) / (confTotal || 1) * 100) + '% ' + (confLabel[k] || k))
-  // Forecast side has no ready-made aggregate field -- derived here from all_sources'
-  // per-row forecast_basis + forecast_month_end (same raw data every row's own badge already
-  // renders below), same forecastBasisLabel() this function already defines for per-row use.
-  const provSources = Array.isArray(s.all_sources) ? s.all_sources : []
-  const fcByBasis = {}
-  for (const it of provSources) {
-    const bkey = it.forecast_basis || 'no_forecast'
-    fcByBasis[bkey] = (fcByBasis[bkey] || 0) + (Number(it.forecast_month_end) || 0)
-  }
-  const fcTotal = Object.values(fcByBasis).reduce((a, b) => a + b, 0)
-  const fcParts = Object.entries(fcByBasis)
-    .filter(([k, v]) => k !== 'no_forecast' && v > 0)
-    .sort((a, b) => b[1] - a[1])
-    .map(([k, v]) => Math.round(v / (fcTotal || 1) * 100) + '% ' + (forecastBasisLabel(k) || k))
-  const provenanceBlock = (confParts.length || fcParts.length)
-    ? '<div style="font-size:0.82em;color:var(--text-muted,#888);margin:-4px 0 18px;padding:10px 14px;border:1px solid var(--border,#e2e2e2);border-radius:10px;">'
-      + (confParts.length ? '<div><strong style="color:var(--text-muted,#888);">Aktuális adat-összetétel:</strong> ' + esc(confParts.join(' · ')) + '</div>' : '')
-      + (fcParts.length ? '<div style="margin-top:4px;"><strong style="color:var(--text-muted,#888);">Előrejelzés alapja:</strong> ' + esc(fcParts.join(' · ')) + '</div>' : '')
-      + '</div>'
-    : ''
-
-  // ---- 1b. Teendők (typed warnings, top zone + drill-down) ----
-  const warningsArr = warningsResp.slice()
-  warningsArr.sort((a, b2) => (sevRank[a.severity] ?? 9) - (sevRank[b2.severity] ?? 9))
-  const topWarnings = warningsArr.slice(0, 5)
-  const restWarnings = warningsArr.slice(5)
-  const warningsBlock = card('Teendők' + (warningsArr.length ? ' (' + warningsArr.length + ')' : ''),
-    warningsArr.length === 0
-      ? '<div style="color:var(--text-muted,#888);font-size:0.9em;">Nincs teendő.</div>'
-      : topWarnings.map(warnItem).join('')
-      + (restWarnings.length
-        ? '<details style="margin-top:8px;"><summary style="cursor:pointer;font-size:0.85em;color:var(--text-muted,#888);">+' + restWarnings.length + ' további teendő</summary>' + restWarnings.map(warnItem).join('') + '</details>'
-        : ''))
-  const warnByProvider = {}
-  warningsArr.forEach(w => {
-    const p = String(w.provider || '').toLowerCase()
-    if (!p) return
-    if (!warnByProvider[p] || (sevRank[w.severity] ?? 9) < (sevRank[warnByProvider[p].severity] ?? 9)) warnByProvider[p] = w
-  })
-
-  // ---- 2. Provider / source breakdown = main table ----
-  // v0.8 (card 6f4d1332 §3/§7): rebuilt on s.all_sources (per-source, not per-provider-summed
-  // opv.provider_breakdown) so actual_source, forecast+basis and original-currency/fx -- all
-  // newly threaded through ledger.ts this build -- can render inline per row instead of living
-  // in 2 separate collapsible blocks (manual-fallback + FX) that duplicated the same sources.
-  const allSources = (s.all_sources || []).slice()
-  const realRows = allSources.filter(t => t.spend != null && Number(t.spend) > 0)
-  const pendingRows = allSources.filter(t => t.confidence === 'pending_permission')
-  const zeroCount = allSources.length - realRows.length - pendingRows.length
-  const sourceRow = (t) => {
-    const so = sourceOf(t.confidence)
-    const isPending = t.confidence === 'pending_permission'
-    const pw = warnByProvider[String(t.provider || '').toLowerCase()]
-    const warnFlag = pw ? ' <span title="' + esc(pw.message || '') + '" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:' + sevStyle(pw.severity)[1] + ';margin-left:4px;vertical-align:middle;"></span>' : ''
-    const basisLabel = forecastBasisLabel(t.forecast_basis)
-    const orig = origCurrencyStr(t)
-    const detailBits = []
-    if (t.forecast_month_end != null) detailBits.push('előrejelzés: ' + fmt(t.forecast_month_end) + (basisLabel ? ' (' + basisLabel + ')' : ''))
-    if (orig) detailBits.push('eredeti: ' + orig)
-    return '<tr style="border-top:1px solid var(--border,#eee);">'
-      + '<td style="padding:8px 10px 8px 0;font-weight:600;text-transform:capitalize;">' + esc(t.name || t.provider) + warnFlag + '</td>'
-      + '<td style="padding:8px 10px 8px 0;">' + actualSrcBadge(t.actual_source) + '</td>'
-      + '<td style="padding:8px 10px 8px 0;">' + qBadge(so.q) + '</td>'
-      + '<td style="padding:8px 10px 8px 0;text-align:right;white-space:nowrap;font-weight:600;">' + (isPending ? '<span style="color:var(--text-muted,#888);font-weight:400;">nincs adat</span>' : fmt(t.spend)) + '</td>'
-      + '<td style="padding:8px 0;color:var(--text-muted,#888);font-size:0.85em;">' + (detailBits.length ? esc(detailBits.join(' · ')) : esc(so.note)) + '</td></tr>'
-  }
-  const provRows = realRows.map(sourceRow).join('') + pendingRows.map(sourceRow).join('')
-  const providerTable = card('Providerenkénti / forrásonkénti bontás',
-    tableWrap('<table style="width:100%;min-width:560px;border-collapse:collapse;font-size:0.92em;">'
-      + '<tr style="color:var(--text-muted,#888);font-size:0.78em;text-align:left;"><th style="text-align:left;padding-bottom:4px;">Forrás</th><th style="text-align:left;">Rögzítés módja</th><th style="text-align:left;">Adat minősége</th><th style="text-align:right;">Havi összeg</th><th style="text-align:left;">Részletek</th></tr>'
-      + (provRows || '<tr><td colspan="5" style="color:var(--text-muted,#888);padding:8px 0;">nincs adat</td></tr>') + '</table>')
-    + '<div style="font-size:0.78em;color:var(--text-muted,#888);margin-top:8px;">Becslésként csak azt jelöljük, amire nincs API-alapú adat. Kézi érték csak fallback.'
-    + (zeroCount > 0 ? ' (+' + zeroCount + ' forrás 0 ' + cur + ')' : '') + '</div>')
-
-  // ---- 3. Render card (compact; plan estimate since no billing API) ----
-  let renderCard = ''
-  if (rp) {
-    const vColor = rp.variance > 0 ? '#e74c3c' : (rp.variance < 0 ? '#2ecc71' : '#9aa0a6')
-    const det = rp.detail || {}
-    const svcCount = det.service_count || 0
-    const bp = Object.keys(det.by_type_plan || {}).map(k => {
-      const x = det.by_type_plan[k]
-      return '<tr style="border-top:1px solid var(--border,#eee);"><td style="padding:4px 8px 4px 0;">' + esc(k) + '</td><td style="padding:4px 8px 4px 0;text-align:right;">' + (x.count || 0) + '</td><td style="padding:4px 0;text-align:right;color:var(--text-muted,#888);">$' + (x.usd || 0) + '</td></tr>'
-    }).join('')
-    const nc = (rp.not_covered || []).map(x => '<li>' + esc(x) + '</li>').join('')
-    const flags = (det.undercount_flags || []).map(x => '<li>' + esc(x) + '</li>').join('')
-    const syncBtn = '<button id="costsSyncBtn" onclick="costopsSyncNow()" style="background:#2d6cdf;color:#fff;border:none;border-radius:8px;padding:6px 12px;cursor:pointer;font-size:0.8em;">Render frissítés</button>'
-    renderCard = card('Render infrastruktúra ' + qBadge('plan'),
-      '<div style="font-size:0.82em;color:var(--text-muted,#888);margin-bottom:10px;">API plan estimate, nem számlaadat. A Render nem ad hivatalos billing/current-spend API-t, ezért a service-plánokból számolt havi becslést használjuk.</div>'
-      + tableWrap('<table style="width:100%;min-width:320px;border-collapse:collapse;">'
-        + '<tr><td style="padding:4px 0;">Plan-alapú havi összeg</td><td style="padding:4px 0;text-align:right;font-weight:700;">' + fmt(rp.plan_estimate_total) + '</td></tr>'
-        + '<tr><td style="padding:4px 0;color:var(--text-muted,#888);">Kézi fallback</td><td style="padding:4px 0;text-align:right;color:var(--text-muted,#888);">' + fmt(rp.manual_estimate) + '</td></tr>'
-        + '<tr><td style="padding:4px 0;">Eltérés</td><td style="padding:4px 0;text-align:right;color:' + vColor + ';font-weight:600;">' + fmt(rp.variance) + '</td></tr>'
-        + '<tr><td style="padding:4px 0;color:var(--text-muted,#888);">Szolgáltatások száma</td><td style="padding:4px 0;text-align:right;color:var(--text-muted,#888);">' + svcCount + '</td></tr>'
-        + '</table>')
-      + '<div style="font-size:0.78em;color:#e0a800;margin-top:8px;">Alulszámolhat: bandwidth, storage, adó, kreditek, seat-ek.</div>'
-      + '<details style="margin-top:10px;"><summary style="cursor:pointer;font-size:0.85em;color:var(--text-muted,#888);">Technikai részletek</summary>'
-      + '<div style="font-size:0.8em;color:var(--text-muted,#888);margin:8px 0 4px;">utolsó frissítés: ' + fmtDate(rp.last_sync) + (det.fx_usd_huf ? ' · árfolyam: ' + det.fx_usd_huf + ' HUF/USD' : '') + '</div>'
-      + (bp ? tableWrap('<table style="width:100%;min-width:280px;border-collapse:collapse;font-size:0.85em;"><tr style="color:var(--text-muted,#888);font-size:0.78em;text-align:left;"><th style="text-align:left;">Típus / plan</th><th style="text-align:right;">db</th><th style="text-align:right;">USD/hó</th></tr>' + bp + '</table>') : '')
-      + (flags ? '<div style="font-size:0.78em;color:#e0a800;margin-top:6px;">Alulszámolás-jelzők:<ul style="margin:2px 0 0 18px;">' + flags + '</ul></div>' : '')
-      + (nc ? '<div style="font-size:0.78em;color:var(--text-muted,#888);margin-top:6px;">Nem fedett költségek:<ul style="margin:2px 0 0 18px;">' + nc + '</ul></div>' : '')
-      + '</details>',
-      syncBtn)
-  }
-
-  // ---- 4. Token & limit monitor ----
-  // v0.8 (card 6f4d1332 §5/§6.2/§7): merges the old separate "token cost estimate" card and
-  // "AI subscription / kvóta" card into one, both now driven by /api/costs/limits -- agent-
-  // grouped token cost (getTokenCostByAgent) + the normalized limits/quota pass (subscriptions,
-  // DeepSeek balance, Workspace alerts, Render build-minutes, SSL/domain expiry all in one
-  // uniform usage_pct shape) rather than piecing quota state together from warning codes.
-  const limitTierColor = (st) => ({ ok: '#2ecc71', warning: '#e0a800', critical: '#e74c3c', blocked: '#e74c3c', unknown: '#9aa0a6' }[st] || '#9aa0a6')
-  const limitStatusLabel = (st) => ({ ok: 'Rendben', warning: 'Figyelmeztetés', critical: 'Kritikus', blocked: 'Blokkolva', unknown: 'Ismeretlen' }[st] || st)
-  const limitTypeLabel = (t) => ({
-    subscription_renewal: 'előfizetés megújítás', weekly_tokens: 'heti token-keret', five_hour_tokens: '5 órás token-keret',
-    balance: 'egyenleg', workspace_payment: 'fizetés / felfüggesztés', build_minutes: 'build percek',
-    ssl_expiry: 'SSL lejárat', domain_expiry: 'domain lejárat', weekly_usage_pct: 'heti felhasználás (kézi pillanatkép)',
-  }[t] || t)
-  // Card 2ed90db1: lookup by sub_id, not provider -- Claude Max + Claude Pro share provider
-  // 'anthropic', so the old provider-keyed lookup silently collapsed two subscriptions into one
-  // (whichever the forEach visited last) once both had rows to show at the same time.
-  const subById = {}
-  subsResp.forEach(sub => { subById[sub.id] = sub })
-  const limitGaugeRow = (l) => {
-    const sub = l.sub_id ? subById[l.sub_id] : null
-    const title = sub ? sub.name : (esc(l.provider) + ' · ' + esc(limitTypeLabel(l.limit_type)))
-    const color = limitTierColor(l.status)
-    let body
-    if (l.usage_pct != null) {
-      const pct = Math.round(l.usage_pct * 100)
-      body = '<div style="margin-top:6px;">'
-        + '<div style="display:flex;justify-content:space-between;font-size:0.78em;color:var(--text-muted,#888);"><span>Felhasználva</span><span>' + pct + '%</span></div>'
-        + '<div style="background:rgba(150,150,150,0.2);border-radius:6px;height:6px;overflow:hidden;margin-top:3px;"><div style="background:' + color + ';height:100%;width:' + Math.min(100, pct) + '%;"></div></div>'
-        + (l.reset_date ? '<div style="font-size:0.75em;color:var(--text-muted,#888);margin-top:3px;">Megújul: ' + esc(l.reset_date) + '</div>' : '')
-        + '</div>'
-    } else {
-      const dateVal = l.expiry_date || l.paid_until || l.reset_date
-      const dd = daysRemaining(dateVal)
-      body = dateVal
-        ? '<div style="font-size:0.78em;color:var(--text-muted,#888);margin-top:6px;">' + (l.paid_until ? 'Fut, majd megszűnik: ' : l.expiry_date ? 'Lejárat: ' : 'Következő: ') + fmtAnyDate(dateVal) + daysStr(dd) + '</div>'
-        : '<div style="font-size:0.78em;color:var(--text-muted,#888);margin-top:6px;">nincs numerikus limit-adat</div>'
-    }
-    // Card 2ed90db1: usage_snapshot is a manual, occasionally-refreshed reading Istvan pastes in
-    // from the Claude usage screen -- NOT live-polled. Label it as such plus its as-of timestamp
-    // so nobody mistakes this for a continuously-updated gauge, and surface the session%/Fable%
-    // that aren't part of the alerted weekly_usage_pct row itself.
-    const snap = l.limit_type === 'weekly_usage_pct' && sub && sub.usage_snapshot ? sub.usage_snapshot : null
-    const snapshotBadge = snap
-      ? '<span style="display:inline-block;padding:1px 7px;border-radius:9px;font-size:0.68em;font-weight:600;color:#9aa0a6;background:rgba(150,150,150,0.16);white-space:nowrap;">Kézi pillanatkép</span>'
-      : ''
-    const snapshotDetail = snap
-      ? '<div style="font-size:0.75em;color:var(--text-muted,#888);margin-top:3px;">'
-        + 'Állapot ekkor: ' + fmtAnyDate(snap.as_of)
-        + ' · munkamenet: ' + Math.round(snap.session_pct) + '%'
-        + (snap.fable_pct != null ? ' · Fable: ' + Math.round(snap.fable_pct) + '%' : '')
-        + '</div>'
-      : ''
-    return '<div style="padding:10px 0;border-top:1px solid var(--border,#eee);">'
-      + '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">'
-      + '<span style="font-weight:600;font-size:0.9em;">' + title + '</span>'
-      + '<span style="display:flex;gap:4px;align-items:center;">'
-      + snapshotBadge
-      + '<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.72em;font-weight:600;color:' + color + ';background:' + color + '22;white-space:nowrap;">' + esc(limitStatusLabel(l.status)) + '</span>'
-      + '</span>'
-      + '</div>'
-      + (sub && sub.notes ? '<div style="font-size:0.78em;color:var(--text-muted,#888);margin-top:2px;">' + esc(sub.notes) + '</div>' : '')
-      + body
-      + snapshotDetail
-      + '</div>'
-  }
-  const limitRows = limitsResp.map(limitGaugeRow).join('') || '<div style="color:var(--text-muted,#888);font-size:0.9em;">nincs limit-adat.</div>'
-  // v0.8.1 (card d9739cf3, Istvan tg3540): label/naming polish only, money unchanged -- the
-  // backend field was renamed actual_cost_estimate_mtd -> estimated_cost_mtd (the old name implied
-  // a confirmed charge; this is a run-rate ESTIMATE never in operational_spend, never fires a
-  // budget alert). billed_status/source are now explicit per-row fields instead of only living in
-  // this card's header prose.
-  const billedStatusLabel = (b) => ({ not_billed: 'Előfizetésben (nincs külön díj)', unknown: 'Ismeretlen' }[b] || b)
-  const tokenSourceLabel = (s) => ({ local_token_usage: 'Lokális tokenhasználat' }[s] || s)
-  const tokenByAgentRows = tokenByAgent.slice()
-    .sort((a, b2) => (Number(b2.estimated_cost_mtd) || 0) - (Number(a.estimated_cost_mtd) || 0))
-    .map(m => '<tr style="border-top:1px solid var(--border,#eee);">'
-      + '<td style="padding:4px 8px 4px 0;">' + esc(m.agent) + '</td>'
-      + '<td style="padding:4px 8px 4px 0;color:var(--text-muted,#888);text-transform:capitalize;">' + esc(m.provider) + '</td>'
-      + '<td style="padding:4px 8px 4px 0;color:var(--text-muted,#888);">' + esc(m.model) + '</td>'
-      + '<td style="padding:4px 8px 4px 0;text-align:right;color:var(--text-muted,#888);white-space:nowrap;">' + Number(m.input_tokens || 0).toLocaleString('hu-HU') + ' / ' + Number(m.output_tokens || 0).toLocaleString('hu-HU') + '</td>'
-      + '<td style="padding:4px 8px 4px 0;text-align:right;color:var(--text-muted,#888);white-space:nowrap;">' + Number(m.cache_read_tokens || 0).toLocaleString('hu-HU') + ' / ' + Number(m.cache_creation_tokens || 0).toLocaleString('hu-HU') + '</td>'
-      + '<td style="padding:4px 8px 4px 0;text-align:right;font-weight:600;">' + fmt(m.estimated_cost_mtd) + '</td>'
-      + '<td style="padding:4px 8px 4px 0;text-align:right;color:var(--text-muted,#888);">' + (m.forecast_month_end != null ? fmt(m.forecast_month_end) : '—') + '</td>'
-      + '<td style="padding:4px 8px 4px 0;color:var(--text-muted,#888);font-size:0.85em;white-space:nowrap;">' + esc(billedStatusLabel(m.billed_status)) + '</td>'
-      + '<td style="padding:4px 8px 4px 0;color:var(--text-muted,#888);font-size:0.85em;white-space:nowrap;">' + esc(tokenSourceLabel(m.source)) + ' · ' + esc(forecastBasisLabel(m.forecast_basis) || m.forecast_basis) + '</td>'
-      + '<td style="padding:4px 0;color:var(--text-muted,#888);font-size:0.85em;">' + (m.limit_usage_pct != null ? Math.round(m.limit_usage_pct * 100) + '%' : '—') + '</td></tr>')
-    .join('') || '<tr><td colspan="10" style="color:var(--text-muted,#888);padding:4px 0;">nincs adat</td></tr>'
-  const tokenTotal = tokenByAgent.reduce((sum, m) => sum + (Number(m.estimated_cost_mtd) || 0), 0)
-  const tokenLimitCard = card('Token & limit monitor',
-    '<div style="font-size:0.82em;color:var(--text-muted,#888);margin-bottom:8px;">Lokális tokenhasználatból számolt becslés ágensenként (Run-rate extrapoláció), nem számlaadat -- nem része a fenti havi költésnek, nem vált ki budget-riasztást.</div>'
-    + '<div style="font-size:1.3em;font-weight:700;">' + fmt(tokenTotal) + '</div>'
-    + '<details style="margin-top:10px;"><summary style="cursor:pointer;font-size:0.85em;color:var(--text-muted,#888);">Ágensenkénti bontás</summary>'
-    + tableWrap('<table style="width:100%;min-width:900px;border-collapse:collapse;font-size:0.85em;margin-top:6px;"><tr style="color:var(--text-muted,#888);font-size:0.78em;text-align:left;"><th style="text-align:left;">Ágens</th><th style="text-align:left;">Provider</th><th style="text-align:left;">Modell</th><th style="text-align:right;">In / Out token</th><th style="text-align:right;">Cache olvasás / írás</th><th style="text-align:right;">Becsült (MTD)</th><th style="text-align:right;">Hó végi előrejelzés</th><th style="text-align:left;">Számlázás</th><th style="text-align:left;">Forrás / alap</th><th style="text-align:left;">Limit%</th></tr>' + tokenByAgentRows + '</table>')
-    + '</details>'
-    + '<div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--border,#e2e2e2);"><div style="font-weight:600;font-size:0.88em;margin-bottom:4px;">Limitek / kvóták</div>' + limitRows + '</div>')
-
-  // ---- 6. Diagnostics / debug (collapsed, bottom) ----
-  // confLabel is defined above (card d2631bad) -- was a separate, now-stale inline copy of the
-  // same map here; reusing the one const so a future new confidence code only needs one edit.
-  const conf = Object.entries(s.confidence_breakdown || {}).map(([k, v]) => {
-    const label = confLabel[k] || k
-    return '<tr><td style="padding:3px 12px 3px 0;">' + esc(label) + '</td><td style="padding:3px 0;text-align:right;">' + fmt(v) + '</td></tr>'
-  }).join('') || '<tr><td colspan="2" style="color:var(--text-muted,#888);">—</td></tr>'
-  const bd = s.breakdown || {}
-  const pm = s.previous_month
-  const mom = s.month_over_month_delta
-  const momColor = mom == null ? '#9aa0a6' : mom > 0 ? '#e74c3c' : mom < 0 ? '#2ecc71' : '#9aa0a6'
-  const sync = s.provider_sync || []
-  const rec = s.reconcile || []
-  const ageStr = (sec) => { if (sec == null) return '—'; const h = Math.round(sec / 3600); return h < 24 ? (h + 'ó') : (Math.round(h / 24) + 'n') }
-  const syncRows = sync.map(p => {
-    const st = p.status === 'failed' ? sBadge('failed') : (p.status === 'stale' ? sBadge('stale') : (p.status === 'no_data' ? sBadge('nodata') : sBadge('ok')))
-    return '<tr style="border-top:1px solid var(--border,#eee);"><td style="padding:4px 10px 4px 0;text-transform:capitalize;">' + esc(p.provider) + '</td><td style="padding:4px 10px 4px 0;">' + st + '</td><td style="padding:4px 10px 4px 0;text-align:right;">' + (Number(p.imported_count) || 0) + '</td><td style="padding:4px 10px 4px 0;color:var(--text-muted,#888);font-size:0.85em;">' + ageStr(p.data_age_secs) + '</td><td style="padding:4px 0;color:var(--text-muted,#888);font-size:0.82em;">' + (p.last_success ? fmtDate(p.last_success) : '—') + '</td></tr>'
-  }).join('') || '<tr><td colspan="5" style="color:var(--text-muted,#888);padding:4px 0;">nincs provider-sync futás</td></tr>'
-  const recRows = rec.map(r => {
-    const vColor = r.variance > 0 ? '#e74c3c' : (r.variance < 0 ? '#2ecc71' : '#9aa0a6')
-    return '<tr style="border-top:1px solid var(--border,#eee);"><td style="padding:4px 10px 4px 0;">' + esc(r.source_id) + '</td><td style="padding:4px 10px 4px 0;text-align:right;">' + fmt(r.estimate) + '</td><td style="padding:4px 10px 4px 0;text-align:right;">' + fmt(r.actual) + '</td><td style="padding:4px 0;text-align:right;color:' + vColor + ';">' + fmt(r.variance) + '</td></tr>'
-  }).join('')
-  const cfgWarn = (s.config_present === false)
-    ? '<div style="color:#e0a800;font-size:0.85em;margin-bottom:8px;">Nincs költség-konfiguráció betöltve — üres összesítő.</div>'
-    : (s.config_errors && s.config_errors.length ? '<div style="color:#e0a800;font-size:0.85em;margin-bottom:8px;">Konfiguráció-figyelmeztetés: ' + esc(s.config_errors.join('; ')) + '</div>' : '')
-  const diagBlock = '<details style="border:1px solid var(--border,#e2e2e2);border-radius:12px;padding:14px 16px;margin-bottom:16px;">'
-    + '<summary style="cursor:pointer;font-weight:600;color:var(--text-muted,#888);">Diagnosztika</summary>'
-    + '<div style="margin-top:10px;">' + cfgWarn
-    + '<div style="font-size:0.8em;color:var(--text-muted,#888);margin:6px 0 4px;">Előző hónap: ' + (pm ? fmt(pm.operational_spend) + ' <span style="color:' + momColor + ';">(' + (mom > 0 ? '+' : '') + fmt(mom) + ' MoM)</span>' : 'nincs adat') + '</div>'
-    + '<div style="font-size:0.8em;color:var(--text-muted,#888);margin:10px 0 4px;">Adatminőség szerint</div>'
-    + tableWrap('<table style="width:100%;max-width:360px;border-collapse:collapse;font-size:0.88em;">' + conf + '</table>')
-    + '<div style="font-size:0.8em;color:var(--text-muted,#888);margin:10px 0 4px;">Kézi vs provider vs becslés</div>'
-    + tableWrap('<table style="width:100%;max-width:360px;border-collapse:collapse;font-size:0.88em;">'
-      + '<tr><td style="padding:3px 12px 3px 0;">Kézi fix</td><td style="padding:3px 0;text-align:right;">' + fmt(bd.fixed_manual) + '</td></tr>'
-      + '<tr><td style="padding:3px 12px 3px 0;">Provider</td><td style="padding:3px 0;text-align:right;">' + fmt(bd.provider) + '</td></tr>'
-      + '<tr><td style="padding:3px 12px 3px 0;">Becslés</td><td style="padding:3px 0;text-align:right;">' + fmt(bd.estimate) + '</td></tr></table>')
-    + '<div style="font-size:0.8em;color:var(--text-muted,#888);margin:10px 0 4px;">Kézi ↔ provider eltérés: ' + fmt(opv.manual_vs_provider_variance) + '</div>'
-    + '<div style="font-size:0.8em;color:var(--text-muted,#888);margin:12px 0 4px;">Provider-sync állapot</div>'
-    + tableWrap('<table style="width:100%;min-width:420px;border-collapse:collapse;font-size:0.85em;"><tr style="color:var(--text-muted,#888);font-size:0.76em;text-align:left;"><th style="text-align:left;">Provider</th><th style="text-align:left;">Állapot</th><th style="text-align:right;">Import</th><th style="text-align:left;">Kor</th><th style="text-align:left;">Utolsó siker</th></tr>' + syncRows + '</table>')
-    + (rec.length ? '<div style="font-size:0.8em;color:var(--text-muted,#888);margin:10px 0 4px;">Becslés vs tény</div>' + tableWrap('<table style="width:100%;min-width:360px;border-collapse:collapse;font-size:0.85em;"><tr style="color:var(--text-muted,#888);font-size:0.76em;text-align:left;"><th style="text-align:left;">Forrás</th><th style="text-align:right;">Becslés</th><th style="text-align:right;">Tény</th><th style="text-align:right;">Eltérés</th></tr>' + recRows + '</table>') : '')
-    + '<div style="font-size:0.75em;color:var(--text-muted,#888);margin-top:10px;">Összesítő készült: ' + fmtDate(s.generated_at) + '</div>'
-    + '</div></details>'
-
-  body.innerHTML = ''
-    + '<div style="font-size:0.85em;color:var(--text-muted,#888);margin-bottom:14px;">Ahol van API-adat, azt használjuk. Becslés csak fallback, ha nincs API-adat.</div>'
-    + '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:18px;">' + cards.join('') + '</div>'
-    + provenanceBlock
-    + warningsBlock
-    + providerTable
-    + renderCard
-    + tokenLimitCard
-    + diagBlock
-}
-
-// Card 55d75546: data-quality focus filter for the category->provider accordion.
-// Pure client-side view toggle (no re-fetch, no recompute) -- category totals stay
-// the full honest sum; the filter only shows/hides provider rows by their dominant
-// source bucket so a user can answer "hol hiányzik számla/API adat?" (main Q6).
-function cv2FilterProviders(btn, mode) {
-  const acc = document.getElementById('cv2CatAcc');
-  if (!acc) return;
-  acc.classList.remove('f-teendo', 'f-valos');
-  if (mode === 'teendo') acc.classList.add('f-teendo');
-  else if (mode === 'valos') acc.classList.add('f-valos');
-  const grp = btn.parentElement;
-  grp.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', b === btn ? 'true' : 'false'));
-}
-
-// §8.6 Manual UI submit -- POST/PATCH a hand-entered cost line or entitlement.
-// The token is auto-injected into /api/* by the patched window.fetch; we only set
-// Content-Type. On success we reload loadCostsV2 so the new row appears (badged
-// "Kézi fallback" via confidence=manual/actual_source=manual_entry -- no new badge).
-async function cv2SubmitManual(kind, method) {
-  const gv = (id) => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
-  const num = (v) => { if (v === '' || v == null) return null; const n = Number(v); return isFinite(n) ? n : null; };
-  const isCost = kind === 'cost';
-  const statusEl = document.getElementById(isCost ? 'cvm_c_status' : 'cvm_e_status');
-  const setStatus = (msg, ok) => { if (statusEl) { statusEl.textContent = msg; statusEl.className = 'cv2-mstatus ' + (ok ? 'ok' : 'err'); } };
-  let url, body;
-  if (isCost) {
-    const source_id = gv('cvm_c_source_id'), month = gv('cvm_c_month'), currency = gv('cvm_c_currency') || 'HUF';
-    const amount = num(gv('cvm_c_amount'));
-    if (!source_id || !month) { setStatus('Forrás azonosító és hónap kötelező.', false); return; }
-    if (amount == null) { setStatus('Az összeg kötelező és szám kell legyen.', false); return; }
-    url = '/api/costs/manual';
-    body = method === 'PATCH'
-      ? { source_id, month, amount, currency }
-      : { source_id, name: gv('cvm_c_name') || source_id, provider: gv('cvm_c_provider'), amount, currency, month, source_type: gv('cvm_c_source_type') || 'subscription' };
-    if (method === 'POST' && !body.provider) { setStatus('Provider kötelező új tételnél.', false); return; }
-  } else {
-    const provider = gv('cvm_e_provider'), product = gv('cvm_e_product'), entitlement_type = gv('cvm_e_entitlement_type');
-    if (!provider || !product || !entitlement_type) { setStatus('Provider, termék és keret-típus kötelező.', false); return; }
-    const resetRaw = gv('cvm_e_reset_at');
-    const reset_at = resetRaw ? Math.floor(new Date(resetRaw + 'T00:00:00').getTime() / 1000) : null;
-    url = '/api/costs/entitlements/manual';
-    body = { provider, product, plan_name: gv('cvm_e_plan_name') || null, billing_period: gv('cvm_e_billing_period') || 'monthly',
-      entitlement_type, included_limit: num(gv('cvm_e_included_limit')), included_unit: gv('cvm_e_included_unit') || null,
-      remaining: num(gv('cvm_e_remaining')), reset_at, status: gv('cvm_e_status') || 'unknown' };
-  }
-  setStatus('Küldés...', true);
-  try {
-    const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    const d = await res.json().catch(() => ({}));
-    if (res.ok && d && d.ok) {
-      setStatus(method === 'POST' ? 'Létrehozva.' : 'Frissítve.', true);
-      setTimeout(() => { if (typeof loadCostsV2 === 'function') loadCostsV2(); }, 900);
-    } else {
-      setStatus('Hiba (' + res.status + '): ' + ((d && d.error) || 'ismeretlen hiba'), false);
-    }
-  } catch (e) {
-    setStatus('Hálózati hiba a rögzítéskor.', false);
-  }
-}
-
-// Card 73e8914a: DELETE a manual cost/entitlement row -- only the identifying fields matter
-// (source_id+month for cost, provider+product+entitlement_type+billing_period for entitlement),
-// same fields the operator already fills in to PATCH one. Irreversible, so confirm() first.
-async function cv2DeleteManual(kind) {
-  const gv = (id) => { const el = document.getElementById(id); return el ? el.value.trim() : ''; };
-  const isCost = kind === 'cost';
-  const statusEl = document.getElementById(isCost ? 'cvm_c_status' : 'cvm_e_status');
-  const setStatus = (msg, ok) => { if (statusEl) { statusEl.textContent = msg; statusEl.className = 'cv2-mstatus ' + (ok ? 'ok' : 'err'); } };
-  let url, body;
-  if (isCost) {
-    const source_id = gv('cvm_c_source_id'), month = gv('cvm_c_month');
-    if (!source_id || !month) { setStatus('Forrás azonosító és hónap kötelező a törléshez.', false); return; }
-    url = '/api/costs/manual';
-    body = { source_id, month };
-  } else {
-    const provider = gv('cvm_e_provider'), product = gv('cvm_e_product'), entitlement_type = gv('cvm_e_entitlement_type'), billing_period = gv('cvm_e_billing_period') || 'monthly';
-    if (!provider || !product || !entitlement_type) { setStatus('Provider, termék és keret-típus kötelező a törléshez.', false); return; }
-    url = '/api/costs/entitlements/manual';
-    body = { provider, product, entitlement_type, billing_period };
-  }
-  if (!confirm('Biztosan törlöd ezt a kézi bejegyzést? Ez nem vonható vissza.')) return;
-  setStatus('Törlés...', true);
-  try {
-    const res = await fetch(url, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    const d = await res.json().catch(() => ({}));
-    if (res.ok && d && d.ok) {
-      setStatus('Törölve.', true);
-      setTimeout(() => { if (typeof loadCostsV2 === 'function') loadCostsV2(); }, 900);
-    } else {
-      setStatus('Hiba (' + res.status + '): ' + ((d && d.error) || 'ismeretlen hiba'), false);
-    }
-  } catch (e) {
-    setStatus('Hálózati hiba a törléskor.', false);
-  }
-}
-
-async function loadCostsV2() {
-  const body = document.getElementById('costsV2Body')
-  if (!body) return
-  if (!document.getElementById('cv2Style')) {
-    const st = document.createElement('style')
-    st.id = 'cv2Style'
-    st.textContent = [
-      '.cv2-wrap{max-width:1100px;margin:0 auto;}',
-      '.cv2-topbar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap;}',
-      '.cv2-topbar .cv2-month{font-size:0.9em;color:var(--text-secondary);}',
-      '.cv2-toglink{font-size:0.82em;color:var(--text-muted);text-decoration:none;border:1px solid var(--border);border-radius:var(--radius-sm,6px);padding:4px 10px;}',
-      '.cv2-toglink:hover{color:var(--text);border-color:var(--accent);}',
-      '.cv2-cards{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;margin-bottom:16px;}',
-      '.cv2-card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius,10px);padding:15px 17px;box-shadow:var(--shadow-sm);}',
-      '.cv2-card.cv2-hero{grid-column:span 1;}',
-      '.cv2-card .cv2-label{font-size:0.74em;color:var(--text-muted);text-transform:uppercase;letter-spacing:.03em;}',
-      '.cv2-card .cv2-num{font-size:clamp(1.35rem,3vw,1.85rem);font-weight:700;color:var(--text);margin:5px 0 3px;line-height:1.1;}',
-      '.cv2-card .cv2-sub{font-size:0.79em;color:var(--text-secondary);}',
-      '.cv2-qual{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center;margin-bottom:20px;font-size:0.8em;color:var(--text-secondary);}',
-      '.cv2-chip{display:inline-block;padding:2px 9px;border-radius:9px;font-size:0.92em;font-weight:600;white-space:nowrap;}',
-      '.cv2-ok{color:#2ecc71;background:rgba(46,204,113,0.14);}',
-      '.cv2-warn{color:#e0a800;background:rgba(224,168,0,0.14);}',
-      '.cv2-over{color:#e74c3c;background:rgba(231,76,60,0.15);}',
-      '.cv2-muted{color:#9aa0a6;background:rgba(150,150,150,0.14);}',
-      '.cv2-soon{color:var(--text-muted);font-size:0.82em;padding:10px 0;border-top:1px dashed var(--border);margin-top:4px;line-height:1.5;}',
-      '@media(max-width:1100px){.cv2-cards{grid-template-columns:repeat(3,1fr);}.cv2-card:nth-child(4),.cv2-card:nth-child(5){grid-column:span 1;}}',
-      '@media(max-width:700px){.cv2-cards{grid-template-columns:1fr 1fr;}.cv2-card.cv2-hero{grid-column:1/-1;}.cv2-card.cv2-hero .cv2-num{font-size:clamp(1.6rem,6vw,2.2rem);}}',
-      '.cv2-sec{margin:22px 0 8px;font-size:0.95em;font-weight:700;color:var(--text);}',
-      '.cv2-movers{display:flex;flex-direction:column;gap:0;margin-bottom:8px;}',
-      '.cv2-mover{display:flex;justify-content:space-between;gap:10px;font-size:0.85em;padding:6px 0;border-top:1px solid var(--border);}',
-      '.cv2-recon{font-size:0.8em;color:var(--text-secondary);margin:6px 0 18px;}',
-      '.cv2-acc{border:1px solid var(--border);border-radius:var(--radius,10px);overflow:hidden;margin-bottom:10px;}',
-      '.cv2-acc>details{border-top:1px solid var(--border);}',
-      '.cv2-acc>details:first-child{border-top:none;}',
-      '.cv2-acc summary{cursor:pointer;list-style:none;padding:10px 14px;display:flex;justify-content:space-between;gap:10px;align-items:center;font-size:0.9em;}',
-      '.cv2-acc summary::-webkit-details-marker{display:none;}',
-      '.cv2-acc summary:hover{background:var(--bg-card-hover,rgba(127,127,127,0.05));}',
-      '.cv2-acc .cv2-lvl2 summary{padding-left:30px;font-size:0.86em;}',
-      '.cv2-acc .cv2-lvl3{padding:4px 14px 8px 46px;font-size:0.82em;color:var(--text-secondary);}',
-      '.cv2-acc .cv2-srcrow{display:flex;justify-content:space-between;gap:10px;padding:4px 0;border-top:1px dashed var(--border);}',
-      '.cv2-amt{font-variant-numeric:tabular-nums;white-space:nowrap;}',
-      '.cv2-tblwrap{overflow-x:auto;}',
-      '.cv2-tblwrap:focus-visible{outline:2px solid var(--accent,#4a90d9);outline-offset:2px;}',
-      '.cv2-vh{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;}',
-      '.cv2-filter{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 8px;}',
-      '.cv2-fbtn{font-size:0.78em;padding:4px 11px;border:1px solid var(--border);border-radius:14px;background:transparent;color:var(--text-secondary);cursor:pointer;min-height:32px;}',
-      '.cv2-fbtn:hover{border-color:var(--accent);}',
-      '.cv2-fbtn[aria-pressed="true"]{background:var(--accent,#4a90d9);color:#fff;border-color:var(--accent,#4a90d9);}',
-      '.cv2-fbtn:focus-visible{outline:2px solid var(--accent,#4a90d9);outline-offset:2px;}',
-      '.cv2-acc.f-teendo .cv2-lvl2[data-q="real"]{display:none;}',
-      '.cv2-acc.f-teendo>details[data-cat-q="allreal"]{display:none;}',
-      '.cv2-acc.f-valos .cv2-lvl2[data-q="attention"]{display:none;}',
-      '.cv2-acc.f-valos>details[data-cat-q="noreal"]{display:none;}',
-      '.cv2-tbl{width:100%;border-collapse:collapse;font-size:0.8em;}',
-      '.cv2-tbl th,.cv2-tbl td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap;}',
-      '.cv2-tbl th{color:var(--text-muted);font-weight:600;position:sticky;top:0;background:var(--bg-card);}',
-      '.cv2-tbl td.cv2-r{text-align:right;font-variant-numeric:tabular-nums;}',
-      // §8.4 Havi trend -- simple monthly bar chart (plan §5: bars, 3-6 months, no dense multi-series)
-      '.cv2-trend{display:flex;align-items:flex-end;gap:8px;height:130px;margin:8px 0 4px;padding-top:6px;}',
-      '.cv2-tcol{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;min-width:0;}',
-      '.cv2-tbar{width:100%;max-width:44px;border-radius:5px 5px 0 0;background:var(--accent,#4a90d9);min-height:2px;}',
-      '.cv2-tpartial{background:repeating-linear-gradient(45deg,var(--accent,#4a90d9),var(--accent,#4a90d9) 5px,rgba(74,144,217,0.4) 5px,rgba(74,144,217,0.4) 10px);}',
-      '.cv2-tnodata{background:repeating-linear-gradient(45deg,transparent,transparent 4px,var(--border) 4px,var(--border) 5px);border:1px dashed var(--border);}',
-      '.cv2-tlabel{font-size:0.72em;color:var(--text-muted);margin-top:6px;text-align:center;white-space:nowrap;}',
-      '.cv2-tval{font-size:0.68em;color:var(--text-secondary);margin-top:2px;font-variant-numeric:tabular-nums;white-space:nowrap;}',
-      // §8.6 Kézi rögzítés -- manual cost/entitlement forms
-      '.cv2-mform{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:10px 0;}',
-      '.cv2-mfield{display:flex;flex-direction:column;gap:3px;font-size:0.8em;}',
-      '.cv2-mfield label{color:var(--text-muted);font-size:0.9em;}',
-      '.cv2-mfield input,.cv2-mfield select{padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg-card);color:var(--text);font-size:0.95em;min-height:34px;}',
-      '.cv2-mfield input:focus-visible,.cv2-mfield select:focus-visible{outline:2px solid var(--accent,#4a90d9);outline-offset:1px;}',
-      '.cv2-mactions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:4px;}',
-      '.cv2-mbtn{font-size:0.82em;padding:7px 14px;border:1px solid var(--accent,#4a90d9);border-radius:7px;background:var(--accent,#4a90d9);color:#fff;cursor:pointer;min-height:36px;}',
-      '.cv2-mbtn.secondary{background:transparent;color:var(--accent,#4a90d9);}',
-      '.cv2-mbtn:focus-visible{outline:2px solid var(--accent,#4a90d9);outline-offset:2px;}',
-      '.cv2-mstatus{font-size:0.8em;margin-top:6px;min-height:1.1em;}',
-      '.cv2-mstatus.ok{color:#2ecc71;}.cv2-mstatus.err{color:var(--danger,#e74c3c);}',
-    ].join('')
-    document.head.appendChild(st)
-  }
-  body.innerHTML = '<p style="color:var(--text-muted);">Betöltés...</p>'
-  let s
-  try {
-    const res = await fetch('/api/costs/summary')
-    if (!res.ok) { body.innerHTML = '<p style="color:var(--danger,#c0392b);">Nem sikerült betölteni a költség-összesítőt.</p>'; return }
-    s = await res.json()
-  } catch (e) { body.innerHTML = '<p style="color:var(--danger,#c0392b);">Hálózati hiba a költség-adatok betöltésekor.</p>'; return }
-
-  // Secondary endpoints (non-fatal -- zones degrade to empty/pending if missing).
-  let warnings = [], limits = [], subs = []
-  try { const r = await fetch('/api/costs/warnings'); if (r.ok) { const j = await r.json(); warnings = Array.isArray(j.warnings) ? j.warnings : [] } } catch (e) { /* Teendők empty */ }
-  try { const r = await fetch('/api/costs/limits'); if (r.ok) { const j = await r.json(); limits = Array.isArray(j.limits) ? j.limits : [] } } catch (e) { /* keretek empty */ }
-  try { const r = await fetch('/api/costs/subscriptions'); if (r.ok) { const j = await r.json(); subs = Array.isArray(j.subscriptions) ? j.subscriptions : [] } } catch (e) { /* keretek empty */ }
-  // §8.4 Havi trend source (pre-existing endpoint): months[] oldest-first + current/previous/MoM.
-  let period = { months: [] }
-  try { const r = await fetch('/api/costs/period?months=6'); if (r.ok) { const j = await r.json(); period = j || period } } catch (e) { /* trend zone degrades to empty */ }
-
-  const cur = s.currency || 'HUF'
-  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
-  const fmt = (n) => (Number(n) || 0).toLocaleString('hu-HU') + ' ' + cur
-  const pct = (n) => (Math.round((Number(n) || 0) * 1000) / 10) + '%'
-  const nowSec = Number(s.generated_at) || Math.floor(Date.now() / 1000)
-  const relAge = (unixSec) => {
-    if (!unixSec) return 'nincs adat'
-    const age = nowSec - Number(unixSec)
-    if (age < 3600) return Math.max(1, Math.round(age / 60)) + ' perce'
-    if (age < 86400) return Math.round(age / 3600) + ' órája'
-    return Math.round(age / 86400) + ' napja'
-  }
-
-  const b = s.budget || {}
-  const budgetPct = b.operational_used_pct != null ? b.operational_used_pct : b.used_pct
-  const budgetFPct = b.operational_forecast_pct != null ? b.operational_forecast_pct : b.forecast_pct
-
-  const mom = Number(s.month_over_month_delta) || 0
-  const momArrow = mom > 0 ? '▲' : (mom < 0 ? '▼' : '■')
-  const momColor = mom > 0 ? 'var(--danger,#e74c3c)' : (mom < 0 ? 'var(--success,#2ecc71)' : 'var(--text-muted)')
-
-  const prev = s.previous_month || {}
-
-  // --- source badge: EXACTLY the 6 canonical badges (Muse UX plan sec3). No seventh
-  // label may leak in. email invoice -> Számla; manual -> Kézi fallback; any estimate
-  // (plan_estimate) -> API becslés (grey/advisory), never a "Becslés"/"Kézi becslés" variant.
-  const srcBadge = (a) => {
-    // §6 Two-tier manual labels: "Kézi — nincs API" (grey) vs "Kézi — API hiba" (amber).
-    // Cascade: unified table sets the new labels via manual_reason; here the generic
-    // "manual_entry" / "manual" keys map to the "nincs API" default — the "API hiba"
-    // variant is set inline in the unified table where manual_reason is available.
-    const m = {
-      provider_api: ['API', '#2ecc71', 'rgba(46,204,113,0.15)'],
-      actual_invoice: ['Számla', '#2ecc71', 'rgba(46,204,113,0.15)'],
-      email_invoice: ['Számla', '#2ecc71', 'rgba(46,204,113,0.15)'],
-      manual_entry: ['Kézi — nincs API', '#9aa0a6', 'rgba(150,150,150,0.16)'],
-      manual: ['Kézi — nincs API', '#9aa0a6', 'rgba(150,150,150,0.16)'],
-      estimate: ['API becslés', '#9aa0a6', 'rgba(150,150,150,0.16)'],
-      plan_estimate: ['API becslés', '#9aa0a6', 'rgba(150,150,150,0.16)'],
-      pending_permission: ['Jogosultság kell', '#e0854a', 'rgba(224,133,74,0.16)'],
-      no_data: ['Nincs adat', '#9aa0a6', 'rgba(150,150,150,0.16)'],
-    }[a]
-    if (!m) return ''
-    return '<span class="cv2-chip" style="color:' + m[1] + ';background:' + m[2] + ';font-size:0.72em;">' + esc(m[0]) + '</span>'
-  }
-  // Reconciled source for badging. `confidence` is authoritative (it feeds the API's
-  // confidence_breakdown); `actual_source` can lag -- e.g. Render carries
-  // actual_source=no_data while its reconciled confidence is actual_invoice, so a real
-  // invoice must NOT be hidden as "Nincs adat". A reconciled invoice always wins; a
-  // provider_api confidence only counts as API when actual_source confirms live data,
-  // otherwise (API configured but returned nothing) it falls through to no_data.
-  const effSrc = (it) => {
-    if (it.confidence === 'actual_invoice') return 'actual_invoice'
-    if (it.confidence === 'provider_api' && it.actual_source === 'provider_api') return 'provider_api'
-    return it.actual_source || it.confidence || 'no_data'
-  }
-  const fBasis = (x) => ({ run_rate: 'run-rate', fixed_subscription: 'fix előfizetés', manual_forecast: 'kézi forecast', token_runrate: 'token alapú', no_forecast: '' }[x] || '')
-  // Eredeti deviza. fx_estimated (card a1552362): the HUF conversion used an estimated
-  // FX rate (static Render-pricing config, not an invoice-native rate), so flag it honestly
-  // rather than implying invoice-exact precision (plan §5 "if FX estimated/manual, flag it").
-  const fxEst = (t) => (t.fx_estimated && t.original_currency && t.original_currency !== cur) ? ' · becsült árf.' : ''
-  const origCur = (t) => (t.original_amount != null && t.original_currency)
-    ? (Number(t.original_amount) || 0).toLocaleString('hu-HU') + ' ' + esc(t.original_currency) + fxEst(t) : ''
-  const CAT = (p, st) => ({
-    openai: 'AI / LLM', anthropic: 'AI / LLM', deepseek: 'AI / LLM', google: 'AI / LLM',
-    render: 'Webszolgáltatás / hosting', vercel: 'Webszolgáltatás / hosting',
-    aws: 'Cloud infra', cloudflare: 'Cloud infra',
-    posthog: 'Monitoring', github: 'Fejlesztői eszközök',
-  }[p] || (st === 'domain' ? 'Domainek' : (st === 'subscription' || st === 'saas' ? 'Előfizetések' : 'Egyéb')))
-
-  const sources = Array.isArray(s.all_sources) ? s.all_sources : []
-  const catMap = {}
-  for (const it of sources) {
-    const cat = CAT(it.provider, it.source_type)
-    const prov = it.provider || 'egyéb'
-    if (!catMap[cat]) catMap[cat] = {}
-    if (!catMap[cat][prov]) catMap[cat][prov] = []
-    catMap[cat][prov].push(it)
-  }
-  const sumSpend = (arr) => arr.reduce((x, y) => x + (Number(y.spend) || 0), 0)
-  const sumFc = (arr) => arr.reduce((x, y) => x + (Number(y.forecast_month_end) || 0), 0)
-  const lineSum = sumSpend(sources)
-  const headline = Number(s.operational_spend) || 0
-  const reconOk = Math.abs(lineSum - headline) < 1
-
-  // Mi változott: per-provider current vs previous month
-  const curByProv = {}
-  for (const it of sources) curByProv[it.provider] = (curByProv[it.provider] || 0) + (Number(it.spend) || 0)
-  const prevByProv = {}
-  for (const it of (Array.isArray(prev.by_provider) ? prev.by_provider : [])) prevByProv[it.provider] = (Number(it.spend) || 0)
-  const movers = Array.from(new Set([...Object.keys(curByProv), ...Object.keys(prevByProv)]))
-    .map(p => ({ p, cur: curByProv[p] || 0, prev: prevByProv[p] || 0, delta: (curByProv[p] || 0) - (prevByProv[p] || 0) }))
-    .filter(m => m.delta !== 0)
-    .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
-    .slice(0, 5)
-
-  // F3 (card e4fc58a3, Muse ruling comment 4312): the +MoM number and the "Mi változott?"
-  // wall are FACTUALLY correct but dressed with the wrong SEVERITY (red = real spike) when
-  // the previous month is an onboarding baseline (plan §5: pre-June is legit no_data). Damp
-  // the severity framing, KEEP the fact. Pure client-side, auto-heals once a real comparable
-  // baseline exists (≥half of current providers tracked last month), so it is conditional.
-  const prevProvs = Array.isArray(prev.by_provider) ? prev.by_provider.length : 0
-  const curProvs = new Set(sources.filter(it => it.spend != null).map(it => it.provider)).size
-  const BASELINE_MIN_COVERAGE = 0.5
-  const baselineIncomplete = !curProvs ? false : (prevProvs / curProvs) < BASELINE_MIN_COVERAGE
-
-  // Zone A: 5 executive cards (§1-5 GO). Order: Past | MTD (hero) | Forecast | Budget | Data Quality.
-  // Past is the prior CLOSED month. MTD is current spend-to-date. Budget colour keys off
-  // the FORECAST pct (green <80 / amber 80-100 / red >100). Data Quality is amount-weighted.
-  const budgetZoneColor = budgetFPct == null ? null : (budgetFPct > 1 ? '#e74c3c' : (budgetFPct >= 0.8 ? '#e0a800' : '#2ecc71'))
-  const momSign = mom > 0 ? '+' : (mom < 0 ? '-' : '')
-  // Forecast basis sub-line: aggregate forecast by basis; when fixed/manual dominates,
-  // forecast == current is the honest truth (fixed costs don't trend).
-  const fcByBasis = {}
-  for (const it of sources) { const bkey = it.forecast_basis || 'no_forecast'; fcByBasis[bkey] = (fcByBasis[bkey] || 0) + (Number(it.forecast_month_end) || 0) }
-  const fcTot = Object.values(fcByBasis).reduce((x, y) => x + y, 0) || 1
-  const runRateShare = Math.round((fcByBasis['run_rate'] || 0) / fcTot * 100)
-  const fcSub = runRateShare >= 67 ? 'run-rate trend alapján' : 'fix/kézi alapon · nincs usage-trend'
-  // §2 Previous month: must clearly signal PARTIAL/INCOMPLETE when coverage < 50% providers.
-  const prevMonthLabel = baselineIncomplete ? 'Előző hónap (részleges)' : ('Előző hónap (' + esc(prev.month || '—') + ')')
-  const prevMonthSub = baselineIncomplete
-    ? (prevProvs + '/' + curProvs + ' provider követve · 1/' + (Array.isArray(prev.by_line_item) ? prev.by_line_item.length : 1) + ' line item')
-    : ('teljes havi lezárt')
-  // §4 Amount-weighted data quality: weigh by spend, not provider count.
-  let dqWeightedTotal = 0, dqByBucket = {}
-  const dqBucketOrder = ['actual_invoice', 'provider_api', 'estimate', 'manual_entry', 'manual', 'pending_permission', 'no_data']
-  const dqBucketLabel = { actual_invoice: 'Számla', provider_api: 'API', estimate: 'API becslés', manual_entry: 'Kézi', manual: 'Kézi', pending_permission: 'Jogosultság kell', no_data: 'Nincs adat' }
-  for (const it of sources) {
-    const spend = Number(it.spend) || 0
-    dqWeightedTotal += spend
-    const src = effSrc(it)
-    dqByBucket[src] = (dqByBucket[src] || 0) + spend
-  }
-  const dqInvoicePct = dqWeightedTotal > 0 ? Math.round((dqByBucket['actual_invoice'] || 0) / dqWeightedTotal * 100) : 0
-  const dqApiPct = dqWeightedTotal > 0 ? Math.round((dqByBucket['provider_api'] || 0) / dqWeightedTotal * 100) : 0
-  const dqParts = dqBucketOrder.filter(k => dqByBucket[k]).map(k => {
-    const pct = dqWeightedTotal > 0 ? Math.round(dqByBucket[k] / dqWeightedTotal * 100) : 0
-    return pct + '% ' + (dqBucketLabel[k] || k)
-  })
-  const cards = [
-    { label: prevMonthLabel, num: fmt(prev.operational_spend || 0), numColor: baselineIncomplete ? 'var(--text-muted)' : null, sub: prevMonthSub, cls: '' },
-    { label: 'Aktuális havi költés', num: fmt(s.operational_spend || 0), sub: 'MTD · eddig ebben a hónapban', cls: 'cv2-hero', hero: true },
-    { label: 'Várható hó vége', num: fmt(s.operational_forecast_month_end || 0), sub: fcSub, cls: '' },
-    { label: 'Budget státusz', num: (budgetPct != null ? pct(budgetPct) + ' elhasználva' : '—'), numColor: budgetZoneColor, sub: (budgetFPct != null ? 'előrejelzett ' + pct(budgetFPct) : (b.amount ? 'keret ' + fmt(b.amount) : 'nincs keret megadva')), cls: '' },
-    { label: 'Adatminőség', num: (dqWeightedTotal > 0 ? dqInvoicePct + '% számla' : '—'), numColor: dqInvoicePct >= 50 ? '#2ecc71' : (dqInvoicePct >= 20 ? '#e0a800' : '#e74c3c'), sub: (dqParts.length ? dqParts.join(' · ') : 'nincs adat'), cls: '' },
-  ]
-
-  let html = '<div class="cv2-wrap" role="region" aria-label="Költség-áttekintő">'
-  html += '<div class="cv2-topbar"><span class="cv2-month">Hónap: <b>' + esc(s.month || '—') + '</b></span>'
-    + '<span style="font-size:0.8em;color:var(--text-muted);">frissítve ' + relAge(s.data_freshness) + '</span>'
-    + '</div>'
-  html += '<div class="cv2-cards">'
-  for (const c of cards) {
-    html += '<div class="cv2-card' + (c.cls ? ' ' + c.cls : '') + '"><div class="cv2-label">' + esc(c.label) + '</div>'
-      + '<div class="cv2-num"' + (c.numColor ? ' style="color:' + c.numColor + '"' : '') + '>' + c.num + '</div>'
-      + '<div class="cv2-sub">' + c.sub + '</div></div>'
-  }
-  html += '</div>'
-  // --- Forecast breakdown + Previous-month status (§2-3 GO) ---
-  // §3 Forecast must break out: (a) fixed/manual full-month, (b) run-rate estimate, (c) no_forecast.
-  const fcFixed = fcByBasis['fixed_subscription'] || 0
-  const fcManual = fcByBasis['manual_forecast'] || 0
-  const fcRunRate = fcByBasis['run_rate'] || 0
-  const fcNoFc = fcByBasis['no_forecast'] || 0
-  const fcParts = []
-  if (fcFixed + fcManual > 0) fcParts.push('fix/kézi: ' + fmt(fcFixed + fcManual))
-  if (fcRunRate > 0) fcParts.push('run-rate: ' + fmt(fcRunRate))
-  if (fcNoFc > 0) fcParts.push('nincs előrejelzés: ' + fmt(fcNoFc))
-  html += '<div class="cv2-qual">'
-  if (baselineIncomplete) {
-    html += 'ⓘ Június (' + fmt(prev.operational_spend || 0) + ') részleges: ' + prevProvs + '/' + curProvs + ' provider követve, nem reprezentatív baseline · '
-  }
-  html += 'Forecast: ' + (fcParts.length ? fcParts.join(' · ') : 'nincs adat') + '</div>'
-  html += '<div class="cv2-recon">' + (reconOk
-    ? '✓ A főszám (' + fmt(headline) + ') megegyezik a tételek összegével.'
-    : '⚠ Eltérés: főszám ' + fmt(headline) + ' vs tételek ' + fmt(lineSum) + '.') + '</div>'
-
-  // Never fake a 0 for an unknown value (integrity rule #1): a no_data / pending source,
-  // or a null amount, renders "—", not "0 HUF" -- otherwise a "Nincs adat"/"Jogosultság
-  // kell" badge sits next to a fabricated 0. A MEASURED/entered value (incl. a real 0,
-  // e.g. github's API-confirmed zero bill) still renders explicitly via fmt(). Hoisted here
-  // (card 55d75546 F2) so the accordion leaf uses it too, not just the unified table.
-  const valCell = (it, v) => {
-    const k = effSrc(it)
-    if (k === 'no_data' || k === 'pending_permission') return '—'
-    return v == null ? '—' : fmt(v)
-  }
-  // --- Unified cost table: DEFAULT OPEN (§5 GO) ---
-  html += '<div class="cv2-sec">Egységes költségtábla (' + sources.length + ' tétel)</div>'
-  html += '<div class="cv2-tblwrap" tabindex="0" role="group" aria-label="Egységes tételtábla (görgethető)"><table class="cv2-tbl"><caption class="cv2-vh">Egységes tételtábla: provider, szolgáltatás, előző hónap, MTD, forecast, adatforrás, státusz</caption><thead><tr>'
-    + '<th scope="col">Provider</th><th scope="col">Szolgáltatás</th><th scope="col">Előző hónap</th><th scope="col">MTD</th><th scope="col">Forecast</th><th scope="col">Adatforrás</th><th scope="col">Státusz</th>'
-    + '</tr></thead><tbody>'
-  // Compute per-item prior-month spend (for the "Előző hónap" column)
-  const prevByItem = {}
-  for (const it of (Array.isArray(prev.by_line_item) ? prev.by_line_item : [])) {
-    const key = (it.provider || '') + '|' + (it.source_id || it.name || '')
-    prevByItem[key] = Number(it.spend) || 0
-  }
-  for (const it of sources.slice().sort((a, b) => (Number(b.spend) || 0) - (Number(a.spend) || 0))) {
-    const key = (it.provider || '') + '|' + (it.source_id || it.name || '')
-    const prevSpend = prevByItem[key]
-    const src = effSrc(it)
-    // §6 Manual source split: Kezi - nincs API vs Kezi - API hiba
-    const manualLabel = it.manual_reason === 'api_error' ? 'Kézi — API hiba' : 'Kézi — nincs API'
-    const srcLabel = src === 'manual_entry' || src === 'manual' ? manualLabel : (src === 'actual_invoice' ? 'Számla' : (src === 'provider_api' ? 'API' : (src === 'estimate' ? 'API becslés' : (src === 'pending_permission' ? 'Jogosultság kell' : 'Nincs adat'))))
-    const srcColor = (src === 'manual_entry' || src === 'manual') ? (it.manual_reason === 'api_error' ? '#e0a800' : '#9aa0a6') : (src === 'actual_invoice' || src === 'provider_api' ? '#2ecc71' : (src === 'pending_permission' ? '#e0854a' : '#9aa0a6'))
-    const statusCell = src === 'no_data' ? 'Hiányzó adat' : (src === 'pending_permission' ? 'Jogosultság kell' : (src === 'estimate' ? 'Becslés' : 'OK'))
-    const statusColor = src === 'no_data' ? '#e74c3c' : (src === 'pending_permission' ? '#e0854a' : (src === 'estimate' ? '#e0a800' : '#2ecc71'))
-    html += '<tr><td>' + esc(it.provider) + '</td><td>' + esc(it.name || it.source_id) + '</td>'
-      + '<td class="cv2-r">' + (prevSpend != null ? fmt(prevSpend) : '—') + '</td>'
-      + '<td class="cv2-r">' + valCell(it, it.spend) + '</td>'
-      + '<td class="cv2-r">' + valCell(it, it.forecast_month_end) + '</td>'
-      + '<td><span class="cv2-chip" style="color:' + srcColor + ';background:rgba(' + (srcColor === '#2ecc71' ? '46,204,113' : srcColor === '#e0a800' ? '224,168,0' : srcColor === '#e0854a' ? '224,133,74' : '150,150,150') + ',0.16);font-size:0.72em;">' + esc(srcLabel) + '</span></td>'
-      + '<td style="color:' + statusColor + ';font-weight:600;">' + esc(statusCell) + '</td></tr>'
-  }
-  html += '</tbody></table></div>'
-
-  // --- Category -> provider accordion (SECONDARY, collapsed by default) ---
-  html += '<details class="cv2-acc" style="margin-top:10px;"><summary style="font-weight:600;">Részletes bontás (kategóriák → providerek → források)</summary>'
-  html += '<div class="cv2-filter" role="group" aria-label="Szűrés adatminőség szerint">'
-    + '<button type="button" class="cv2-fbtn" aria-pressed="true" onclick="cv2FilterProviders(this,\'mind\')">Mind</button>'
-    + '<button type="button" class="cv2-fbtn" aria-pressed="false" onclick="cv2FilterProviders(this,\'teendo\')">Teendő (hiányzó adat)</button>'
-    + '<button type="button" class="cv2-fbtn" aria-pressed="false" onclick="cv2FilterProviders(this,\'valos\')">Valós (számla/API)</button>'
-    + '</div>'
-  html += '<div class="cv2-acc" id="cv2CatAcc">'
-  const provBucket = {}
-  { const srcRank = { actual_invoice: 5, provider_api: 4, estimate: 2, manual_entry: 1, manual: 1, pending_permission: 0, no_data: -1 }
-    for (const it of sources) {
-      const src = effSrc(it); const r = srcRank[src] != null ? srcRank[src] : 3
-      if (provBucket[it.provider] == null || r > provBucket[it.provider].r) provBucket[it.provider] = { r, src }
-    } }
-  const catNames = Object.keys(catMap).sort((a, b) => sumSpend(Object.values(catMap[b]).flat()) - sumSpend(Object.values(catMap[a]).flat()))
-  for (const cat of catNames) {
-    const provs = catMap[cat]
-    const flat = Object.values(provs).flat()
-    // Category data-quality class for the focus filter: does it hold any "real"
-    // (invoice/API) provider, any "attention" (estimate/manual/pending/no_data) one, or both.
-    let catReal = false, catAtt = false
-    for (const p of Object.keys(provs)) { const r = (provBucket[p] && provBucket[p].r) || 3; if (r >= 4) catReal = true; else catAtt = true }
-    const catQ = catReal && catAtt ? 'mixed' : (catReal ? 'allreal' : 'noreal')
-    html += '<details data-cat-q="' + catQ + '"><summary><span><b>' + esc(cat) + '</b> <span style="color:var(--text-muted);font-size:0.85em;">' + Object.keys(provs).length + ' provider</span></span>'
-      + '<span class="cv2-amt">' + fmt(sumSpend(flat)) + ' <span style="color:var(--text-muted);font-size:0.85em;">→ ' + fmt(sumFc(flat)) + '</span></span></summary>'
-    const provNames = Object.keys(provs).sort((a, b) => sumSpend(provs[b]) - sumSpend(provs[a]))
-    for (const prov of provNames) {
-      const items = provs[prov]
-      const pr = (provBucket[prov] && provBucket[prov].r) || 3
-      const pq = pr >= 4 ? 'real' : 'attention'
-      html += '<details class="cv2-lvl2" data-q="' + pq + '"><summary><span>' + esc(prov) + '</span><span class="cv2-amt">' + fmt(sumSpend(items)) + ' <span style="color:var(--text-muted);font-size:0.85em;">→ ' + fmt(sumFc(items)) + '</span></span></summary><div class="cv2-lvl3">'
-      for (const it of items) {
-        html += '<div class="cv2-srcrow"><span>' + esc(it.name || it.source_id) + ' ' + srcBadge(effSrc(it))
-          + (origCur(it) ? ' <span style="color:var(--text-muted);">' + origCur(it) + '</span>' : '') + '</span>'
-          + '<span class="cv2-amt">' + valCell(it, it.spend) + '</span></div>'
-      }
-      html += '</div></details>'
-    }
-    html += '</details>'
-  }
-  html += '</div></details>'
-
-  // --- Teendők (warnings): max 3 actionable on top, rest collapsed (§8 GO) ---
-  const sevRank = { critical: 4, high: 3, medium: 2, low: 1 }
-  const sevColor = (sv) => ({ critical: '#e74c3c', high: '#e74c3c', medium: '#e0a800', low: '#9aa0a6' }[sv] || '#9aa0a6')
-  const sortedW = warnings.slice().sort((a, b) => (sevRank[b.severity] || 0) - (sevRank[a.severity] || 0))
-  // §8 Dedup: same message text within same category = only keep highest severity
-  const seenW = new Set()
-  const dedupedW = sortedW.filter(w => {
-    const key = (w.message || w.warning_type || '') + '|' + (w.category || w.provider || '')
-    if (seenW.has(key)) return false
-    seenW.add(key)
-    return true
-  })
-  const warnRow = (w) => '<div class="cv2-mover" style="align-items:flex-start;">'
-    + '<span style="display:flex;gap:8px;min-width:0;"><span style="flex:none;margin-top:6px;width:8px;height:8px;border-radius:50%;background:' + sevColor(w.severity) + ';"></span>'
-    + '<span style="min-width:0;"><b style="font-weight:600;">' + esc(w.message || w.warning_type || w.code) + '</b>'
-    + (w.action ? '<br><span style="color:var(--text-muted);font-size:0.9em;">→ ' + esc(w.action) + '</span>' : '') + '</span></span>'
-    + '<span style="color:var(--text-muted);font-size:0.8em;white-space:nowrap;">' + esc(w.category || w.provider || '') + '</span></div>'
-  html += '<div class="cv2-sec">Teendők' + (warnings.length ? ' <span style="color:var(--text-muted);font-size:0.8em;font-weight:400;">(' + warnings.length + ')</span>' : '') + '</div>'
-  if (!warnings.length) {
-    html += '<div class="cv2-recon">Nincs teendő.</div>'
-  } else {
-    html += '<div class="cv2-movers">' + dedupedW.slice(0, 3).map(warnRow).join('') + '</div>'
-    const restW = dedupedW.slice(3)
-    if (restW.length) {
-      html += '<details class="cv2-acc" style="margin-top:8px;"><summary style="font-weight:600;">További ' + restW.length + ' figyelmeztetés</summary><div style="padding:2px 14px 10px;">' + restW.map(warnRow).join('') + '</div></details>'
-    }
-  }
-
-  // --- Csomagok és keretek (entitlement) -- SEPARATE from operational spend (§7 GO) ---
-  html += '<div class="cv2-sec">Csomagok és keretek</div>'
-  if (!limits.length && !subs.length) {
-    html += '<div class="cv2-recon">Nincs csomag/keret adat.</div>'
-  } else {
-    // §7 Freshness-gate: stale entitlement must show "Frissítés szükséges", NOT current blocked truth.
-    // Use last_sync age to determine freshness; > 24h old = stale.
-    const staleThreshold = 86400 // 24 hours in seconds
-    const isStale = (item) => {
-      if (!item.fetched_at && !item.last_sync) return true
-      const ts = Number(item.fetched_at || item.last_sync) || 0
-      return (nowSec - ts) > staleThreshold
-    }
-    const entSevRank = { blocked: 5, critical: 4, over: 4, warning: 3, stale: 2, no_data: 1, ok: 0 }
-    const entSev = (l) => {
-      if (isStale(l)) return 'stale'
-      const st = String(l.status || '')
-      if (/blocked|critical|over/.test(st)) return 'critical'
-      if (/warn/.test(st)) return 'warning'
-      if (st === 'ok') return 'ok'
-      return 'no_data'
-    }
-    const entSevColor = (sv) => ({ blocked: '#e74c3c', critical: '#e74c3c', over: '#e74c3c', warning: '#e0a800', stale: '#9aa0a6', no_data: '#9aa0a6', ok: '#2ecc71' }[sv] || '#9aa0a6')
-    const entSevLabel = (sv) => ({ blocked: 'Blokkolt', critical: 'Kritikus', over: 'Túllépve', warning: 'Figyelmeztetés', stale: 'Frissítés szükséges', no_data: 'Nincs adat', ok: 'OK' }[sv] || sv)
-    // Merge limits+subs with severity, sort by severity descending
-    const entRows = []
-    for (const l of limits) {
-      if (l.limit_type === 'subscription_renewal') continue
-      entRows.push({ type: 'limit', data: l, sev: entSev(l), sevRank: entSevRank[entSev(l)] || 0 })
-    }
-    for (const sub of subs) {
-      const sv = sub.past_due ? 'critical' : entSev(sub)
-      entRows.push({ type: 'sub', data: sub, sev: sv, sevRank: sub.past_due ? (entSevRank['critical'] || 4) : (entSevRank[entSev(sub)] || 0) })
-    }
-    entRows.sort((a, b) => b.sevRank - a.sevRank)
-    html += '<div class="cv2-tblwrap" tabindex="0" role="group" aria-label="Csomagok és keretek (görgethető)"><table class="cv2-tbl"><caption class="cv2-vh">Csomagok és keretek: csomag/keret, provider, felhasználási keret, felhasználva, nullázódik, lejárat, státusz, forrás, frissesség</caption><thead><tr>'
-      + '<th scope="col">Csomag / keret</th><th scope="col">Provider</th><th scope="col">Felhasználási keret</th><th scope="col">Felhasználva</th><th scope="col">Nullázódik</th><th scope="col">Lejárat</th><th scope="col">Státusz</th><th scope="col">Forrás</th><th scope="col">Frissesség</th></tr></thead><tbody>'
-    const limitUsageSrc = (l) => (l.source === 'ledger' || l.source === 'workspace_alert') ? 'provider_api'
-      : (l.source === 'config' && l.limit_type === 'weekly_usage_pct') ? 'manual' : 'no_data'
-    const subUsageSrc = (sub) => { const u = sub.usage_snapshot || {}; return (u.session_pct != null || u.weekly_pct != null) ? 'manual' : 'no_data' }
-    const forrasCell = (key) => srcBadge(key) + (key === 'no_data' ? '<span style="color:var(--text-muted);font-size:0.72em;margin-left:4px;">nincs read-only forrás</span>' : '')
-    const limitLabel = (l) => ({ weekly_usage_pct: 'Heti limit', monthly_usage_pct: 'Havi limit', balance: 'Egyenleg', workspace_payment: 'Workspace fizetés' }[l.limit_type] || l.limit_type || '—')
-    const limitUnit = (l) => l.unit || (l.limit_type === 'balance' ? (l.provider === 'deepseek' ? 'USD' : '') : (/pct/.test(String(l.limit_type)) ? '%' : ''))
-    const limitAmount = (l, v) => {
-      if (v == null) return '—'
-      const u = limitUnit(l)
-      if (u === '%') return (Number(v) || 0) + '%'
-      if (u) return (Number(v) || 0).toLocaleString('hu-HU') + ' ' + esc(u)
-      return fmt(v)
-    }
-    const freshnessCell = (item) => {
-      const ts = Number(item.fetched_at || item.last_sync) || 0
-      if (!ts) return '<span style="color:#9aa0a6;">sosem frissült</span>'
-      const stale = (nowSec - ts) > staleThreshold
-      return '<span style="color:' + (stale ? '#e0a800' : '#2ecc71') + ';">' + relAge(ts) + (stale ? ' (stale)' : '') + '</span>'
-    }
-    for (const row of entRows) {
-      if (row.type === 'sub') {
-        const sub = row.data
-        const snap = sub.usage_snapshot || {}
-        const used = snap.session_pct != null ? snap.session_pct + '% (session)' : (snap.weekly_pct != null ? snap.weekly_pct + '% (heti)' : '—')
-        const reset = snap.weekly_reset_label || '—'
-        const st = isStale(sub) ? 'Frissítés szükséges' : (sub.past_due ? 'lejárt' : (sub.status || '—'))
-        const stColor = entSevColor(row.sev)
-        html += '<tr><td>' + esc(sub.name) + '</td><td>' + esc(sub.provider) + '</td><td>—</td><td>' + esc(used) + '</td><td>' + esc(reset) + '</td><td>—</td><td style="color:' + stColor + ';font-weight:600;">' + esc(st) + '</td><td>' + forrasCell(subUsageSrc(sub)) + '</td><td>' + freshnessCell(sub) + '</td></tr>'
-      } else {
-        const l = row.data
-        const keret = limitAmount(l, l.limit_value)
-        const used = l.usage_pct != null
-          ? (Math.round(l.usage_pct * 1000) / 10) + '%' + (l.limit_type === 'weekly_usage_pct' ? ' (heti)' : '')
-          : (l.current_usage != null ? limitAmount(l, l.current_usage) : '—')
-        const reset = l.reset_date || '—'
-        const expiry = l.expiry_date || l.paid_until || '—'
-        const st = isStale(l) ? 'Frissítés szükséges' : (l.status || '—')
-        html += '<tr><td>' + esc(limitLabel(l)) + '</td><td>' + esc(l.provider) + '</td><td>' + keret + '</td><td>' + used + '</td><td>' + esc(String(reset)) + '</td><td>' + esc(String(expiry)) + '</td><td style="color:' + entSevColor(row.sev) + ';font-weight:600;">' + esc(st) + '</td><td>' + forrasCell(limitUsageSrc(l)) + '</td><td>' + freshnessCell(l) + '</td></tr>'
-      }
-    }
-    html += '</tbody></table></div>'
-    html += '<div class="cv2-recon">Külön szekció: a csomaghasználat (keret / reset / lejárat) nincs összekeverve az operatív költéssel. A „Frissítés szükséges” azt jelenti, hogy az adat 24 óránál régebbi — nem aktuális blocked truth.</div>'
-  }
-
-  // --- §10 Havi trend: only draw columns with data, no empty bars for no_data months ---
-  html += '<div class="cv2-sec">Havi trend</div>'
-  const pmonths = Array.isArray(period.months) ? period.months : []
-  if (!pmonths.length) {
-    html += '<div class="cv2-recon">Még nincs havi trend adat erre az időszakra.</div>'
-  } else {
-    const curMonth = s.month
-    // §10: filter to months that HAVE data for the chart; text shows the truth for all months
-    const dataMonths = pmonths.filter(m => !m.no_data)
-    const ndMonths = pmonths.filter(m => m.no_data)
-    const shortM = (ym) => { const mm = Number(String(ym || '').slice(5, 7)); return (['', 'jan', 'feb', 'már', 'ápr', 'máj', 'jún', 'júl', 'aug', 'szep', 'okt', 'nov', 'dec'][mm] || String(ym)) + ' ' + String(ym || '').slice(2, 4) }
-    if (dataMonths.length) {
-      const maxSpend = Math.max(1, ...dataMonths.map(m => Number(m.operational_spend) || 0))
-      html += '<div class="cv2-trend" role="img" aria-label="Havi operatív költés oszlopdiagram, utolsó ' + dataMonths.length + ' hónap adatokkal">'
-      for (const m of dataMonths) {
-        const val = Number(m.operational_spend) || 0
-        const isCur = m.month === curMonth
-        const cls = isCur ? 'cv2-tpartial' : ''
-        const h = Math.max(3, Math.round(val / maxSpend * 108))
-        const ttl = esc(m.month) + ': ' + fmt(val) + (isCur ? ' (MTD, részleges)' : '')
-        html += '<div class="cv2-tcol" aria-hidden="true"><div class="cv2-tbar ' + cls + '" style="height:' + h + 'px;" title="' + ttl + '"></div>'
-          + '<div class="cv2-tlabel">' + esc(shortM(m.month)) + (isCur ? ' •' : '') + '</div>'
-          + '<div class="cv2-tval">' + Number(val).toLocaleString('hu-HU') + '</div></div>'
-      }
-      html += '</div>'
-    }
-    // §10 Text truth: list months without data honestly
-    if (ndMonths.length) {
-      html += '<div class="cv2-recon" style="margin-top:4px;">Nincs adat: ' + ndMonths.map(m => esc(shortM(m.month))).join(', ') + '</div>'
-    }
-    html += '<div class="cv2-recon">Sávozott oszlop = aktuális hó (MTD, részleges). A trend csak lezárt hónapokból von következtetést; a részleges aktuális hót nem vetíti előre.</div>'
-  }
-
-  // --- §9 Opportunity-cost: TWO separate concepts, always collapsed ---
-  // A) Token usage-equivalent: NOT BILLED, covered by subscription, API-price-equivalent.
-  //    Always collapsed, never near the money headline. Honest when data is unavailable.
-  // B) Unused entitlement value: only show money if provable; otherwise percent only.
-  html += '<details class="cv2-acc" style="margin-top:10px;"><summary style="font-weight:600;">Opportunity-cost: nem számlázott tokenhasználat + kihasználatlan keretek</summary>'
-  html += '<div style="padding:6px 14px 14px;">'
-  // A) Token usage-equivalent
-  html += '<div class="cv2-sec" style="font-size:0.88em;">A) NEM SZÁMLÁZOTT — előfizetésben foglalt tokenhasználat</div>'
-  const tokenSubs = subs.filter(s => s.provider === 'anthropic' || s.provider === 'openai' || s.provider === 'deepseek' || s.provider === 'google')
-  if (tokenSubs.length) {
-    html += '<div class="cv2-recon">Az alábbi csomagok tokenhasználata NEM jelenik meg külön számlaként — az előfizetési díj fedezi. Az API-áron számított költségekvivalens tájékoztató jellegű, nem része az operatív költésnek:</div>'
-    for (const sub of tokenSubs) {
-      const snap = sub.usage_snapshot || {}
-      html += '<div class="cv2-mover"><span>' + esc(sub.name || sub.provider) + ' (' + esc(sub.provider) + ')</span>'
-        + '<span style="color:var(--text-muted);">előfizetésben foglalt</span></div>'
-    }
-  } else {
-    html += '<div class="cv2-recon">Nincs aktív AI/LLM előfizetés, vagy a tokenhasználati adatok jelenleg nem elérhetők. Ez a szekció nem számlázott, előfizetésben foglalt értéket mutatna — nem operatív költést.</div>'
-  }
-  // B) Unused entitlement
-  html += '<div class="cv2-sec" style="margin-top:12px;font-size:0.88em;">B) Kihasználatlan keretek</div>'
-  const occLimitLabel = (l) => ({ weekly_usage_pct: 'Heti limit', monthly_usage_pct: 'Havi limit', balance: 'Egyenleg', workspace_payment: 'Workspace fizetés' }[l.limit_type] || l.limit_type || '—')
-  let hasUnusedData = false
-  for (const l of limits) {
-    if (l.limit_type === 'subscription_renewal') continue
-    const usagePct = l.usage_pct != null ? l.usage_pct : (l.limit_value > 0 && l.current_usage != null ? (Number(l.current_usage) / Number(l.limit_value)) : null)
-    if (usagePct != null && usagePct < 0.95) {
-      hasUnusedData = true
-      const remainingPct = Math.round((1 - usagePct) * 1000) / 10
-      html += '<div class="cv2-mover"><span>' + esc(l.provider) + ' — ' + esc(occLimitLabel(l)) + '</span>'
-        + '<span style="color:' + (remainingPct > 50 ? '#e0a800' : 'var(--text-muted)') + ';">' + remainingPct + '% kihasználatlan</span></div>'
-    }
-  }
-  if (!hasUnusedData) {
-    html += '<div class="cv2-recon">Minden követett keret közel teljesen kihasznált, vagy nincs elég adat a kihasználatlanság számszerűsítésére. Pénzbeli értéket csak bizonyítható számítás esetén mutatunk — nem fabrikálunk „megtakarítás” összeget.</div>'
-  }
-  html += '</div></details>'
-
-  // --- §11 Kézi rögzítés (költség + keret) -- collapsed drawer ---
-  const mField = (id, label, type, ph) => '<div class="cv2-mfield"><label for="' + id + '">' + esc(label) + '</label><input id="' + id + '" type="' + type + '" placeholder="' + esc(ph) + '"' + (type === 'number' ? ' step="any"' : '') + '></div>'
-  const mSelect = (id, label, opts) => '<div class="cv2-mfield"><label for="' + id + '">' + esc(label) + '</label><select id="' + id + '">' + opts.map(o => '<option value="' + esc(o) + '">' + esc(o) + '</option>').join('') + '</select></div>'
-  html += '<details class="cv2-acc" style="margin-top:18px;"><summary style="font-weight:600;">+ Kézi tétel (költség / keret)</summary>'
-  html += '<div style="padding:6px 14px 14px;">'
-  html += '<div class="cv2-recon" style="margin-top:6px;">Csak olyan providerhez, aminek nincs API/számla-útja. POST = új tétel (409 ha erre a hónapra már létezik), PATCH = meglévő frissítése (404 ha nincs), Törlés = eltávolítja (404 ha nincs, 409 ha nem kézi tétel). A HUF-ra váltás a Render árfolyam-configgal történik; nem-HUF csak érvényes árfolyammal megy át.</div>'
-  html += '<div class="cv2-sec" style="margin-top:10px;font-size:0.88em;">Költség tétel</div>'
-  html += '<div class="cv2-mform">'
-    + mField('cvm_c_source_id', 'Forrás azonosító (source_id)', 'text', 'pl. notion-sub')
-    + mField('cvm_c_name', 'Név', 'text', 'pl. Notion előfizetés')
-    + mField('cvm_c_provider', 'Provider', 'text', 'pl. notion')
-    + mField('cvm_c_amount', 'Összeg', 'number', '0')
-    + mSelect('cvm_c_currency', 'Deviza', ['HUF', 'USD', 'EUR'])
-    + mField('cvm_c_month', 'Hónap (YYYY-MM)', 'month', '')
-    + mSelect('cvm_c_source_type', 'Típus', ['subscription', 'domain', 'usage', 'saas'])
-    + '</div>'
-  html += '<div class="cv2-mactions"><button type="button" class="cv2-mbtn" onclick="cv2SubmitManual(\'cost\',\'POST\')">Létrehozás</button>'
-    + '<button type="button" class="cv2-mbtn secondary" onclick="cv2SubmitManual(\'cost\',\'PATCH\')">Frissítés</button>'
-    + '<button type="button" class="cv2-mbtn secondary" onclick="cv2DeleteManual(\'cost\')">Törlés</button></div>'
-  html += '<div class="cv2-mstatus" id="cvm_c_status" role="status" aria-live="polite"></div>'
-  html += '<div class="cv2-sec" style="margin-top:14px;font-size:0.88em;">Csomag / keret (entitlement)</div>'
-  html += '<div class="cv2-mform">'
-    + mField('cvm_e_provider', 'Provider', 'text', 'pl. anthropic')
-    + mField('cvm_e_product', 'Termék', 'text', 'pl. Claude Max')
-    + mField('cvm_e_plan_name', 'Csomag neve (opcionális)', 'text', '')
-    + mSelect('cvm_e_billing_period', 'Számlázási ciklus', ['monthly', 'weekly', 'ongoing'])
-    + mField('cvm_e_entitlement_type', 'Keret típusa', 'text', 'pl. weekly_limit')
-    + mField('cvm_e_included_limit', 'Keret (opcionális)', 'number', '')
-    + mField('cvm_e_included_unit', 'Egység (opcionális)', 'text', 'pl. üzenet')
-    + mField('cvm_e_remaining', 'Hátralévő (opcionális)', 'number', '')
-    + mField('cvm_e_reset_at', 'Nullázódik (opcionális)', 'date', '')
-    + mSelect('cvm_e_status', 'Státusz', ['ok', 'warning', 'critical', 'unknown'])
-    + '</div>'
-  html += '<div class="cv2-mactions"><button type="button" class="cv2-mbtn" onclick="cv2SubmitManual(\'entitlement\',\'POST\')">Létrehozás</button>'
-    + '<button type="button" class="cv2-mbtn secondary" onclick="cv2SubmitManual(\'entitlement\',\'PATCH\')">Frissítés</button>'
-    + '<button type="button" class="cv2-mbtn secondary" onclick="cv2DeleteManual(\'entitlement\')">Törlés</button></div>'
-  html += '<div class="cv2-mstatus" id="cvm_e_status" role="status" aria-live="polite"></div>'
-  html += '</div></details>'
-  html += '<div style="text-align:right;margin-top:16px;font-size:0.72em;"><a href="#costs" style="color:var(--text-muted);text-decoration:none;" title="Rollback: klasszikus v1 nézet">v1 nézet (rollback)</a></div>'
-  html += '</div>'
-  body.innerHTML = html
 }
 
 async function loadTokenUsage() {
@@ -14401,6 +14124,313 @@ document.getElementById('conversationClose')?.addEventListener('click', () => {
 document.getElementById('conversationSearch')?.addEventListener('input', () => renderConversation())
 document.getElementById('conversationShowActions')?.addEventListener('change', () => renderConversation())
 document.getElementById('conversationRefresh')?.addEventListener('click', () => loadConversation())
+
+// === Federation page ===
+// State lets live BEFORE the router IIFE (top-level code runs in order; a
+// first-load #federation route must not hit a TDZ on these).
+let fedPageWired = false
+let fedPeersViewCache = null
+
+async function loadFederationPage() {
+  wireFederationPage()
+  const statsEl = document.getElementById('federationStats')
+  const masterEl = document.getElementById('federationMaster')
+  const peersEl = document.getElementById('federationPeers')
+  if (!statsEl || !masterEl || !peersEl) return
+  peersEl.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${t('common.loading')}</p>`
+  try {
+    const [peersRes, statusRes] = await Promise.all([
+      fetch('/api/federation/peers'),
+      fetch('/api/federation/status').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    ])
+    if (!peersRes.ok) throw new Error('HTTP ' + peersRes.status)
+    fedPeersViewCache = await peersRes.json()
+    if (statusRes && Array.isArray(statusRes.peers)) federatedPeerStatus = statusRes.peers
+    renderFederationPage()
+  } catch (e) {
+    peersEl.innerHTML = `<p style="color:var(--danger)">${t('federation.error', { msg: escapeHtml(String(e.message || e)) })}</p>`
+  }
+}
+
+function fedStateLabel(state) {
+  const key = 'federation.peer_state.' + (state || 'unknown')
+  return t(key)
+}
+
+function renderFederationPage() {
+  const view = fedPeersViewCache
+  if (!view) return
+  const statsEl = document.getElementById('federationStats')
+  const masterEl = document.getElementById('federationMaster')
+  const peersEl = document.getElementById('federationPeers')
+  const statusById = new Map(federatedPeerStatus.map((p) => [p.id, p]))
+  const okCount = federatedPeerStatus.filter((p) => p.state === 'ok').length
+
+  const statBox = (value, label) => `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 16px;min-width:110px">
+    <div style="font-size:20px;font-weight:600">${value}</div>
+    <div style="font-size:12px;color:var(--text-muted)">${label}</div>
+  </div>`
+  statsEl.innerHTML = [
+    statBox(view.enabled ? t('common.yes') : t('common.no'), t('federation.stat.enabled')),
+    statBox(String(view.peers.length), t('federation.stat.peers')),
+    statBox(String(okCount), t('federation.stat.reachable')),
+    statBox(escapeHtml(view.systemId || '-'), t('federation.stat.system_id')),
+  ].join('')
+
+  const routingMode = view.routingMode || 'catalog-first'
+  const routingRadios = ['strong', 'catalog-first', 'advisory'].map((m) => `
+    <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;padding:5px 0">
+      <input type="radio" name="fedRoutingMode" value="${m}" ${routingMode === m ? 'checked' : ''} style="margin-top:3px;accent-color:var(--accent)">
+      <span>
+        <span style="font-weight:600">${t('federation.routing.mode.' + m + '.label')}</span>
+        <span style="display:block;font-size:12px;color:var(--text-muted)">${t('federation.routing.mode.' + m + '.hint')}</span>
+      </span>
+    </label>`).join('')
+  masterEl.innerHTML = `
+    <label style="display:flex;align-items:center;gap:10px;cursor:pointer">
+      <input type="checkbox" id="fedEnabledToggle" style="width:16px;height:16px;accent-color:var(--accent)" ${view.enabled ? 'checked' : ''}>
+      <span style="font-weight:600">${t('federation.master_label')}</span>
+    </label>
+    <p style="font-size:12px;color:var(--text-muted);margin:6px 0 0 26px">${t('federation.master_hint')}</p>
+    <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
+      <div style="font-weight:600">${t('federation.routing.title')}</div>
+      <p style="font-size:12px;color:var(--text-muted);margin:2px 0 8px 0">${t('federation.routing.subtitle')}</p>
+      ${routingRadios}
+      <p style="font-size:12px;color:var(--text-muted);margin:8px 0 0 0">${t('federation.routing.apply_note')}</p>
+    </div>`
+  document.getElementById('fedEnabledToggle').addEventListener('change', async (e) => {
+    const enabled = e.target.checked
+    if (!enabled && !confirm(t('federation.confirm.disable'))) { e.target.checked = true; return }
+    try {
+      const res = await fetch('/api/federation/enabled', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) { showToast(t('federation.toast.error', { msg: data.error || ('HTTP ' + res.status) })); e.target.checked = !enabled; return }
+      showToast(enabled ? t('federation.toast.enabled') : t('federation.toast.disabled'))
+      fedRefreshAndReload()
+    } catch (err) { showToast(t('federation.toast.error', { msg: String(err.message || err) })); e.target.checked = !enabled }
+  })
+  document.querySelectorAll('input[name="fedRoutingMode"]').forEach((radio) => {
+    radio.addEventListener('change', async (e) => {
+      const mode = e.target.value
+      try {
+        const res = await fetch('/api/federation/routing-mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode }) })
+        const data = await res.json().catch(() => ({}))
+        if (!res.ok) { showToast(t('federation.toast.error', { msg: data.error || ('HTTP ' + res.status) })); return }
+        showToast(t('federation.routing.toast_set', { mode: t('federation.routing.mode.' + mode + '.label') }))
+      } catch (err) { showToast(t('federation.toast.error', { msg: String(err.message || err) })) }
+    })
+  })
+
+  if (!view.peers.length) {
+    peersEl.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${t('federation.peers_empty')}</p>`
+    return
+  }
+  peersEl.innerHTML = ''
+  for (const peer of view.peers) {
+    const st = statusById.get(peer.id)
+    const state = peer.hasOutboundToken ? (st ? st.state : 'unknown') : 'unpaired'
+    const reachable = state === 'ok'
+    const lastOk = st && st.lastOkAt ? new Date(st.lastOkAt).toLocaleString() : '-'
+    const agentCount = st && st.manifest && Array.isArray(st.manifest.agents) ? String(st.manifest.agents.length) : '-'
+    const card = document.createElement('div')
+    card.className = 'card'
+    card.style.cssText = 'padding:12px 16px;display:flex;flex-direction:column;gap:8px'
+    // Peer ids/baseUrls are OWNER-entered and segment-validated; state labels
+    // come from t(). Still: text nodes only, escapeHtml everywhere.
+    card.innerHTML = `
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <strong style="font-size:15px">${escapeHtml(peer.id)}</strong>
+        <span class="tg-status"><span class="tg-dot ${reachable ? 'connected' : 'disconnected'}"></span> ${fedStateLabel(state)}</span>
+        <span style="color:var(--text-muted);font-size:12px;margin-left:auto">${t('federation.card.last_ok')}: ${escapeHtml(lastOk)} · ${t('federation.card.agents')}: ${escapeHtml(agentCount)}</span>
+      </div>
+      <div style="font-size:13px;color:var(--text-muted);word-break:break-all">${escapeHtml(peer.baseUrl)}</div>
+      ${st && st.error ? `<div style="font-size:12px;color:var(--danger)">${escapeHtml(st.error)}</div>` : ''}
+      <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-muted);cursor:pointer">
+        <input type="checkbox" class="fed-share-cap" ${peer.shareCapabilitySummaries ? 'checked' : ''} style="accent-color:var(--accent)">
+        ${t('federation.share_cap_label')}
+      </label>
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn-secondary btn-compact" data-action="reveal">${t('federation.btn.reveal')}</button>
+        <button class="btn-secondary btn-compact" data-action="rotate">${t('federation.btn.rotate')}</button>
+        <button class="btn-secondary btn-compact" data-action="edit">${t('common.edit')}</button>
+        <button class="btn-secondary btn-compact" data-action="delete" style="color:var(--danger)">${t('common.delete')}</button>
+      </div>
+      <div class="fed-token-reveal" hidden style="font-family:monospace;font-size:12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:8px;word-break:break-all"></div>`
+    card.querySelector('[data-action="reveal"]').addEventListener('click', () => fedRevealToken(peer.id, card))
+    card.querySelector('[data-action="rotate"]').addEventListener('click', () => fedRotateToken(peer.id))
+    card.querySelector('[data-action="edit"]').addEventListener('click', () => fedOpenPeerModal(peer))
+    card.querySelector('[data-action="delete"]').addEventListener('click', () => fedDeletePeer(peer.id))
+    card.querySelector('.fed-share-cap').addEventListener('change', (e) => fedToggleShareCap(peer.id, e.target.checked))
+    peersEl.appendChild(card)
+  }
+}
+
+async function fedRevealToken(peerId, card) {
+  const box = card.querySelector('.fed-token-reveal')
+  if (!box.hidden) { box.hidden = true; box.textContent = ''; return }
+  try {
+    const res = await fetch(`/api/federation/peers/${encodeURIComponent(peerId)}/inbound-token`)
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) { showToast(t('federation.toast.error', { msg: data.error || ('HTTP ' + res.status) })); return }
+    box.textContent = data.inboundToken
+    box.hidden = false
+    navigator.clipboard?.writeText(data.inboundToken).then(
+      () => showToast(t('federation.toast.token_copied')),
+      () => {},
+    )
+  } catch (err) { showToast(t('federation.toast.error', { msg: String(err.message || err) })) }
+}
+
+async function fedRotateToken(peerId) {
+  if (!confirm(t('federation.confirm.rotate', { peer: peerId }))) return
+  try {
+    const res = await fetch(`/api/federation/peers/${encodeURIComponent(peerId)}/rotate-inbound-token`, { method: 'POST' })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) { showToast(t('federation.toast.error', { msg: data.error || ('HTTP ' + res.status) })); return }
+    showToast(t('federation.toast.rotated'))
+    loadFederationPage()
+  } catch (err) { showToast(t('federation.toast.error', { msg: String(err.message || err) })) }
+}
+
+async function fedToggleShareCap(peerId, share) {
+  try {
+    const res = await fetch(`/api/federation/peers/${encodeURIComponent(peerId)}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ shareCapabilitySummaries: share }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) { showToast(t('federation.toast.error', { msg: data.error || ('HTTP ' + res.status) })); loadFederationPage(); return }
+    showToast(share ? t('federation.toast.share_cap_on') : t('federation.toast.share_cap_off'))
+  } catch (err) { showToast(t('federation.toast.error', { msg: String(err.message || err) })); loadFederationPage() }
+}
+
+async function fedDeletePeer(peerId) {
+  if (!confirm(t('federation.confirm.delete_peer', { peer: peerId }))) return
+  try {
+    const res = await fetch(`/api/federation/peers/${encodeURIComponent(peerId)}`, { method: 'DELETE' })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) { showToast(t('federation.toast.error', { msg: data.error || ('HTTP ' + res.status) })); return }
+    // Sweep browser leftovers scoped to the removed peer.
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i)
+      if (key && key.startsWith('chat_last_seen_' + peerId + '/')) localStorage.removeItem(key)
+    }
+    if (chatSelectedAgent && chatSelectedAgent.startsWith(peerId + '/')) chatSelectedAgent = null
+    showToast(t('federation.toast.peer_deleted'))
+    loadFederationPage()
+  } catch (err) { showToast(t('federation.toast.error', { msg: String(err.message || err) })) }
+}
+
+// Apply federation config changes to the RUNNING main agent by restarting it
+// (it reloads CLAUDE.md, which carries the federation onboarding + delegation
+// directive). Reuses the existing main-agent restart endpoint -- no new
+// backend, no terminal command for the operator.
+async function fedApplyToMainAgent() {
+  if (!confirm(t('federation.confirm.apply'))) return
+  try {
+    // Server-side apply: restarts the main channels agent by MAIN_AGENT_ID,
+    // so the client does not depend on window._marveen being loaded (the
+    // Federation page does not populate it -> the old /api/agents/:name path
+    // 404'd when it fell back to the 'marveen' default).
+    const res = await fetch('/api/federation/apply', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) { showToast(t('federation.toast.error', { msg: data.error || ('HTTP ' + res.status) })); return }
+    showToast(t('federation.toast.applied'))
+  } catch (err) { showToast(t('federation.toast.error', { msg: String(err.message || err) })) }
+}
+
+// Re-poll peer reachability then re-render. Called after config mutations
+// (enable, peer add/edit) so the status shows fresh -- there is no separate
+// manual "refresh" button anymore (the apply action owns the top-right slot).
+async function fedRefreshAndReload() {
+  try { await fetch('/api/federation/refresh', { method: 'POST' }) } catch { /* best effort */ }
+  loadFederationPage()
+}
+
+let fedPeerModalEditId = null
+
+function fedOpenPeerModal(peer) {
+  fedPeerModalEditId = peer ? peer.id : null
+  document.getElementById('fedPeerModalTitle').textContent = peer ? t('federation.modal.edit_title', { peer: peer.id }) : t('federation.modal.add_title')
+  const idInput = document.getElementById('fedPeerId')
+  idInput.value = peer ? peer.id : ''
+  idInput.disabled = !!peer
+  document.getElementById('fedPeerBaseUrl').value = peer ? peer.baseUrl : ''
+  document.getElementById('fedPeerOutboundToken').value = ''
+  document.getElementById('fedPeerOutboundToken').placeholder = peer && peer.hasOutboundToken ? t('federation.modal.outbound_keep') : ''
+  document.getElementById('fedPeerAbandonWindow').value = peer && peer.abandonWindowMinutes ? String(peer.abandonWindowMinutes) : ''
+  openModal(document.getElementById('fedPeerModalOverlay'))
+}
+
+async function fedSavePeerModal() {
+  // Ids are case-insensitive server-side (stored lowercase); fold here too so
+  // the operator immediately sees the canonical form.
+  const id = document.getElementById('fedPeerId').value.trim().toLowerCase()
+  const baseUrl = document.getElementById('fedPeerBaseUrl').value.trim()
+  const outbound = document.getElementById('fedPeerOutboundToken').value.trim()
+  const abandonRaw = document.getElementById('fedPeerAbandonWindow').value.trim()
+  try {
+    let res, data
+    if (fedPeerModalEditId) {
+      const body = { baseUrl }
+      if (outbound) body.outboundToken = outbound
+      if (abandonRaw) body.abandonWindowMinutes = parseInt(abandonRaw, 10)
+      else body.abandonWindowMinutes = null
+      res = await fetch(`/api/federation/peers/${encodeURIComponent(fedPeerModalEditId)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      data = await res.json().catch(() => ({}))
+      if (!res.ok) { showToast(t('federation.toast.error', { msg: data.error || ('HTTP ' + res.status) })); return }
+      showToast(t('federation.toast.peer_saved'))
+    } else {
+      const body = { id, baseUrl }
+      if (outbound) body.outboundToken = outbound
+      res = await fetch('/api/federation/peers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      data = await res.json().catch(() => ({}))
+      if (!res.ok) { showToast(t('federation.toast.error', { msg: data.error || ('HTTP ' + res.status) })); return }
+      // The minted inbound token is shown ONCE right away: the owner hands it
+      // to the peer's operator during pairing.
+      prompt(t('federation.modal.minted_token_hint'), data.inboundToken)
+      showToast(t('federation.toast.peer_added'))
+    }
+    closeModal(document.getElementById('fedPeerModalOverlay'))
+    fedRefreshAndReload()
+  } catch (err) { showToast(t('federation.toast.error', { msg: String(err.message || err) })) }
+}
+
+async function fedRemoveAll() {
+  if (!confirm(t('federation.confirm.remove'))) return
+  try {
+    const res = await fetch('/api/federation/remove', { method: 'POST' })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) { showToast(t('federation.toast.error', { msg: data.error || ('HTTP ' + res.status) })); return }
+    federatedPeerStatus = []
+    // Sweep browser leftovers for ALL federated (qualified) threads -- the
+    // per-peer DELETE path does this per peer, full removal must do it wholesale.
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const key = localStorage.key(i)
+      if (key && /^chat_last_seen_[^/]+\//.test(key)) localStorage.removeItem(key)
+    }
+    if (chatSelectedAgent && chatSelectedAgent.includes('/')) chatSelectedAgent = null
+    showToast(t('federation.toast.removed'))
+    loadFederationPage()
+  } catch (err) { showToast(t('federation.toast.error', { msg: String(err.message || err) })) }
+}
+
+function wireFederationPage() {
+  if (fedPageWired) return
+  fedPageWired = true
+  const fedApplyBtn = document.getElementById('federationApplyBtn')
+  if (fedApplyBtn) { fedApplyBtn.title = t('federation.apply_hint'); fedApplyBtn.addEventListener('click', fedApplyToMainAgent) }
+  document.getElementById('federationAddPeerBtn')?.addEventListener('click', () => fedOpenPeerModal(null))
+  document.getElementById('federationRemoveBtn')?.addEventListener('click', fedRemoveAll)
+  document.getElementById('fedPeerModalSave')?.addEventListener('click', fedSavePeerModal)
+  document.getElementById('fedPeerModalCancel')?.addEventListener('click', () => closeModal(document.getElementById('fedPeerModalOverlay')))
+  document.getElementById('fedPeerModalClose')?.addEventListener('click', () => closeModal(document.getElementById('fedPeerModalOverlay')))
+  const overlay = document.getElementById('fedPeerModalOverlay')
+  overlay?.addEventListener('click', (e) => { if (e.target === overlay) closeModal(overlay) })
+}
+
 ;(() => {
   function routeFromHash() {
     let pageId = decodeURIComponent((location.hash || '').replace(/^#/, ''))
@@ -14450,7 +14480,7 @@ function renderMarkdown(md) {
       i++
       while (i < lines.length && !/^```\s*$/.test(lines[i])) { code.push(lines[i]); i++ }
       i++
-      out.push('<pre><code>' + escapeHtml(code.join('\n')) + '</code></pre>')
+      out.push('<pre><code' + (fence[1] ? ' class="language-' + escapeHtml(fence[1]) + '"' : '') + '>' + escapeHtml(code.join('\n')) + '</code></pre>')
       continue
     }
     const h = line.match(/^(#{1,6})\s+(.*)$/)
@@ -14546,7 +14576,7 @@ async function openDoc(name) {
       '<div class="docs-content-toolbar">' +
         '<button class="btn-secondary btn-compact" id="docsDownloadBtn">' + t('docs.download_btn') + '</button>' +
       '</div>' +
-      '<div class="docs-rendered markdown-body">' + renderMarkdown(content) + '</div>'
+      '<div class="docs-rendered markdown-body md-rendered">' + renderMarkdown(content) + '</div>'
     const dl = document.getElementById('docsDownloadBtn')
     if (dl) dl.addEventListener('click', () => downloadMarkdown(name, content))
   } catch (e) {

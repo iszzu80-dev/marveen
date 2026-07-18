@@ -6,7 +6,7 @@
 # automatikusan a teljes flottat"). Use this instead of starting every agent at
 # once after a restart.
 #
-# Order: core agents first (deliverylead, broker), then the rest one-by-one with
+# Order: core agents first (this install's main agent by default), then the rest one-by-one with
 # a stagger, calling fleet-memory-gate.sh --check before EACH start. When the gate
 # says BLOCK (safe-mode band / hard pause / cap), that agent is skipped and the
 # script stops adding non-core agents -- dashboard + channels (systemd services)
@@ -28,10 +28,17 @@ done
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GATE="$HERE/fleet-memory-gate.sh"
+# Resolve this install's main agent id from its .env (no hardcoded agent names --
+# distribution rule); mirrors fleet-memory-gate.sh so the same agent is "core".
+INSTALL_DIR="$(cd "$HERE/.." && pwd)"
+_env_val() { [[ -f "$INSTALL_DIR/.env" ]] && grep -E "^$1=" "$INSTALL_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"'"'"'\r'; }
+MAIN_AGENT_ID="$(_env_val MAIN_AGENT_ID)"; MAIN_AGENT_ID="${MAIN_AGENT_ID:-marveen}"
 STORE="${MARVEEN_STORE:-$HOME/marveen/store}"
 TOKEN_FILE="$STORE/.dashboard-token"
 DASH="${MARVEEN_DASHBOARD_URL:-http://localhost:3420}"
-CORE_AGENTS="${MARVEEN_CORE_AGENTS:-deliverylead,broker}"
+# Core = started first / never throttled. Defaults to THIS install's main agent
+# so the primary bot always comes up; override with MARVEEN_CORE_AGENTS.
+CORE_AGENTS="${MARVEEN_CORE_AGENTS:-$MAIN_AGENT_ID}"
 STAGGER_SEC="${MARVEEN_STAGGER_SEC:-20}"
 
 log() { echo "[fleet-safe-start] $*"; }

@@ -4,11 +4,12 @@ import { homedir, platform, tmpdir } from 'node:os'
 import { execSync } from 'node:child_process'
 import { logger } from '../../logger.js'
 import { MAIN_AGENT_ID, BOT_NAME, PROJECT_ROOT } from '../../config.js'
-import { delay } from '../delay.js'
-import { createAgentMessage, listPendingChannelRequests, updateChannelRequestStatus, getDb, claimPendingForAgent } from '../../db.js'
+import { createAgentMessage, listPendingChannelRequests, updateChannelRequestStatus, getDb, claimPendingForAgent, markMessageFailed } from '../../db.js'
 import { classifyAgentMessage, wrapAgentMessageForDelivery } from '../agent-message-wrap.js'
+import { ensureFederationClaudeMdSection } from '../federation/onboarding.js'
 import { atomicWriteFileSync } from '../atomic-write.js'
 import { getSecret, setSecret, deleteSecret, listSecrets } from '../vault.js'
+import { loadOpenRouterCatalog, fetchAllOpenRouterModels, loadCuratedManual, addCuratedManual, removeCuratedManual } from '../openrouter-models.js'
 import {
   agentDir,
   agentConfigRoot,
@@ -470,6 +471,10 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   // both in the "new agent" wizard and the agent edit panel.
   if (path === '/api/models/available' && method === 'GET') {
     const hasDeepseek = getSecret('DEEPSEEK_API_KEY') !== null
+    // OpenRouter is gated behind the vault key, same as DeepSeek: surfacing the
+    // options without the key would let the operator pick a model that 401s.
+    const hasOpenRouter = getSecret('openrouter-fleet-key') !== null
+    const orCatalog = loadOpenRouterCatalog()
     json(res, {
       claude: [
         { id: 'claude-fable-5', label: 'Fable 5 (legújabb)' },
@@ -484,7 +489,68 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
           ]
         : [],
       deepseekConfigured: hasDeepseek,
+      // OpenRouter tiers for the model picker. `auto` per tier feeds the "Auto"
+      // mode (stored as `openrouter-auto:<tierKey>`, resolved weekly-fresh at
+      // launch); `manual` (2 ids) feeds the "Manual" mode.
+      openrouter: hasOpenRouter
+        ? {
+            updated: orCatalog.updated,
+            tiers: orCatalog.tiers.map(t => ({
+              key: t.key,
+              label: t.label,
+              autoId: `openrouter-auto:${t.key}`,
+              auto: t.auto,
+              manual: t.manual,
+            })),
+          }
+        : null,
+      // User-curated manual models (ticked in the main agent's browse popup).
+      // Feeds the "OpenRouter - kézi" optgroup in every agent's model dropdown.
+      openrouterManual: hasOpenRouter ? loadCuratedManual() : [],
+      openrouterConfigured: hasOpenRouter,
     })
+    return true
+  }
+
+  // Curated manual-model list read/toggle. Curation is main-agent-only in the UI
+  // (the browse popup is hidden for sub-agents), but the API just gates on the
+  // vault key; the ticked set is shared across all agents' dropdowns.
+  if (path === '/api/openrouter/manual' && method === 'GET') {
+    if (getSecret('openrouter-fleet-key') === null) {
+      json(res, { error: 'OpenRouter not configured' }, 403)
+      return true
+    }
+    json(res, { models: loadCuratedManual() })
+    return true
+  }
+  if (path === '/api/openrouter/manual' && method === 'POST') {
+    if (getSecret('openrouter-fleet-key') === null) {
+      json(res, { error: 'OpenRouter not configured' }, 403)
+      return true
+    }
+    const body = await readBody(req)
+    const { id, name, checked } = JSON.parse(body.toString()) as { id?: string; name?: string; checked?: boolean }
+    if (!id || typeof id !== 'string') { json(res, { error: 'id is required' }, 400); return true }
+    const models = checked ? addCuratedManual(id, name || id) : removeCuratedManual(id)
+    json(res, { ok: true, models })
+    return true
+  }
+
+  // Full OpenRouter model list for the manual "browse all" picker popup.
+  // Gated behind the vault key like the tier group. The upstream /models list
+  // is public; the module caches it for 6h.
+  if (path === '/api/openrouter/models' && method === 'GET') {
+    if (getSecret('openrouter-fleet-key') === null) {
+      json(res, { error: 'OpenRouter not configured' }, 403)
+      return true
+    }
+    try {
+      const models = await fetchAllOpenRouterModels(Date.now())
+      json(res, { models })
+    } catch (err) {
+      logger.warn({ err }, 'openrouter models list fetch failed')
+      json(res, { error: 'Could not fetch OpenRouter models' }, 502)
+    }
     return true
   }
 
@@ -743,13 +809,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const name = decodeURIComponent(avatarUploadMatch[1])
     const avatarPath = findAvatarForAgent(name)
     if (avatarPath) { serveFile(req, res, avatarPath); return true }
-    // No custom avatar — return a monogram placeholder so <img> tags
-    // (e.g. the overview agent list) don't trigger a 404 on every page
-    // load for every agent without a custom avatar. Cached for 1h.
-    const initial = name[0]?.toUpperCase() || '?'
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40"><rect width="40" height="40" fill="#374151" rx="8"/><text x="20" y="27" text-anchor="middle" fill="#9ca3af" font-size="18" font-family="sans-serif">${initial}</text></svg>`
-    res.writeHead(200, { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=3600' })
-    res.end(svg)
+    res.writeHead(404); res.end()
     return true
   }
 
@@ -806,7 +866,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     if (name !== MAIN_AGENT_ID && !isAgentRunning(name)) {
       json(res, { error: 'Agent is not running' }, 400); return true
     }
-    const result = await attemptChannelMcpReconnect(name)
+    const result = attemptChannelMcpReconnect(name)
     json(res, result)
     return true
   }
@@ -877,7 +937,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       let gcRestarted = false
       let gcWasRunning = false
       if (isMain) {
-        const r = await hardRestartMarveenChannels()
+        const r = hardRestartMarveenChannels()
         gcRestarted = r.ok
         gcWasRunning = true
       } else {
@@ -885,10 +945,10 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
         setAgentEnabledPlugins(name, provider)
         gcWasRunning = isAgentRunning(name)
         if (gcWasRunning) {
-          const stopRes = await stopAgentProcess(name)
+          const stopRes = stopAgentProcess(name)
           if (stopRes.ok) {
-            await delay(2000)
-            gcRestarted = (await startAgentProcess(name)).ok
+            try { execSync('sleep 2', { timeout: 4000 }) } catch {}
+            gcRestarted = startAgentProcess(name).ok
           }
         }
       }
@@ -959,7 +1019,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     let restarted = false
     let wasRunning = false
     if (isMain) {
-      const r = await hardRestartMarveenChannels()
+      const r = hardRestartMarveenChannels()
       restarted = r.ok
       wasRunning = true
     } else {
@@ -968,10 +1028,10 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       if (provider === 'telegram') sendWelcomeMessage(name, botToken.trim()).catch(() => {})
       wasRunning = isAgentRunning(name)
       if (wasRunning) {
-        const stopRes = await stopAgentProcess(name)
+        const stopRes = stopAgentProcess(name)
         if (stopRes.ok) {
-          await delay(2000)
-          const startRes = await startAgentProcess(name)
+          try { execSync('sleep 2', { timeout: 4000 }) } catch {}
+          const startRes = startAgentProcess(name)
           restarted = startRes.ok
         }
       }
@@ -1234,7 +1294,11 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
 
       const approvedDir = join(chDir, 'approved')
       mkdirSync(approvedDir, { recursive: true })
-      writeFileSync(join(approvedDir, entry.senderId), '')
+      // Marker contents = chatId, per the plugin's /telegram:access pair
+      // contract (the channel server polls approved/ to send the "Paired!"
+      // confirmation; current server keys off the filename, the chatId
+      // contents keep us aligned with the documented format).
+      writeFileSync(join(approvedDir, entry.senderId), String(entry.chatId ?? ''))
 
       logger.info({ name, provider, senderId: entry.senderId, code }, 'Channel pairing approved')
       json(res, { ok: true, senderId: entry.senderId })
@@ -1472,7 +1536,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       // Wait for Claude Code to render the auth URL (typically 3-6s)
       let authUrl: string | null = null
       for (let i = 0; i < 12; i++) {
-        await delay(1000)
+        execSync('sleep 1', { timeout: 3000 })
         const pane = capturePane(session, host)
         if (!pane) continue
         const urlMatch = pane.match(/https:\/\/console\.anthropic\.com\/[^\s"']+/)
@@ -1504,7 +1568,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // the --channels plugin MCP server (agent comes up deaf).
     let startFresh = false
     try { startFresh = JSON.parse((await readBody(req)).toString() || '{}').fresh === true } catch {}
-    const result = await startAgentProcess(name, { fresh: startFresh })
+    const result = startAgentProcess(name, { fresh: startFresh })
     // Record operator intent so the monitor keeps this agent up across shared
     // tmux-server restarts / reboots (see agent-desired-state.ts).
     if (result.ok || result.error === 'Agent is already running') addDesiredAgent(name)
@@ -1516,7 +1580,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   const stopMatch = path.match(/^\/api\/agents\/([^/]+)\/stop$/)
   if (stopMatch && method === 'POST') {
     const name = decodeURIComponent(stopMatch[1])
-    const result = await stopAgentProcess(name)
+    const result = stopAgentProcess(name)
     // Explicit stop clears intent so the monitor will not resurrect it.
     removeDesiredAgent(name)
     if (result.ok) { json(res, { ok: true }); return true }
@@ -1544,7 +1608,16 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const blocks: string[] = []
     for (const msg of claimed) {
       const cls = classifyAgentMessage(msg.from_agent, msg.to_agent)
-      if (!cls) continue // empty/invalid from_agent -> cannot frame safely; drop
+      if (!cls) {
+        // The claim already flipped the row to 'delivered'; a silent skip
+        // here is invisible message loss (delivered in the DB, never shown
+        // to the agent, no log, no retry). Surface it like the router does.
+        logger.warn({ id: msg.id, rawFrom: msg.from_agent }, 'drain-inbox: message rejected, from_agent cannot be framed safely')
+        if (!markMessageFailed(msg.id, 'Invalid or empty from_agent')) {
+          logger.warn({ id: msg.id }, 'markMessageFailed affected 0 rows (deleted concurrently?)')
+        }
+        continue
+      }
       const { prefix, wrapped } = wrapAgentMessageForDelivery(cls.category, cls.safeFrom, msg.from_agent, msg.content, msg.id, msg.origin_note)
       blocks.push(prefix + wrapped)
     }
@@ -1561,7 +1634,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // `/remote-control` (needs a full-scope login token the agent lacks). Mirror
     // the precedent in the channels-config handler above. Sub-agents unchanged.
     if (isMainChannelsAgent(name)) {
-      const r = await hardRestartMarveenChannels()
+      const r = hardRestartMarveenChannels()
       if (r.ok) { json(res, { ok: true }); return true }
       json(res, { error: r.error || 'Restart failed' }, 500)
       return true
@@ -1570,7 +1643,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // Optional { "fresh": true } body -> no `--continue` (see /start note).
     let restartFresh = false
     try { restartFresh = JSON.parse((await readBody(req)).toString() || '{}').fresh === true } catch {}
-    const result = await restartAgentProcess(name, { fresh: restartFresh })
+    const result = restartAgentProcess(name, { fresh: restartFresh })
     if (result.ok) { json(res, { ok: true }); return true }
     json(res, { error: result.error }, 400)
     return true
@@ -1750,7 +1823,14 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       }
       writeAgentMemoryIsolation(name, data.memoryIsolation === true)
     }
-    if (data.claudeMd !== undefined) atomicWriteFileSync(join(configRoot, 'CLAUDE.md'), data.claudeMd)
+    if (data.claudeMd !== undefined) {
+      atomicWriteFileSync(join(configRoot, 'CLAUDE.md'), data.claudeMd)
+      // A stale dashboard-editor buffer can carry a pre-federation snapshot
+      // (or a block from a since-disabled state): reconcile the managed
+      // federation section right after the write, not just at boot -- the
+      // service runs for weeks between restarts. No-op for sub-agents.
+      if (name === MAIN_AGENT_ID) ensureFederationClaudeMdSection()
+    }
     if (data.soulMd !== undefined) atomicWriteFileSync(join(agentDir(name), 'SOUL.md'), data.soulMd)
     if (data.mcpJson !== undefined) atomicWriteFileSync(join(agentDir(name), '.mcp.json'), data.mcpJson)
     if (data.model !== undefined) writeAgentModel(name, data.model)

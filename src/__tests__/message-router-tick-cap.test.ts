@@ -22,8 +22,13 @@ vi.mock('../logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() },
 }))
 
-vi.mock('../config.js', () => ({
+vi.mock('../config.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../config.js')>()),
   MAIN_AGENT_ID: 'orin',
+  // message-router imports maybeWakeSubAgentsForTelegram, which reads this flag
+  // from config; keep it OFF so the wake watcher early-returns and this test
+  // stays isolated to the per-tick message cap.
+  SUBAGENT_TELEGRAM_WAKE_ENABLED: false,
 }))
 
 vi.mock('../db.js', () => ({

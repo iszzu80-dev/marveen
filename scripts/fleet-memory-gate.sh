@@ -48,12 +48,22 @@ if [[ "${MARVEEN_MEM_GATE_DISABLE:-0}" == "1" ]]; then
   exit 0
 fi
 
+# Resolve this install's own dir + main agent id from its .env (no hardcoded
+# owner/agent/chat-id -- distribution rule). SERVICE_ID falls back to
+# MAIN_AGENT_ID which falls back to "marveen"; the main agent MUST be core so
+# a memory-pressure band never throttles the operator's primary bot.
+INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+_env_val() { [[ -f "$INSTALL_DIR/.env" ]] && grep -E "^$1=" "$INSTALL_DIR/.env" | head -1 | cut -d= -f2- | tr -d '"'"'"'\r'; }
+MAIN_AGENT_ID="$(_env_val MAIN_AGENT_ID)"; MAIN_AGENT_ID="${MAIN_AGENT_ID:-marveen}"
+
 WARN_PCT="${MARVEEN_MEM_WARN_PCT:-80}"
 HARD_PCT="${MARVEEN_MEM_HARD_PCT:-90}"
 AGENT_CAP="${MARVEEN_AGENT_CAP:-12}"
-CORE_AGENTS="${MARVEEN_CORE_AGENTS:-deliverylead,broker}"
+# Core = never-throttled agents. Defaults to THIS install's main agent so the
+# primary bot always survives the safe-mode band; override with MARVEEN_CORE_AGENTS.
+CORE_AGENTS="${MARVEEN_CORE_AGENTS:-$MAIN_AGENT_ID}"
 STAGGER_SEC="${MARVEEN_STAGGER_SEC:-20}"   # consumed by fleet-safe-start.sh
-STATE_DIR="${MARVEEN_STORE:-$HOME/marveen/store}"
+STATE_DIR="${MARVEEN_STORE:-$INSTALL_DIR/store}"
 SAFE_FLAG="$STATE_DIR/.fleet-safe-mode"
 ALERT_STAMP="$STATE_DIR/.fleet-memgate-alert"   # "band:epoch" of last alert
 OBSERVE_FLAG="$STATE_DIR/.fleet-memgate-observe"  # if present -> observe-only
@@ -65,7 +75,19 @@ OBSERVE_FLAG="$STATE_DIR/.fleet-memgate-observe"  # if present -> observe-only
 OBSERVE=0
 if [[ "${MARVEEN_MEM_GATE_OBSERVE:-0}" == "1" || -f "$OBSERVE_FLAG" ]]; then OBSERVE=1; fi
 ENV_FILE="${TELEGRAM_ENV:-$HOME/.claude/channels/telegram/.env}"
-CHAT_ID="${MARVEEN_ALERT_CHAT_ID:-8942301795}"
+# Alert target: the owner's chat id. Resolve from the channel access.json (the
+# first allow-listed sender) so no chat-id is ever hardcoded; override with
+# MARVEEN_ALERT_CHAT_ID. Empty -> the Telegram alert is skipped (log only), never
+# sent to a stranger.
+ACCESS_JSON="${TELEGRAM_ACCESS:-$HOME/.claude/channels/telegram/access.json}"
+CHAT_ID="${MARVEEN_ALERT_CHAT_ID:-}"
+if [[ -z "$CHAT_ID" && -f "$ACCESS_JSON" ]] && command -v python3 >/dev/null 2>&1; then
+  CHAT_ID="$(python3 -c 'import json,sys
+try:
+  a=json.load(open(sys.argv[1]));v=a.get("allowFrom") or []
+  print(v[0] if v else "")
+except Exception: print("")' "$ACCESS_JSON" 2>/dev/null)"
+fi
 ALERT_COOLDOWN=600   # seconds; do not repeat the same band's alert within this
 
 log() { echo "[fleet-memory-gate] $*" >&2; }
@@ -98,6 +120,9 @@ is_core() {
 send_alert() {
   local band="$1" msg="$2"
   (( DRY_RUN )) && { log "DRY-RUN alert [$band]: $msg"; return 0; }
+  # No resolvable owner chat id -> never send (would otherwise go nowhere or, with
+  # a hardcoded default, to a stranger). Log and move on.
+  [[ -z "$CHAT_ID" ]] && { log "no owner chat id resolved; skipping Telegram alert [$band]"; return 0; }
   local now prev_band prev_ep
   now="$(date +%s)"
   if [[ -f "$ALERT_STAMP" ]]; then

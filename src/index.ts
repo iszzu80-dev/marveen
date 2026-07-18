@@ -1,7 +1,6 @@
 import {
   readFileSync,
   readlinkSync,
-  realpathSync,
   unlinkSync,
   mkdirSync,
   openSync,
@@ -12,12 +11,12 @@ import { join } from 'node:path'
 import { execFileSync, execSync } from 'node:child_process'
 import type { Server as HttpServer } from 'node:http'
 import { PROJECT_ROOT, STORE_DIR, PID_FILENAME, WEB_PORT, ALLOWED_CHAT_ID, MAIN_AGENT_ID, RESPAWN_ENABLED, HEARTBEAT_AGENT_ENABLED } from './config.js'
-import { initDatabase } from './db.js'
+import { initDatabase, backfillEmbeddings } from './db.js'
 import { runDecaySweep, runDailyDigest } from './memory.js'
 import { initHeartbeat, stopHeartbeat } from './heartbeat.js'
 import { ensureHeartbeatAgent, shouldBootHeartbeatAgent, HEARTBEAT_AGENT_NAME } from './web/heartbeat-agent-scaffold.js'
 import { startAgentProcess } from './web/agent-process.js'
-import { renameSharedCredentialsIfSafe } from './web/claude-credentials-guard.js'
+import { renameSharedCredentialsIfSafe, fleetTokenBootPass } from './web/claude-credentials-guard.js'
 import { startWebServer } from './web.js'
 import { logger } from './logger.js'
 import { startInviteMonitor, stopInviteMonitor } from './web/channel-invites.js'
@@ -28,7 +27,6 @@ import { AGENTS_BASE_DIR } from './web/agent-config.js'
 import {
   acquirePortLock,
   acquirePidfileLock,
-  findOwnBinaryMatches,
   writeBufferFully,
   DeferToPeerError,
   type ProcessLockContext,
@@ -63,35 +61,44 @@ const SHUTDOWN_HARD_KILL_MS = 5000
 // those files would get SIGKILLed on startup.
 const DASHBOARD_BINARY_PATTERN = /(?:^|[\s/])(?:dist\/index\.js|src\/index\.ts)(?:\s|$)/
 
+// Own-install affinity guard for the takeover kill. The binary pattern alone
+// matches ANY Marveen dashboard argv of the same UID -- including a SECOND
+// install's live process (federation makes multi-install machines a supported
+// reality, and dev/test copies always existed). Only processes that belong to
+// THIS install may be taken over: an absolute argv must contain PROJECT_ROOT,
+// a relative argv ("node dist/index.js" via npm start) must have its cwd
+// inside PROJECT_ROOT. A process we cannot attribute is left alone -- failing
+// to reclaim our own port surfaces as EADDRINUSE (handled downstream), while
+// killing a stranger's dashboard would be silent data-plane damage.
+function processCwd(pid: number): string | null {
+  try {
+    // Linux: cheap and exact.
+    return readlinkSync(`/proc/${pid}/cwd`)
+  } catch { /* not Linux or no access; try lsof (macOS) */ }
+  try {
+    const raw = execSync(`lsof -a -p ${pid} -d cwd -Fn 2>/dev/null || true`, { timeout: 2000, encoding: 'utf-8' })
+    const line = raw.split('\n').find((l) => l.startsWith('n'))
+    return line ? line.slice(1) : null
+  } catch {
+    return null
+  }
+}
+
+function argvBelongsToThisInstall(argv: string, pid: number): boolean {
+  // Boundary-suffixed so /path/marveen never matches /path/marveen2.
+  if (argv.includes(PROJECT_ROOT + '/')) return true
+  const cwd = processCwd(pid)
+  return cwd !== null && (cwd === PROJECT_ROOT || cwd.startsWith(PROJECT_ROOT + '/'))
+}
+
 // Build the I/O surface used by process-lock.ts. Kept here so the pure
 // module stays testable with a mock ctx and never imports node:child_process
 // or node:fs directly.
 function buildProcessLockContext(): ProcessLockContext {
   const uid = typeof process.getuid === 'function' ? process.getuid() : null
-  // realpath so this compares equal against /proc/<pid>/cwd, which the
-  // kernel always reports fully symlink-resolved -- an un-resolved
-  // PROJECT_ROOT (e.g. reached via a symlinked path) would otherwise never
-  // match even for our own genuine predecessor.
-  let selfProjectRoot: string | null
-  try {
-    selfProjectRoot = realpathSync(PROJECT_ROOT)
-  } catch {
-    selfProjectRoot = null
-  }
   return {
     currentPid: process.pid,
     uid,
-    selfProjectRoot,
-    getProcessCwd(pid: number): string | null {
-      // Linux-only (/proc), consistent with the rest of this file's tooling
-      // (ps, lsof). Resolves symlinks so two different-looking paths to the
-      // same directory (e.g. via a bind mount) still compare equal.
-      try {
-        return readlinkSync(`/proc/${pid}/cwd`)
-      } catch {
-        return null
-      }
-    },
     listPortHolders(port: number): number[] {
       try {
         const raw = execSync(`lsof -ti :${port} 2>/dev/null || true`, { timeout: 3000, encoding: 'utf-8' }).trim()
@@ -122,6 +129,7 @@ function buildProcessLockContext(): ProcessLockContext {
           if (pid === process.pid) continue
           if (uid != null && rowUid !== uid) continue
           if (!pattern.test(argv)) continue
+          if (!argvBelongsToThisInstall(argv, pid)) continue
           out.push(pid)
         }
         return out
@@ -195,11 +203,7 @@ function isLegitimateDashboardPid(pid: number, procCtx: ProcessLockContext): boo
     if (ownerUid == null || ownerUid !== procCtx.uid) return false
   }
   if (!/node|tsx/i.test(cmd)) return false
-  // Scoped (via findOwnBinaryMatches -> selfProjectRoot), not the raw
-  // listOwnProcessesMatching call: the pattern alone can't distinguish this
-  // checkout's dashboard from another worktree's, even though a pidfile
-  // collision across worktrees is rare (each worktree has its own store/).
-  const matches = findOwnBinaryMatches(DASHBOARD_BINARY_PATTERN, procCtx)
+  const matches = procCtx.listOwnProcessesMatching(DASHBOARD_BINARY_PATTERN)
   return matches.includes(pid)
 }
 
@@ -331,16 +335,7 @@ async function acquireLock(): Promise<void> {
   // anything running the dashboard binary (for the zombie case where the
   // port was released but the process survived). The pidfile alone can
   // lie under launchd KeepAlive because each restart overwrites it.
-  // Binary-pattern matching is scoped to this checkout's own selfProjectRoot
-  // (see process-lock.ts), but DASHBOARD_SKIP_BINARY_RECLAIM=1 is an explicit
-  // extra opt-out for one-off test/worktree instances that want zero
-  // participation in cross-instance reclaim at all, belt-and-braces on top
-  // of the scoping (e.g. if /proc/<pid>/cwd is ever unavailable).
-  const skipBinaryReclaim = process.env['DASHBOARD_SKIP_BINARY_RECLAIM'] === '1'
-  if (skipBinaryReclaim) {
-    logger.warn('DASHBOARD_SKIP_BINARY_RECLAIM=1 -- binary-pattern reclaim disabled for this instance')
-  }
-  await acquirePortLock(WEB_PORT, procCtx, skipBinaryReclaim ? {} : { binaryPattern: DASHBOARD_BINARY_PATTERN })
+  await acquirePortLock(WEB_PORT, procCtx, { binaryPattern: DASHBOARD_BINARY_PATTERN })
 
   // Atomic O_EXCL claim on PID_FILE. Serializes any two fresh startups
   // that race past the port check. `onLiveLegitimate: 'defer'` is a
@@ -445,6 +440,12 @@ async function main(): Promise<void> {
   initDatabase()
   logger.info('Adatbazis inicializalva')
 
+  // Backfill embeddings for memories saved before Ollama was available.
+  // Fire-and-forget: a missing or slow Ollama instance must not block startup.
+  backfillEmbeddings().then(count => {
+    if (count > 0) logger.info({ count }, 'Embedding backfill befejezve')
+  }).catch(err => logger.warn({ err }, 'Embedding backfill hiba (Ollama nem elerheto)'))
+
   // Memory decay (24h cycle)
   runDecaySweep()
   decayInterval = setInterval(runDecaySweep, 24 * 60 * 60 * 1000)
@@ -485,15 +486,33 @@ async function main(): Promise<void> {
   // sub-agent that reads the operator's calendar and DB, and a gated-off
   // machine (e.g. a dev box) must not fight the production host over the
   // channel.
+  // Linux credentials-guard, once at boot before any agent starts (opt-in,
+  // default OFF, no-op on macOS). Retires the rotating credentials.json so
+  // even the systemd-managed main channels agent comes up on the stable
+  // setup-token; startAgentProcess re-runs it per launch for self-healing.
+  // Was previously nested inside the heartbeat-agent boot branch below, so on
+  // any install with the heartbeat sub-agent disabled (the common case) this
+  // never ran at boot at all (found 2026-07-13 while diagnosing recurring
+  // dead-token incidents).
+  renameSharedCredentialsIfSafe()
+
+  // Fleet-token boot pass, DEFERRED and fire-and-forget: it live-probes a
+  // credential (one real `claude -p` call, up to 60s) so it must never block
+  // boot. Backfills store/.claude-oauth-token from a terminal-pasted
+  // `claude setup-token` (which lands only in ~/.claude/.credentials.json and
+  // silently disables per-agent isolation AND the rename guard -- 2026-07-15
+  // bootcamp root gap), validates a never-verified existing fleet token, and
+  // quarantines one the probe proves dead.
+  setTimeout(() => {
+    fleetTokenBootPass()
+      .then((result) => logger.info({ result }, 'credentials-guard: fleet-token boot pass'))
+      .catch((err) => logger.warn({ err }, 'credentials-guard: fleet-token boot pass failed'))
+  }, 15_000)
+
   if (shouldBootHeartbeatAgent({ respawnEnabled: RESPAWN_ENABLED, agentEnabled: HEARTBEAT_AGENT_ENABLED })) {
     ensureHeartbeatAgent()
     logger.info({ agent: HEARTBEAT_AGENT_NAME }, 'Heartbeat agent scaffold ensured (channel-less, dashboard-hidden)')
-    // Linux credentials-guard, once at boot before any agent starts (opt-in,
-    // default OFF, no-op on macOS). Retires the rotating credentials.json so
-    // even the systemd-managed main channels agent comes up on the stable
-    // setup-token; startAgentProcess re-runs it per launch for self-healing.
-    renameSharedCredentialsIfSafe()
-    const heartbeatStart = await startAgentProcess(HEARTBEAT_AGENT_NAME)
+    const heartbeatStart = startAgentProcess(HEARTBEAT_AGENT_NAME)
     if (heartbeatStart.ok) {
       logger.info({ agent: HEARTBEAT_AGENT_NAME }, 'Heartbeat agent started')
     } else if (heartbeatStart.error === 'Agent is already running') {
