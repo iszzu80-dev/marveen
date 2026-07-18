@@ -216,7 +216,7 @@ async function attemptFireTask(
     // sends once Claude has booted (isSessionReadyForPrompt). host-aware:
     // startAgentProcess is itself remote-aware and launches over ssh when the
     // target agent is remote, so a missing remote session is auto-started too.
-    const start = startAgentProcess(agentName)
+    const start = await startAgentProcess(agentName)
     if (!start.ok) {
       // "already running" means it raced up between the check and here -- treat
       // as busy so the normal retry path delivers. Any other failure (config
@@ -240,7 +240,7 @@ async function attemptFireTask(
   // still land on a 100%-context session. Left open deliberately -- forceSend's
   // contract is "always eventually land, never silently drop", and a saturated
   // session needs a separate delivery policy, tracked as future work.
-  if (!task.forceSend && !isSessionReadyForPrompt(session, host)) {
+  if (!task.forceSend && !await isSessionReadyForPrompt(session, host)) {
     logger.warn({ task: task.name, agent: agentName, session }, 'Schedule target session busy or has pending input, will retry')
     return 'busy'
   }
@@ -373,7 +373,7 @@ async function attemptFireTask(
           // its cooldown fired), fall back to one more bare Enter. waitForIdle
           // is off because the box is 'typing', not idle -- the pre-flight gate
           // would otherwise burn its whole budget and time out every attempt.
-          if (clearStaleParkedInput(session, host)) {
+          if (await clearStaleParkedInput(session, host)) {
             await sendPromptToSession(session, fullPrompt, host, { waitForIdle: false })
             logger.info({ task: task.name, session, attempt }, 'Scheduled prompt re-injected after swallowed Enter')
           } else {

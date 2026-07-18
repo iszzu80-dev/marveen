@@ -53,7 +53,7 @@ export function getChannelHealth(agentName: string): ChannelHealthStatus {
   }
 }
 
-function checkAgent(agentName: string, session: string): void {
+async function checkAgent(agentName: string, session: string): Promise<void> {
   const now = Date.now()
   const state = reconnectState.get(agentName)
 
@@ -86,7 +86,7 @@ function checkAgent(agentName: string, session: string): void {
     'channel-health-monitor: plugin failure detected, attempting reconnect',
   )
 
-  const result = attemptChannelMcpReconnect(agentName)
+  const result = await attemptChannelMcpReconnect(agentName)
 
   const backoffMs = getBackoffMs(attempt)
   reconnectState.set(agentName, {
@@ -106,9 +106,9 @@ function checkAgent(agentName: string, session: string): void {
 }
 
 export function startChannelHealthMonitor(): NodeJS.Timeout {
-  function check() {
+  async function check() {
     try {
-      checkAgent(MAIN_AGENT_ID, MAIN_CHANNELS_SESSION)
+      await checkAgent(MAIN_AGENT_ID, MAIN_CHANNELS_SESSION)
     } catch (err) {
       logger.debug({ err }, 'channel-health-monitor: main agent check error')
     }
@@ -116,7 +116,7 @@ export function startChannelHealthMonitor(): NodeJS.Timeout {
     for (const name of listAgentNames()) {
       if (!isAgentRunning(name)) continue
       try {
-        checkAgent(name, resolveAgentSession(name))
+        await checkAgent(name, resolveAgentSession(name))
       } catch (err) {
         logger.debug({ err, agent: name }, 'channel-health-monitor: agent check error')
       }
@@ -125,6 +125,6 @@ export function startChannelHealthMonitor(): NodeJS.Timeout {
 
   // Offset from channel-monitor's 30s initial delay to avoid
   // overlapping tmux interactions on the same tick.
-  setTimeout(check, 45_000)
-  return setInterval(check, 60_000)
+  setTimeout(() => { void check() }, 45_000)
+  return setInterval(() => { void check() }, 60_000)
 }

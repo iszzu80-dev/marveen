@@ -100,13 +100,13 @@ function measurePct(name: string, cfgLimit: number | null): number | null {
   return tokens / limit
 }
 
-function performRestart(name: string): void {
+async function performRestart(name: string): Promise<void> {
   if (name === MAIN_AGENT_ID) {
     // launchd-managed; channels.sh always starts fresh, KeepAlive respawns it.
     const uid = typeof process.getuid === 'function' ? process.getuid() : ''
     execFileSync('/bin/launchctl', ['kickstart', '-k', `gui/${uid}/com.${SERVICE_ID}.channels`], { timeout: 10_000 })
   } else {
-    restartAgentProcess(name, { fresh: true })
+    await restartAgentProcess(name, { fresh: true })
   }
 }
 
@@ -141,7 +141,7 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
     running,
     pct: running && needPct ? measurePct(name, cfg.limitTokens) : null,
     paneIdle: pane !== null ? paneLooksIdle(pane) : false,
-    sessionReady: running && state.phase === 'await-ready' ? isSessionReadyForPrompt(session) : false,
+    sessionReady: running && state.phase === 'await-ready' ? await isSessionReadyForPrompt(session) : false,
     handoffMtime: needPct ? handoffMtime(name) : null,
   }
 
@@ -158,7 +158,7 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
         await sendPromptToSession(session, handoffPrompt(pctRound ?? 0, handoffPathFor(name)))
         break
       case 'restart':
-        performRestart(name)
+        await performRestart(name)
         break
       case 'inject-resume': {
         const hadHandoff = inputs.handoffMtime !== null || handoffMtime(name) !== null

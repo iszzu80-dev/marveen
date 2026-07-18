@@ -419,8 +419,8 @@ function getMainAgentProvider(): ChannelProviderType {
   return CHANNEL_PROVIDER
 }
 
-function softReconnectMarveen(): boolean {
-  return attemptChannelMcpReconnect(MAIN_AGENT_ID).ok
+async function softReconnectMarveen(): Promise<boolean> {
+  return (await attemptChannelMcpReconnect(MAIN_AGENT_ID)).ok
 }
 
 function triggerMarveenMemorySave(): void {
@@ -514,7 +514,7 @@ export function buildMainSessionRespawnCmd(opts: {
 // kicked ([exited]) -- the #248 user-visible crash. It also runs the
 // pane-attribution detached-claude reap first, breaking the orphan->409->freeze
 // doom-loop that the launchctl path (channels.sh env-grep reap) never cleaned.
-export function resumeMarveenSession(): boolean {
+export async function resumeMarveenSession(): Promise<boolean> {
   const provider = getProvider(getMainAgentProvider())
   try {
     // Reap any orphan bun/node poller BEFORE we respawn. tmux respawn-pane -k
@@ -523,7 +523,7 @@ export function resumeMarveenSession(): boolean {
     // --continue session would race a still-alive poller for the same bot
     // token (409 Conflict on getUpdates).
     try {
-      reapChannelOrphans(provider.type, PROJECT_ROOT)
+      await reapChannelOrphans(provider.type, PROJECT_ROOT)
     } catch (err) {
       logger.warn({ err }, 'resumeMarveenSession: pre-respawn reap failed (continuing)')
     }
@@ -537,7 +537,7 @@ export function resumeMarveenSession(): boolean {
     // spares the live session (this pane) and kills only the leftovers.
     // See project_channels_continue_respawn_leak.
     try {
-      reapDetachedChannelClaudes({ tmuxPath: TMUX })
+      await reapDetachedChannelClaudes({ tmuxPath: TMUX })
     } catch (err) {
       logger.warn({ err }, 'resumeMarveenSession: detached-claude reap failed (continuing)')
     }
@@ -561,7 +561,7 @@ export function resumeMarveenSession(): boolean {
     // silently times out into stage 4. The agent-process startup path already
     // dismisses this modal; we mirror it here for the resume path.
     try {
-      execFileSync('/bin/sleep', ['2'], { timeout: 4000 })
+      await delay(2000)
       dismissResumeSummaryModalIfPresent(MAIN_CHANNELS_SESSION)
     } catch (err) {
       logger.warn({ err }, 'resumeMarveenSession: post-respawn modal dismiss failed (continuing)')
@@ -574,7 +574,7 @@ export function resumeMarveenSession(): boolean {
     // times out into stage 4. The agent-process startup path already dismisses
     // this modal; we do the same here so the resume path matches.
     try {
-      execFileSync('/bin/sleep', ['2'], { timeout: 4000 })
+      await delay(2000)
       dismissResumeSummaryModalIfPresent(MAIN_CHANNELS_SESSION)
     } catch (err) {
       logger.warn({ err }, 'resumeMarveenSession: post-respawn modal dismiss failed (continuing)')
@@ -815,7 +815,7 @@ function schedulePostResumePluginGuard(provider: ChannelProviderType): void {
   logger.info({ delayMs: POST_RESUME_GUARD_DELAY_MS }, 'Post-resume plugin guard scheduled after --continue resume')
 }
 
-export function hardRestartMarveenChannels(): { ok: boolean; error?: string } {
+export async function hardRestartMarveenChannels(): Promise<{ ok: boolean; error?: string }> {
   // macOS: bounce the launchd job when the plist exists. If the channels session
   // is NOT managed by launchd on this install (plist absent -- only
   // com.jarvis.dashboard exists), fall through to the respawn-pane path below.
@@ -824,7 +824,7 @@ export function hardRestartMarveenChannels(): { ok: boolean; error?: string } {
   if (process.platform !== 'linux' && existsSync(MAIN_CHANNELS_PLIST)) {
     try {
       execFileSync('/bin/launchctl', ['unload', MAIN_CHANNELS_PLIST], { timeout: 5000 })
-      execFileSync('/bin/sleep', ['2'], { timeout: 4000 })
+      await delay(2000)
       execFileSync('/bin/launchctl', ['load', MAIN_CHANNELS_PLIST], { timeout: 5000 })
       logger.warn(`Hard restart: launchctl reload of com.${SERVICE_ID}.channels`)
       marveenLastHardRestart = Date.now()
@@ -857,7 +857,7 @@ export function hardRestartMarveenChannels(): { ok: boolean; error?: string } {
 // restart (respawn-pane). Driven by the pure decideStuckInputRestart; this
 // wrapper owns the I/O + counters. Called once per monitor tick right after the
 // main stuck-input recovery.
-function maybeRestartWedgedMainChannel(state: StuckInputState): void {
+async function maybeRestartWedgedMainChannel(state: StuckInputState): Promise<void> {
   const parked = state.parkedSig !== null
   // A cleared input box ends the spell -> reset the escalation counter so the
   // next genuine wedge starts fresh (and a successful restart is not penalised).
@@ -885,7 +885,7 @@ function maybeRestartWedgedMainChannel(state: StuckInputState): void {
     return
   }
   logger.warn({ session: MAIN_CHANNELS_SESSION, attempts: state.attempts, restart: stuckRestartCount + 1 }, 'Stuck main channel input survived soft recovery -- escalating to hard restart (respawn-pane)')
-  const r = hardRestartMarveenChannels()
+  const r = await hardRestartMarveenChannels()
   lastStuckRestartAt = Date.now()
   if (r.ok) {
     stuckRestartCount++
@@ -1061,7 +1061,7 @@ export function sendAlert(text: string): void {
   notifyChannel(text).catch(() => {})
 }
 
-function handleMarveenDown(): void {
+async function handleMarveenDown(): Promise<void> {
   const now = Date.now()
   const providerLabel = getMainAgentProvider()
   // Cold-start guard: defer the ENTIRE down cascade while a recent respawn
@@ -1107,11 +1107,11 @@ function handleMarveenDown(): void {
           })
       }
     }
-    if (softReconnectMarveen()) marveenDownState.softAttempts += 1
+    if (await softReconnectMarveen()) marveenDownState.softAttempts += 1
     return
   }
   if (marveenDownState.stage === 'soft') {
-    if (marveenDownState.softAttempts < 3 && softReconnectMarveen()) {
+    if (marveenDownState.softAttempts < 3 && await softReconnectMarveen()) {
       marveenDownState.softAttempts += 1
       marveenDownState.lastAlertAt = now
       return
@@ -1130,7 +1130,7 @@ function handleMarveenDown(): void {
     marveenDownState.stageStartedAt = now
     marveenDownState.lastAlertAt = now
     logger.warn({ provider: providerLabel }, 'Marveen channel plugin still down -- stage 3 (session resume)')
-    resumeMarveenSession()
+    await resumeMarveenSession()
     return
   }
   if (marveenDownState.stage === 'resume') {
@@ -1199,7 +1199,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
 
   const mainProvider = getMainAgentProvider()
 
-  function check() {
+  async function check() {
     // Restore persisted failure counts on first tick so a dashboard restart
     // does not reset the cap and restart agents that have already been given up on.
     ensureAgentRestartFailuresInitialized()
@@ -1288,7 +1288,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
     // Reliable backstop: if the soft recovery is exhausted and the input is
     // STILL parked, the TUI is hard-wedged -- escalate to a respawn-pane (the
     // automated form of the manual `systemctl restart channels`). Rate-limited.
-    maybeRestartWedgedMainChannel(mainStuckInput)
+    await maybeRestartWedgedMainChannel(mainStuckInput)
     // Same recovery for every running sub-agent session: a parked channel
     // message wedges a sub-agent ("nem válaszol") exactly as it would the main
     // session. Per-session state lives in agentStuckInput; drop it once the
@@ -1323,7 +1323,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
               marveenSuspectFirstSeen = null
             }
           } else if (shouldEscalateMarveenDown()) {
-            handleMarveenDown()
+            await handleMarveenDown()
           }
         }
         continue
@@ -1351,7 +1351,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         continue
       }
       if (t.isMarveen) {
-        if (shouldEscalateMarveenDown()) handleMarveenDown()
+        if (shouldEscalateMarveenDown()) await handleMarveenDown()
       } else {
         if (!agentDownSince.has(t.session)) agentDownSince.set(t.session, Date.now())
         const lastRestart = agentLastRestart.get(t.agentName!)
@@ -1407,7 +1407,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
         }
         logger.warn({ agent: t.agentName, provider: t.provider, failures }, 'Agent channel plugin down -- auto-restarting')
         try {
-          stopAgentProcess(t.agentName!)
+          await stopAgentProcess(t.agentName!)
           // Settle before the fresh start. stopAgentProcess already reaps this
           // agent's channel orphans + waits 2s; add more so the shared plugin
           // cache (bun run --cwd <plugin>, .in_use markers) fully releases from
@@ -1416,13 +1416,13 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
           // rapid restart (2026-07-01 rocket/mantis loop). Fleet-wide staggering
           // (CHANNEL_RESTART_STAGGER_MS) means this extra block runs at most once
           // per 90s, so it does not stall the monitor's per-agent sweep.
-          execSync('sleep 8', { timeout: 10000 })
+          await delay(8000)
           lastChannelAgentRestartAt = Date.now()
           // FRESH (no --continue): on CC 2.1.193 a --continue resume does NOT load
           // the --channels plugin MCP server, so the agent comes up with no plugin
           // and no poller (verified: continue -> "Plugin not found" in /mcp; fresh
           // -> plugin loads + poller attaches). Context is dropped, memory persists.
-          startAgentProcess(t.agentName!, { fresh: true })
+          await startAgentProcess(t.agentName!, { fresh: true })
           agentLastRestart.set(t.agentName!, Date.now())
           agentDownSince.delete(t.session)
           // Count this restart as failed until a later sweep sees the plugin
@@ -1450,7 +1450,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
     if (shouldRunPeriodicReap(lastDetachedReapAt, Date.now(), DETACHED_REAP_INTERVAL_MS)) {
       lastDetachedReapAt = Date.now()
       try {
-        const reaped = reapDetachedChannelClaudes({ tmuxPath: TMUX })
+        const reaped = await reapDetachedChannelClaudes({ tmuxPath: TMUX })
         if (reaped.length > 0) {
           logger.warn({ reaped }, 'channel-monitor: periodic reap removed detached channel-claude orphans')
         }
@@ -1459,8 +1459,8 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
       }
     }
   }
-  setTimeout(check, 30000)
-  return setInterval(check, 60000)
+  setTimeout(() => { void check() }, 30000)
+  return setInterval(() => { void check() }, 60000)
 }
 
 // Start desired-but-missing agents one at a time (~15s apart). The stagger is
@@ -1511,7 +1511,7 @@ async function reconcileDesiredAgents(): Promise<void> {
       if (!memGateAllowsStart(name)) continue   // Commit 3 v1: safe-mode / memory gate
       logger.warn({ agent: name }, 'Desired agent not running -- auto-starting (reconcile)')
       try {
-        const r = startAgentProcess(name)
+        const r = await startAgentProcess(name)
         agentLastRestart.set(name, Date.now())
         if (!r.ok && r.error !== 'Agent is already running') {
           logger.error({ agent: name, error: r.error }, 'Reconcile start failed')

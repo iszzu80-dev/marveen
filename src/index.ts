@@ -493,7 +493,7 @@ async function main(): Promise<void> {
     // even the systemd-managed main channels agent comes up on the stable
     // setup-token; startAgentProcess re-runs it per launch for self-healing.
     renameSharedCredentialsIfSafe()
-    const heartbeatStart = startAgentProcess(HEARTBEAT_AGENT_NAME)
+    const heartbeatStart = await startAgentProcess(HEARTBEAT_AGENT_NAME)
     if (heartbeatStart.ok) {
       logger.info({ agent: HEARTBEAT_AGENT_NAME }, 'Heartbeat agent started')
     } else if (heartbeatStart.error === 'Agent is already running') {

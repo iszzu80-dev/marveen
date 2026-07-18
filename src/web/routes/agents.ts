@@ -806,7 +806,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     if (name !== MAIN_AGENT_ID && !isAgentRunning(name)) {
       json(res, { error: 'Agent is not running' }, 400); return true
     }
-    const result = attemptChannelMcpReconnect(name)
+    const result = await attemptChannelMcpReconnect(name)
     json(res, result)
     return true
   }
@@ -877,7 +877,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       let gcRestarted = false
       let gcWasRunning = false
       if (isMain) {
-        const r = hardRestartMarveenChannels()
+        const r = await hardRestartMarveenChannels()
         gcRestarted = r.ok
         gcWasRunning = true
       } else {
@@ -885,10 +885,10 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
         setAgentEnabledPlugins(name, provider)
         gcWasRunning = isAgentRunning(name)
         if (gcWasRunning) {
-          const stopRes = stopAgentProcess(name)
+          const stopRes = await stopAgentProcess(name)
           if (stopRes.ok) {
-            try { execSync('sleep 2', { timeout: 4000 }) } catch {}
-            gcRestarted = startAgentProcess(name).ok
+            await delay(2000)
+            gcRestarted = (await startAgentProcess(name)).ok
           }
         }
       }
@@ -959,7 +959,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     let restarted = false
     let wasRunning = false
     if (isMain) {
-      const r = hardRestartMarveenChannels()
+      const r = await hardRestartMarveenChannels()
       restarted = r.ok
       wasRunning = true
     } else {
@@ -968,10 +968,10 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       if (provider === 'telegram') sendWelcomeMessage(name, botToken.trim()).catch(() => {})
       wasRunning = isAgentRunning(name)
       if (wasRunning) {
-        const stopRes = stopAgentProcess(name)
+        const stopRes = await stopAgentProcess(name)
         if (stopRes.ok) {
-          try { execSync('sleep 2', { timeout: 4000 }) } catch {}
-          const startRes = startAgentProcess(name)
+          await delay(2000)
+          const startRes = await startAgentProcess(name)
           restarted = startRes.ok
         }
       }
@@ -1504,7 +1504,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // the --channels plugin MCP server (agent comes up deaf).
     let startFresh = false
     try { startFresh = JSON.parse((await readBody(req)).toString() || '{}').fresh === true } catch {}
-    const result = startAgentProcess(name, { fresh: startFresh })
+    const result = await startAgentProcess(name, { fresh: startFresh })
     // Record operator intent so the monitor keeps this agent up across shared
     // tmux-server restarts / reboots (see agent-desired-state.ts).
     if (result.ok || result.error === 'Agent is already running') addDesiredAgent(name)
@@ -1516,7 +1516,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   const stopMatch = path.match(/^\/api\/agents\/([^/]+)\/stop$/)
   if (stopMatch && method === 'POST') {
     const name = decodeURIComponent(stopMatch[1])
-    const result = stopAgentProcess(name)
+    const result = await stopAgentProcess(name)
     // Explicit stop clears intent so the monitor will not resurrect it.
     removeDesiredAgent(name)
     if (result.ok) { json(res, { ok: true }); return true }
@@ -1561,7 +1561,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // `/remote-control` (needs a full-scope login token the agent lacks). Mirror
     // the precedent in the channels-config handler above. Sub-agents unchanged.
     if (isMainChannelsAgent(name)) {
-      const r = hardRestartMarveenChannels()
+      const r = await hardRestartMarveenChannels()
       if (r.ok) { json(res, { ok: true }); return true }
       json(res, { error: r.error || 'Restart failed' }, 500)
       return true
@@ -1570,7 +1570,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     // Optional { "fresh": true } body -> no `--continue` (see /start note).
     let restartFresh = false
     try { restartFresh = JSON.parse((await readBody(req)).toString() || '{}').fresh === true } catch {}
-    const result = restartAgentProcess(name, { fresh: restartFresh })
+    const result = await restartAgentProcess(name, { fresh: restartFresh })
     if (result.ok) { json(res, { ok: true }); return true }
     json(res, { error: result.error }, 400)
     return true

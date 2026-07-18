@@ -15,6 +15,7 @@ import {
 import { readClaudeCodeOauthJson } from './claude-credentials.js'
 import { detectPaneState } from '../pane-state.js'
 import { notifyChannel } from '../notify.js'
+import { delay } from './delay.js'
 
 // =============================================================================
 // Interactive-tmux agent worker (jun.15 subscription migration).
@@ -423,13 +424,13 @@ let lastWorkerStuckAlert = 0
  * the pane still is not healthy. Never touches a busy/idle/auth pane.
  * Returns true if it acted.
  */
-function selfHealWorkerOnce(): boolean {
+async function selfHealWorkerOnce(): Promise<boolean> {
   const cls = classifyWorkerPane(capturePane(WORKER_SESSION))
   if (!shouldSelfHeal(cls)) return false
   logger.warn({ cls }, 'agent-worker: pane parked on unexpected chrome -- bounded Escape self-heal')
   for (let i = 0; i < WORKER_SELF_HEAL_MAX_ESCAPES; i++) {
     try { execFileSync(TMUX, ['send-keys', '-t', WORKER_SESSION, 'Escape'], { timeout: 5000 }) } catch { break }
-    try { execFileSync('/bin/sleep', ['0.5'], { timeout: 2000 }) } catch { /* best effort */ }
+    await delay(500)
     const now = classifyWorkerPane(capturePane(WORKER_SESSION))
     if (now === 'idle' || now === 'busy') {
       logger.info({ escapes: i + 1 }, 'agent-worker: self-heal cleared the parked chrome via Escape')
@@ -437,7 +438,7 @@ function selfHealWorkerOnce(): boolean {
     }
   }
   logger.warn('agent-worker: Escape did not clear the parked chrome -- restarting the worker session')
-  restartWorkerSession()
+  await restartWorkerSession()
   return true
 }
 
@@ -457,10 +458,10 @@ async function ensureWorkerReady(): Promise<boolean> {
   const deadline = start + WORKER_BOOT_TIMEOUT_MS
   let healed = false
   while (Date.now() < deadline) {
-    if (isSessionReadyForPrompt(WORKER_SESSION)) return true
+    if (await isSessionReadyForPrompt(WORKER_SESSION)) return true
     if (!healed && Date.now() - start > WORKER_SELF_HEAL_GRACE_MS) {
       healed = true
-      try { selfHealWorkerOnce() } catch (err) { logger.warn({ err }, 'agent-worker: self-heal pass failed') }
+      try { await selfHealWorkerOnce() } catch (err) { logger.warn({ err }, 'agent-worker: self-heal pass failed') }
     }
     await sleepMs(2000)
   }
@@ -469,18 +470,18 @@ async function ensureWorkerReady(): Promise<boolean> {
   return false
 }
 
-function restartWorkerSession(): void {
+async function restartWorkerSession(): Promise<void> {
   try { execFileSync(TMUX, ['kill-session', '-t', WORKER_SESSION], { timeout: 5000 }) } catch { /* not running */ }
   try { startWorkerSession() } catch (err) { logger.warn({ err }, 'agent-worker: restart failed') }
 }
 
 // Reset context between requests so unrelated one-shots never share/grow context.
-function clearWorkerContext(): void {
+async function clearWorkerContext(): Promise<void> {
   try {
     execFileSync(TMUX, ['send-keys', '-t', WORKER_SESSION, '-l', '/clear'], { timeout: 5000 })
-    execFileSync('/bin/sleep', ['0.2'], { timeout: 2000 })
+    await delay(200)
     execFileSync(TMUX, ['send-keys', '-t', WORKER_SESSION, 'Enter'], { timeout: 5000 })
-    execFileSync('/bin/sleep', ['0.5'], { timeout: 2000 })
+    await delay(500)
   } catch (err) {
     logger.warn({ err }, 'agent-worker: /clear failed (continuing)')
   }
@@ -514,7 +515,7 @@ async function runWorkerAttempt(message: string, timeoutMs: number): Promise<Att
   const donePath = join(SCRATCH_DIR, `${reqId}.done`)
   for (const p of [outPath, donePath]) { try { rmSync(p, { force: true }) } catch { /* none */ } }
 
-  clearWorkerContext()
+  await clearWorkerContext()
   await sendPromptToSession(WORKER_SESSION, buildWorkerPrompt(message, outPath, donePath))
 
   const start = Date.now()
@@ -543,7 +544,7 @@ async function runWorkerAttempt(message: string, timeoutMs: number): Promise<Att
       }
       if (decision === 'dead') {
         logger.warn({ reqId }, 'agent-worker: session died mid-request, restarting (fail-fast)')
-        restartWorkerSession()
+        await restartWorkerSession()
         return { kind: 'fail', error: 'worker session died mid-request' }
       }
     }
@@ -576,7 +577,7 @@ export async function runViaWorker(message: string, timeoutMs: number): Promise<
         // fixes them all. Mirrors the auth-recovery retry-once shape above.
         if (r.error === 'worker session not ready' && attempt === 0) {
           logger.warn('agent-worker: worker not ready -- restarting once and retrying the request')
-          restartWorkerSession()
+          await restartWorkerSession()
           continue
         }
         return { text: null, error: r.error }
@@ -585,7 +586,7 @@ export async function runViaWorker(message: string, timeoutMs: number): Promise<
       if (attempt === 0) {
         logger.warn('agent-worker: auth failure -> recovering (reseed creds + clear keychain + restart)')
         seedWorkerCredentials()
-        restartWorkerSession()
+        await restartWorkerSession()
         continue
       }
       logger.error('agent-worker: auth failure persists after recovery -> signalling SDK fallback (authFailed)')

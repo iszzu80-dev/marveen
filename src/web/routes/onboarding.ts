@@ -165,7 +165,7 @@ export async function tryHandleOnboarding(ctx: RouteContext): Promise<boolean> {
   if (path === '/api/onboarding/launch' && method === 'POST') {
     if (agentsRunning()) { json(res, { ok: true, alreadyRunning: true }); return true }
     if (!claudeAuthPresent()) { json(res, { error: 'Eloszor allitsd be a Claude-autentikaciot.', reason: 'no-auth' }, 409); return true }
-    const r = hardRestartMarveenChannels()
+    const r = await hardRestartMarveenChannels()
     if (!r.ok) { json(res, { error: r.error || 'Nem sikerult eletre kelteni az agenteket.', reason: 'launch-failed' }, 500); return true }
     logger.info('onboarding: fleet launched (channels session)')
     json(res, { ok: true, started: true })

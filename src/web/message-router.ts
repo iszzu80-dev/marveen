@@ -294,7 +294,7 @@ export async function runMessageRouterTick(): Promise<void> {
         continue
       }
 
-      if (!isSessionReadyForPrompt(session, host)) {
+      if (!await isSessionReadyForPrompt(session, host)) {
         // ---- session-stuck detection (card 2922e380 thread a) ----
         // Track how long this session has been continuously not-ready.
         const stuckStart = agentStuckSince.get(msg.to_agent)
@@ -321,7 +321,7 @@ export async function runMessageRouterTick(): Promise<void> {
         // ParkedInput only fires on the idle 'typing' state with text unchanged
         // across a settle, so it never clobbers a session that is actually
         // processing or input a human/agent is mid-typing.
-        if (ageMs > JANITOR_PARKED_MIN_AGE_MS && clearStaleParkedInput(session, host)) {
+        if (ageMs > JANITOR_PARKED_MIN_AGE_MS && await clearStaleParkedInput(session, host)) {
           routerLoggedMisses.delete(msg.id)
           continue // input cleared; deliver on the next tick
         }

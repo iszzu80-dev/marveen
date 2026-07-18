@@ -638,7 +638,7 @@ function startRemoteAgentProcess(
   }
 }
 
-export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}): { ok: boolean; pid?: number; error?: string } {
+export async function startAgentProcess(name: string, opts: { fresh?: boolean } = {}): Promise<{ ok: boolean; pid?: number; error?: string }> {
   const dir = agentDir(name)
   if (!existsSync(dir)) return { ok: false, error: 'Agent not found' }
 
@@ -701,7 +701,7 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
   try {
     try {
       runTmux(null, ['kill-session', '-t', session])
-      execSync('sleep 3', { timeout: 5000 })
+      await delay(3000)
     } catch { /* ok */ }
 
     // Reap any orphan poller (bun/node) left over from a previous run BEFORE
@@ -971,7 +971,7 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
   }
 }
 
-export function stopAgentProcess(name: string): { ok: boolean; error?: string } {
+export async function stopAgentProcess(name: string): Promise<{ ok: boolean; error?: string }> {
   const session = agentSessionName(name)
   if (!isAgentRunning(name)) return { ok: false, error: 'Agent is not running' }
 
@@ -979,7 +979,7 @@ export function stopAgentProcess(name: string): { ok: boolean; error?: string } 
 
   try {
     runTmux(host, ['kill-session', '-t', session], { timeout: 5000 })
-    execSync('sleep 2', { timeout: 4000 })
+    await delay(2000)
     // Reap any orphaned plugin grandchild that tmux did not tear down. This is
     // a LOCAL pkill against this host's process table, so it only makes sense
     // for local agents; a remote agent is channel-less and its processes live
@@ -1010,9 +1010,9 @@ export function getAgentProcessInfo(name: string): { running: boolean; session?:
   }
 }
 
-export function restartAgentProcess(name: string, opts: { fresh?: boolean } = {}): { ok: boolean; pid?: number; error?: string } {
+export async function restartAgentProcess(name: string, opts: { fresh?: boolean } = {}): Promise<{ ok: boolean; pid?: number; error?: string }> {
   if (isAgentRunning(name)) {
-    const stopResult = stopAgentProcess(name)
+    const stopResult = await stopAgentProcess(name)
     if (!stopResult.ok) return { ok: false, error: stopResult.error || 'Failed to stop running agent before restart' }
   }
   return startAgentProcess(name, opts)
@@ -1451,7 +1451,7 @@ export function captureParkedInputView(session: string, host: string | null = nu
 // session that cannot act on it. We only log/audit the refusal here; how (or
 // whether) to recover the session is left to the caller / operator tooling, so
 // this predicate stays a pure, dependency-free readiness check.
-export function isSessionReadyForPrompt(session: string, host: string | null = null): boolean {
+export async function isSessionReadyForPrompt(session: string, host: string | null = null): Promise<boolean> {
   // Dim-ghost tolerant idle read: CC >=2.1.202 paints a dim placeholder into
   // the empty input box, which a plain capture reads as parked text. Only when
   // the plain view says 'typing' do we pay for the second (-e, dim-stripped)
@@ -1467,7 +1467,7 @@ export function isSessionReadyForPrompt(session: string, host: string | null = n
   }
   if (!idleOrGhost(first)) return false
 
-  try { execFileSync('/bin/sleep', [PANE_READY_CONFIRM_DELAY_S], { timeout: 2000 }) } catch { /* best effort */ }
+  await delay(250)
 
   const second = capturePane(session, host)
   if (second == null) return false
@@ -1512,7 +1512,7 @@ const unwedgeAttempts = new Map<string, { last: number; sig: string; fails: numb
 // parked text -- never 'busy'/processing) AND the text is unchanged across a
 // short settle, so input a human or agent is actively typing is never clobbered.
 // Returns true if it cleared something (caller should retry delivery next tick).
-export function clearStaleParkedInput(session: string, host: string | null = null): boolean {
+export async function clearStaleParkedInput(session: string, host: string | null = null): Promise<boolean> {
   const a = capturePane(session, host)
   if (a == null || detectPaneState(a) !== 'typing') return false
   // DIM-GUARD (2026-06-30, Szabi insight): extract the parked TEXT from the
@@ -1536,7 +1536,7 @@ export function clearStaleParkedInput(session: string, host: string | null = nul
   const prev = unwedgeAttempts.get(key)
   if (prev && prev.sig === parked && nowMs - prev.last < UNWEDGE_COOLDOWN_MS) return false
 
-  try { execFileSync('/bin/sleep', [PARKED_STABLE_CONFIRM_S], { timeout: 4000 }) } catch { /* best effort */ }
+  await delay(2000)
   const b = capturePane(session, host)
   // Changed (someone is typing) or already cleared -> leave it alone, and do not
   // record an attempt (this was never a stuck box). Compare on the SAME dim-
@@ -1562,7 +1562,7 @@ export function clearStaleParkedInput(session: string, host: string | null = nul
 
   for (let i = 0; i < PARKED_CLEAR_MAX; i++) {
     runTmux(host, ['send-keys', '-t', session, 'C-u'], { timeout: 5000 })
-    try { execFileSync('/bin/sleep', [PARKED_CLEAR_SETTLE_S], { timeout: 2000 }) } catch { /* best effort */ }
+    await delay(300)
     const after = capturePane(session, host)
     if (after == null || detectPaneState(after) !== 'typing') break
   }
@@ -1575,7 +1575,7 @@ export function clearStaleParkedInput(session: string, host: string | null = nul
     runTmux(host, ['send-keys', '-t', session, 'C-k'], { timeout: 5000 })
     for (let i = 0; i < PARKED_CLEAR_MAX; i++) {
       runTmux(host, ['send-keys', '-t', session, 'C-u'], { timeout: 5000 })
-      try { execFileSync('/bin/sleep', [PARKED_CLEAR_SETTLE_S], { timeout: 2000 }) } catch { /* best effort */ }
+      await delay(300)
       post = capturePane(session, host)
       if (post == null || detectPaneState(post) !== 'typing') break
     }

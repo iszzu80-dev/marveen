@@ -28,6 +28,7 @@ import { join } from 'node:path'
 import type { ChannelProviderType } from '../channel-provider.js'
 import { channelStateDir } from '../channel-provider.js'
 import { logger } from '../logger.js'
+import { delay } from './delay.js'
 
 const STATE_ENV_VAR: Record<ChannelProviderType, string> = {
   telegram: 'TELEGRAM_STATE_DIR',
@@ -96,10 +97,10 @@ export interface ReapResult {
  * a short grace period, SIGKILL any survivor. Safe to call multiple times
  * (process.kill on a missing pid is caught).
  */
-export function reapChannelOrphans(
+export async function reapChannelOrphans(
   provider: ChannelProviderType,
   agentDirPath: string,
-): ReapResult {
+): Promise<ReapResult> {
   const chanDir = channelStateDir(provider, agentDirPath)
   const envVar = STATE_ENV_VAR[provider]
 
@@ -121,7 +122,7 @@ export function reapChannelOrphans(
     try { process.kill(pid, 'SIGTERM') } catch { /* already gone */ }
   }
   if (all.length > 0) {
-    try { execFileSync('/bin/sleep', ['0.3'], { timeout: 2000 }) } catch { /* ignore */ }
+    await delay(300)
     for (const pid of all) {
       try { process.kill(pid, 0) /* probe */; process.kill(pid, 'SIGKILL') } catch { /* gone */ }
     }
@@ -262,7 +263,7 @@ function killBunChildren(claudePid: number): void {
  * tmuxPath defaults to a bare `tmux` (resolved on PATH); callers that already
  * hold an absolute path should pass it.
  */
-export function reapDetachedChannelClaudes(opts: { channelNeedle?: string; tmuxPath?: string } = {}): number[] {
+export async function reapDetachedChannelClaudes(opts: { channelNeedle?: string; tmuxPath?: string } = {}): Promise<number[]> {
   const tmuxPath = opts.tmuxPath ?? 'tmux'
   const procs = snapshotProcs()
   const live = livePanePids(tmuxPath)
@@ -278,7 +279,7 @@ export function reapDetachedChannelClaudes(opts: { channelNeedle?: string; tmuxP
     try { process.kill(pid, 'SIGTERM') } catch { /* gone */ }
   }
   if (orphans.length > 0) {
-    try { execFileSync('/bin/sleep', ['0.3'], { timeout: 2000 }) } catch { /* ignore */ }
+    await delay(300)
     for (const pid of orphans) {
       try { process.kill(pid, 0); process.kill(pid, 'SIGKILL') } catch { /* gone */ }
     }
