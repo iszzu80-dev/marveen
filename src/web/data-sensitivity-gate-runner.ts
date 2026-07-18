@@ -19,6 +19,7 @@ import {
   type GateConfig,
   type GateResult,
 } from '../data-sensitivity-gate.js';
+import { saveSensitivityAuditEntry } from '../db.js';
 
 const CONFIG_PATH = join(process.cwd(), 'store', 'data-sensitivity-gate.json');
 
@@ -100,12 +101,33 @@ export function checkDispatchGate(input: GateCheckInput): {
     message_id: input.messageId ?? null,
     content_hash: contentHash,
     mode: config.mode,
+    reason: result.reason,
   };
 
   const shouldBlock = config.mode === 'enforce' && result.verdict === 'block';
 
+  // Persist every non-allow verdict to the audit log so the false-positive
+  // sample is durable across restarts (card 6bf535bf FP-sample phase).
+  // Only would_block/block are persisted — 'allow' verdicts are volume-heavy
+  // and would dilute the sample. The 48h observation window starts from the
+  // first persisted row, not from gate activation time.
   if (result.verdict !== 'allow') {
     logger.warn(auditEntry, `data-sensitivity-gate: ${result.verdict} — ${result.reason}`);
+    try {
+      saveSensitivityAuditEntry({
+        content_hash: contentHash,
+        verdict: result.verdict,
+        category: result.category,
+        matched_patterns: result.matchedPatterns as string[],
+        target_agent: input.targetAgent,
+        target_model: targetModel,
+        message_id: input.messageId ?? null,
+        mode: config.mode,
+        reason: result.reason,
+      });
+    } catch (err) {
+      logger.warn({ err }, 'data-sensitivity-gate: failed to persist audit entry');
+    }
   }
 
   return { result, auditEntry, shouldBlock };

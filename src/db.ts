@@ -655,6 +655,30 @@ export function initDatabase(dbPathOverride?: string): void {
   // Migration: add agent column to installs that created the table before this column existed.
   try { db.exec(`ALTER TABLE store_file_audit ADD COLUMN agent TEXT`) } catch { /* column already exists */ }
 
+  // --- Data-sensitivity audit log (FP sample persistence) ---
+  // Stores every would_block/block verdict from the dispatch gate so the
+  // false-positive sample is durable across restarts and the 48h observation
+  // window can start from when this table lands, not from gate activation.
+  // content_hash = SHA-256 of the message body (irreversible, for correlation).
+  // Raw content is NEVER stored.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sensitivity_audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      content_hash TEXT NOT NULL,
+      verdict TEXT NOT NULL CHECK(verdict IN ('allow','would_block','block')),
+      category TEXT NOT NULL CHECK(category IN ('public','internal','restricted')),
+      matched_patterns TEXT NOT NULL DEFAULT '[]',
+      target_agent TEXT NOT NULL,
+      target_model TEXT NOT NULL,
+      message_id INTEGER,
+      mode TEXT NOT NULL CHECK(mode IN ('off','observe-only','enforce')),
+      reason TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_sensitivity_audit_ts ON sensitivity_audit_log(created_at)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_sensitivity_audit_verdict ON sensitivity_audit_log(verdict, created_at)`)
+
   // LOCAL-FORK: costops seam (keep on rebase). All CostOps tables/columns/
   // indexes live in src/costops/schema.ts's initCostOpsSchema(), not here --
   // see docs/fork-upstream-policy.md §2a. This one call is the entire
@@ -2431,7 +2455,63 @@ export function queryAuditLog(opts: {
   return parts.slice(0, limit)
 }
 
-// Prune all three audit tables to AUDIT_LOG_RETENTION_DAYS. Called from the
+export interface SensitivityAuditEntry {
+  content_hash: string
+  verdict: string
+  category: string
+  matched_patterns: string[]
+  target_agent: string
+  target_model: string
+  message_id?: number | null
+  mode: string
+  reason: string
+}
+
+export function saveSensitivityAuditEntry(entry: SensitivityAuditEntry): void {
+  db.prepare(`
+    INSERT INTO sensitivity_audit_log
+      (content_hash, verdict, category, matched_patterns, target_agent, target_model, message_id, mode, reason, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    entry.content_hash,
+    entry.verdict,
+    entry.category,
+    JSON.stringify(entry.matched_patterns),
+    entry.target_agent,
+    entry.target_model,
+    entry.message_id ?? null,
+    entry.mode,
+    entry.reason,
+    Math.floor(Date.now() / 1000),
+  )
+}
+
+export function getSensitivityAuditLog(opts: {
+  since?: number        // unix seconds
+  verdict?: string
+  limit?: number
+}): SensitivityAuditEntry[] {
+  const { since, verdict, limit = 100 } = opts
+  let sql = 'SELECT * FROM sensitivity_audit_log WHERE 1=1'
+  const params: (number | string)[] = []
+  if (since != null) {
+    sql += ' AND created_at >= ?'
+    params.push(since)
+  }
+  if (verdict != null) {
+    sql += ' AND verdict = ?'
+    params.push(verdict)
+  }
+  sql += ' ORDER BY created_at DESC LIMIT ?'
+  params.push(limit)
+  const rows = db.prepare(sql).all(...params) as any[]
+  return rows.map((r) => ({
+    ...r,
+    matched_patterns: JSON.parse(r.matched_patterns || '[]'),
+  }))
+}
+
+// Prune all four audit tables to AUDIT_LOG_RETENTION_DAYS. Called from the
 // daily decay sweep so old entries do not accumulate indefinitely.
 export function pruneAuditLogs(): void {
   const retentionDays = Number(getEffectiveSettingValue('AUDIT_LOG_RETENTION_DAYS'))
@@ -2439,6 +2519,7 @@ export function pruneAuditLogs(): void {
   db.prepare('DELETE FROM config_change_log WHERE created_at < ?').run(cutoff)
   db.prepare('DELETE FROM idea_status_log WHERE created_at < ?').run(cutoff)
   db.prepare('DELETE FROM store_file_audit WHERE created_at < ?').run(cutoff)
+  db.prepare('DELETE FROM sensitivity_audit_log WHERE created_at < ?').run(cutoff)
 }
 
 // Prune token_usage rows older than TOKEN_USAGE_RETENTION_DAYS. The table is the
