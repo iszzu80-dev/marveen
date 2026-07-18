@@ -515,7 +515,7 @@ async function runWorkerAttempt(message: string, timeoutMs: number): Promise<Att
   for (const p of [outPath, donePath]) { try { rmSync(p, { force: true }) } catch { /* none */ } }
 
   clearWorkerContext()
-  sendPromptToSession(WORKER_SESSION, buildWorkerPrompt(message, outPath, donePath))
+  await sendPromptToSession(WORKER_SESSION, buildWorkerPrompt(message, outPath, donePath))
 
   const start = Date.now()
   try {

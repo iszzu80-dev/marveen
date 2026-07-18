@@ -261,7 +261,7 @@ export async function runMessageRouterTick(): Promise<void> {
           mainAgentWakeupFiredThisTick = true
           lastMainAgentWakeupMs = now
           try {
-            sendPromptToSession(MAIN_CHANNELS_SESSION, '[inbox-wakeup: pending inter-agent messages]', null, { waitForIdle: false })
+            await sendPromptToSession(MAIN_CHANNELS_SESSION, '[inbox-wakeup: pending inter-agent messages]', null, { waitForIdle: false })
             logger.info({ msgId: msg.id }, 'message-router: main-agent wakeup fired')
           } catch (err) {
             logger.warn({ err }, 'message-router: main-agent wakeup injection failed')
@@ -411,7 +411,7 @@ export async function runMessageRouterTick(): Promise<void> {
 
         // Inline preamble so a fresh session (post hard-restart) doesn't miss
         // the context that explains the tag semantics.
-        sendPromptToSession(session, prefix + wrapped, host)
+        await sendPromptToSession(session, prefix + wrapped, host)
         if (!markMessageDelivered(msg.id)) {
           logger.warn({ id: msg.id }, 'markMessageDelivered affected 0 rows (deleted concurrently?)')
         }

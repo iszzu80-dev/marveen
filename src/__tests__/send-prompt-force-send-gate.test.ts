@@ -18,17 +18,17 @@ const SCHEDULE_RUNNER = readFileSync(join(__dirname, '../web/schedule-runner.ts'
 
 describe('sendPromptToSession waitForIdle gate', () => {
   it('sendPromptToSession accepts a waitForIdle option', () => {
-    const sigIdx = AGENT_PROCESS.indexOf('export function sendPromptToSession(')
+    const sigIdx = AGENT_PROCESS.indexOf('export async function sendPromptToSession(')
     expect(sigIdx).toBeGreaterThan(0)
-    const sig = AGENT_PROCESS.slice(sigIdx, sigIdx + 260)
+    const sig = AGENT_PROCESS.slice(sigIdx, sigIdx + 280)
     expect(sig).toMatch(/opts:\s*\{\s*waitForIdle\?:\s*boolean\s*\}/)
   })
 
   it('the gate defaults ON (waitForIdle !== false) so all other callers keep it', () => {
     // The default must be ON: only an explicit waitForIdle:false opts out.
     expect(AGENT_PROCESS).toMatch(/const waitForIdle = opts\.waitForIdle !== false/)
-    // And the wait is guarded by that flag, not called unconditionally.
-    expect(AGENT_PROCESS).toMatch(/if \(waitForIdle && !waitForPaneIdle\(session, host\)\)/)
+    // And the wait is guarded by that flag, now awaited (async conversion).
+    expect(AGENT_PROCESS).toMatch(/if \(waitForIdle && !\(await waitForPaneIdle\(session, host\)\)\)/)
     // No unconditional `if (!waitForPaneIdle(` remains.
     expect(AGENT_PROCESS).not.toMatch(/^\s*if \(!waitForPaneIdle\(session, host\)\) \{/m)
   })

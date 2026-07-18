@@ -44,6 +44,7 @@ import { getSecret } from './vault.js'
 import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller-reap.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { notifyChannel } from '../notify.js'
+import { delay } from './delay.js'
 
 const TMUX = resolveFromPath('tmux')
 const CLAUDE = resolveFromPath('claude')
@@ -1026,14 +1027,14 @@ export function restartAgentProcess(name: string, opts: { fresh?: boolean } = {}
 // caller writing a prompt has a clear input field.
 const SURVEY_MODAL_RX = /How is Claude doing this session/
 
-function dismissSurveyModalIfPresent(session: string, host: string | null = null): void {
+async function dismissSurveyModalIfPresent(session: string, host: string | null = null): Promise<void> {
   try {
     const pane = captureTmux(host, ['capture-pane', '-t', session, '-p'])
     if (!SURVEY_MODAL_RX.test(pane)) return
     runTmux(host, ['send-keys', '-t', session, '0'], { timeout: 5000 })
     // Modal close is one frame; settle window so the next send-keys lands in
     // the prompt input, not the now-stale modal handler.
-    execFileSync('/bin/sleep', ['0.3'], { timeout: 2000 })
+    await delay(300)
     logger.info({ session }, 'Dismissed Claude Code session-rating modal before sending prompt')
   } catch (err) {
     logger.warn({ err, session }, 'Failed to probe/dismiss session-rating modal')
@@ -1048,16 +1049,16 @@ function dismissSurveyModalIfPresent(session: string, host: string | null = null
 // pick option 1 (Resume from summary, recommended) and Enter to confirm.
 const RESUME_SUMMARY_MODAL_RX = /Resume from summary/
 
-export function dismissResumeSummaryModalIfPresent(session: string, host: string | null = null): void {
+export async function dismissResumeSummaryModalIfPresent(session: string, host: string | null = null): Promise<void> {
   try {
     const pane = captureTmux(host, ['capture-pane', '-t', session, '-p'])
     if (!RESUME_SUMMARY_MODAL_RX.test(pane)) return
     runTmux(host, ['send-keys', '-t', session, '1'], { timeout: 5000 })
-    execFileSync('/bin/sleep', ['0.1'], { timeout: 2000 })
+    await delay(100)
     runTmux(host, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
     // /compact starts immediately and can run for minutes; we only need to
     // unblock the modal so detectPaneState can transition off 'unknown'.
-    execFileSync('/bin/sleep', ['0.3'], { timeout: 2000 })
+    await delay(300)
     logger.info({ session }, 'Dismissed Claude Code resume-from-summary modal before sending prompt')
   } catch (err) {
     logger.warn({ err, session }, 'Failed to probe/dismiss resume-from-summary modal')
@@ -1087,22 +1088,26 @@ const IDENTITY_SEND_DELAY_MS = 5000
 // errors are swallowed/logged so a missed setup never tears down the caller.
 export function scheduleIdentitySetup(session: string, displayName: string, host: string | null = null): void {
   setTimeout(() => {
-    try {
-      dismissSurveyModalIfPresent(session, host)
-      dismissResumeSummaryModalIfPresent(session, host)
-    } catch (err) {
-      logger.warn({ err, session }, 'Post-restart modal dismiss failed')
-    }
-    setTimeout(() => {
+    (async () => {
       try {
-        for (const cmd of identitySlashCommands(displayName)) {
-          runTmux(host, ['send-keys', '-t', session, cmd, 'Enter'], { timeout: 5000 })
-          execFileSync('/bin/sleep', ['1'], { timeout: 2000 })
-        }
-        logger.info({ session, displayName }, 'Set session /name')
+        await dismissSurveyModalIfPresent(session, host)
+        await dismissResumeSummaryModalIfPresent(session, host)
       } catch (err) {
-        logger.warn({ err, session, displayName }, 'Failed to set session /name')
+        logger.warn({ err, session }, 'Post-restart modal dismiss failed')
       }
+    })()
+    setTimeout(() => {
+      (async () => {
+        try {
+          for (const cmd of identitySlashCommands(displayName)) {
+            runTmux(host, ['send-keys', '-t', session, cmd, 'Enter'], { timeout: 5000 })
+            await delay(1000)
+          }
+          logger.info({ session, displayName }, 'Set session /name')
+        } catch (err) {
+          logger.warn({ err, session, displayName }, 'Failed to set session /name')
+        }
+      })()
     }, IDENTITY_SEND_DELAY_MS)
   }, MODAL_DISMISS_DELAY_MS)
 }
@@ -1158,29 +1163,29 @@ const PANE_IDLE_POLL_S = (PANE_IDLE_POLL_MS / 1000).toFixed(3)
 // never re-inlined here. A capture failure is treated as "not yet idle" and we
 // keep polling within the budget (a transient tmux hiccup should not be read as
 // idle and let us blast a prompt into a busy pane).
-export function waitForPaneIdle(
+export async function waitForPaneIdle(
   session: string,
   host: string | null = null,
   timeoutMs: number = PANE_IDLE_WAIT_TIMEOUT_MS,
-): boolean {
+): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
   for (;;) {
     const pane = capturePane(session, host)
     if (pane != null && paneLooksIdle(pane)) return true
     if (Date.now() >= deadline) return false
-    try { execFileSync('/bin/sleep', [PANE_IDLE_POLL_S], { timeout: 2000 }) } catch { /* best effort */ }
+    await delay(PANE_IDLE_POLL_MS)
   }
 }
 
 // Buffer-clear (Ctrl-U) used pre-flight when shouldClearTruncatedPreamble
 // flags a stale preamble. Sent as a single key name (no `-l` literal
 // flag) so tmux interprets it as the control sequence.
-export function clearInputBuffer(session: string, host: string | null = null): void {
+export async function clearInputBuffer(session: string, host: string | null = null): Promise<void> {
   try {
     runTmux(host, ['send-keys', '-t', session, 'C-u'], { timeout: 5000 })
     // Settle briefly so the next send-keys lands in the freshly cleared
     // buffer rather than racing the Ctrl-U.
-    execFileSync('/bin/sleep', ['0.1'], { timeout: 2000 })
+    await delay(100)
   } catch (err) {
     logger.warn({ err, session }, 'Failed to clear pane input buffer before send')
   }
@@ -1206,7 +1211,7 @@ const PLACEHOLDER_DISCARD_SETTLE_S = '0.45'
 // detectsPastePlaceholder guarantees at the call site. We re-check before each
 // press and stop the instant the placeholder is gone, so we never press Ctrl-C
 // into an already-empty box. Returns true if the placeholder was cleared.
-function discardPlaceholderBuffer(session: string, host: string | null = null): boolean {
+async function discardPlaceholderBuffer(session: string, host: string | null = null): Promise<boolean> {
   for (let i = 0; i < PLACEHOLDER_DISCARD_MAX; i++) {
     const pane = capturePane(session, host)
     // Stop pressing once the stub is gone -- a further Ctrl-C on an empty box
@@ -1218,7 +1223,7 @@ function discardPlaceholderBuffer(session: string, host: string | null = null): 
       logger.warn({ err, session }, 'discardPlaceholderBuffer: Ctrl-C send failed')
       return false
     }
-    try { execFileSync('/bin/sleep', [PLACEHOLDER_DISCARD_SETTLE_S], { timeout: 2000 }) } catch { /* best effort */ }
+    await delay(450)
   }
   const finalPane = capturePane(session, host)
   return finalPane != null && !detectsPastePlaceholder(finalPane)
@@ -1243,14 +1248,14 @@ function discardPlaceholderBuffer(session: string, host: string | null = null): 
 // still reports stuck, send up to SUBMIT_RETRY_MAX_ATTEMPTS extra
 // Enters. The retry budget bounds the loop so a pathologically stuck
 // pane gives up rather than spinning.
-export function sendPromptToSession(
+export async function sendPromptToSession(
   session: string,
   text: string,
   host: string | null = null,
   opts: { waitForIdle?: boolean } = {},
-): void {
-  dismissSurveyModalIfPresent(session, host)
-  dismissResumeSummaryModalIfPresent(session, host)
+): Promise<void> {
+  await dismissSurveyModalIfPresent(session, host)
+  await dismissResumeSummaryModalIfPresent(session, host)
 
   // Pre-flight wait-until-idle (root-cause gate). Placed here -- inside
   // sendPromptToSession, AFTER the modal dismissals (a modal keeps the pane
@@ -1269,7 +1274,7 @@ export function sendPromptToSession(
   // Eating the 12s idle wait here would defeat that contract -- the whole point
   // of forceSend is to inject regardless and let Claude Code queue it.
   const waitForIdle = opts.waitForIdle !== false
-  if (waitForIdle && !waitForPaneIdle(session, host)) {
+  if (waitForIdle && !(await waitForPaneIdle(session, host))) {
     logger.warn({ session }, 'sendPromptToSession: pane still busy after wait-until-idle budget; sending best-effort')
   }
 
@@ -1281,7 +1286,7 @@ export function sendPromptToSession(
     const preCapture = captureTmux(host, ['capture-pane', '-t', session, '-p'])
     if (shouldClearTruncatedPreamble(preCapture)) {
       logger.info({ session }, 'Cleared stale preamble from input buffer before sending prompt')
-      clearInputBuffer(session, host)
+      await clearInputBuffer(session, host)
     }
   } catch (err) {
     logger.warn({ err, session }, 'Pre-send capture-pane failed; skipping truncated-preamble check')
@@ -1301,7 +1306,7 @@ export function sendPromptToSession(
   // so a long run of dashes doesn't inflate one chunk past the paste-detector
   // threshold; if the cap is reached, prepend a space to the chunk instead.
   const MAX_SLIDE = 8
-  const sendChunks = (): void => {
+  const sendChunks = async (): Promise<void> => {
     let i = 0
     while (i < oneLine.length) {
       let end = Math.min(i + CHUNK, oneLine.length)
@@ -1313,11 +1318,11 @@ export function sendPromptToSession(
       if (chunk.startsWith('-')) chunk = ' ' + chunk
       runTmux(host, ['send-keys', '-t', session, '-l', chunk], { timeout: 5000 })
       i = end
-      if (i < oneLine.length) execFileSync('/bin/sleep', ['0.03'], { timeout: 1000 })
+      if (i < oneLine.length) await delay(30)
     }
     runTmux(host, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
   }
-  sendChunks()
+  await sendChunks()
 
   // Post-send retry loop. The payload hint is the first chunk of oneLine
   // (truncated to a safe length) so the verbatim-stuck path has something
@@ -1339,7 +1344,7 @@ export function sendPromptToSession(
   //     resend that itself parks is re-cleared and retried until it lands.
   const payloadHint = oneLine.slice(0, Math.min(oneLine.length, 96))
   for (let attempt = 0; ; attempt++) {
-    try { execFileSync('/bin/sleep', [SUBMIT_RETRY_POLL_MS], { timeout: 2000 }) } catch { /* best effort */ }
+    await delay(300)
     const pane = capturePane(session, host)
     const action = decideSubmitFollowup(pane, payloadHint, attempt, SUBMIT_RETRY_MAX_ATTEMPTS)
     if (action === 'done') break
@@ -1353,11 +1358,11 @@ export function sendPromptToSession(
       // chunk stream. The loop re-samples on the next iteration and will keep
       // recovering (or give up at the budget) if the resend itself parks.
       logger.info({ session, attempt }, 'sendPromptToSession: paste placeholder detected; clearing and re-sending')
-      if (!discardPlaceholderBuffer(session, host)) {
+      if (!(await discardPlaceholderBuffer(session, host))) {
         logger.warn({ session, attempt }, 'sendPromptToSession: failed to clear paste placeholder before resend')
       }
       try {
-        sendChunks()
+        await sendChunks()
       } catch (err) {
         logger.warn({ err, session, attempt }, 'Clear-and-resend chunk replay failed')
         break

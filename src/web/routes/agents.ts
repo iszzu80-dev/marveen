@@ -4,6 +4,7 @@ import { homedir, platform, tmpdir } from 'node:os'
 import { execSync } from 'node:child_process'
 import { logger } from '../../logger.js'
 import { MAIN_AGENT_ID, BOT_NAME, PROJECT_ROOT } from '../../config.js'
+import { delay } from '../delay.js'
 import { createAgentMessage, listPendingChannelRequests, updateChannelRequestStatus, getDb, claimPendingForAgent } from '../../db.js'
 import { classifyAgentMessage, wrapAgentMessageForDelivery } from '../agent-message-wrap.js'
 import { atomicWriteFileSync } from '../atomic-write.js'
@@ -1467,11 +1468,11 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const session = agentSessionName(name)
     const host = readAgentRemoteHost(name)
     try {
-      sendPromptToSession(session, '/login', host)
+      await sendPromptToSession(session, '/login', host)
       // Wait for Claude Code to render the auth URL (typically 3-6s)
       let authUrl: string | null = null
       for (let i = 0; i < 12; i++) {
-        execSync('sleep 1', { timeout: 3000 })
+        await delay(1000)
         const pane = capturePane(session, host)
         if (!pane) continue
         const urlMatch = pane.match(/https:\/\/console\.anthropic\.com\/[^\s"']+/)
