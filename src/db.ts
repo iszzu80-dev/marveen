@@ -5,6 +5,7 @@ import { STORE_DIR, DB_FILENAME, ALLOWED_CHAT_ID, OLLAMA_URL, APP_TZ } from './c
 import { getEffectiveSettingValue } from './settings-store.js'
 import { logger } from './logger.js'
 import { TOOL_TIMEOUTS } from './tool-timeouts.js'
+import { initCostOpsSchema } from './costops/schema.js'
 
 let db: Database.Database
 
@@ -700,6 +701,30 @@ export function initDatabase(dbPathOverride?: string): void {
   // Migration: add agent column to installs that created the table before this column existed.
   try { db.exec(`ALTER TABLE store_file_audit ADD COLUMN agent TEXT`) } catch { /* column already exists */ }
 
+  // --- Data-sensitivity audit log (card 6bf535bf) ---
+  // Gate observe/enforce events persisted to SQLite so a daily false-positive
+  // sample is durable across restarts and the 48h observation window can start
+  // from when this table lands, not from gate activation.
+  // content_hash = SHA-256 of the message body (irreversible, for correlation).
+  // Raw content is NEVER stored.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sensitivity_audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      content_hash TEXT NOT NULL,
+      verdict TEXT NOT NULL CHECK(verdict IN ('allow','would_block','block')),
+      category TEXT NOT NULL CHECK(category IN ('public','internal','restricted')),
+      matched_patterns TEXT NOT NULL DEFAULT '[]',
+      target_agent TEXT NOT NULL,
+      target_model TEXT NOT NULL,
+      message_id INTEGER,
+      mode TEXT NOT NULL CHECK(mode IN ('off','observe-only','enforce')),
+      reason TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_sensitivity_audit_ts ON sensitivity_audit_log(created_at)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_sensitivity_audit_verdict ON sensitivity_audit_log(verdict, created_at)`)
+
   // --- CostOps (local cost ledger) ---
   // Read-mostly, FOCUS-inspired. cost_sources = provider/subscription origin,
   // cost_line_items = individual charge rows (estimate or provider-sourced).
@@ -747,6 +772,12 @@ export function initDatabase(dbPathOverride?: string): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cost_line_items_period ON cost_line_items(charge_period_start, charge_period_end)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cost_line_items_source ON cost_line_items(source_id)`)
+
+  // LOCAL-FORK: costops seam (keep on rebase). All ADDITIONAL CostOps tables
+  // (forecast, fx, alerts, period-close, budgets, optimization, invoice) live
+  // in src/costops/schema.ts. The base tables (cost_sources, cost_line_items)
+  // are in the upstream now — initCostOpsSchema() adds the extended schema on top.
+  initCostOpsSchema(db)
 
   // --- Vault SSH Keys (shared pool) ---
   db.exec(`
@@ -2932,3 +2963,35 @@ export function expireTimedOutApprovals(): number {
   `).run(now, now).changes
 }
 
+// --- Data-sensitivity audit log persistence (card 6bf535bf) ---
+
+export interface SensitivityAuditEntry {
+  content_hash: string
+  verdict: string
+  category: string
+  matched_patterns: string[]
+  target_agent: string
+  target_model: string
+  message_id?: number | null
+  mode: string
+  reason: string
+}
+
+export function saveSensitivityAuditEntry(entry: SensitivityAuditEntry): void {
+  db.prepare(`
+    INSERT INTO sensitivity_audit_log
+      (content_hash, verdict, category, matched_patterns, target_agent, target_model, message_id, mode, reason, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    entry.content_hash,
+    entry.verdict,
+    entry.category,
+    JSON.stringify(entry.matched_patterns),
+    entry.target_agent,
+    entry.target_model,
+    entry.message_id ?? null,
+    entry.mode,
+    entry.reason,
+    Math.floor(Date.now() / 1000),
+  )
+}

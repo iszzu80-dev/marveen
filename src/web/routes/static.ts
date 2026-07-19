@@ -126,6 +126,25 @@ export async function tryHandleStatic(ctx: RouteContext, webDir: string): Promis
     return true
   }
 
+  if (path.startsWith('/costops/')) {
+    // CostOps Command Center module (UI-1, docs/costops/ui-0-audit-and-plan.md file plan).
+    // Allowlist by exact filename (same no-path-traversal shape as /lang/ above), not a
+    // startsWith/existsSync directory serve -- this is a small, fixed set of static assets, not
+    // user-uploaded content like /avatars/.
+    const costopsFile = path.replace('/costops/', '')
+    const COSTOPS_FILES = new Set([
+      'costops-state.js', 'costops-api.js', 'costops-charts.js',
+      'costops-shell.js', 'costops-overview.js', 'costops-analysis.js',
+      'costops-drawer.js', 'costops-close.js', 'costops.css',
+    ])
+    if (COSTOPS_FILES.has(costopsFile)) {
+      serveFile(req, res, join(webDir, 'costops', costopsFile))
+      return true
+    }
+    res.writeHead(404); res.end()
+    return true
+  }
+
   if (path.startsWith('/avatars/')) {
     const avatarFile = path.replace('/avatars/', '')
     const avatarPath = join(webDir, 'avatars', avatarFile)

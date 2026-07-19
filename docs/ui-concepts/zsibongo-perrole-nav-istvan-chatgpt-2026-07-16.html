@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zsibongó – szerepspecifikus mobil navigáció</title>
+<style>
+:root{--bg:#f6f7f4;--card:#fff;--text:#1f2a2a;--muted:#687572;--primary:#126a70;--soft:#e8f3f1;--accent:#d6831f;--border:#d9e1de;--shadow:0 10px 28px rgba(24,55,52,.08)}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.55}.page{max-width:1120px;margin:auto;padding:28px 18px 56px}.hero{background:linear-gradient(135deg,#105f65,#1b7a72);color:#fff;padding:38px;border-radius:24px;box-shadow:var(--shadow);margin-bottom:24px}.hero h1{font-size:clamp(2rem,5vw,3.4rem);line-height:1.1;margin:0 0 12px}.hero p{margin:0;max-width:800px;font-size:1.07rem;opacity:.94}.intro{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:22px 24px;margin-bottom:22px}.intro strong{color:var(--primary)}.grid{display:grid;gap:22px}.card{background:var(--card);border:1px solid var(--border);border-radius:18px;box-shadow:var(--shadow);overflow:hidden}.head{display:flex;gap:15px;align-items:center;padding:22px 26px;border-bottom:1px solid var(--border)}.badge{width:50px;height:50px;border-radius:15px;background:var(--soft);display:grid;place-items:center;font-size:1.55rem}.head h2{margin:0 0 3px;font-size:1.5rem}.sub{color:var(--muted)}.body{padding:24px 26px 28px}.label{font-size:.78rem;letter-spacing:.07em;text-transform:uppercase;color:var(--primary);font-weight:800;margin-bottom:10px}.nav{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:9px;margin-bottom:24px}.navitem{background:#f2f7f5;border:1px solid var(--border);border-radius:13px;padding:11px 8px;min-height:84px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:4px}.navitem:first-child{background:#e3f1ef;border-color:#9bc6c1}.icon{font-size:1.3rem}.name{font-size:.85rem;font-weight:750}.order{font-size:.72rem;color:var(--muted)}.action{background:#fff6e8;border-left:5px solid var(--accent);border-radius:11px;padding:17px 19px;margin:4px 0 22px}.action strong{display:block;color:#85500f;margin-bottom:4px}.cols{display:grid;grid-template-columns:1fr 1fr;gap:18px}.mini{border:1px solid var(--border);border-radius:12px;padding:17px 19px;background:#fcfdfc}.mini h3{font-size:1rem;margin:0 0 9px}ul{margin:8px 0 0;padding-left:20px}li+li{margin-top:5px}.reason{margin-top:20px;background:#f1f4f3;border-radius:11px;padding:16px 18px;color:#41504d}.comparison{margin-top:26px;background:var(--card);border:1px solid var(--border);border-radius:18px;box-shadow:var(--shadow);overflow:hidden}.comparison h2{margin:0;padding:22px 26px 8px}.comparison>p{margin:0;padding:0 26px 20px;color:var(--muted)}.tablewrap{overflow-x:auto;border-top:1px solid var(--border)}table{width:100%;border-collapse:collapse;min-width:760px}th,td{padding:14px 17px;text-align:left;border-bottom:1px solid var(--border);vertical-align:top}th{background:#edf4f2;font-size:.85rem;color:#3b524f}tr:last-child td{border-bottom:0}.closing{padding:22px 26px 28px}.note{margin-top:20px;background:#f2faf8;border:1px dashed #8fb9b3;border-radius:11px;padding:16px 18px;color:#31514c}footer{text-align:center;color:var(--muted);font-size:.85rem;margin-top:26px}@media(max-width:820px){.hero{padding:28px 22px}.cols{grid-template-columns:1fr}.nav{grid-template-columns:repeat(3,1fr)}}@media(max-width:520px){.page{padding:16px 10px 38px}.hero{border-radius:18px}.body,.head{padding-left:19px;padding-right:19px}.nav{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<main class="page">
+<section class="hero"><h1>Szerepspecifikus mobil navigáció</h1><p>A Zsibongó négy eltérő mobil navigációs sablont kap: fenntartó, gondozó, egyéb dolgozó és szülő számára. Minden szerep azt érje el egy-két koppintással, amit a napi munkájában a leggyakrabban használ.</p></section>
+<section class="intro"><strong>Alapelv:</strong> ne egy közös bottom nav készüljön elrejtett menüpontokkal. Közös komponensrendszer kell, de szerepenként eltérő prioritással, nyelvvel és elsődleges művelettel.</section>
+<section class="grid">
+
+<article class="card">
+<header class="head"><div class="badge">🏢</div><div><h2>1. Fenntartó / üzemeltető</h2><div class="sub">Felügyelet, döntés, adminisztráció és eltéréskezelés</div></div></header>
+<div class="body">
+<div class="label">Bottom nav – prioritási sorrend</div>
+<div class="nav">
+<div class="navitem"><div class="icon">🏠</div><div class="name">Áttekintés</div><div class="order">1.</div></div>
+<div class="navitem"><div class="icon">🏫</div><div class="name">Működés</div><div class="order">2.</div></div>
+<div class="navitem"><div class="icon">🛡️</div><div class="name">Megfelelés</div><div class="order">3.</div></div>
+<div class="navitem"><div class="icon">💳</div><div class="name">Pénzügy</div><div class="order">4.</div></div>
+<div class="navitem"><div class="icon">•••</div><div class="name">Továbbiak</div><div class="order">5.</div></div>
+</div>
+<div class="action"><strong>Elsődleges egykoppintásos művelet: „Mai eltérések”</strong>Közvetlenül megnyitja a kritikus vagy döntést igénylő tételeket: kapacitásprobléma, hiányzó dolgozó, KENYSZI-eltérés, lejárt dokumentum és jóváhagyás.</div>
+<div class="cols"><div class="mini"><h3>Mit tartalmazzon?</h3><ul><li><b>Áttekintés:</b> telephelyek, csoportok, napi állapot, nyitott kockázatok.</li><li><b>Működés:</b> gyermekek, munkatársak, beosztás, helyettesítés.</li><li><b>Megfelelés:</b> kapacitásmátrix, KENYSZI/OJR, normatíva, dokumentumlejáratok.</li><li><b>Pénzügy:</b> díjak, befizetések, hátralékok, havi összesítők.</li><li><b>Továbbiak:</b> helyettes-hálózat, riportok, szervezet, beállítások.</li></ul></div><div class="mini"><h3>Mi ne legyen a fő navban?</h3><ul><li>külön Gyermekek és Munkatársak menüpont;</li><li>onboarding és adatimport;</li><li>telephely-beállítások;</li><li>étlap és napi csoportnapló;</li><li>gyógyszeradás részletes műveletei;</li><li>előfizetés és jogosultságkezelés;</li><li>e-képviselő külön menüpontként.</li></ul></div></div>
+<div class="reason">A fenntartó nem folyamatosan rögzít adatot, hanem felügyel és kivételeket kezel. A fő navigáció ezért szervezeti állapotokra épül, nem gyermekenkénti napi műveletekre.</div>
+</div></article>
+
+<article class="card">
+<header class="head"><div class="badge">🧑‍🍼</div><div><h2>2. Gondozó / kisgyermeknevelő</h2><div class="sub">Gyors napi operáció, kevés gépelés, egykoppintásos rögzítés</div></div></header>
+<div class="body">
+<div class="label">Bottom nav – prioritási sorrend</div>
+<div class="nav">
+<div class="navitem"><div class="icon">☀️</div><div class="name">Ma</div><div class="order">1.</div></div>
+<div class="navitem"><div class="icon">👧</div><div class="name">Csoportom</div><div class="order">2.</div></div>
+<div class="navitem"><div class="icon">💬</div><div class="name">Üzenetek</div><div class="order">3.</div></div>
+<div class="navitem"><div class="icon">📋</div><div class="name">Gyermekek</div><div class="order">4.</div></div>
+<div class="navitem"><div class="icon">•••</div><div class="name">Továbbiak</div><div class="order">5.</div></div>
+</div>
+<div class="action"><strong>Elsődleges egykoppintásos művelet: „＋ Rögzítés”</strong>Gyorsmenü: jelenlét, étkezés, alvás, napi jegyzet, gyógyszer és jegyzőkönyv. A „Ma” képernyő fő akciója napszak szerint változhat.</div>
+<div class="cols"><div class="mini"><h3>Mit tartalmazzon?</h3><ul><li><b>Ma:</b> jelenlét, gyógyszer, elviteli változás, hiányzó napi adatok.</li><li><b>Csoportom:</b> a hozzárendelt csoport gyermekei és napi állapota.</li><li><b>Üzenetek:</b> szülői és vezetői kommunikáció.</li><li><b>Gyermekek:</b> profil, allergia, elvitel, szükséges dokumentáció.</li><li><b>Továbbiak:</b> beosztás, saját dokumentumok, jegyzőkönyvek.</li></ul></div><div class="mini"><h3>Mi ne legyen a fő navban?</h3><ul><li>pénzügy;</li><li>normatíva és fenntartói riportok;</li><li>teljes dolgozói adminisztráció;</li><li>telephelyek és szervezet;</li><li>helyettes-hálózat keresője;</li><li>onboarding;</li><li>külön Étkezés, Alvás és Gyógyszer főmenüpont.</li></ul></div></div>
+<div class="reason">A gondozó egész nap megszakítások között dolgozik. Nem menürendszerre, hanem gyors napi munkafelületre van szüksége, ahol a leggyakoribb műveletek minimális gépeléssel elérhetők.</div>
+</div></article>
+
+<article class="card">
+<header class="head"><div class="badge">🧩</div><div><h2>3. Egyéb dolgozó: helyettes vagy adminisztrátor</h2><div class="sub">Jogosultság- és megbízásvezérelt munkaterület</div></div></header>
+<div class="body">
+<div class="label">Bottom nav – prioritási sorrend</div>
+<div class="nav">
+<div class="navitem"><div class="icon">☀️</div><div class="name">Ma</div><div class="order">1.</div></div>
+<div class="navitem"><div class="icon">✅</div><div class="name">Feladataim</div><div class="order">2.</div></div>
+<div class="navitem"><div class="icon">👥</div><div class="name">Munkaterület</div><div class="order">3.</div></div>
+<div class="navitem"><div class="icon">💬</div><div class="name">Üzenetek</div><div class="order">4.</div></div>
+<div class="navitem"><div class="icon">•••</div><div class="name">Továbbiak</div><div class="order">5.</div></div>
+</div>
+<div class="action"><strong>Elsődleges egykoppintásos művelet</strong><b>Helyettesnél:</b> „Megérkeztem” vagy „Belépek a csoportba”. <b>Adminisztrátornál:</b> „Következő jóváhagyás”.</div>
+<div class="cols"><div class="mini"><h3>Mit tartalmazzon?</h3><ul><li><b>Ma:</b> mai beosztás, aktuális megbízás, saját teendők.</li><li><b>Feladataim:</b> kizárólag kiosztott műveletek és jóváhagyások.</li><li><b>Munkaterület:</b> helyettesnél csoport, adminnál adminisztratív ügyek.</li><li><b>Üzenetek:</b> vezető és engedélyezett kapcsolatok.</li><li><b>Továbbiak:</b> saját beosztás, dokumentumok, profil, segítség.</li></ul></div><div class="mini"><h3>Mi ne legyen a fő navban?</h3><ul><li>teljes gyermekállomány;</li><li>más csoportok;</li><li>nem releváns pénzügyi összesítők;</li><li>normatíva és fenntartói riportok;</li><li>szervezeti beállítások;</li><li>teljes dolgozói adatbázis;</li><li>jogosultságon kívüli modulok.</li></ul></div></div>
+<div class="reason">A helyettes és az adminisztrátor feladatköre túl eltérő egy közös modulmenühöz. A helyes UX egy dinamikus, jogosultságvezérelt munkaterület, amely csak az aktuális feladathoz szükséges adatokat mutatja.</div>
+</div></article>
+
+<article class="card">
+<header class="head"><div class="badge">👨‍👩‍👧</div><div><h2>4. Szülő</h2><div class="sub">Saját gyermek, teendők, kommunikáció és pénzügy</div></div></header>
+<div class="body">
+<div class="label">Bottom nav – prioritási sorrend</div>
+<div class="nav">
+<div class="navitem"><div class="icon">🏠</div><div class="name">Kezdőlap</div><div class="order">1.</div></div>
+<div class="navitem"><div class="icon">👶</div><div class="name">Gyermekem</div><div class="order">2.</div></div>
+<div class="navitem"><div class="icon">💬</div><div class="name">Üzenetek</div><div class="order">3.</div></div>
+<div class="navitem"><div class="icon">💳</div><div class="name">Pénzügy</div><div class="order">4.</div></div>
+<div class="navitem"><div class="icon">•••</div><div class="name">Továbbiak</div><div class="order">5.</div></div>
+</div>
+<div class="action"><strong>Elsődleges egykoppintásos művelet: „Jelzés az intézménynek”</strong>Gyorsválasztó: ma nem megy, később érkezik, más személy viszi el, új meghatalmazott vagy rövid üzenet.</div>
+<div class="cols"><div class="mini"><h3>Mit tartalmazzon?</h3><ul><li><b>Kezdőlap:</b> mai állapot, új események, szülői teendők.</li><li><b>Gyermekem:</b> idővonal, étkezés, alvás, egészség, elvitel, dokumentumok.</li><li><b>Üzenetek:</b> kommunikáció a gondozóval és az intézménnyel.</li><li><b>Pénzügy:</b> egyenleg, fizetendő tételek, befizetések, bizonylatok.</li><li><b>Továbbiak:</b> meghatalmazások, hozzájárulások, adatok, értesítések.</li></ul></div><div class="mini"><h3>Mi ne legyen a fő navban?</h3><ul><li>allergia külön főmenüpontként;</li><li>gyógyszer külön főmenüpontként;</li><li>elvitel külön főmenüpontként;</li><li>hozzájárulások külön főmenüpontként;</li><li>dokumentumok külön főmenüpontként;</li><li>intézményi jelentések;</li><li>csoport teljes gyermeklistája;</li><li>KENYSZI és normatíva.</li></ul></div></div>
+<div class="reason">A szülő nem intézményi rendszert akar kezelni. A navigáció három igényre épül: mi történt a gyermekével, van-e teendője, és hogyan tud kapcsolatba lépni az intézménnyel.</div>
+</div></article>
+
+</section>
+<section class="comparison"><h2>Rövid összevetés</h2><p>A szerepek navigációja szándékosan élesen eltér, mert más időhorizonton, más objektumokkal és más felelősséggel dolgoznak.</p><div class="tablewrap"><table><thead><tr><th>Szerep</th><th>Navigáció központja</th><th>Legfontosabb napi akció</th><th>UX-logika</th></tr></thead><tbody><tr><td><b>Fenntartó</b></td><td>Szervezeti állapot és kivételek</td><td>Mai eltérések kezelése</td><td>Kockázat- és döntésközpontú</td></tr><tr><td><b>Gondozó</b></td><td>Saját csoport és napi események</td><td>Jelenlét / gyorsrögzítés</td><td>Idő- és műveletközpontú</td></tr><tr><td><b>Egyéb dolgozó</b></td><td>Aktuális megbízás vagy kiosztott feladat</td><td>Check-in vagy következő jóváhagyás</td><td>Jogosultságvezérelt</td></tr><tr><td><b>Szülő</b></td><td>Saját gyermek, kommunikáció és teendők</td><td>Hiányzás / elvitel jelzése</td><td>Gyermekközpontú</td></tr></tbody></table></div><div class="closing"><ul><li>A <b>fenntartó objektumok és kockázatok között navigál</b>.</li><li>A <b>gondozó idő és napi események szerint dolgozik</b>.</li><li>Az <b>egyéb dolgozó csak a kiosztott munkaterületét látja</b>.</li><li>A <b>szülő kizárólag a saját gyermekéből indul ki</b>.</li></ul><div class="note"><b>Termékdöntés:</b> négy külön navigációs sablon szükséges, közös komponensrendszerrel, de eltérő prioritásokkal.</div></div></section>
+<footer>Zsibongó – szerepspecifikus mobil navigációs koncepció</footer>
+</main>
+</body>
+</html>

@@ -8,6 +8,8 @@ __pycache__/
 
 # Secrets & personal data
 .env
+.env.backup*
+.env.*.backup
 store/
 workspace/
 agents/
@@ -82,3 +84,4 @@ scripts/support-mail/no-support-reply.html
 # Python bytecode cache
 __pycache__/
 *.pyc
+store/.github-classic-token

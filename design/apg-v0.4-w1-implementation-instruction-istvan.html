@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="hu">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>APG v0.4 Lean Pilot Kernel – W1 implementációs utasítás</title>
+  <style>
+    :root{--bg:#f6f7f9;--surface:#fff;--text:#1f2937;--muted:#667085;--border:#d0d5dd;--accent:#0f766e;--accent-soft:#ecfdf5;--warning:#92400e;--warning-soft:#fffbeb;--code-bg:#111827;--code-text:#f9fafb;--success:#166534;--success-soft:#f0fdf4}
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.65}
+    main{max-width:980px;margin:0 auto;padding:48px 20px 72px}.hero,.section,.prompt{background:var(--surface);border:1px solid var(--border);border-radius:18px;box-shadow:0 10px 28px rgba(16,24,40,.06)}
+    .hero{padding:36px;margin-bottom:24px}.section{padding:28px 32px;margin-bottom:20px}.prompt{padding:30px 34px;border-left:6px solid var(--accent)}
+    h1,h2,h3{line-height:1.2;margin-top:0;color:#111827}h1{font-size:clamp(2rem,5vw,3.2rem);margin-bottom:12px}h2{font-size:1.55rem;margin-bottom:14px}h3{font-size:1.15rem;margin-top:24px;margin-bottom:8px}
+    p{margin:0 0 14px}ul{padding-left:1.4rem}li{margin:7px 0}code{font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace;font-size:.92em;background:#f2f4f7;padding:.14em .38em;border-radius:6px}
+    pre{margin:14px 0 18px;padding:18px;overflow-x:auto;background:var(--code-bg);color:var(--code-text);border-radius:12px;line-height:1.5}pre code{background:transparent;padding:0;color:inherit;font-size:.92rem}
+    .badge{display:inline-block;padding:6px 10px;border-radius:999px;background:var(--success-soft);color:var(--success);font-weight:700;font-size:.8rem;letter-spacing:.03em;text-transform:uppercase;margin-bottom:14px}
+    .callout{background:var(--warning-soft);color:var(--warning);border:1px solid #fde68a;border-radius:12px;padding:16px 18px;margin:18px 0}.prompt h2{color:var(--accent)}.prompt-section{border-top:1px solid #e5e7eb;padding-top:18px;margin-top:18px}.footer{text-align:center;color:var(--muted);font-size:.9rem;margin-top:28px}
+  </style>
+</head>
+<body>
+<main>
+  <section class="hero">
+    <span class="badge">Ready for implementation</span>
+    <h1>APG v0.4 Lean Pilot Kernel</h1>
+    <p><strong>W1 – Minimal Sidecar Store implementációs utasítás</strong></p>
+    <p>A jóváhagyott implementációs specifikáció alapján az első lépés a minimális sidecar persistence foundation megépítése.</p>
+  </section>
+
+  <section class="section">
+    <h2>Döntési összefoglaló</h2>
+    <p>Az implementáció elindítható, és a helyes első work item:</p>
+    <pre><code>W1 — Minimal Sidecar Store</code></pre>
+    <ul>
+      <li>A pilot nem igényel Marveen core-módosítást.</li>
+      <li>Nincs upstream előfeltétel.</li>
+      <li>A tokenmegtakarítás még hipotézis, ezért a pilot feladata a mérés.</li>
+      <li>A sidecar teljesen eltávolítható és a Marveen core-tól elkülönített marad.</li>
+    </ul>
+    <div class="callout"><strong>Fontos helykorrekció:</strong> a sidecar ne az official Marveen repositoryba kerüljön, még gitignored könyvtárként sem.</div>
+    <pre><code>~/marveen-local/apg-kernel/
+├── src/
+├── migrations/
+├── tests/
+├── README.md
+└── store/
+    └── apg-kernel.db</code></pre>
+  </section>
+
+  <section class="section">
+    <h2>Mit kell bizonyítania a W1-nek?</h2>
+    <h3>1. Idempotens inicializálás</h3>
+    <pre><code>első init → létrehozza a DB-t
+második init → tiszta no-op
+megszakított init → helyreállítható</code></pre>
+    <h3>2. Verziózott migrációk</h3>
+    <ul><li><code>schema_version</code></li><li><code>migration_id</code></li><li><code>applied_at</code></li><li><code>checksum</code></li></ul>
+    <p>A módosított, már lefuttatott migrációt vissza kell utasítani.</p>
+    <h3>3. Append-only kanonikus rekordok</h3>
+    <ul><li>artifact version;</li><li>edge;</li><li>execution receipt;</li><li>evidence reference;</li><li>checkpoint result;</li><li>token measurement;</li><li>profile activation;</li><li>replay run event.</li></ul>
+    <h3>4. Idempotency</h3><p>Ugyanazon logikai művelet ismétlése ne hozzon létre duplikátumot.</p>
+    <h3>5. Lineage head külön kezelése</h3><pre><code>lineage_id → current artifact version</code></pre><p>A régi verziók megmaradnak.</p>
+    <h3>6. Biztonságos SQLite-konfiguráció</h3>
+    <ul><li><code>foreign_keys=ON</code></li><li>WAL mód</li><li><code>busy_timeout</code></li><li>explicit tranzakciók</li><li>paraméterezett SQL</li><li>explicit indexek</li><li>UTC timestamp</li></ul>
+    <h3>7. Adatminimalizálás</h3>
+    <p>A store ne tartalmazzon API-kulcsot, session tokent, teljes JWT-t, nyers promptot, session historyt, valódi user emailt, nyers deployment-logot vagy nagy evidence payloadot.</p>
+  </section>
+
+  <section class="section">
+    <h2>W1 acceptance</h2>
+    <pre><code>fresh DB init PASS
+repeat init PASS
+migration checksum enforcement PASS
+artifact append PASS
+duplicate append idempotent PASS
+artifact mutation rejected PASS
+lineage head advancement PASS
+illegal edge rejected PASS
+missing reference rejected PASS
+transaction rollback PASS
+concurrent write behavior PASS
+secret/PII fixture rejected PASS
+database reopen and readback PASS
+clean uninstall PASS</code></pre>
+  </section>
+
+  <section class="prompt">
+    <h2>Marveennek visszamásolható implementációs utasítás</h2>
+    <p>Az APG v0.4 Pilot Kernel implementációs specifikációját elfogadom. Kezdd el kizárólag a W1 — Minimal Sidecar Store implementációját.</p>
+
+    <div class="prompt-section"><h3>FONTOS HELYKORREKCIÓ</h3>
+      <p>A sidecar ne kerüljön az official Marveen repositoryba, még gitignored könyvtárként sem.</p>
+      <p><strong>Célhely:</strong> <code>~/marveen-local/apg-kernel/</code></p>
+      <pre><code>~/marveen-local/apg-kernel/
+├── src/
+├── migrations/
+├── tests/
+├── README.md
+└── store/
+    └── apg-kernel.db</code></pre>
+      <p>A schema és a migrációk a sidecar saját verziózott source-ában legyenek. Az adatbázis legyen gitignored. A Marveen core repository és core DB nem módosítható.</p>
+    </div>
+
+    <div class="prompt-section"><h3>SCOPE</h3>
+      <p>Csak W1-et implementáld. Ne kezdj bele W2–W9-be, még akkor sem, ha valamelyik könnyen hozzáadhatónak tűnik.</p>
+      <p>A W1 célja kizárólag a minimális, megbízható sidecar persistence foundation.</p>
+    </div>
+
+    <div class="prompt-section"><h3>KÖTELEZŐ TÁROLÁSI TERÜLETEK</h3>
+      <ul><li>canonical artifact versionök;</li><li>lineage headek;</li><li>edge-ek;</li><li>execution receiptek;</li><li>evidence reference-ek;</li><li>checkpoint resultok;</li><li>token measurement recordok;</li><li>profile activation recordok;</li><li>replay runok és replay eventek;</li><li>schema migration history.</li></ul>
+      <p>A tároló most csak generikus recordokat kezeljen. Ne implementálja a checkpoint-, token-, identity- vagy evidence-chain üzleti logikáját.</p>
+    </div>
+
+    <div class="prompt-section"><h3>KÖTELEZŐ TULAJDONSÁGOK</h3>
+      <p><strong>1. Idempotens init</strong></p><ul><li>első futás létrehozza a DB-t;</li><li>ismételt futás tiszta no-op;</li><li>részlegesen sikertelen init ne hagyjon használhatatlan állapotot.</li></ul>
+      <p><strong>2. Verziózott migráció</strong></p><ul><li>migration ID;</li><li>checksum;</li><li>applied_at;</li><li>schema version;</li><li>már alkalmazott migráció tartalmának megváltoztatása hibát adjon.</li></ul>
+      <p><strong>3. Append-only szemantika</strong></p><p>Az artifact version, edge, execution receipt, evidence reference, checkpoint result, token measurement, profile activation és replay event ne legyen helyben módosítható.</p>
+      <p><strong>4. Idempotency</strong></p><ul><li>ugyanazon logikai write ismétlése ne hozzon létre duplikátumot;</li><li>az idempotency key ne tartalmazzon attempt számot, ha ugyanarról a logikai műveletről van szó.</li></ul>
+      <p><strong>5. Lineage</strong></p><ul><li>immutable artifact versionök;</li><li>külön lineage-head projection;</li><li>a lineage head csak létező, azonos lineage-hez tartozó artifact versionre mutathat.</li></ul>
+      <p><strong>6. SQLite safety</strong></p><ul><li><code>foreign_keys=ON</code>;</li><li>WAL;</li><li><code>busy_timeout</code>;</li><li>explicit transaction;</li><li>paraméterezett SQL;</li><li>szükséges indexek;</li><li>UTC timestamp.</li></ul>
+      <p><strong>7. Adatminimalizálás</strong></p><p>A store nem tárolhat credentialt, API-kulcsot, session tokent, teljes JWT-t, nyers promptot vagy session historyt, valódi user emailt vagy más szükségtelen PII-t, nyers deployment-logot vagy nagy nyers evidence payloadot.</p><p>Csak digest, locator, külső referencia és strukturált metadata tárolható.</p>
+    </div>
+
+    <div class="prompt-section"><h3>KÖTELEZŐ TESZTEK</h3>
+      <ul><li>clean database init;</li><li>repeated init;</li><li>migration ordering;</li><li>migration checksum mismatch rejection;</li><li>valid artifact append;</li><li>duplicate idempotent append;</li><li>immutable artifact mutation rejection;</li><li>lineage-head advancement;</li><li>invalid lineage-head rejection;</li><li>legal edge insertion;</li><li>illegal edge rejection;</li><li>missing edge target rejection;</li><li>transaction rollback;</li><li>database close/reopen/readback;</li><li>concurrent write vagy lock-contention viselkedés;</li><li>secret/PII negative fixture rejection;</li><li>clean removal után a Marveen core változatlanul működik.</li></ul>
+    </div>
+
+    <div class="prompt-section"><h3>OUT OF SCOPE</h3>
+      <ul><li>API server;</li><li>dashboard;</li><li>daemon/service;</li><li>Lifecycle Runner;</li><li>live agent dispatch;</li><li>Kanban write-back;</li><li>Marveen core DB adapter;</li><li>provider adapter;</li><li>token-origin parsing;</li><li>test-identity propagation;</li><li>checkpoint evaluator;</li><li>profile business logic;</li><li>v0.5 Ralph loop;</li><li>frontend/backend delivery lane;</li><li>általános graph database;</li><li>fölösleges ORM vagy framework.</li></ul>
+    </div>
+
+    <div class="prompt-section"><h3>IMPLEMENTÁCIÓS FEGYELEM</h3>
+      <ul><li>A jóváhagyott <code>apg-v0.4-pilot-kernel-store-schema.sql</code> legyen az alap.</li><li>Ettől csak igazolt hibajavítás vagy SQLite-kompatibilitási ok miatt térj el.</li><li>Minden eltérést dokumentálj.</li><li>Ne növeld a táblák vagy mezők számát konkrét fogyasztó nélkül.</li><li>Minden tábla mellett dokumentáld, mely későbbi P0 komponens használja.</li><li>A W1 végén futtasd az összes determinisztikus tesztet.</li><li>Ne implementálj párhuzamosan más work itemet.</li><li>Ne módosíts Marveen core source-t, core DB-t, CLAUDE.md-t, skillt, schedulert vagy servicet.</li><li>Ne deployolj.</li><li>Ne nyiss upstream issue-t vagy PR-t.</li></ul>
+    </div>
+
+    <div class="prompt-section"><h3>A VÉGÉN CSAK EZT ADD VISSZA</h3>
+      <ul><li>W1 implementáció pontos helye;</li><li>létrehozott fájlok;</li><li>adatbázistáblák száma és neve;</li><li>migrációk száma;</li><li>tesztek száma;</li><li>PASS/FAIL eredmény tesztenként vagy tesztcsoportonként;</li><li>schema spechez képesti eltérések;</li><li>idempotency megoldás;</li><li>append-only enforcement megoldás;</li><li>PII/secret-védelem megoldás;</li><li>Marveen core módosítások száma;</li><li>git status mind a Marveen core-ban, mind a sidecarban;</li><li>W1 DONE vagy BLOCKED;</li><li>következő egyetlen feloldott work item.</li></ul>
+    </div>
+  </section>
+
+  <div class="footer">APG v0.4 Lean Pilot Kernel · W1 Minimal Sidecar Store</div>
+</main>
+</body>
+</html>
