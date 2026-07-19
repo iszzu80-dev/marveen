@@ -95,5 +95,9 @@ export const DEFAULT_CONFIG: MemoryPressureConfig = {
   },
 };
 
-export const STATE_FILE = "store/runtime/memory-pressure-state.json";
+// MARVEEN_MEM_PRESSURE_TEST_STATE overrides the state file path for hermetic
+// testing. When set, tests read/write to an isolated temp file instead of the
+// live monitor's state file — the tests neither depend on nor disturb the
+// running daemon, and the daemon's timer cannot race a test assertion.
+export const STATE_FILE = process.env.MARVEEN_MEM_PRESSURE_TEST_STATE ?? "store/runtime/memory-pressure-state.json";
 export const CONFIG_FILE = "store/memory-pressure-config.json";
