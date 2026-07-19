@@ -25,7 +25,7 @@ import {
 import { setLastInboundModality } from './voice-modality.js'
 import { classifyAgentMessage, wrapAgentMessageForDelivery } from './agent-message-wrap.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
-import { checkDispatchGate } from './data-sensitivity-gate-runner.js'
+import { checkDispatchGate, checkGateLiveness } from './data-sensitivity-gate-runner.js'
 import { maybeWakeSubAgentsForTelegram } from './telegram-inbox-wake.js'
 
 // A message that cannot be delivered within this window (target session never
@@ -247,7 +247,17 @@ export async function deliverFederatedBatch(federated: AgentMessage[], now: numb
   }
 }
 
+// Gate liveness: checked once at boot, then every N ticks (~30 min at 5s/tick).
+let _gateLivenessTickCounter = 0;
+const GATE_LIVENESS_CHECK_INTERVAL_TICKS = 360; // every ~30 min
+
 export function startMessageRouter(): NodeJS.Timeout {
+  // Boot-time gate liveness check: catches a gate that was unwired by a merge
+  // that dropped the checkDispatchGate call site (card aaabd99c). This check
+  // queries the AUDIT LOG directly — it does NOT depend on checkDispatchGate
+  // being called, so it survives the exact failure mode it detects.
+  checkGateLiveness();
+
   return setInterval(async () => {
     // Re-entrancy guard: STT can hold a tick for up to 65s; skip new ticks
     // while the previous one is still in flight to prevent double-delivery.
@@ -257,6 +267,15 @@ export function startMessageRouter(): NodeJS.Timeout {
       await runMessageRouterTick()
     } finally {
       _tickRunning = false
+    }
+
+    // Periodic gate liveness re-check: audit log going silent mid-run (e.g.
+    // after a hot-reload or config change that drops the gate) should surface
+    // in the logs within ~30 min rather than days later.
+    _gateLivenessTickCounter++;
+    if (_gateLivenessTickCounter >= GATE_LIVENESS_CHECK_INTERVAL_TICKS) {
+      _gateLivenessTickCounter = 0;
+      checkGateLiveness();
     }
   }, 5000)
 }

@@ -19,7 +19,7 @@ import {
   type GateConfig,
   type GateResult,
 } from '../data-sensitivity-gate.js';
-import { saveSensitivityAuditEntry } from '../db.js';
+import { saveSensitivityAuditEntry, getDb } from '../db.js';
 
 const CONFIG_PATH = join(process.cwd(), 'store', 'data-sensitivity-gate.json');
 
@@ -131,4 +131,60 @@ export function checkDispatchGate(input: GateCheckInput): {
   }
 
   return { result, auditEntry, shouldBlock };
+}
+
+// ---- gate liveness check (card aaabd99c) ------------------------------------
+//
+// The gate can be silently unwired: a merge drops the checkDispatchGate call
+// from message-router.ts, but the module, tests, and audit-log table survive
+// intact. Nobody notices because a never-called gate and an always-passing gate
+// emit exactly the same thing — silence.
+//
+// This check queries the audit log directly at boot time and periodically.
+// It does NOT depend on checkDispatchGate being called — it reads the EFFECT
+// (audit entries) rather than the CAUSE (call site). A merge that removes the
+// call site does not remove this check; they live in different imports.
+//
+// Threshold: 24 hours. If the most recent audit entry is older than that
+// (or the table is empty), the gate is either unwired or something upstream
+// is preventing audit entries from being written. In observe mode with low
+// traffic this can legitimately be silent, so this is a WARN-level log, not
+// an alert — it surfaces in the dashboard logs for a human to triage.
+
+const GATE_SILENCE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+
+export function checkGateLiveness(): { healthy: boolean; lastEntry: number | null } {
+  try {
+    const db = getDb();
+    const row = db
+      .prepare('SELECT MAX(created_at) AS last_ts FROM sensitivity_audit_log')
+      .get() as { last_ts: number | null } | undefined;
+    const lastTs = row?.last_ts ?? null;
+
+    if (lastTs === null) {
+      logger.warn(
+        'data-sensitivity-gate: LIVENESS CHECK FAILED — audit log is EMPTY. ' +
+          'The gate may be unwired (no callers) or the observe window has never triggered a non-allow verdict. ' +
+          'Verify that message-router.ts imports and calls checkDispatchGate.',
+      );
+      return { healthy: false, lastEntry: null };
+    }
+
+    const ageMs = Date.now() - lastTs * 1000;
+    if (ageMs > GATE_SILENCE_THRESHOLD_MS) {
+      const ageHours = Math.round(ageMs / 3600000);
+      logger.warn(
+        { lastEntry: new Date(lastTs * 1000).toISOString(), ageHours },
+        `data-sensitivity-gate: LIVENESS CHECK FAILED — last audit entry was ${ageHours}h ago. ` +
+          'The gate may be unwired (no callers since last deploy/restart). ' +
+          'Verify that message-router.ts imports and calls checkDispatchGate.',
+      );
+      return { healthy: false, lastEntry: lastTs };
+    }
+
+    return { healthy: true, lastEntry: lastTs };
+  } catch (err) {
+    logger.warn({ err }, 'data-sensitivity-gate: liveness check query failed (table may not exist yet)');
+    return { healthy: false, lastEntry: null };
+  }
 }
