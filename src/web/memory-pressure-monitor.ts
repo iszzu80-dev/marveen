@@ -130,6 +130,21 @@ function readAgentRss(): import("./memory-pressure-types.js").AgentRssMeasuremen
   }
 }
 
+/** Read expected agent count from the agent inventory (agents-desired.json).
+ *  This is the canonical list of agents that SHOULD be running, maintained by
+ *  the dashboard. Returns null if the file is unreadable — a null
+ *  expectedAgentCount means "we don't know how many to expect", which makes
+ *  partial status less actionable but is honest about the uncertainty. */
+function readExpectedAgentCount(): number | null {
+  try {
+    const path = resolvePath("store/agents-desired.json");
+    if (!existsSync(path)) return null;
+    const agents = JSON.parse(readFileSync(path, "utf-8"));
+    if (Array.isArray(agents)) return agents.length;
+    return null;
+  } catch { return null; }
+}
+
 function sample(config: MemoryPressureConfig): MemoryPressureSample {
   const mem = readMemInfo();
   const rss = readAgentRss();
@@ -140,6 +155,7 @@ function sample(config: MemoryPressureConfig): MemoryPressureSample {
     psiMemorySome: readPsiMemorySome(),
     agentProcessTreeRssBytes: rss.totalRssBytes,
     measuredAgentCount: rss.measuredAgentCount,
+    expectedAgentCount: readExpectedAgentCount(),
     agentRssMeasurementStatus: rss.status,
     agentRssMeasurementSource: "list-agent-rss.sh",
   };
