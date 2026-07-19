@@ -110,7 +110,12 @@ async function run(): Promise<void> {
   ok("warning at 2.4GiB → still warning at 2.3GiB", computeNextState("warning", sample(2.3), new Date().toISOString(), T) === "warning");
 
   console.log(`memory-pressure-state-machine: PASS ${pass} / FAIL ${fail}`);
-  if (fail > 0) process.exit(1);
+  if (fail > 0) throw new Error(`${fail} test(s) failed`);
 }
 
-run();
+if (process.env.VITEST) {
+  const { test } = await import("vitest");
+  test("memory-pressure-state-machine", run);
+} else {
+  run();
+}

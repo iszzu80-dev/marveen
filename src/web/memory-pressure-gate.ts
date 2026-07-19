@@ -23,6 +23,16 @@ function resolvePath(relative: string): string {
   return `${INSTALL_DIR}/${relative}`;
 }
 
+/** Resolve the state file path. When MARVEEN_MEM_PRESSURE_TEST_STATE is set,
+ *  use it directly (absolute temp path for hermetic testing). Otherwise
+ *  resolve the default relative path against INSTALL_DIR. Checked at CALL
+ *  time, not at module load — the env var may be set after import. */
+function resolveStatePath(): string {
+  const override = process.env.MARVEEN_MEM_PRESSURE_TEST_STATE;
+  if (override) return override;
+  return resolvePath(STATE_FILE);
+}
+
 // ── Gate (component B) ──────────────────────────────────────────────────────
 
 export interface GateResult {
@@ -35,7 +45,7 @@ export interface GateResult {
  *  non-core agents (a broken gate must NOT fail-open). */
 function readState(): MemoryPressureStateFile | null {
   try {
-    const path = resolvePath(STATE_FILE);
+    const path = resolveStatePath();
     if (!existsSync(path)) return null;
     return JSON.parse(readFileSync(path, "utf-8")) as MemoryPressureStateFile;
   } catch {
@@ -377,7 +387,7 @@ export function relievePressure(state: MemoryPressureState): MemoryPressureRelie
  */
 export function updateStateAction(action: MemoryPressureReliefAction | null): void {
   if (!action) return;
-  const statePath = resolvePath(STATE_FILE);
+  const statePath = resolveStatePath();
   try {
     if (!existsSync(statePath)) return;
     const state = JSON.parse(readFileSync(statePath, "utf-8")) as MemoryPressureStateFile;

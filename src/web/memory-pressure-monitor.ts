@@ -38,6 +38,12 @@ function resolvePath(relative: string): string {
   return `${INSTALL_DIR}/${relative}`;
 }
 
+function resolveStatePath(): string {
+  const override = process.env.MARVEEN_MEM_PRESSURE_TEST_STATE;
+  if (override) return override;
+  return resolvePath(STATE_FILE);
+}
+
 function loadConfig(): MemoryPressureConfig {
   const configPath = resolvePath(CONFIG_FILE);
   try {
@@ -224,7 +230,7 @@ function loadStateFile(statePath: string): MemoryPressureStateFile | null {
 
 function main(): void {
   const config = loadConfig();
-  const statePath = resolvePath(STATE_FILE);
+  const statePath = resolveStatePath();
   const prev = loadStateFile(statePath);
   const currentSample = sample(config);
   const prevState = prev?.state ?? "normal";
