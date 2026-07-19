@@ -1695,6 +1695,12 @@ export function getLabel(id: string): Label | undefined {
 
 export function createLabel(label: { id: string; name: string; color: string }): Label {
   const now = Math.floor(Date.now() / 1000)
+  // Check for existing label with same name first (UNIQUE index on name is the
+  // safety net, but the app-level check avoids needless constraint violations).
+  const existing = db.prepare(
+    'SELECT id, name, color, created_at FROM labels WHERE name = ?'
+  ).get(label.name) as Label | undefined
+  if (existing) return existing
   db.prepare(
     'INSERT INTO labels (id, name, color, created_at) VALUES (?, ?, ?, ?)'
   ).run(label.id, label.name, label.color, now)
