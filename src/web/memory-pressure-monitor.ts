@@ -82,32 +82,66 @@ function readPsiMemorySome(): number {
   } catch { return 0; }
 }
 
-function readAgentRssTotalGiB(): number {
+/**
+ * Call the ONE authoritative process-tree measurement script (list-agent-rss.sh).
+ * This replaces the broken cmdline-regex approach that measured 0.012 GiB against
+ * ~2.2 GiB real (commit a6b9743). The script walks from tmux pane PIDs — session
+ * name IS the agent identity, not a cmdline heuristic.
+ *
+ * Returns the full measurement including per-agent RSS, status, and count.
+ * On ANY failure (script crash, timeout, unparseable output), returns a synthetic
+ * error result with totalRssBytes: null — never a false zero.
+ */
+function readAgentRss(): import("./memory-pressure-types.js").AgentRssMeasurement {
+  const script = `${INSTALL_DIR}/scripts/list-agent-rss.sh`;
   try {
-    // Sum RSS of all marveen agent tmux sessions' process trees.
-    // `ps` is available everywhere; no dependency on pgrep or specialized tools.
     const output = execSync(
-      `ps -eo pid,ppid,rss,cmd --no-headers 2>/dev/null | awk '{
-        rss=$3+0; cmd=$0
-        # match agent-* tmux sessions and their child processes
-        if (cmd ~ /agent-/) total += rss
-        # match claude processes owned by agent sessions (the heavy ones)
-        if (cmd ~ /claude/ && cmd ~ /mcp/) total += rss
-      } END { printf "%.4f", total / 1048576 }'`,
-      { timeout: 3000, encoding: "utf-8" },
+      `bash "${script}" --json`,
+      { timeout: 8000, encoding: "utf-8" },
     );
-    return Number(output.trim()) || 0;
-  } catch { return 0; }
+    const parsed = JSON.parse(output.trim()) as import("./memory-pressure-types.js").AgentRssMeasurement;
+
+    // Defensive: if the script returned status "ok" but totalRssBytes is missing
+    // or null, treat as error — a measurement that reports success but provides
+    // no value is corrupt.
+    if (parsed.status === "ok" && (parsed.totalRssBytes === null || parsed.totalRssBytes === undefined)) {
+      return {
+        source: "list-agent-rss.sh",
+        status: "error",
+        error: "script returned ok but totalRssBytes is null",
+        measuredAgentCount: 0,
+        failedAgentCount: 0,
+        agents: [],
+        totalRssBytes: null,
+      };
+    }
+
+    return parsed;
+  } catch (err) {
+    return {
+      source: "list-agent-rss.sh",
+      status: "error",
+      error: err instanceof Error ? err.message : "script execution failed",
+      measuredAgentCount: 0,
+      failedAgentCount: 0,
+      agents: [],
+      totalRssBytes: null,
+    };
+  }
 }
 
 function sample(config: MemoryPressureConfig): MemoryPressureSample {
   const mem = readMemInfo();
+  const rss = readAgentRss();
   return {
     timestamp: new Date().toISOString(),
     memAvailableGiB: mem.memAvailableKiB / 1048576,
     swapUsedGiB: mem.swapUsedKiB / 1048576,
     psiMemorySome: readPsiMemorySome(),
-    rssTotalGiB: readAgentRssTotalGiB(),
+    agentProcessTreeRssBytes: rss.totalRssBytes,
+    measuredAgentCount: rss.measuredAgentCount,
+    agentRssMeasurementStatus: rss.status,
+    agentRssMeasurementSource: "list-agent-rss.sh",
   };
 }
 

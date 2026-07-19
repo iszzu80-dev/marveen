@@ -116,20 +116,19 @@ export function memoryPressureGate(agentName: string): GateResult {
 // ── Active pressure relief (component C) ────────────────────────────────────
 
 /** List running agent tmux sessions with their total process-tree RSS.
- *  Returns agents sorted by RSS descending. Uses an external script to avoid
- *  shell-escape complexity in TypeScript template literals. */
-function listAgentRss(): { name: string; rssGiB: number }[] {
+ *  Calls the ONE authoritative measurement script (list-agent-rss.sh --json)
+ *  — same source the monitor uses for telemetry. Returns agents sorted by
+ *  RSS descending. RSS is in bytes for precision; convert to GiB for display. */
+function listAgentRss(): { name: string; rssBytes: number }[] {
   try {
     const script = `${INSTALL_DIR}/scripts/list-agent-rss.sh`;
-    const output = execSync(`bash "${script}"`, { timeout: 5000, encoding: "utf-8" });
-    const agents: { name: string; rssGiB: number }[] = [];
-    for (const line of output.trim().split("\n")) {
-      const parts = line.trim().split(/\s+/);
-      if (parts.length >= 2) {
-        agents.push({ name: parts[0], rssGiB: Number(parts[1]) || 0 });
-      }
-    }
-    return agents;
+    const output = execSync(`bash "${script}" --json`, { timeout: 8000, encoding: "utf-8" });
+    const parsed = JSON.parse(output.trim()) as import("./memory-pressure-types.js").AgentRssMeasurement;
+    if (parsed.status === "error" || !parsed.agents) return [];
+    // Sort by RSS descending (largest first — eviction targets the biggest)
+    return parsed.agents
+      .map(a => ({ name: a.name, rssBytes: a.rssBytes }))
+      .sort((a, b) => b.rssBytes - a.rssBytes);
   } catch { return []; }
 }
 
@@ -231,7 +230,7 @@ function verifyProcessTreeGone(name: string): boolean {
     // Re-read agent RSS to confirm the freed amount is reflected in the total.
     const after = listAgentRss();
     const stillThere = after.find(a => a.name === name);
-    if (stillThere && stillThere.rssGiB > 0.01) return false;
+    if (stillThere && stillThere.rssBytes > 10 * 1024 * 1024) return false; // > 10 MiB
 
     return true;
   } catch { return false; }
@@ -314,7 +313,8 @@ export function relievePressure(state: MemoryPressureState): MemoryPressureRelie
   const target = candidates[0];
 
   // Record pre-stop RSS for the audit log before we free it
-  const rssBefore = target.rssGiB;
+  const rssBeforeBytes = target.rssBytes;
+  const rssBeforeGiB = rssBeforeBytes / 1073741824;
 
   try {
     // Verify the agent session still exists before we try to stop it
@@ -350,8 +350,8 @@ export function relievePressure(state: MemoryPressureState): MemoryPressureRelie
       action: "parked",
       agentName: target.name,
       pidTreeKilled: [],
-      rssFreedGiB: verified ? rssBefore : 0,
-      reason: `memory-pressure-${state}: rssBefore=${rssBefore.toFixed(1)}GiB agent=${target.name} apiStop=${apiSuccess} verified=${verified}`,
+      rssFreedGiB: verified ? rssBeforeGiB : 0,
+      reason: `memory-pressure-${state}: rssBefore=${rssBeforeGiB.toFixed(1)}GiB agent=${target.name} apiStop=${apiSuccess} verified=${verified}`,
     };
 
     writeAuditLog(action);
