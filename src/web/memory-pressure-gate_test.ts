@@ -58,6 +58,7 @@ function writeFixture(state: FixtureState): void {
     psiMemorySome: 0.0,
     agentProcessTreeRssBytes: 2 * 1073741824, // ~2 GiB
     measuredAgentCount: 8,
+    expectedAgentCount: 6,
     agentRssMeasurementStatus: "ok",
     agentRssMeasurementSource: "list-agent-rss.sh",
   };

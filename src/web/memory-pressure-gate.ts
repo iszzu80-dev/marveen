@@ -203,36 +203,36 @@ function writeAuditLog(entry: MemoryPressureReliefAction): void {
 }
 
 /**
- * Verify the agent's process tree is truly gone. Checks both the RSS listing
- * (which walks tmux pane PIDs and their children) and a direct ps scan for any
- * surviving process with the agent name in its command line. Returns true only
- * when both confirm absence.
+ * Verify the agent's process tree is truly gone after a park. ALL checks use
+ * the ONE authoritative collector (list-agent-rss.sh) — no separate ps
+ * invocations. One definition of the process tree, everywhere.
  */
 function verifyProcessTreeGone(name: string): boolean {
   try {
     // Wait for processes to settle after the stop signal
     execSync("sleep 1", { timeout: 2000 });
 
-    // Check 1: agent no longer appears in listAgentRss output
-    const agentsAfter = listAgentRss();
-    const inRss = agentsAfter.find(a => a.name === name);
-    if (inRss) return false;
-
-    // Check 2: no process with "agent-<name>" in its command line remains.
-    // The grep -v grep filters out the grep process itself.
-    const orphanCount = execSync(
-      `ps -eo pid,cmd --no-headers 2>/dev/null | grep -v grep | grep -c "agent-${name}" || echo 0`,
-      { timeout: 2000, encoding: "utf-8" },
-    );
-    if (Number(orphanCount.trim()) !== 0) return false;
-
-    // Check 3: sum of RSS for any surviving processes in the agent's tree is ~0.
-    // Re-read agent RSS to confirm the freed amount is reflected in the total.
+    // Check 1: agent absent from the shared collector output.
+    // The script walks from tmux pane PIDs — if the session is gone,
+    // the agent will not appear in the output.
     const after = listAgentRss();
-    const stillThere = after.find(a => a.name === name);
-    if (stillThere && stillThere.rssBytes > 10 * 1024 * 1024) return false; // > 10 MiB
+    const agent = after.find(a => a.name === name);
+    if (!agent) return true;  // not in the tree → process tree is gone
 
-    return true;
+    // Check 2: agent present but with negligible RSS. This can happen
+    // when the agent is mid-exit — give it one more beat and re-check
+    // against the same collector.
+    if (agent.rssBytes <= 10 * 1024 * 1024) {  // <= 10 MiB = exiting
+      execSync("sleep 0.5", { timeout: 1000 });
+      const recheck = listAgentRss();
+      const recheckAgent = recheck.find(a => a.name === name);
+      if (!recheckAgent) return true;          // gone after the extra beat
+      if (recheckAgent.rssBytes === 0) return true;  // fully drained
+      return false;  // RSS is non-zero after two checks → park failed
+    }
+
+    // Agent present with significant RSS → park did NOT free memory.
+    return false;
   } catch { return false; }
 }
 

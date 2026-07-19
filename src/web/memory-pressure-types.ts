@@ -34,6 +34,11 @@ export interface MemoryPressureSample {
   // successfully and there are genuinely zero running agents.
   agentProcessTreeRssBytes: number | null;
   measuredAgentCount: number;
+  // expectedAgentCount comes from the agent INVENTORY (agents-desired.json),
+  // NOT from the measurement result. It represents how many agents SHOULD be
+  // running. When expected != measured, status "partial" becomes actionable:
+  // we know which agents are missing from the measurement.
+  expectedAgentCount: number | null;
   agentRssMeasurementStatus: "ok" | "partial" | "error";
   agentRssMeasurementSource: "list-agent-rss.sh";
 }

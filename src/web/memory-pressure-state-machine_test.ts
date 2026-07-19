@@ -55,6 +55,7 @@ function sample(availGiB: number): MemoryPressureSample {
     psiMemorySome: 0,
     agentProcessTreeRssBytes: (5 - availGiB) * 1073741824, // rough inverse, in bytes
     measuredAgentCount: 8,
+    expectedAgentCount: 6,  // from agents-desired.json — fewer than measured = some manually started
     agentRssMeasurementStatus: "ok",
     agentRssMeasurementSource: "list-agent-rss.sh",
   };
