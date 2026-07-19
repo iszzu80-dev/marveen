@@ -53,7 +53,10 @@ function sample(availGiB: number): MemoryPressureSample {
     memAvailableGiB: availGiB,
     swapUsedGiB: 0,
     psiMemorySome: 0,
-    rssTotalGiB: 5 - availGiB, // rough inverse
+    agentProcessTreeRssBytes: (5 - availGiB) * 1073741824, // rough inverse, in bytes
+    measuredAgentCount: 8,
+    agentRssMeasurementStatus: "ok",
+    agentRssMeasurementSource: "list-agent-rss.sh",
   };
 }
 

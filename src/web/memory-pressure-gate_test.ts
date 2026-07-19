@@ -22,7 +22,7 @@ import { writeFileSync, unlinkSync, existsSync, mkdirSync, renameSync, readFileS
 import { dirname } from "node:path";
 import { memoryPressureGate } from "./memory-pressure-gate.js";
 import { DEFAULT_CONFIG, STATE_FILE } from "./memory-pressure-types.js";
-import type { MemoryPressureStateFile } from "./memory-pressure-types.js";
+import type { MemoryPressureStateFile, MemoryPressureSample } from "./memory-pressure-types.js";
 
 const INSTALL_DIR = process.env.MARVEEN_HOME ?? process.cwd();
 const STATE_PATH = `${INSTALL_DIR}/${STATE_FILE}`;
@@ -46,21 +46,37 @@ function teardown(): void {
   }
 }
 
-function writeFixture(state: Partial<MemoryPressureStateFile>): void {
-  const fixture: MemoryPressureStateFile = {
+// Fixture input allows partial lastSample for ergonomic test writing.
+// The merge in writeFixture fills missing lastSample fields from defaults.
+type FixtureState = Partial<Omit<MemoryPressureStateFile, "lastSample">> & { lastSample?: Partial<MemoryPressureSample> };
+
+function writeFixture(state: FixtureState): void {
+  const defaultSample: MemoryPressureSample = {
+    timestamp: new Date().toISOString(),
+    memAvailableGiB: 5.0,
+    swapUsedGiB: 0.0,
+    psiMemorySome: 0.0,
+    agentProcessTreeRssBytes: 2 * 1073741824, // ~2 GiB
+    measuredAgentCount: 8,
+    agentRssMeasurementStatus: "ok",
+    agentRssMeasurementSource: "list-agent-rss.sh",
+  };
+  // Build the base fixture, then spread state over it. The lastSample is
+  // deep-merged: defaults from defaultSample, overridden by state.lastSample.
+  const baseFixture: MemoryPressureStateFile = {
     state: "normal",
     since: new Date().toISOString(),
-    lastSample: {
-      timestamp: new Date().toISOString(),
-      memAvailableGiB: 5.0,
-      swapUsedGiB: 0.0,
-      psiMemorySome: 0.0,
-      rssTotalGiB: 2.0,
-    },
+    lastSample: defaultSample,
     thresholds: DEFAULT_CONFIG.thresholds,
     generation: 1,
     lastAction: null,
+  };
+  const fixture: MemoryPressureStateFile = {
+    ...baseFixture,
     ...state,
+    lastSample: state.lastSample
+      ? { ...defaultSample, ...state.lastSample } as MemoryPressureSample
+      : baseFixture.lastSample,
   };
   mkdirSync(dirname(STATE_PATH), { recursive: true });
   writeFileSync(STATE_PATH, JSON.stringify(fixture, null, 2), "utf-8");
@@ -97,7 +113,7 @@ async function run(): Promise<void> {
   {
     writeFixture({
       state: "warning",
-      lastSample: { timestamp: new Date().toISOString(), memAvailableGiB: 2.0, swapUsedGiB: 0.1, psiMemorySome: 2.5, rssTotalGiB: 4.0 },
+      lastSample: { timestamp: new Date().toISOString(), memAvailableGiB: 2.0, swapUsedGiB: 0.1, psiMemorySome: 2.5, agentProcessTreeRssBytes: 4.0 },
     });
     const r = memoryPressureGate("some-agent");
     ok("warning → non-core blocked", !r.allowed, r);
@@ -107,7 +123,7 @@ async function run(): Promise<void> {
   {
     writeFixture({
       state: "critical",
-      lastSample: { timestamp: new Date().toISOString(), memAvailableGiB: 1.2, swapUsedGiB: 0.5, psiMemorySome: 8.0, rssTotalGiB: 5.5 },
+      lastSample: { timestamp: new Date().toISOString(), memAvailableGiB: 1.2, swapUsedGiB: 0.5, psiMemorySome: 8.0, agentProcessTreeRssBytes: 5.5 },
     });
     const r = memoryPressureGate("buildfejleszto");
     ok("critical → non-core blocked", !r.allowed, r);
@@ -117,7 +133,7 @@ async function run(): Promise<void> {
   {
     writeFixture({
       state: "emergency",
-      lastSample: { timestamp: new Date().toISOString(), memAvailableGiB: 0.5, swapUsedGiB: 2.0, psiMemorySome: 15.0, rssTotalGiB: 6.5 },
+      lastSample: { timestamp: new Date().toISOString(), memAvailableGiB: 0.5, swapUsedGiB: 2.0, psiMemorySome: 15.0, agentProcessTreeRssBytes: 6.5 },
     });
     const r = memoryPressureGate("frontendfejleszto");
     ok("emergency → non-core blocked", !r.allowed, r);
@@ -179,7 +195,7 @@ async function run(): Promise<void> {
   {
     writeFixture({
       state: "critical",
-      lastSample: { timestamp: new Date().toISOString(), memAvailableGiB: 1.0, swapUsedGiB: 0.3, psiMemorySome: 5.0, rssTotalGiB: 3.0 },
+      lastSample: { timestamp: new Date().toISOString(), memAvailableGiB: 1.0, swapUsedGiB: 0.3, psiMemorySome: 5.0, agentProcessTreeRssBytes: 3.0 },
     });
     const r = memoryPressureGate("agent-x");
     ok("block reason includes state", r.reason.includes("state=critical"), r.reason);

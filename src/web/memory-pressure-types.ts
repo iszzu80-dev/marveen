@@ -10,12 +10,32 @@
 
 export type MemoryPressureState = "normal" | "warning" | "critical" | "emergency" | "recovery";
 
+/** Structured output from list-agent-rss.sh --json. ONE authoritative measurement
+ *  consumed by both the monitor (telemetry) and the gate (eviction selector). */
+export interface AgentRssMeasurement {
+  source: "list-agent-rss.sh";
+  status: "ok" | "partial" | "error";
+  error?: string;            // present only on error
+  measuredAgentCount: number;
+  failedAgentCount: number;
+  agents: { name: string; rssBytes: number }[];
+  totalRssBytes: number | null;  // null on error — ZERO means genuinely zero agents
+}
+
 export interface MemoryPressureSample {
   timestamp: string; // ISO 8601
   memAvailableGiB: number;
   swapUsedGiB: number;
   psiMemorySome: number; // /proc/pressure/memory some avg10
-  rssTotalGiB: number;   // sum of marveen agent process trees
+
+  // Agent process-tree RSS from list-agent-rss.sh (ONE authoritative source).
+  // Bytes, not GiB — no lossy conversion at the measurement layer.
+  // null means the measurement FAILED (status=error). 0 means we measured
+  // successfully and there are genuinely zero running agents.
+  agentProcessTreeRssBytes: number | null;
+  measuredAgentCount: number;
+  agentRssMeasurementStatus: "ok" | "partial" | "error";
+  agentRssMeasurementSource: "list-agent-rss.sh";
 }
 
 export interface MemoryPressureReliefAction {
