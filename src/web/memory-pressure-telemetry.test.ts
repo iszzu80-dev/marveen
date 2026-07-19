@@ -16,7 +16,8 @@
 import { execSync } from "node:child_process";
 import { writeFileSync, mkdirSync, rmSync, chmodSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // ── Mock infrastructure ──────────────────────────────────────────────────────
 
@@ -60,8 +61,8 @@ function writeMockPs(processes: Array<[number, number, number, string]>): void {
 
 /** Run list-agent-rss.sh --json with mock tmux/ps on PATH and return parsed JSON. */
 function runScript(): { status: string; measuredAgentCount: number; failedAgentCount: number; agents: Array<{ name: string; rssBytes: number }>; totalRssBytes: number | null } {
-  // MARVEEN_HOME is /home/iszzu/marveen; __dirname without it points to src/web/
-  const home = process.env.MARVEEN_HOME ?? join(__dirname, "..");
+  // MARVEEN_HOME is the repo root; fallback: import.meta.url → src/web/ → up 2 levels
+  const home = process.env.MARVEEN_HOME ?? join(dirname(fileURLToPath(import.meta.url)), "../..");
   const scriptPath = join(home, "scripts/list-agent-rss.sh");
   const output = execSync(`bash "${scriptPath}" --json`, {
     timeout: 5000,
@@ -406,7 +407,12 @@ async function run(): Promise<void> {
   }
 
   console.log(`memory-pressure-telemetry: PASS ${pass} / FAIL ${fail}`);
-  if (fail > 0) process.exit(1);
+  if (fail > 0) throw new Error(`${fail} test(s) failed`);
 }
 
-run();
+if (process.env.VITEST) {
+  const { test } = await import("vitest");
+  test("memory-pressure-telemetry", run);
+} else {
+  run();
+}

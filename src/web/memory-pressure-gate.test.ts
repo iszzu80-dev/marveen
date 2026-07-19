@@ -18,32 +18,32 @@
  *   - zero LLM calls (proven by construction — no imports from llm modules)
  */
 
-import { writeFileSync, unlinkSync, existsSync, mkdirSync, renameSync, readFileSync } from "node:fs";
+import { writeFileSync, unlinkSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { tmpdir } from "node:os";
 import { memoryPressureGate } from "./memory-pressure-gate.js";
-import { DEFAULT_CONFIG, STATE_FILE } from "./memory-pressure-types.js";
+import { DEFAULT_CONFIG } from "./memory-pressure-types.js";
 import type { MemoryPressureStateFile, MemoryPressureSample } from "./memory-pressure-types.js";
 
-const INSTALL_DIR = process.env.MARVEEN_HOME ?? process.cwd();
-const STATE_PATH = `${INSTALL_DIR}/${STATE_FILE}`;
+// Hermetic isolation: auto-generate a temp state file so tests never touch the
+// live monitor's state file. The env var is checked at CALL time by
+// resolveStatePath() in gate.ts — this module-level set happens after import
+// but before any test function runs, which is exactly when we need it.
+if (!process.env.MARVEEN_MEM_PRESSURE_TEST_STATE) {
+  process.env.MARVEEN_MEM_PRESSURE_TEST_STATE = `${tmpdir()}/mem-pressure-gate-test-${Date.now()}.json`;
+}
+const STATE_PATH: string = process.env.MARVEEN_MEM_PRESSURE_TEST_STATE!;
 
-// Save and restore any real state file around test runs
+// No save/restore needed — the temp file is isolated from the live monitor.
+// Still clean up after ourselves so /tmp does not accumulate orphaned state files.
 let savedState: string | null = null;
 
 function setup(): void {
-  if (existsSync(STATE_PATH)) {
-    savedState = readFileSync(STATE_PATH, "utf-8");
-  }
+  // First run: no saved state. Subsequent runs: nothing to save (temp file only).
 }
 
 function teardown(): void {
   try { unlinkSync(STATE_PATH); } catch { /* ok */ }
-  if (savedState) {
-    try {
-      mkdirSync(dirname(STATE_PATH), { recursive: true });
-      writeFileSync(STATE_PATH, savedState, "utf-8");
-    } catch { /* best-effort restore */ }
-  }
 }
 
 // Fixture input allows partial lastSample for ergonomic test writing.
@@ -206,7 +206,15 @@ async function run(): Promise<void> {
 
   teardown();
   console.log(`memory-pressure-gate: PASS ${pass} / FAIL ${fail}`);
-  if (fail > 0) process.exit(1);
+  if (fail > 0) throw new Error(`${fail} test(s) failed`);
 }
 
-run();
+// Vitest integration: when running under vitest (VITEST env var set), import
+// and register via vitest's test(). Standalone (tsx/node): call run() directly.
+// Both paths are hermetic — the env var is set at module level above.
+if (process.env.VITEST) {
+  const { test } = await import("vitest");
+  test("memory-pressure-gate", run);
+} else {
+  run();
+}
