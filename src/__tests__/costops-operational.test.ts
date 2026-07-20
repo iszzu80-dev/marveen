@@ -100,4 +100,39 @@ describe('getCostSummary v0.4 operational fields', () => {
     expect(s.previous_month!.month).toBe(prevWin.key)
     expect(s.month_over_month_delta).toBe(500) // 2500 - 2000
   })
+
+  // Card 097d8355 -- Istvan's ruling 2026-07-20: on an EQUAL tier the FRESHER row
+  // is the current one. actual_invoice / provider_api / billing_export are all tier 4,
+  // so before the fix a strict `>` kept the INCUMBENT and a freshly ingested invoice
+  // was stored but never reached operational_spend.
+  it('on an equal tier the fresher row wins -- new invoice over older provider_api', () => {
+    const win = monthWindow(NOW)
+    const r = resolveOperational([
+      { source_id: 'render-usage', provider: 'render', billed_cost: 9000, charge_category: 'usage', confidence: 'provider_api', data_freshness: NOW - 86400 },
+      { source_id: 'render-usage', provider: 'render', billed_cost: 4200, charge_category: 'usage', confidence: 'actual_invoice', data_freshness: NOW },
+    ], win)
+    expect(r.operational_spend).toBe(4200)
+  })
+
+  // The mirror case -- proves the tiebreak is by FRESHNESS, not by a hardcoded
+  // preference for actual_invoice. Same two tiers, order of freshness reversed.
+  it('on an equal tier the fresher row wins -- newer provider_api over an older invoice', () => {
+    const win = monthWindow(NOW)
+    const r = resolveOperational([
+      { source_id: 'render-usage', provider: 'render', billed_cost: 4200, charge_category: 'usage', confidence: 'actual_invoice', data_freshness: NOW - 86400 },
+      { source_id: 'render-usage', provider: 'render', billed_cost: 9000, charge_category: 'usage', confidence: 'provider_api', data_freshness: NOW },
+    ], win)
+    expect(r.operational_spend).toBe(9000)
+  })
+
+  // Freshness must NOT beat tier -- a fresh estimate never outranks a real actual.
+  it('a fresher LOWER-tier row does not win', () => {
+    const win = monthWindow(NOW)
+    const r = resolveOperational([
+      { source_id: 'render-usage', provider: 'render', billed_cost: 4200, charge_category: 'usage', confidence: 'actual_invoice', data_freshness: NOW - 86400 },
+      { source_id: 'render-usage', provider: 'render', billed_cost: 999, charge_category: 'usage', confidence: 'estimate', data_freshness: NOW },
+    ], win)
+    expect(r.operational_spend).toBe(4200)
+  })
+
 })
