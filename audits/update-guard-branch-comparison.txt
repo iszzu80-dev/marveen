@@ -1,0 +1,70 @@
+=== LOCAL COMMIT STAT ===
+47f73b3 dispatch: block context-saturated agents before prompt injection
+ scripts/dispatch-guard.sh        | 147 +++++++++++++++++++++++++++++++++++++++
+ src/__tests__/pane-state.test.ts |  58 +++++++++++++++
+ src/pane-state.ts                |  25 +++++++
+ src/web/agent-process.ts         |  59 +++++++++++++++-
+ src/web/schedule-runner.ts       |  17 ++++-
+ 5 files changed, 303 insertions(+), 3 deletions(-)
+
+=== LOCAL COMMIT FILES ===
+47f73b3 dispatch: block context-saturated agents before prompt injection
+scripts/dispatch-guard.sh
+src/__tests__/pane-state.test.ts
+src/pane-state.ts
+src/web/agent-process.ts
+src/web/schedule-runner.ts
+
+=== LOCAL HEAD VS UPSTREAM FIX BRANCH ===
+< 47f73b3 (HEAD -> main, tag: backup-before-update-divergence-20260702-072201, tag: backup-before-update-divergence-20260702-071659, backup/local-dispatch-guard-20260702-072201, backup/local-dispatch-guard-20260702-071659) dispatch: block context-saturated agents before prompt injection
+> ab199e3 (origin/fix/parked-escalation-stale-frame-guard) fix(parked-input): stale-frame guard on main escalation -- suppress when agent is active
+>   391afb1 (tag: v1.18.2) chore(release): v1.18.2 -- parked-input main-agent escalation (#500)
+|\  
+| > 55f428f fix(parked-input): escalate main-agent stuck box to operator, never auto-clear it (#2 delivery fix) (#500)
+|/  
+> 4f4b72f (tag: v1.18.1) chore(release): v1.18.1 -- message-router event-loop fix (inter-agent delivery)
+> 38397f9 fix(message-router): drop self-HTTP STT, call whisper in-process + cap tick (#498)
+
+=== FILE DIFF STAT: LOCAL HEAD -> UPSTREAM FIX BRANCH ===
+ package.json                                  |   2 +-
+ scripts/dispatch-guard.sh                     | 147 --------------------------
+ src/__tests__/pane-state.test.ts              |  58 ----------
+ src/__tests__/parked-input-escalation.test.ts |  89 ++++++++++++++++
+ src/db.ts                                     |  12 +++
+ src/pane-state.ts                             |  25 -----
+ src/web/agent-process.ts                      | 139 +++++++++++++-----------
+ src/web/message-router.ts                     |  40 +++----
+ src/web/routes/voice.ts                       |  35 ++++--
+ src/web/schedule-runner.ts                    |  17 +--
+ 10 files changed, 226 insertions(+), 338 deletions(-)
+
+=== FILE DIFF STAT: ORIGIN MAIN -> UPSTREAM FIX BRANCH ===
+ .claude/settings.json                         |  3 +-
+ package.json                                  |  2 +-
+ scripts/channel-watchdog.sh                   |  2 +-
+ scripts/channels.sh                           | 11 ----
+ scripts/hooks/inbox-drain.py                  | 82 --------------------------
+ src/__tests__/channel-inbound-framing.test.ts | 33 ++++-------
+ src/__tests__/claim-pending-for-agent.test.ts | 36 ------------
+ src/__tests__/parked-input-escalation.test.ts | 82 ++++++++++++++------------
+ src/db.ts                                     | 36 ++++--------
+ src/web/agent-message-wrap.ts                 | 68 ----------------------
+ src/web/agent-process.ts                      | 68 ++++++++++++++--------
+ src/web/message-router.ts                     | 84 ++++++++++++++++++++-------
+ src/web/routes/agents.ts                      | 36 +-----------
+ 13 files changed, 176 insertions(+), 367 deletions(-)
+
+=== FILES CHANGED IN UPSTREAM FIX BRANCH ===
+.claude/settings.json
+package.json
+scripts/channel-watchdog.sh
+scripts/channels.sh
+scripts/hooks/inbox-drain.py
+src/__tests__/channel-inbound-framing.test.ts
+src/__tests__/claim-pending-for-agent.test.ts
+src/__tests__/parked-input-escalation.test.ts
+src/db.ts
+src/web/agent-message-wrap.ts
+src/web/agent-process.ts
+src/web/message-router.ts
+src/web/routes/agents.ts

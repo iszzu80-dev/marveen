@@ -6,6 +6,7 @@ import { createInterface } from 'node:readline'
 import { getDb } from '../db.js'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
+import { deriveProvider } from '../costops/pricing.js'
 
 const PROJECTS_DIR = join(homedir(), '.claude', 'projects')
 
@@ -77,7 +78,9 @@ interface ParsedCall {
   cacheCreationTokens: number
   /** Tokens in thinking content blocks (estimated from char length / 4). */
   thinkingTokens: number
-  /** Model identifier from the API response, e.g. "claude-sonnet-4-6". */
+  /** Model identifier from the API response, e.g. "claude-sonnet-4-6". CostOps
+   *  v0.2 also reads this (message.model); null on older transcripts without it,
+   *  never fabricated. */
   model: string | null
   contentPreview: string
   toolName: string | null
@@ -212,13 +215,21 @@ export async function collectTokenUsage(): Promise<{ inserted: number; files: nu
 
   const getCursor = db.prepare('SELECT last_line, last_size FROM token_usage_cursors WHERE file_path = ?')
   const setCursor = db.prepare('INSERT OR REPLACE INTO token_usage_cursors (file_path, last_line, last_size) VALUES (?, ?, ?)')
+  // Reconciled with upstream #573/#583 (per-model cost accuracy): ON CONFLICT DO UPDATE
+  // backfills columns that were NULL/0 on the first (partial-transcript) write once a
+  // later pass sees the real value, instead of INSERT OR IGNORE silently keeping the gap
+  // forever. Extended to our own enrichment columns (provider, model_source) so they get
+  // the same backfill treatment as upstream's model/thinking_tokens.
   const insertCall = db.prepare(`
     INSERT INTO token_usage (agent, session_id, timestamp, input_tokens, output_tokens,
-      cache_read_tokens, cache_creation_tokens, thinking_tokens, model, content_preview, tool_name)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      cache_read_tokens, cache_creation_tokens, thinking_tokens, model, content_preview, tool_name,
+      provider, model_source)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(agent, session_id, timestamp, input_tokens, output_tokens) DO UPDATE SET
       model = CASE WHEN token_usage.model IS NULL AND excluded.model IS NOT NULL THEN excluded.model ELSE token_usage.model END,
-      thinking_tokens = CASE WHEN (token_usage.thinking_tokens IS NULL OR token_usage.thinking_tokens = 0) AND excluded.thinking_tokens > 0 THEN excluded.thinking_tokens ELSE token_usage.thinking_tokens END
+      thinking_tokens = CASE WHEN (token_usage.thinking_tokens IS NULL OR token_usage.thinking_tokens = 0) AND excluded.thinking_tokens > 0 THEN excluded.thinking_tokens ELSE token_usage.thinking_tokens END,
+      provider = CASE WHEN token_usage.provider IS NULL AND excluded.provider IS NOT NULL THEN excluded.provider ELSE token_usage.provider END,
+      model_source = CASE WHEN token_usage.model_source IS NULL AND excluded.model_source IS NOT NULL THEN excluded.model_source ELSE token_usage.model_source END
   `)
 
   for (const source of sources) {
@@ -242,8 +253,10 @@ export async function collectTokenUsage(): Promise<{ inserted: number; files: nu
                 c.agent, c.sessionId, c.timestamp,
                 c.inputTokens, c.outputTokens,
                 c.cacheReadTokens, c.cacheCreationTokens,
-                c.thinkingTokens, c.model,
+                c.thinkingTokens, c.model || null,
                 c.contentPreview || null, c.toolName,
+                c.model ? deriveProvider(c.model) : null,
+                c.model ? 'transcript' : null,
               )
             }
             setCursor.run(file, linesRead, fileSize)

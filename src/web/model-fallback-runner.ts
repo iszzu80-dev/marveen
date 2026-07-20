@@ -73,7 +73,7 @@ function sessionFor(name: string): string {
   return name === MAIN_AGENT_ID ? MAIN_CHANNELS_SESSION : agentSessionName(name)
 }
 
-function restartFor(name: string): void {
+async function restartFor(name: string): Promise<void> {
   if (name === MAIN_AGENT_ID) {
     // The main channels session is launchd-managed; a kickstart re-reads
     // .claude/settings.json (and thus the new model) on relaunch. KeepAlive
@@ -84,11 +84,11 @@ function restartFor(name: string): void {
   } else {
     // 'continue' (fresh: false) re-spawns with --continue so the conversation
     // survives the model swap.
-    restartAgentProcess(name, { fresh: false })
+    await restartAgentProcess(name, { fresh: false })
   }
 }
 
-function checkAgent(name: string, nowMs: number, revertAfterMs: number, chain: string[]): void {
+async function checkAgent(name: string, nowMs: number, revertAfterMs: number, chain: string[]): Promise<void> {
   // Sub-agents must be up; the main session is launchd-managed (always present).
   if (name !== MAIN_AGENT_ID && agentRunState(name) !== 'running') return
 
@@ -118,7 +118,7 @@ function checkAgent(name: string, nowMs: number, revertAfterMs: number, chain: s
 
   try {
     writeModelFor(name, action.model)
-    restartFor(name)
+    await restartFor(name)
     if (action.kind === 'downgrade') downgradedAt.set(name, nowMs)
     else downgradedAt.delete(name)
     logger.info(
@@ -131,7 +131,7 @@ function checkAgent(name: string, nowMs: number, revertAfterMs: number, chain: s
 }
 
 export function startModelFallbackRunner(): NodeJS.Timeout {
-  function sweep() {
+  async function sweep() {
     const cfg = readModelFallbackConfig()
     if (!cfg.enabled) {
       if (downgradedAt.size > 0) downgradedAt.clear() // re-seed cleanly if re-enabled
@@ -139,13 +139,13 @@ export function startModelFallbackRunner(): NodeJS.Timeout {
     }
     const now = Date.now()
     const revertAfterMs = cfg.revertAfterMinutes * 60_000
-    try { checkAgent(MAIN_AGENT_ID, now, revertAfterMs, cfg.chain) }
+    try { await checkAgent(MAIN_AGENT_ID, now, revertAfterMs, cfg.chain) }
     catch (err) { logger.debug({ err }, 'model-fallback: main check error') }
     for (const name of listAgentNames()) {
-      try { checkAgent(name, now, revertAfterMs, cfg.chain) }
+      try { await checkAgent(name, now, revertAfterMs, cfg.chain) }
       catch (err) { logger.debug({ err, agent: name }, 'model-fallback: agent check error') }
     }
   }
-  setTimeout(sweep, INITIAL_DELAY_MS)
-  return setInterval(sweep, INTERVAL_MS)
+  setTimeout(() => { void sweep() }, INITIAL_DELAY_MS)
+  return setInterval(() => { void sweep() }, INTERVAL_MS)
 }

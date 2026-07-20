@@ -445,8 +445,8 @@ function getMainAgentProvider(): ChannelProviderType {
   return CHANNEL_PROVIDER
 }
 
-function softReconnectMarveen(): boolean {
-  return attemptChannelMcpReconnect(MAIN_AGENT_ID).ok
+async function softReconnectMarveen(): Promise<boolean> {
+  return (await attemptChannelMcpReconnect(MAIN_AGENT_ID)).ok
 }
 
 async function triggerMarveenMemorySave(): Promise<void> {
@@ -1156,11 +1156,11 @@ async function handleMarveenDown(): Promise<void> {
           })
       }
     }
-    if (softReconnectMarveen()) marveenDownState.softAttempts += 1
+    if (await softReconnectMarveen()) marveenDownState.softAttempts += 1
     return
   }
   if (marveenDownState.stage === 'soft') {
-    if (marveenDownState.softAttempts < 3 && softReconnectMarveen()) {
+    if (marveenDownState.softAttempts < 3 && await softReconnectMarveen()) {
       marveenDownState.softAttempts += 1
       marveenDownState.lastAlertAt = now
       return
@@ -1578,7 +1578,7 @@ export function startChannelPluginMonitor(): NodeJS.Timeout | null {
     if (shouldRunPeriodicReap(lastDetachedReapAt, Date.now(), DETACHED_REAP_INTERVAL_MS)) {
       lastDetachedReapAt = Date.now()
       try {
-        const reaped = reapDetachedChannelClaudes({ tmuxPath: TMUX })
+        const reaped = await reapDetachedChannelClaudes({ tmuxPath: TMUX })
         if (reaped.length > 0) {
           logger.warn({ reaped }, 'channel-monitor: periodic reap removed detached channel-claude orphans')
         }

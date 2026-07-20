@@ -1,0 +1,249 @@
+/* CostOps Command Center -- shell + Áttekintés + Elemzés + Havi zárás + drawer styles.
+   Kept in its own stylesheet (unlike costs-v2, which self-injects a <style> tag at runtime) so
+   it's inspectable/editable like any other static asset, per the UI-0 file plan.
+
+   UI-4 token audit: every color below reuses the real design tokens from web/style.css
+   (--bg/--bg-card/--bg-input/--text/--text-muted/--border/--accent/--danger/--success/--info +
+   their *-soft variants). Earlier drafts referenced a var(--bg-secondary, ...) that does not
+   exist in style.css -- its fallback hex was silently rendering unconditionally in both light
+   and dark mode, which is exactly the "hardcoded color" spec 10.1 asks to avoid. Fixed here:
+   --bg-secondary -> --bg-input (the real token for a recessed/track-like surface). Status colors
+   (ok/warn/over) now reuse --success/--danger directly, matching spec 10.2's red=hiba/
+   zöld=reconciled convention with the app's OWN palette instead of an invented one; there is no
+   dedicated "warning/amber" token in style.css, so #f5a623 stays as the one deliberate, minimal
+   exception for the middle severity tier. */
+
+main.costs-cc-active { max-width: 1500px; }
+
+.cc-shell { display: flex; flex-direction: column; gap: 16px; }
+
+.cc-topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+
+.cc-tabs { display: flex; gap: 4px; overflow-x: auto; }
+.cc-tab {
+  background: none; border: 1px solid var(--border); border-radius: 8px;
+  padding: 6px 14px; cursor: pointer; color: var(--text); font-size: 0.9em; white-space: nowrap;
+}
+.cc-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.cc-month-select {
+  background: var(--bg-input); color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; padding: 6px 10px; font-size: 0.9em;
+}
+
+.cc-section { padding: 12px 0; border-top: 1px solid var(--border); }
+.cc-section:first-child { border-top: none; }
+.cc-section-title { font-size: 0.75em; font-weight: 600; letter-spacing: 0.04em; color: var(--text-muted); margin-bottom: 10px; }
+
+.cc-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; min-width: 0; }
+@media (max-width: 900px) { .cc-grid-2 { grid-template-columns: 1fr; } }
+
+.cc-muted { color: var(--text-muted); font-size: 0.9em; }
+.cc-error { color: var(--danger); padding: 16px 0; }
+.cc-loading { color: var(--text-muted); padding: 24px 0; }
+
+/* Hero */
+.cc-hero { padding: 16px; border: 1px solid var(--border); border-radius: 12px; }
+.cc-hero-title { font-size: 0.8em; font-weight: 600; letter-spacing: 0.04em; color: var(--text-muted); margin-bottom: 10px; }
+.cc-hero-row { display: flex; gap: 32px; flex-wrap: wrap; margin-bottom: 12px; }
+.cc-hero-value { font-size: 1.6em; font-weight: 700; font-variant-numeric: tabular-nums; }
+.cc-hero-label { font-size: 0.8em; color: var(--text-muted); margin-top: 2px; }
+.cc-hero-budget-label { font-size: 0.85em; color: var(--text-muted); margin-bottom: 4px; }
+.cc-hero-budget-track { height: 10px; }
+
+/* Bars (top sources) */
+.cc-bar-row { display: grid; grid-template-columns: 120px 1fr auto; gap: 10px; align-items: center; padding: 4px 0; min-width: 0; }
+.cc-bar-label { font-size: 0.85em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cc-bar-track { background: var(--bg-input); border-radius: 4px; height: 8px; overflow: hidden; }
+.cc-bar-fill { height: 100%; background: var(--accent); border-radius: 4px; }
+.cc-bar-fill.cc-ok { background: var(--success); }
+.cc-bar-fill.cc-warn { background: #f5a623; }
+.cc-bar-fill.cc-over { background: var(--danger); }
+.cc-bar-value { font-size: 0.82em; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.cc-bar-sub { display: block; font-size: 0.78em; color: var(--text-muted); }
+
+/* Monthly trend */
+.cc-trend-chart { display: flex; align-items: flex-end; gap: 8px; height: 120px; padding-top: 8px; }
+.cc-trend-col { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; }
+.cc-trend-bar-track { width: 100%; height: 100px; display: flex; align-items: flex-end; }
+.cc-trend-bar { width: 100%; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 2px; }
+.cc-trend-bar.cc-trend-nodata { background: var(--bg-input); }
+.cc-trend-label { font-size: 0.7em; color: var(--text-muted); margin-top: 4px; }
+
+/* Attention (alerts) */
+.cc-attn-row { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.cc-attn-row:last-child { border-bottom: none; }
+.cc-attn-sev { font-size: 0.72em; font-weight: 600; text-transform: uppercase; padding: 2px 8px; border-radius: 6px; height: fit-content; white-space: nowrap; }
+.cc-sev-critical .cc-attn-sev, .cc-sev-high .cc-attn-sev { background: var(--danger-soft); color: var(--danger); }
+.cc-sev-warning .cc-attn-sev, .cc-sev-medium .cc-attn-sev { background: rgba(245,166,35,0.15); color: #f5a623; }
+.cc-sev-low .cc-attn-sev, .cc-sev-info .cc-attn-sev { background: var(--info-soft); color: var(--text-muted); }
+.cc-attn-title { font-size: 0.88em; }
+.cc-attn-sub { font-size: 0.78em; color: var(--text-muted); margin-top: 2px; }
+
+/* Data trust segmented bar */
+.cc-segbar { display: flex; height: 12px; border-radius: 6px; overflow: hidden; background: var(--bg-input); }
+.cc-seg { height: 100%; }
+.cc-seg.cc-ok { background: var(--success); }
+.cc-seg.cc-neutral { background: var(--accent); }
+.cc-seg.cc-warn { background: #f5a623; }
+.cc-seg.cc-over { background: var(--danger); }
+.cc-seg.cc-muted-seg { background: var(--text-muted); }
+.cc-segbar-legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px; font-size: 0.78em; color: var(--text-muted); }
+.cc-seg-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
+.cc-seg-dot.cc-ok { background: var(--success); }
+.cc-seg-dot.cc-neutral { background: var(--accent); }
+.cc-seg-dot.cc-warn { background: #f5a623; }
+.cc-seg-dot.cc-over { background: var(--danger); }
+.cc-seg-dot.cc-muted-seg { background: var(--text-muted); }
+
+/* Savings */
+.cc-savings-total { font-size: 1.1em; font-weight: 700; margin-bottom: 8px; font-variant-numeric: tabular-nums; }
+.cc-savings-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 0.88em; }
+.cc-savings-value { font-variant-numeric: tabular-nums; }
+
+/* UI-2: Elemzés controls, chips, table, export */
+.cc-body-row { display: flex; gap: 20px; align-items: flex-start; min-width: 0; }
+.cc-view { flex: 1; min-width: 0; }
+
+.cc-controls { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 8px; }
+.cc-controls label { font-size: 0.8em; color: var(--text-muted); display: flex; flex-direction: column; gap: 4px; }
+.cc-controls select {
+  background: var(--bg-input); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 5px 8px; font-size: 0.95em;
+}
+
+.cc-chips { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+.cc-chip {
+  background: var(--bg-input); border: 1px solid var(--border); border-radius: 14px;
+  padding: 3px 10px; font-size: 0.78em; display: inline-flex; align-items: center; gap: 4px;
+}
+.cc-chip-x { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 1em; padding: 0; }
+.cc-chip-clear { background: none; border: none; color: var(--accent); cursor: pointer; font-size: 0.78em; text-decoration: underline; }
+
+.cc-bar-clickable { cursor: pointer; border-radius: 6px; }
+.cc-bar-clickable:hover { background: var(--bg-input); }
+.cc-bar-active { background: var(--accent-soft); }
+
+.cc-pair-row { display: grid; grid-template-columns: 120px 1fr auto; gap: 10px; align-items: center; padding: 4px 0; min-width: 0; }
+.cc-pair-tracks { display: flex; flex-direction: column; gap: 2px; }
+.cc-pair-prev { opacity: 0.6; }
+
+.cc-table-wrap { overflow-x: auto; max-width: 100%; }
+.cc-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+.cc-table th { text-align: left; font-weight: 600; color: var(--text-muted); padding: 6px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.cc-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); }
+.cc-table td.cc-num, .cc-table th:nth-child(4), .cc-table th:nth-child(5) { text-align: right; font-variant-numeric: tabular-nums; }
+.cc-table-row { cursor: pointer; }
+.cc-table-row:hover { background: var(--bg-input); }
+
+.cc-export-bar { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.cc-export-link { font-size: 0.8em; color: var(--accent); text-decoration: none; }
+.cc-export-link:hover { text-decoration: underline; }
+
+/* Stale-data visual flag (spec 12.6.6 -- stale state handled distinctly from a plain value). */
+.cc-stale-flag { color: #f5a623; font-weight: 600; }
+
+/* UI-3: Havi zárás */
+.cc-close-header { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; flex-wrap: wrap; }
+.cc-close-month { font-size: 1.3em; font-weight: 700; }
+
+.cc-status-badge { font-size: 0.72em; font-weight: 600; text-transform: uppercase; padding: 3px 10px; border-radius: 6px; letter-spacing: 0.03em; }
+.cc-status-open, .cc-status-provisional { background: var(--info-soft); color: var(--info); }
+.cc-status-closed, .cc-status-matched { background: var(--success-soft); color: var(--success); }
+.cc-status-reopened, .cc-status-variance { background: rgba(245,166,35,0.15); color: #f5a623; }
+.cc-status-missing_invoice, .cc-status-missing_provider_data { background: var(--danger-soft); color: var(--danger); }
+.cc-status-estimate_only, .cc-status-no_data { background: rgba(136,136,136,0.15); color: var(--text-muted); }
+
+.cc-checklist-group { margin-bottom: 12px; }
+.cc-checklist-group-title { font-size: 0.72em; font-weight: 600; color: var(--text-muted); text-transform: uppercase; margin-bottom: 6px; }
+.cc-check-row { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; font-size: 0.88em; flex-wrap: wrap; }
+.cc-check-icon { width: 16px; text-align: center; font-weight: 700; }
+.cc-check-ok .cc-check-icon { color: var(--success); }
+.cc-check-fail .cc-check-icon, .cc-check-fail { color: #f5a623; }
+.cc-check-detail { color: var(--text-muted); font-size: 0.85em; }
+
+.cc-close-summary-title { font-size: 0.8em; font-weight: 600; margin-bottom: 8px; color: var(--text-muted); }
+
+.cc-close-action { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.cc-input {
+  background: var(--bg-input); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 10px; font-size: 0.88em; min-width: 160px;
+}
+.cc-close-blockers { flex-basis: 100%; font-size: 0.85em; }
+
+/* Universal drawer (desktop: side column; mobile: bottom sheet) */
+.cc-drawer { width: 0; overflow: hidden; transition: width 0.15s ease; }
+.cc-drawer.cc-drawer-open { width: 340px; flex: none; border-left: 1px solid var(--border); padding-left: 20px; }
+.cc-drawer-header { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+.cc-drawer-close { background: none; border: 1px solid var(--border); border-radius: 6px; color: var(--text); cursor: pointer; padding: 4px 10px; font-size: 0.8em; }
+.cc-drawer-title { font-size: 1.1em; font-weight: 700; margin-bottom: 12px; }
+.cc-drawer-section-title { font-size: 0.72em; font-weight: 600; letter-spacing: 0.04em; color: var(--text-muted); margin: 16px 0 8px; }
+.cc-drawer-kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 0.85em; }
+.cc-drawer-kv div:nth-child(odd) { color: var(--text-muted); }
+.cc-drawer-row { display: flex; justify-content: space-between; font-size: 0.82em; padding: 3px 0; }
+.cc-evidence { font-size: 0.75em; background: var(--bg-input); padding: 8px; border-radius: 6px; overflow-x: auto; }
+
+/* Keyboard accessibility: visible focus ring on every interactive costops element, matching the
+   app's own :focus-visible convention (see .tmux-copy-btn in style.css) rather than relying on
+   inconsistent browser defaults on non-<button> role="button" elements. */
+.cc-tab:focus-visible,
+.cc-bar-row.cc-bar-clickable:focus-visible,
+.cc-pair-row.cc-bar-clickable:focus-visible,
+.cc-attn-row.cc-bar-clickable:focus-visible,
+.cc-savings-row.cc-bar-clickable:focus-visible,
+.cc-table-row:focus-visible,
+.cc-drawer-close:focus-visible,
+.cc-chip-x:focus-visible,
+.cc-chip-clear:focus-visible,
+.cc-export-link:focus-visible,
+.cc-month-select:focus-visible,
+.cc-controls select:focus-visible,
+.cc-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Mobile backdrop for the bottom-sheet drawer -- dimming the rest of the page while it's open
+   makes the "sheet over content" relationship clear and gives a large, obvious tap-to-close
+   target beyond the small × button. */
+.cc-drawer-backdrop { display: none; }
+
+@media (max-width: 900px) {
+  .cc-body-row { flex-direction: column; }
+  .cc-drawer.cc-drawer-open {
+    width: auto; border-left: none; padding-left: 0; position: fixed; inset: auto 0 0 0; max-height: 80vh;
+    overflow-y: auto; background: var(--bg-card); border-top: 1px solid var(--border); padding: 16px;
+    border-radius: 16px 16px 0 0; box-shadow: var(--shadow-lg); z-index: 51;
+  }
+  .cc-drawer-backdrop.cc-drawer-backdrop-open {
+    display: block; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 50;
+  }
+}
+
+/* Mobile: tab bar becomes an evenly-spaced segmented control (spec 3.2) instead of a scrolling
+   row of loosely-packed buttons. */
+@media (max-width: 600px) {
+  .cc-tabs { width: 100%; }
+  .cc-tab { flex: 1; text-align: center; }
+}
+
+/* Mobile: tables collapse to row-lists (spec 9 -- "A táblák mobilon sorlistává alakuljanak"),
+   each <td> relabeled via its data-label attribute (set in the JS templates) instead of relying
+   on the now-hidden <thead>. Reconciliation/forecast tables stay reachable this way rather than
+   only via horizontal scroll, which the spec calls out as desktop-first, not mobile-primary. */
+@media (max-width: 640px) {
+  .cc-table thead { display: none; }
+  .cc-table, .cc-table tbody, .cc-table tr, .cc-table td { display: block; width: 100%; }
+  .cc-table tr { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; padding: 6px 0; }
+  .cc-table td { border-bottom: none; display: flex; justify-content: space-between; gap: 12px; text-align: right; }
+  .cc-table td.cc-num, .cc-table th:nth-child(4), .cc-table th:nth-child(5) { text-align: right; }
+  .cc-table td::before { content: attr(data-label); color: var(--text-muted); text-align: left; font-weight: 600; font-size: 0.85em; }
+}
+
+@media (max-width: 768px) {
+  .cc-hero-row { gap: 16px; }
+  .cc-hero-value { font-size: 1.3em; }
+  .cc-bar-label { display: none; }
+  .cc-bar-row { grid-template-columns: 1fr auto; }
+  .cc-pair-row { grid-template-columns: 1fr auto; }
+}
