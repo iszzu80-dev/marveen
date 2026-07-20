@@ -10,6 +10,7 @@
 
 import type Database from 'better-sqlite3'
 import { initFxSchema } from './fx.js'
+import { initAlertsSchema } from './alerts.js'
 
 export function initCostOpsSchema(db: Database.Database): void {
   // CostOps v0.2: model/provider enrichment on the CORE token_usage table
@@ -81,6 +82,8 @@ export function initCostOpsSchema(db: Database.Database): void {
   try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN corrects_line_id INTEGER REFERENCES cost_line_items(id)`) } catch { /* already exists */ }
   // Phase 1 (GAP-09): fx_source/conversion_method columns + fx_rates history table.
   initFxSchema(db)
+  // Phase 3 (GAP-12): costops_alerts lifecycle table.
+  initAlertsSchema(db)
 
   // CostOps v0.3: provider cost-collector run history / sync status. No raw
   // account id, no raw API response, no secret ever stored here.
