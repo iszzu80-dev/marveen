@@ -126,6 +126,7 @@ for f in \
   dist/web/memory-pressure-monitor.js \
   dist/web/memory-pressure-types.js \
   dist/web/memory-pressure-gate.js \
+  dist/web/memory-pressure-health.js \
 ; do
   [ -f "$REPO_ROOT/$f" ] || die "missing build artifact: $f"
   cp "$REPO_ROOT/$f" "$RELEASE_DIR/"
@@ -145,6 +146,7 @@ cat > "$RELEASE_DIR/$MANIFEST_FILE" << MANIFEST
     "memory-pressure-monitor.js",
     "memory-pressure-types.js",
     "memory-pressure-gate.js",
+    "memory-pressure-health.js",
     "list-agent-rss.sh"
   ]
 }
