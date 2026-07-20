@@ -11,6 +11,11 @@
 import type Database from 'better-sqlite3'
 import { initFxSchema } from './fx.js'
 import { initAlertsSchema } from './alerts.js'
+import { initForecastSchema } from './forecast.js'
+import { initPeriodCloseSchema } from './period-close.js'
+import { initBudgetAuditSchema } from './budgets.js'
+import { initOptimizationSchema } from './optimization.js'
+import { initInvoiceSchema } from './invoice.js'
 
 export function initCostOpsSchema(db: Database.Database): void {
   // CostOps v0.2: model/provider enrichment on the CORE token_usage table
@@ -84,6 +89,16 @@ export function initCostOpsSchema(db: Database.Database): void {
   initFxSchema(db)
   // Phase 3 (GAP-12): costops_alerts lifecycle table.
   initAlertsSchema(db)
+  // Phase 1 (GAP-10): forecast_snapshots table. FK to cost_sources(id).
+  initForecastSchema(db)
+  // Phase 2 (GAP-13): period_status/period_close_events — monthly close workflow.
+  initPeriodCloseSchema(db)
+  // Phase 3 (GAP-11): budget change audit trail.
+  initBudgetAuditSchema(db)
+  // Phase 4: optimization recommendations persistence.
+  initOptimizationSchema(db)
+  // Phase 1: invoice/credit/refund/correction workflow tables.
+  initInvoiceSchema(db)
 
   // CostOps v0.3: provider cost-collector run history / sync status. No raw
   // account id, no raw API response, no secret ever stored here.
