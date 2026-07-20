@@ -140,6 +140,27 @@ describe('costops ledger + summary', () => {
     expect(anthropic.confidence).toBe('manual')
     expect(anthropic.spend).toBe(22000)
     expect(anthropic).toHaveProperty('name')
+    // Card a1552362 (item 2): no fx conversion happened for this HUF-native line -> null, not false.
+    expect(anthropic.fx_estimated).toBeNull()
+  })
+
+  // Card a1552362 (item 2): original_currency/fx_rate exist on the schema but had no derived
+  // "is this rate an estimate" flag -- every fx_rate today comes from the static Render-pricing
+  // config, never a rate embedded in the source document itself, so it's honestly always an
+  // estimate once a conversion happened at all.
+  it('fx_estimated is true once a real fx conversion is on the line, null when there is none', () => {
+    const db = getDb()
+    const c = cfg({ fixed_costs: [], budgets: [] })
+    syncFixedCostsToLedger(db, c, NOW)
+    db.prepare(`INSERT INTO cost_sources (id, name, provider, source_type, currency, active, created_at, updated_at) VALUES ('aws-usd','AWS','aws','usage','HUF',1,@now,@now)`).run({ now: NOW })
+    const win = monthWindow(NOW)
+    db.prepare(`
+      INSERT INTO cost_line_items (source_id, charge_period_start, charge_period_end, charge_category, billed_cost, currency, confidence, data_freshness, created_at, actual_source, original_amount, original_currency, fx_rate, fx_date)
+      VALUES ('aws-usd', @start, @end, 'invoice', 3600, 'HUF', 'actual_invoice', @now, @now, 'email_invoice', 10, 'USD', 360, @now)
+    `).run({ start: win.start, end: win.end, now: NOW })
+    const s = getCostSummary(db, c, NOW)
+    const aws = s.all_sources.find(x => x.source_id === 'aws-usd')!
+    expect(aws.fx_estimated).toBe(true)
   })
 
   it('classifies budget status at thresholds (display-only, no action)', () => {

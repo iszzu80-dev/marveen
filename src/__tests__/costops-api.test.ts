@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { writeFileSync, unlinkSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { initDatabase, getDb } from '../db.js'
-import { tryHandleCosts, startCostsSyncTask } from '../web/routes/costs.js'
+import { tryHandleCostOps, startCostsSyncTask } from '../web/routes/costs.js'
 import { monthWindow } from '../costops/ledger.js'
 import { COSTOPS_CONFIG_PATH } from '../costops/config.js'
 import type { RouteContext } from '../web/routes/types.js'
@@ -29,7 +29,7 @@ describe('costops API (route smoke)', () => {
     getDb().prepare("INSERT INTO token_usage (agent,session_id,timestamp,input_tokens,output_tokens,cache_read_tokens,cache_creation_tokens) VALUES ('marveen','s',?,1234,5678,0,0)").run(w.start + 100)
 
     const { ctx, out } = fakeCtx('/api/costs/summary')
-    const handled = await tryHandleCosts(ctx)
+    const handled = await tryHandleCostOps(ctx)
     expect(handled).toBe(true)
     expect(out.status).toBe(200)
     // shape
@@ -53,14 +53,14 @@ describe('costops API (route smoke)', () => {
 
   it('GET /api/costs/sources returns an array', async () => {
     const { ctx, out } = fakeCtx('/api/costs/sources')
-    expect(await tryHandleCosts(ctx)).toBe(true)
+    expect(await tryHandleCostOps(ctx)).toBe(true)
     expect(out.status).toBe(200)
     expect(Array.isArray(out.body)).toBe(true)
   })
 
   it('falls through (returns false) for unrelated paths', async () => {
     const { ctx } = fakeCtx('/api/kanban')
-    expect(await tryHandleCosts(ctx)).toBe(false)
+    expect(await tryHandleCostOps(ctx)).toBe(false)
   })
 
   // Review blocker (Szotasz, PR #524): "the GET endpoint performs writes". Proven with a
@@ -81,8 +81,8 @@ describe('costops API (route smoke)', () => {
 
     it('never inserts into cost_line_items/cost_sources, even with a real fixed cost configured', async () => {
       const { ctx } = fakeCtx('/api/costs/summary')
-      expect(await tryHandleCosts(ctx)).toBe(true)
-      expect(await tryHandleCosts(ctx)).toBe(true) // twice, to also rule out a one-shot lazy-write pattern
+      expect(await tryHandleCostOps(ctx)).toBe(true)
+      expect(await tryHandleCostOps(ctx)).toBe(true) // twice, to also rule out a one-shot lazy-write pattern
       const items = (getDb().prepare('SELECT COUNT(*) as n FROM cost_line_items').get() as { n: number }).n
       const sources = (getDb().prepare('SELECT COUNT(*) as n FROM cost_sources').get() as { n: number }).n
       expect(items).toBe(0)

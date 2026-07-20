@@ -5,6 +5,7 @@ import { STORE_DIR, DB_FILENAME, ALLOWED_CHAT_ID, OLLAMA_URL } from './config.js
 import { getEffectiveSettingValue } from './settings-store.js'
 import { logger } from './logger.js'
 import { TOOL_TIMEOUTS } from './tool-timeouts.js'
+import { initCostOpsSchema } from './costops/schema.js'  // LOCAL-FORK: costops seam (keep on rebase)
 
 let db: Database.Database
 
@@ -683,6 +684,11 @@ export function initDatabase(dbPathOverride?: string): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cost_line_items_period ON cost_line_items(charge_period_start, charge_period_end)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cost_line_items_source ON cost_line_items(source_id)`)
+
+  // LOCAL-FORK: costops seam (keep on rebase). All ADDITIONAL CostOps tables
+  // in src/costops/schema.ts. The base tables (cost_sources, cost_line_items)
+  // are in the upstream now — initCostOpsSchema() adds the extended schema on top.
+  initCostOpsSchema(db)
 
   // --- Vault SSH Keys (shared pool) ---
   db.exec(`

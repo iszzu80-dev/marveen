@@ -52,7 +52,7 @@ import { tryHandleOnboarding } from './web/routes/onboarding.js'
 import { tryHandleStatus } from './web/routes/status.js'
 import { tryHandleAutonomy } from './web/routes/autonomy.js'
 import { tryHandleTokenUsage } from './web/routes/token-usage.js'
-import { tryHandleCosts, startCostsSyncTask } from './web/routes/costs.js'
+import { tryHandleCostOps, startCostsSyncTask } from './web/routes/costs.js'  // LOCAL-FORK: costops seam (keep on rebase)
 import { tryHandleIdeas } from './web/routes/ideas.js'
 import { tryHandleToolLog } from './web/routes/tool-log.js'
 import { tryHandleSettings } from './web/routes/settings.js'
@@ -187,7 +187,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleStatus(routeCtx)) return
       if (await tryHandleAutonomy(routeCtx)) return
       if (await tryHandleTokenUsage(routeCtx)) return
-      if (await tryHandleCosts(routeCtx)) return
+      if (await tryHandleCostOps(routeCtx)) return  // LOCAL-FORK: costops seam (keep on rebase)
       if (await tryHandleIdeas(routeCtx)) return
       if (await tryHandleToolLog(routeCtx)) return
       if (await tryHandleSettings(routeCtx)) return
