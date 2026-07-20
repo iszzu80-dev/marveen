@@ -6,6 +6,6 @@ import { defineConfig, configDefaults } from 'vitest/config'
 // defaults; only carve out the e2e directory.
 export default defineConfig({
   test: {
-    exclude: [...configDefaults.exclude, 'tests/smoke/**'],
+    exclude: [...configDefaults.exclude, 'tests/smoke/**', '.claude/**'],
   },
 })
