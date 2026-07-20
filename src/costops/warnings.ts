@@ -188,7 +188,7 @@ export function getWarnings(
   // from rule 6 above (any material CHANGE, either direction, 15% threshold, low severity,
   // informational). This is one-directional (increase only) with a higher, more urgent
   // threshold. 50% is a recommendation, not business-specified (flagged, same treatment as the
-  // Eskuv{0151} bundle-discount placeholder earlier this session) -- tune once real data exists.
+  // Wedding bundle-discount placeholder earlier this session) -- tune once real data exists.
   const LARGE_INCREASE_FRACTION = 0.5
   if (summary.previous_month) {
     const prevByProvider = new Map(summary.previous_month.by_provider.map(p => [p.provider, p.spend]))
