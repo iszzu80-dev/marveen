@@ -1,0 +1,14 @@
+[Unit]
+Description=Marveen Memory Pressure Monitor
+Documentation=https://github.com/istvan/marveen
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/iszzu/.bun/bin/bun run /home/iszzu/marveen/src/web/memory-pressure-monitor.ts
+Environment=MARVEEN_HOME=/home/iszzu/marveen
+# Must survive dashboard death — no PartOf/Requires on dashboard.
+# No memory limit on the monitor itself (it's tiny).
+StandardOutput=journal
+StandardError=journal
+# Oneshot services exit after ExecStart; the timer triggers the next run.
