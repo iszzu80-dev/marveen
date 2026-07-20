@@ -9,6 +9,7 @@ __pycache__/
 # Secrets & personal data
 .env
 store/
+releases/
 workspace/
 agents/
 reports/
