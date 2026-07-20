@@ -22,11 +22,14 @@
  * failing service cannot update the state file.
  */
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readlinkSync, statSync } from "node:fs";
 import type { MemoryPressureStateFile } from "./memory-pressure-types.js";
 import { DEFAULT_CONFIG, STATE_FILE } from "./memory-pressure-types.js";
 
-export type MonitorFailureMode = "MONITOR_STATE_STALE" | "MONITOR_EXECUTION_FAILED";
+export type MonitorFailureMode =
+  | "MONITOR_STATE_STALE"
+  | "MONITOR_EXECUTION_FAILED"
+  | "MONITOR_RELEASE_MISMATCH";
 
 export interface MonitorHealth {
   healthy: boolean;
@@ -71,6 +74,29 @@ export function loadStateFile(): MemoryPressureStateFile | null {
  * @param nowMs      Current time in epoch ms (for test injection).
  * @param maxCycles  Max allowed age in monitor cycles (default 2).
  */
+
+/**
+ * The release the monitor SHOULD be running from: the target of the
+ * releases/monitor-current symlink. Returns null when the symlink is absent
+ * (e.g. a dev box that never ran install-monitor.sh) -- in that case we cannot
+ * compare, so we do not fail the health check on it.
+ */
+function readInstalledReleaseId(): string | null {
+  try {
+    const override = process.env.MARVEEN_MEM_PRESSURE_TEST_RELEASE_LINK;
+    const link = override ?? `${INSTALL_DIR}/releases/monitor-current`;
+    // readlinkSync, NOT existsSync: existsSync FOLLOWS the symlink, so a
+    // DANGLING monitor-current (release dir deleted, e.g. by git clean) would
+    // return false and silently disable this whole check -- the one case where
+    // it matters most. readlinkSync reads the link itself and throws only when
+    // there is no link at all.
+    const target = readlinkSync(link);
+    return target.split("/").filter(Boolean).pop() ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function checkMonitorHealth(
   stateFile?: MemoryPressureStateFile | null,
   nowMs?: number,
@@ -163,7 +189,25 @@ export function checkMonitorHealth(
     }
   }
 
-  // ── All checks passed ─────────────────────────────────────────────────
+  // -- Release match ------------------------------------------------------
+  // A state file can be fresh, recent and status=ok and STILL be written by a
+  // monitor from a superseded release: install a new release, fail to restart
+  // the timer, and the old process keeps heartbeating. Every other check here
+  // passes and the guard silently protects using stale logic. Compare what
+  // wrote the state against what is installed.
+  const installedRelease = readInstalledReleaseId();
+  if (installedRelease !== null && state.releaseId && state.releaseId !== installedRelease) {
+    return {
+      healthy: false,
+      failureMode: "MONITOR_RELEASE_MISMATCH",
+      details: `state written by release ${state.releaseId} but ${installedRelease} is installed -- a superseded monitor is still running`,
+      stateFileMtimeMs,
+      lastSuccessAgeSeconds: lastSuccessTime ? Math.round((now - lastSuccessTime) / 1000) : null,
+      stateGeneration: state.generation,
+    };
+  }
+
+  // -- All checks passed ─────────────────────────────────────────────────
   return {
     healthy: true,
     failureMode: null,

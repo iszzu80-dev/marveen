@@ -18,7 +18,7 @@
  * the fix branch to verify GREEN.
  */
 
-import { writeFileSync, unlinkSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { writeFileSync, unlinkSync, existsSync, mkdirSync, readFileSync, mkdtempSync, symlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
@@ -420,6 +420,37 @@ async function run(): Promise<void> {
     teardown();
     const rC = memoryPressureGate("non-core-agent");
     ok("T6c: no state file → non-core blocked (fail-closed, pre-existing behavior)", !rC.allowed, rC);
+
+    // ── T7: release mismatch → unhealthy (Istvan requirement 3, 2026-07-20) ──
+    // A state file can be fresh, recent and status=ok and STILL be written by a
+    // superseded monitor: install a new release, fail to restart the timer, and
+    // the old process keeps heartbeating. Every other health check passes while
+    // the guard silently protects using stale logic.
+    {
+      const linkDir = mkdtempSync(join(tmpdir(), "mp-release-"));
+      const installed = join(linkDir, "monitor-current");
+      symlinkSync(join(linkDir, "monitor-99999999"), installed);
+      process.env.MARVEEN_MEM_PRESSURE_TEST_RELEASE_LINK = installed;
+
+      // state written by a DIFFERENT release than the one installed
+      writeFixture({ releaseId: "monitor-98222ef28" });
+      const hM = checkMonitorHealth(null, NOW);
+      ok("T7: release mismatch → unhealthy", !hM.healthy, hM);
+      ok("T7: failure mode is MONITOR_RELEASE_MISMATCH",
+         hM.failureMode === "MONITOR_RELEASE_MISMATCH", hM.failureMode);
+      ok("T7: details name BOTH releases (auditable)",
+         !!hM.details && hM.details.includes("monitor-98222ef28") && hM.details.includes("monitor-99999999"),
+         hM.details);
+
+      // the mirror: matching release must NOT trip the check, so the test
+      // proves the comparison and not merely that any releaseId fails.
+      writeFixture({ releaseId: "monitor-99999999" });
+      const hOk = checkMonitorHealth(null, NOW);
+      ok("T7: matching release → healthy", hOk.healthy, hOk);
+
+      delete process.env.MARVEEN_MEM_PRESSURE_TEST_RELEASE_LINK;
+    }
+
   }
 
   // ── Summary ────────────────────────────────────────────────────────────────
