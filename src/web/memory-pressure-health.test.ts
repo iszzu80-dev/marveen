@@ -58,10 +58,22 @@ function writeFixture(state: FixtureState, ageSeconds?: number): void {
   const successTs = ageSeconds
     ? new Date(now.getTime() - ageSeconds * 1000).toISOString()
     : now.toISOString();
+  const ts = new Date().toISOString();
 
   const baseFixture: MemoryPressureStateFile = {
+    // v2 fields
+    pressureState: "normal",
+    pressureStateSince: sampleTs,
+    monitorHealth: "healthy",
+    healthReasonCode: "OK",
+    healthDetails: "monitor healthy",
+    measurementCapabilities: { hostMemory: "ok", agentProcessTreeRss: "ok" },
+    dependencyClosureStatus: "ok",
+    dependencyClosureErrors: [],
+    // backward-compat aliases
     state: "normal",
     since: sampleTs,
+    // unchanged
     lastSample: { ...defaultSample, timestamp: sampleTs },
     thresholds: DEFAULT_CONFIG.thresholds,
     generation: 1,
@@ -69,12 +81,17 @@ function writeFixture(state: FixtureState, ageSeconds?: number): void {
     lastSuccessfulMeasurementTime: successTs,
     lastMeasurementStatus: "ok",
     monitorBuildCommit: "test-commit",
-    releaseId: "monitor-test0001",
+    releaseId: "monitor-test0001",  // Only used in T7 which tests release mismatch explicitly
   };
 
   const fixture: MemoryPressureStateFile = {
     ...baseFixture,
     ...state,
+    // Sync backward-compat aliases
+    pressureState: state.pressureState ?? state.state ?? baseFixture.pressureState,
+    pressureStateSince: state.pressureStateSince ?? state.since ?? baseFixture.pressureStateSince,
+    state: state.state ?? state.pressureState ?? baseFixture.state,
+    since: state.since ?? state.pressureStateSince ?? baseFixture.since,
     lastSample: state.lastSample
       ? ({ ...defaultSample, timestamp: sampleTs, ...state.lastSample } as MemoryPressureSample)
       : { ...defaultSample, timestamp: sampleTs },
@@ -415,10 +432,16 @@ async function run(): Promise<void> {
   // This is the lifecycle integration — a dead guard must fail-closed.
   // ═══════════════════════════════════════════════════════════════════════════
   {
-    // Scenario A: state file fresh, lastMeasurementStatus="failed" → gate blocks non-core
+    // Scenario A: state file fresh, monitorHealth="unhealthy" → gate blocks non-core
+    // In v2, the monitor self-declares unhealthy when measurement fails.
+    // lastMeasurementStatus is the v1 mechanism; monitorHealth is v2.
     writeFixture({
       state: "normal",
+      pressureState: "normal",
       generation: 50,
+      monitorHealth: "unhealthy",
+      healthReasonCode: "MONITOR_EXECUTION_FAILED",
+      healthDetails: "last measurement status is failed",
       lastMeasurementStatus: "failed",
       lastSuccessfulMeasurementTime: new Date(NOW - 10 * 1000).toISOString(),
       lastSample: { agentRssMeasurementStatus: "error", timestamp: new Date(NOW - 5 * 1000).toISOString() },
@@ -493,6 +516,117 @@ async function run(): Promise<void> {
       delete process.env.MARVEEN_MEM_PRESSURE_TEST_RELEASE_LINK;
     }
 
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // v2: measurement capabilities in health result
+  // ═══════════════════════════════════════════════════════════════════════════
+  {
+    writeFixture({
+      state: "normal",
+      releaseId: null,  // disable release-match check for this test
+      measurementCapabilities: { hostMemory: "ok", agentProcessTreeRss: "ok" },
+    });
+    const health = checkMonitorHealth(null, NOW, 2);
+    ok("v2: healthy state returns measurementCapabilities", health.measurementCapabilities !== null);
+    ok("v2: healthReasonCode is OK when healthy", health.healthReasonCode === "OK", health.healthReasonCode);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // v2: RSS dependency_failed → unhealthy
+  // ═══════════════════════════════════════════════════════════════════════════
+  {
+    writeFixture({
+      state: "normal",
+      measurementCapabilities: { hostMemory: "ok", agentProcessTreeRss: "dependency_failed" },
+    });
+    const health = checkMonitorHealth(null, NOW, 2);
+    ok("v2: RSS dependency_failed → unhealthy", !health.healthy, health);
+    ok("v2: failure mode is MONITOR_EXECUTION_FAILED",
+      health.failureMode === "MONITOR_EXECUTION_FAILED", health.failureMode);
+    ok("v2: healthReasonCode is AGENT_RSS_COLLECTOR_FAILED",
+      health.healthReasonCode === "AGENT_RSS_COLLECTOR_FAILED", health.healthReasonCode);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // v2: RSS error → unhealthy
+  // ═══════════════════════════════════════════════════════════════════════════
+  {
+    writeFixture({
+      state: "normal",
+      measurementCapabilities: { hostMemory: "ok", agentProcessTreeRss: "error" },
+    });
+    const health = checkMonitorHealth(null, NOW, 2);
+    ok("v2: RSS error → unhealthy", !health.healthy, health);
+    ok("v2: healthReasonCode is AGENT_RSS_COLLECTOR_FAILED for error too",
+      health.healthReasonCode === "AGENT_RSS_COLLECTOR_FAILED", health.healthReasonCode);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // v2: host memory error → unhealthy
+  // ═══════════════════════════════════════════════════════════════════════════
+  {
+    writeFixture({
+      state: "normal",
+      measurementCapabilities: { hostMemory: "error", agentProcessTreeRss: "ok" },
+    });
+    const health = checkMonitorHealth(null, NOW, 2);
+    ok("v2: host memory error → unhealthy", !health.healthy, health);
+    ok("v2: healthReasonCode is HOST_MEMORY_MEASUREMENT_FAILED",
+      health.healthReasonCode === "HOST_MEMORY_MEASUREMENT_FAILED", health.healthReasonCode);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // v2: monitor self-declared unhealthy → trusted
+  // ═══════════════════════════════════════════════════════════════════════════
+  {
+    writeFixture({
+      state: "normal",
+      monitorHealth: "unhealthy",
+      healthReasonCode: "AGENT_RSS_COLLECTOR_FAILED",
+      healthDetails: "Agent RSS collector script missing",
+      measurementCapabilities: { hostMemory: "ok", agentProcessTreeRss: "dependency_failed" },
+    });
+    const health = checkMonitorHealth(null, NOW, 2);
+    ok("v2: self-declared unhealthy → unhealthy", !health.healthy, health);
+    ok("v2: healthReasonCode propagated from state file",
+      health.healthReasonCode === "AGENT_RSS_COLLECTOR_FAILED", health.healthReasonCode);
+    ok("v2: measurementCapabilities propagated",
+      health.measurementCapabilities?.agentProcessTreeRss === "dependency_failed");
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // v2: pre-v2 state file (no v2 fields) → backward compat
+  // ═══════════════════════════════════════════════════════════════════════════
+  {
+    // Write a minimal v1-style fixture by omitting v2 fields
+    const v1Fixture: any = {
+      state: "normal",
+      since: new Date().toISOString(),
+      lastSample: {
+        timestamp: new Date().toISOString(),
+        memAvailableGiB: 5.0,
+        swapUsedGiB: 0,
+        psiMemorySome: 0,
+        agentProcessTreeRssBytes: 2 * 1073741824,
+        measuredAgentCount: 8,
+        expectedAgentCount: 6,
+        agentRssMeasurementStatus: "ok",
+        agentRssMeasurementSource: "list-agent-rss.sh",
+      },
+      thresholds: DEFAULT_CONFIG.thresholds,
+      generation: 1,
+      lastAction: null,
+      lastSuccessfulMeasurementTime: new Date().toISOString(),
+      lastMeasurementStatus: "ok",
+      monitorBuildCommit: null,
+      releaseId: null,
+    };
+    mkdirSync(dirname(STATE_PATH), { recursive: true });
+    writeFileSync(STATE_PATH, JSON.stringify(v1Fixture, null, 2), "utf-8");
+    const health = checkMonitorHealth(null, NOW, 2);
+    ok("v2: pre-v2 state file → healthy (backward compat)", health.healthy, health);
+    ok("v2: pre-v2 state file → no measurementCapabilities", health.measurementCapabilities === null);
   }
 
   // ── Summary ────────────────────────────────────────────────────────────────

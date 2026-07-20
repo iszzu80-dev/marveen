@@ -64,14 +64,26 @@ function writeFixture(state: FixtureState): void {
   };
   // Build the base fixture, then spread state over it. The lastSample is
   // deep-merged: defaults from defaultSample, overridden by state.lastSample.
+  const now = new Date().toISOString();
   const baseFixture: MemoryPressureStateFile = {
+    // v2 fields
+    pressureState: "normal",
+    pressureStateSince: now,
+    monitorHealth: "healthy",
+    healthReasonCode: "OK",
+    healthDetails: "monitor healthy",
+    measurementCapabilities: { hostMemory: "ok", agentProcessTreeRss: "ok" },
+    dependencyClosureStatus: "ok",
+    dependencyClosureErrors: [],
+    // backward-compat aliases
     state: "normal",
-    since: new Date().toISOString(),
+    since: now,
+    // unchanged
     lastSample: defaultSample,
     thresholds: DEFAULT_CONFIG.thresholds,
     generation: 1,
     lastAction: null,
-    lastSuccessfulMeasurementTime: new Date().toISOString(),
+    lastSuccessfulMeasurementTime: now,
     lastMeasurementStatus: "ok",
     monitorBuildCommit: null,
     releaseId: null,
@@ -79,6 +91,12 @@ function writeFixture(state: FixtureState): void {
   const fixture: MemoryPressureStateFile = {
     ...baseFixture,
     ...state,
+    // Sync backward-compat aliases: if test sets state but not pressureState,
+    // propagate both so the gate (which reads pressureState first) sees the value.
+    pressureState: state.pressureState ?? state.state ?? baseFixture.pressureState,
+    pressureStateSince: state.pressureStateSince ?? state.since ?? baseFixture.pressureStateSince,
+    state: state.state ?? state.pressureState ?? baseFixture.state,
+    since: state.since ?? state.pressureStateSince ?? baseFixture.since,
     lastSample: state.lastSample
       ? { ...defaultSample, ...state.lastSample } as MemoryPressureSample
       : baseFixture.lastSample,
@@ -203,9 +221,81 @@ async function run(): Promise<void> {
       lastSample: { timestamp: new Date().toISOString(), memAvailableGiB: 1.0, swapUsedGiB: 0.3, psiMemorySome: 5.0, agentProcessTreeRssBytes: 3.0 },
     });
     const r = memoryPressureGate("agent-x");
-    ok("block reason includes state", r.reason.includes("state=critical"), r.reason);
+    ok("block reason includes state", r.reason.includes("pressureState=critical"), r.reason);
     ok("block reason includes memAvailable", r.reason.includes("memAvailable=1.0GiB"), r.reason);
     ok("block reason includes threshold", r.reason.includes("threshold=2.5GiB"), r.reason);
+  }
+
+  // ── v2: monitor unhealthy (self-declared) → non-core blocked ──────────
+  {
+    writeFixture({
+      state: "normal",
+      pressureState: "normal",
+      monitorHealth: "unhealthy",
+      healthReasonCode: "AGENT_RSS_COLLECTOR_FAILED",
+      healthDetails: "Agent RSS collector script missing or not executable",
+    });
+    const r = memoryPressureGate("non-core-agent");
+    ok("v2: monitor self-declared unhealthy → non-core blocked", !r.allowed, r);
+    ok("v2: reason includes healthReasonCode", r.reason.includes("AGENT_RSS_COLLECTOR_FAILED"), r.reason);
+    // Core still allowed
+    const rCore = memoryPressureGate("marveen");
+    ok("v2: unhealthy monitor → core still allowed", rCore.allowed, rCore);
+  }
+
+  // ── v2: RSS measurement dependency_failed → non-core blocked ──────────
+  {
+    writeFixture({
+      state: "normal",
+      pressureState: "normal",
+      monitorHealth: "healthy",
+      healthReasonCode: "OK",
+      measurementCapabilities: { hostMemory: "ok", agentProcessTreeRss: "dependency_failed" },
+    });
+    const r = memoryPressureGate("non-core-agent");
+    ok("v2: RSS dependency_failed → non-core blocked (fail-closed)", !r.allowed, r);
+    ok("v2: reason mentions measurement degraded", r.reason.includes("measurement degraded"), r.reason);
+    ok("v2: reason mentions dependency_failed", r.reason.includes("dependency_failed"), r.reason);
+  }
+
+  // ── v2: RSS measurement error → non-core blocked ──────────────────────
+  {
+    writeFixture({
+      state: "normal",
+      pressureState: "normal",
+      monitorHealth: "healthy",
+      healthReasonCode: "OK",
+      measurementCapabilities: { hostMemory: "ok", agentProcessTreeRss: "error" },
+    });
+    const r = memoryPressureGate("non-core-agent");
+    ok("v2: RSS measurement error → non-core blocked", !r.allowed, r);
+    ok("v2: reason mentions measurement degraded", r.reason.includes("measurement degraded"), r.reason);
+  }
+
+  // ── v2: RSS measurement partial + healthy → non-core allowed ──────────
+  {
+    writeFixture({
+      state: "normal",
+      pressureState: "normal",
+      monitorHealth: "healthy",
+      healthReasonCode: "OK",
+      measurementCapabilities: { hostMemory: "ok", agentProcessTreeRss: "partial" },
+    });
+    const r = memoryPressureGate("non-core-agent");
+    ok("v2: RSS partial but monitor healthy → non-core allowed", r.allowed, r);
+  }
+
+  // ── v2: pre-v2 state file (no measurementCapabilities) → backward compat
+  {
+    writeFixture({
+      state: "normal",
+      pressureState: "normal",
+      monitorHealth: "healthy",
+      healthReasonCode: "OK",
+      measurementCapabilities: undefined as any,
+    });
+    const r = memoryPressureGate("non-core-agent");
+    ok("v2: pre-v2 state file (no caps) → non-core allowed when healthy", r.allowed, r);
   }
 
   teardown();

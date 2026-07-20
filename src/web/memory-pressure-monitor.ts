@@ -18,9 +18,13 @@
  *
  * PSI and swap are SUPPLEMENTARY conditions — they can escalate but never
  * de-escalate alone. Hysteresis prevents flapping.
+ *
+ * Schema v2 (2026-07-20): pressureState split from monitorHealth.
+ * The monitor self-assesses its health and writes it into the state file.
+ * The gate reads monitorHealth directly — no function call, no stale path.
  */
 
-import { writeFileSync, readFileSync, renameSync, existsSync, mkdirSync } from "node:fs";
+import { writeFileSync, readFileSync, renameSync, existsSync, mkdirSync, statSync, readlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import { execSync } from "node:child_process";
 import type {
@@ -28,24 +32,41 @@ import type {
   MemoryPressureSample,
   MemoryPressureStateFile,
   MemoryPressureConfig,
+  MeasurementCapabilities,
+  HealthReasonCode,
 } from "./memory-pressure-types.js";
 import { DEFAULT_CONFIG, STATE_FILE, CONFIG_FILE } from "./memory-pressure-types.js";
 import { relievePressure, updateStateAction } from "./memory-pressure-gate.js";
 
-const INSTALL_DIR = process.env.MARVEEN_HOME ?? process.cwd();
+// ── Data path resolution ───────────────────────────────────────────────────
+// Code dependencies (scripts, JS modules) live INSIDE the release directory
+// and are resolved relative to THIS file via import.meta.url. Data paths
+// (state file, config, audit log, agents-desired) live under MARVEEN_HOME
+// which is set by the systemd unit. No process.cwd() fallback — a missing
+// MARVEEN_HOME is a configuration error and must fail loudly.
 
-function resolvePath(relative: string): string {
-  return `${INSTALL_DIR}/${relative}`;
+function resolveDataPath(relative: string): string {
+  const home = process.env.MARVEEN_HOME;
+  if (!home) {
+    // Test mode: MARVEEN_MEM_PRESSURE_TEST_STATE implies a hermetic test
+    // environment where data paths are absolute overrides and MARVEEN_HOME
+    // is intentionally absent (the test must not touch the live store).
+    if (process.env.MARVEEN_MEM_PRESSURE_TEST_STATE) {
+      return `/tmp/mem-pressure-test/${relative}`;
+    }
+    throw new Error("MARVEEN_HOME is not set — systemd unit must provide this env var");
+  }
+  return `${home}/${relative}`;
 }
 
 function resolveStatePath(): string {
   const override = process.env.MARVEEN_MEM_PRESSURE_TEST_STATE;
   if (override) return override;
-  return resolvePath(STATE_FILE);
+  return resolveDataPath(STATE_FILE);
 }
 
 function loadConfig(): MemoryPressureConfig {
-  const configPath = resolvePath(CONFIG_FILE);
+  const configPath = resolveDataPath(CONFIG_FILE);
   try {
     if (existsSync(configPath)) {
       const raw = JSON.parse(readFileSync(configPath, "utf-8")) as Partial<MemoryPressureConfig>;
@@ -146,7 +167,7 @@ function readAgentRss(): import("./memory-pressure-types.js").AgentRssMeasuremen
  *  partial status less actionable but is honest about the uncertainty. */
 function readExpectedAgentCount(): number | null {
   try {
-    const path = resolvePath("store/agents-desired.json");
+    const path = resolveDataPath("store/agents-desired.json");
     if (!existsSync(path)) return null;
     const agents = JSON.parse(readFileSync(path, "utf-8"));
     if (Array.isArray(agents)) return agents.length;
@@ -154,9 +175,11 @@ function readExpectedAgentCount(): number | null {
   } catch { return null; }
 }
 
-function sample(config: MemoryPressureConfig): MemoryPressureSample {
+function sample(
+  config: MemoryPressureConfig,
+  rss: import("./memory-pressure-types.js").AgentRssMeasurement,
+): MemoryPressureSample {
   const mem = readMemInfo();
-  const rss = readAgentRss();
   return {
     timestamp: new Date().toISOString(),
     memAvailableGiB: mem.memAvailableKiB / 1048576,
@@ -215,6 +238,175 @@ function computeNextState(
   return "normal";
 }
 
+// ── Measurement capabilities (v2) ───────────────────────────────────────────
+
+/**
+ * Evaluate what this monitor can actually measure RIGHT NOW.
+ * Written into the state file so the gate and health check can decide
+ * fail-closed without calling back into monitor code.
+ */
+function computeMeasurementCapabilities(
+  rssResult: import("./memory-pressure-types.js").AgentRssMeasurement,
+): MeasurementCapabilities {
+  // Host memory: /proc/meminfo is a kernel interface. On Linux it always works.
+  // If it returned zeros, it's still "ok" — we measured, the value is just zero.
+  const hostMemory: MeasurementCapabilities["hostMemory"] = "ok";
+
+  // Agent RSS: what does the measurement script tell us?
+  let agentProcessTreeRss: MeasurementCapabilities["agentProcessTreeRss"];
+  if (rssResult.status === "ok") {
+    agentProcessTreeRss = "ok";
+  } else if (rssResult.status === "partial") {
+    agentProcessTreeRss = "partial";
+  } else {
+    // status === "error" — but WHY? Distinguish "script missing/not-executable"
+    // (dependency_failed) from "script exists but execution failed" (error).
+    const monitorDir = dirname(new URL(import.meta.url).pathname);
+    const script = `${monitorDir}/list-agent-rss.sh`;
+    try {
+      if (!existsSync(script)) {
+        agentProcessTreeRss = "dependency_failed";
+      } else {
+        // Script exists but execution failed — could be timeout, parse error, etc.
+        agentProcessTreeRss = "error";
+      }
+    } catch {
+      agentProcessTreeRss = "error";
+    }
+  }
+
+  return { hostMemory, agentProcessTreeRss };
+}
+
+// ── Monitor health self-assessment (v2) ─────────────────────────────────────
+
+/**
+ * The monitor evaluates its OWN health during main() and writes it into the
+ * state file. The gate reads monitorHealth directly — no function call, no
+ * stale code path. The gate's ONLY job is to check the state file.
+ *
+ * This function answers: given what we just measured and what we know about
+ * our runtime environment, are we healthy?
+ */
+function computeMonitorHealth(
+  capabilities: MeasurementCapabilities,
+  release: { commit: string | null; releaseId: string | null },
+): { monitorHealth: "healthy" | "unhealthy"; healthReasonCode: HealthReasonCode; healthDetails: string } {
+  const problems: string[] = [];
+
+  // Check 1: can we measure agent RSS at all?
+  if (capabilities.agentProcessTreeRss === "dependency_failed") {
+    problems.push("Agent RSS collector script missing or not executable");
+    return {
+      monitorHealth: "unhealthy",
+      healthReasonCode: "AGENT_RSS_COLLECTOR_FAILED",
+      healthDetails: problems.join("; "),
+    };
+  }
+
+  // Check 2: agent RSS measurement errored
+  if (capabilities.agentProcessTreeRss === "error") {
+    problems.push("Agent RSS measurement failed (script execution error)");
+    return {
+      monitorHealth: "unhealthy",
+      healthReasonCode: "AGENT_RSS_COLLECTOR_FAILED",
+      healthDetails: problems.join("; "),
+    };
+  }
+
+  // Check 3: host memory measurement
+  if (capabilities.hostMemory === "error") {
+    problems.push("Host memory measurement failed (/proc/meminfo unreadable)");
+    return {
+      monitorHealth: "unhealthy",
+      healthReasonCode: "HOST_MEMORY_MEASUREMENT_FAILED",
+      healthDetails: problems.join("; "),
+    };
+  }
+
+  // Check 4: release match — does the running code match what's installed?
+  // Only meaningful when running from a release (not source tree / dev mode).
+  if (release.commit && release.releaseId) {
+    try {
+      const installedRelease = readInstalledReleaseId();
+      if (installedRelease !== null && release.releaseId !== installedRelease) {
+        problems.push(
+          `Running release ${release.releaseId} but ${installedRelease} is installed — superseded monitor still active`,
+        );
+        return {
+          monitorHealth: "unhealthy",
+          healthReasonCode: "MONITOR_RELEASE_MISMATCH",
+          healthDetails: problems.join("; "),
+        };
+      }
+    } catch { /* release symlink not available; skip this check */ }
+  }
+
+  // Healthy
+  return {
+    monitorHealth: "healthy",
+    healthReasonCode: "OK",
+    healthDetails: capabilities.agentProcessTreeRss === "partial"
+      ? "monitor healthy (RSS measurement partial)"
+      : "monitor healthy",
+  };
+}
+
+// ── Dependency closure self-audit (v2) ──────────────────────────────────────
+
+/**
+ * Check that a release-local dependency actually exists inside the release
+ * directory and is executable (for scripts). Returns an error message or null.
+ * This is a RUNTIME self-audit — the build-time check in install-monitor.sh
+ * is the primary gate, but this catches post-install corruption.
+ */
+function auditReleaseLocalDep(relativePath: string, mustBeExecutable: boolean): string | null {
+  const monitorDir = dirname(new URL(import.meta.url).pathname);
+  const fullPath = `${monitorDir}/${relativePath}`;
+  try {
+    if (!existsSync(fullPath)) {
+      return `missing: ${relativePath}`;
+    }
+    if (mustBeExecutable) {
+      try {
+        execSync(`test -x "${fullPath}"`, { timeout: 1000 });
+      } catch {
+        return `not executable: ${relativePath}`;
+      }
+    }
+    return null;
+  } catch (err) {
+    return `cannot stat ${relativePath}: ${err instanceof Error ? err.message : "unknown"}`;
+  }
+}
+
+/**
+ * At runtime, verify the release has no dangling references to the shared
+ * checkout. This catches post-install corruption (e.g. git clean removed a
+ * release file that the symlink still points to).
+ */
+function auditReleaseClosure(): { status: "ok" | "missing_dependency" | "dependency_outside_release"; errors: string[] } {
+  const errors: string[] = [];
+
+  // Critical release-local dependencies
+  const deps = [
+    { path: "list-agent-rss.sh", executable: true },
+  ];
+
+  for (const dep of deps) {
+    const err = auditReleaseLocalDep(dep.path, dep.executable);
+    if (err) errors.push(err);
+  }
+
+  if (errors.length > 0) {
+    return { status: "missing_dependency", errors };
+  }
+
+  return { status: "ok", errors: [] };
+}
+
+// ── Atomic write ────────────────────────────────────────────────────────────
+
 function atomicWrite(path: string, content: string): void {
   const tmp = path + ".tmp";
   mkdirSync(dirname(path), { recursive: true });
@@ -236,7 +428,6 @@ function loadStateFile(statePath: string): MemoryPressureStateFile | null {
 function readReleaseMetadata(): { commit: string | null; releaseId: string | null } {
   try {
     // When running from a release, the release.json is next to the JS file.
-    // __dirname equivalent for ESM: import.meta.url → file URL → dirname.
     const monitorDir = dirname(new URL(import.meta.url).pathname);
     const manifestPath = `${monitorDir}/release.json`;
     if (existsSync(manifestPath)) {
@@ -250,56 +441,100 @@ function readReleaseMetadata(): { commit: string | null; releaseId: string | nul
   return { commit: null, releaseId: null };
 }
 
+/** Read the installed release ID from the monitor-current symlink target.
+ *  Uses readlinkSync (NOT existsSync) — existsSync follows the symlink and
+ *  would silently return false on a dangling symlink, disabling this check
+ *  in the exact case where it matters most. */
+function readInstalledReleaseId(): string | null {
+  try {
+    const home = process.env.MARVEEN_HOME;
+    if (!home) return null;
+    const link = `${home}/releases/monitor-current`;
+    const target = readlinkSync(link);  // throws if no link, reads link itself
+    return target.split("/").filter(Boolean).pop() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// ── Main ────────────────────────────────────────────────────────────────────
+
 function main(): void {
   const config = loadConfig();
   const statePath = resolveStatePath();
   const prev = loadStateFile(statePath);
-  const currentSample = sample(config);
-  const prevState = prev?.state ?? "normal";
-  const prevSince = prev?.since ?? currentSample.timestamp;
+
+  // ONE measurement call per cycle — sample() and computeMeasurementCapabilities()
+  // share the same RSS result. No double invocation of the script.
+  const rssResult = readAgentRss();
+  const currentSample = sample(config, rssResult);
+
+  // Resolve previous state, handling both v1 (state/since) and v2 (pressureState/pressureStateSince)
+  const prevPressureState: MemoryPressureState =
+    prev?.pressureState ?? prev?.state ?? "normal";
+  const prevPressureSince: string =
+    prev?.pressureStateSince ?? prev?.since ?? currentSample.timestamp;
 
   const measurementOk = currentSample.agentRssMeasurementStatus !== "error";
   const now = new Date().toISOString();
 
-  const nextState = computeNextState(prevState, currentSample, prevSince, config.thresholds);
+  const nextPressureState = computeNextState(prevPressureState, currentSample, prevPressureSince, config.thresholds);
 
   // No state change → write nothing. Zero repeat reports, zero LLM calls.
-  if (nextState === prevState && prevState !== "normal") {
+  if (nextPressureState === prevPressureState && prevPressureState !== "normal") {
     // In non-normal states, we still update the sample every N samples for freshness,
     // but avoid writing every cycle. Write on generation % 3 === 0 (every ~60s at 20s interval).
     if ((prev?.generation ?? 0) % 3 !== 0) return;
   }
 
-  // Active pressure relief on critical/emergency transitions (component C).
+  // ── Active pressure relief (component C) ───────────────────────────────
   // At most ONE agent per cycle. NEVER touches core agents.
   // reliefCooldown prevents re-parking within the cooldown window.
   let reliefAction = prev?.lastAction ?? null;
   if (
-    (nextState === "critical" || nextState === "emergency") &&
-    nextState !== prevState
+    (nextPressureState === "critical" || nextPressureState === "emergency") &&
+    nextPressureState !== prevPressureState
   ) {
-    reliefAction = relievePressure(nextState) ?? reliefAction;
+    reliefAction = relievePressure(nextPressureState) ?? reliefAction;
   }
 
-  // Release metadata — null if running from source tree (dev mode).
+  // ── v2: measurement capabilities + monitor health ──────────────────────
+  const detailedCapabilities = computeMeasurementCapabilities(rssResult);
   const release = readReleaseMetadata();
+  const health = computeMonitorHealth(detailedCapabilities, release);
 
-  // First sample ever, or first normal after load — write it.
+  // Runtime dependency closure audit
+  const closureAudit = auditReleaseClosure();
+
+  // ── Dead-guard detection fields ────────────────────────────────────────
+  const lastSuccessfulMeasurementTime = measurementOk
+    ? now
+    : (prev?.lastSuccessfulMeasurementTime ?? now);
+  const lastMeasurementStatus: "ok" | "failed" = measurementOk ? "ok" : "failed";
+
+  // Build the state file — v2 schema with backward-compat aliases
   const stateFile: MemoryPressureStateFile = {
-    state: nextState,
-    since: nextState !== prevState ? currentSample.timestamp : prevSince,
+    // v2 separated fields
+    pressureState: nextPressureState,
+    pressureStateSince: nextPressureState !== prevPressureState ? currentSample.timestamp : prevPressureSince,
+    monitorHealth: health.monitorHealth,
+    healthReasonCode: health.healthReasonCode,
+    healthDetails: health.healthDetails,
+    measurementCapabilities: detailedCapabilities,
+    dependencyClosureStatus: closureAudit.status,
+    dependencyClosureErrors: closureAudit.errors,
+
+    // Backward-compat aliases
+    state: nextPressureState,
+    since: nextPressureState !== prevPressureState ? currentSample.timestamp : prevPressureSince,
+
+    // Unchanged fields
     lastSample: currentSample,
     thresholds: config.thresholds,
     generation: (prev?.generation ?? 0) + 1,
     lastAction: reliefAction,
-    // Dead-guard detection fields:
-    // If measurement succeeded, advance lastSuccessfulMeasurementTime.
-    // If it failed, keep the PREVIOUS value — we need to know how long
-    // it has been since the last GOOD measurement, not the last attempt.
-    lastSuccessfulMeasurementTime: measurementOk
-      ? now
-      : (prev?.lastSuccessfulMeasurementTime ?? now),
-    lastMeasurementStatus: measurementOk ? "ok" : "failed",
+    lastSuccessfulMeasurementTime,
+    lastMeasurementStatus,
     monitorBuildCommit: release.commit ?? prev?.monitorBuildCommit ?? null,
     releaseId: release.releaseId ?? prev?.releaseId ?? null,
   };

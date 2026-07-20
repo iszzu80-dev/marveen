@@ -15,7 +15,9 @@
  *   MONITOR_STATE_STALE       — state file missing or too old
  *   MONITOR_EXECUTION_FAILED  — state file fresh but last measurement failed
  *
- * Both produce fail-closed lifecycle behaviour for non-core agents.
+ * v2 (2026-07-20): reads the separated pressureState/monitorHealth schema.
+ * Falls back to v1 fields when reading older state files. Adds
+ * HealthReasonCode for auditable failure attribution.
  *
  * This module checks the STATE FILE only. Systemd timer/service health is
  * reported by the state file's freshness and lastMeasurementStatus — a
@@ -23,7 +25,7 @@
  */
 
 import { existsSync, readFileSync, readlinkSync, statSync } from "node:fs";
-import type { MemoryPressureStateFile } from "./memory-pressure-types.js";
+import type { MemoryPressureStateFile, HealthReasonCode } from "./memory-pressure-types.js";
 import { DEFAULT_CONFIG, STATE_FILE } from "./memory-pressure-types.js";
 
 export type MonitorFailureMode =
@@ -42,14 +44,29 @@ export interface MonitorHealth {
   lastSuccessAgeSeconds: number | null;
   /** The state file's generation at time of check, or null. */
   stateGeneration: number | null;
+  /** v2: health reason code from the state file, or computed by this check. */
+  healthReasonCode: HealthReasonCode | null;
+  /** v2: measurement capabilities from the state file, if present. */
+  measurementCapabilities: import("./memory-pressure-types.js").MeasurementCapabilities | null;
 }
 
-const INSTALL_DIR = process.env.MARVEEN_HOME ?? process.cwd();
+// ── Data path resolution ───────────────────────────────────────────────────
+
+function resolveDataPath(relative: string): string {
+  const home = process.env.MARVEEN_HOME;
+  if (!home) {
+    if (process.env.MARVEEN_MEM_PRESSURE_TEST_STATE) {
+      return `/tmp/mem-pressure-test/${relative}`;
+    }
+    throw new Error("MARVEEN_HOME is not set");
+  }
+  return `${home}/${relative}`;
+}
 
 function resolveStatePath(): string {
   const override = process.env.MARVEEN_MEM_PRESSURE_TEST_STATE;
   if (override) return override;
-  return `${INSTALL_DIR}/${STATE_FILE}`;
+  return resolveDataPath(STATE_FILE);
 }
 
 export function loadStateFile(): MemoryPressureStateFile | null {
@@ -63,31 +80,18 @@ export function loadStateFile(): MemoryPressureStateFile | null {
 }
 
 /**
- * Check monitor health from the state file alone.
- *
- * The state file IS the monitor's heartbeat. If the timer fires but the
- * service crashes (import error, syntax error, missing dependency), the
- * state file is never updated — mtime ages, lastMeasurementStatus stays
- * "failed", and this function returns unhealthy.
- *
- * @param stateFile  Pre-loaded state file (for test injection), or null to load from disk.
- * @param nowMs      Current time in epoch ms (for test injection).
- * @param maxCycles  Max allowed age in monitor cycles (default 2).
- */
-
-/**
  * The release the monitor SHOULD be running from: the target of the
  * releases/monitor-current symlink. Returns null when the symlink is absent
- * (e.g. a dev box that never ran install-monitor.sh) -- in that case we cannot
+ * (e.g. a dev box that never ran install-monitor.sh) — in that case we cannot
  * compare, so we do not fail the health check on it.
  */
 function readInstalledReleaseId(): string | null {
   try {
     const override = process.env.MARVEEN_MEM_PRESSURE_TEST_RELEASE_LINK;
-    const link = override ?? `${INSTALL_DIR}/releases/monitor-current`;
+    const link = override ?? resolveDataPath("releases/monitor-current");
     // readlinkSync, NOT existsSync: existsSync FOLLOWS the symlink, so a
     // DANGLING monitor-current (release dir deleted, e.g. by git clean) would
-    // return false and silently disable this whole check -- the one case where
+    // return false and silently disable this whole check — the one case where
     // it matters most. readlinkSync reads the link itself and throws only when
     // there is no link at all.
     const target = readlinkSync(link);
@@ -97,6 +101,21 @@ function readInstalledReleaseId(): string | null {
   }
 }
 
+/**
+ * Check monitor health from the state file alone.
+ *
+ * The state file IS the monitor's heartbeat. If the timer fires but the
+ * service crashes (import error, syntax error, missing dependency), the
+ * state file is never updated — mtime ages, lastMeasurementStatus stays
+ * "failed", and this function returns unhealthy.
+ *
+ * v2: reads pressureState/monitorHealth/measurementCapabilities from the
+ * state file. Falls back to v1 fields for older state files.
+ *
+ * @param stateFile  Pre-loaded state file (for test injection), or null to load from disk.
+ * @param nowMs      Current time in epoch ms (for test injection).
+ * @param maxCycles  Max allowed age in monitor cycles (default 2).
+ */
 export function checkMonitorHealth(
   stateFile?: MemoryPressureStateFile | null,
   nowMs?: number,
@@ -127,6 +146,8 @@ export function checkMonitorHealth(
       stateFileMtimeMs: null,
       lastSuccessAgeSeconds: null,
       stateGeneration: null,
+      healthReasonCode: "MONITOR_STATE_STALE",
+      measurementCapabilities: null,
     };
   }
 
@@ -140,6 +161,8 @@ export function checkMonitorHealth(
       stateFileMtimeMs,
       lastSuccessAgeSeconds: null,
       stateGeneration: null,
+      healthReasonCode: "MONITOR_STATE_STALE",
+      measurementCapabilities: null,
     };
   }
 
@@ -154,10 +177,69 @@ export function checkMonitorHealth(
       stateFileMtimeMs,
       lastSuccessAgeSeconds: null,
       stateGeneration: null,
+      healthReasonCode: "MONITOR_STATE_STALE",
+      measurementCapabilities: null,
     };
   }
 
-  // ── Last measurement status ────────────────────────────────────────────
+  // ── v2: if the state file self-declares unhealthy, trust it ──────────
+  if (state.monitorHealth === "unhealthy") {
+    const reasonCode = state.healthReasonCode ?? "MONITOR_EXECUTION_FAILED";
+    const details = state.healthDetails ?? "monitor self-reported unhealthy";
+    return {
+      healthy: false,
+      failureMode: "MONITOR_EXECUTION_FAILED",
+      details: `monitor self-reported unhealthy: ${reasonCode} — ${details}`,
+      stateFileMtimeMs,
+      lastSuccessAgeSeconds: null,
+      stateGeneration: state.generation,
+      healthReasonCode: reasonCode,
+      measurementCapabilities: state.measurementCapabilities ?? null,
+    };
+  }
+
+  // ── v2: check measurement capabilities ────────────────────────────────
+  if (state.measurementCapabilities) {
+    const caps = state.measurementCapabilities;
+    if (caps.agentProcessTreeRss === "dependency_failed") {
+      return {
+        healthy: false,
+        failureMode: "MONITOR_EXECUTION_FAILED",
+        details: "Agent RSS collector missing or not executable (dependency_failed)",
+        stateFileMtimeMs,
+        lastSuccessAgeSeconds: null,
+        stateGeneration: state.generation,
+        healthReasonCode: "AGENT_RSS_COLLECTOR_FAILED",
+        measurementCapabilities: caps,
+      };
+    }
+    if (caps.agentProcessTreeRss === "error") {
+      return {
+        healthy: false,
+        failureMode: "MONITOR_EXECUTION_FAILED",
+        details: "Agent RSS measurement failed (script execution error)",
+        stateFileMtimeMs,
+        lastSuccessAgeSeconds: null,
+        stateGeneration: state.generation,
+        healthReasonCode: "AGENT_RSS_COLLECTOR_FAILED",
+        measurementCapabilities: caps,
+      };
+    }
+    if (caps.hostMemory === "error") {
+      return {
+        healthy: false,
+        failureMode: "MONITOR_EXECUTION_FAILED",
+        details: "Host memory measurement failed (/proc/meminfo unreadable)",
+        stateFileMtimeMs,
+        lastSuccessAgeSeconds: null,
+        stateGeneration: state.generation,
+        healthReasonCode: "HOST_MEMORY_MEASUREMENT_FAILED",
+        measurementCapabilities: caps,
+      };
+    }
+  }
+
+  // ── Last measurement status (v1 compat) ────────────────────────────────
   const lastStatus = state.lastMeasurementStatus ?? "ok"; // pre-D fields default ok
   const lastSuccessTime = state.lastSuccessfulMeasurementTime
     ? new Date(state.lastSuccessfulMeasurementTime).getTime()
@@ -171,6 +253,8 @@ export function checkMonitorHealth(
       stateFileMtimeMs,
       lastSuccessAgeSeconds: lastSuccessTime ? Math.round((now - lastSuccessTime) / 1000) : null,
       stateGeneration: state.generation,
+      healthReasonCode: "MONITOR_EXECUTION_FAILED",
+      measurementCapabilities: state.measurementCapabilities ?? null,
     };
   }
 
@@ -185,35 +269,39 @@ export function checkMonitorHealth(
         stateFileMtimeMs,
         lastSuccessAgeSeconds: Math.round(successAgeMs / 1000),
         stateGeneration: state.generation,
+        healthReasonCode: "AGENT_RSS_MEASUREMENT_STALE",
+        measurementCapabilities: state.measurementCapabilities ?? null,
       };
     }
   }
 
-  // -- Release match ------------------------------------------------------
-  // A state file can be fresh, recent and status=ok and STILL be written by a
-  // monitor from a superseded release: install a new release, fail to restart
-  // the timer, and the old process keeps heartbeating. Every other check here
-  // passes and the guard silently protects using stale logic. Compare what
-  // wrote the state against what is installed.
+  // ── Release match ──────────────────────────────────────────────────────
   const installedRelease = readInstalledReleaseId();
   if (installedRelease !== null && state.releaseId && state.releaseId !== installedRelease) {
     return {
       healthy: false,
       failureMode: "MONITOR_RELEASE_MISMATCH",
-      details: `state written by release ${state.releaseId} but ${installedRelease} is installed -- a superseded monitor is still running`,
+      details: `state written by release ${state.releaseId} but ${installedRelease} is installed — a superseded monitor is still running`,
       stateFileMtimeMs,
       lastSuccessAgeSeconds: lastSuccessTime ? Math.round((now - lastSuccessTime) / 1000) : null,
       stateGeneration: state.generation,
+      healthReasonCode: "MONITOR_RELEASE_MISMATCH",
+      measurementCapabilities: state.measurementCapabilities ?? null,
     };
   }
 
-  // -- All checks passed ─────────────────────────────────────────────────
+  // ── Resolve the pressure state for the diagnostic message (v1+v2 compat) ─
+  const pressureState = state.pressureState ?? state.state ?? "normal";
+
+  // ── All checks passed ─────────────────────────────────────────────────
   return {
     healthy: true,
     failureMode: null,
-    details: `monitor healthy — generation ${state.generation}, state=${state.state}, lastSuccessAge=${lastSuccessTime ? Math.round((now - lastSuccessTime) / 1000) : '?'}s`,
+    details: `monitor healthy — generation ${state.generation}, pressureState=${pressureState}, lastSuccessAge=${lastSuccessTime ? Math.round((now - lastSuccessTime) / 1000) : '?'}s`,
     stateFileMtimeMs,
     lastSuccessAgeSeconds: lastSuccessTime ? Math.round((now - lastSuccessTime) / 1000) : null,
     stateGeneration: state.generation,
+    healthReasonCode: "OK",
+    measurementCapabilities: state.measurementCapabilities ?? null,
   };
 }

@@ -6,9 +6,40 @@
  * P0 commit — Istvan-approved plan, single isolated commit.
  * Do NOT merge memGate logic from fleet-memory-gate.sh into this file.
  * That gate is deliberately fail-open; this one is fail-closed.
+ *
+ * Schema v2 (2026-07-20): pressureState split from monitorHealth, with
+ * measurementCapabilities and healthReasonCode. Backward-compat aliases
+ * (state, since) ensure old consumers can still read the file.
  */
 
 export type MemoryPressureState = "normal" | "warning" | "critical" | "emergency" | "recovery";
+
+/** What the monitor can actually measure. Computed by the monitor during main()
+ *  and written into the state file for the gate and health check to consume. */
+export interface MeasurementCapabilities {
+  /** /proc/meminfo — kernel interface, never fails on Linux. */
+  hostMemory: "ok" | "error";
+  /** list-agent-rss.sh — release-local script. "dependency_failed" means the
+   *  script file is missing or not executable (release-local deps broken).
+   *  "error" means the script exists but execution failed (timeout, parse). */
+  agentProcessTreeRss: "ok" | "partial" | "error" | "dependency_failed";
+}
+
+/** Auditable health reason codes. Every unhealthy state carries exactly one
+ *  code so the gate can log WHY it blocked a start. */
+export type HealthReasonCode =
+  | "OK"
+  | "MONITOR_STATE_STALE"
+  | "MONITOR_EXECUTION_FAILED"
+  | "MONITOR_RELEASE_MISMATCH"
+  | "AGENT_RSS_COLLECTOR_FAILED"
+  | "AGENT_RSS_MEASUREMENT_PARTIAL"
+  | "AGENT_RSS_MEASUREMENT_STALE"
+  | "HOST_MEMORY_MEASUREMENT_FAILED"
+  | "MONITOR_RUNTIME_DEPENDENCY_MISSING"
+  | "MONITOR_RUNTIME_DEPENDENCY_OUTSIDE_RELEASE"
+  | "EVICTION_MEASUREMENT_UNAVAILABLE"
+  | "NO_SAFE_EVICTION_CANDIDATE";
 
 /** Structured output from list-agent-rss.sh --json. ONE authoritative measurement
  *  consumed by both the monitor (telemetry) and the gate (eviction selector). */
@@ -53,8 +84,28 @@ export interface MemoryPressureReliefAction {
 }
 
 export interface MemoryPressureStateFile {
+  // ── v2: SEPARATED pressure state and monitor health ─────────────────────
+  pressureState: MemoryPressureState;
+  pressureStateSince: string; // ISO 8601 — when the current pressureState was entered
+  monitorHealth: "healthy" | "unhealthy";
+  healthReasonCode: HealthReasonCode;
+  healthDetails: string;
+  measurementCapabilities: MeasurementCapabilities;
+  /** Result of the build-time dependency-closure check. null if the check
+   *  was never run (pre-v2 release or running from source tree). */
+  dependencyClosureStatus: "ok" | "missing_dependency" | "dependency_outside_release" | null;
+  dependencyClosureErrors: string[];
+
+  // ── BACKWARD-COMPAT ALIASES ────────────────────────────────────────────
+  // Written alongside the v2 fields so old consumers (dashboards, pre-v2
+  // gate code) see the same values they always did. The gate reads the v2
+  // fields directly; these exist for readers that haven't been updated.
+  /** @deprecated Use pressureState instead. */
   state: MemoryPressureState;
-  since: string; // ISO 8601 — when the current state was entered
+  /** @deprecated Use pressureStateSince instead. */
+  since: string;
+
+  // ── UNCHANGED from v1 ──────────────────────────────────────────────────
   lastSample: MemoryPressureSample;
   thresholds: {
     warningMemAvailableGiB: number;
@@ -65,9 +116,6 @@ export interface MemoryPressureStateFile {
   generation: number; // monotonically increasing, for change detection
   lastAction: MemoryPressureReliefAction | null;
   // ── Dead-guard detection fields (P0 phase 2, requirements C/D) ──────────
-  // Health must NOT be inferred from "timer active + state file exists" alone.
-  // These fields let the health check distinguish a working monitor from one
-  // whose timer fires but whose execution crashes (Module not found, etc.).
   lastSuccessfulMeasurementTime: string; // ISO 8601 — last time a measurement succeeded
   lastMeasurementStatus: "ok" | "failed"; // whether the LAST measurement attempt succeeded
   monitorBuildCommit: string | null;       // source commit of the running monitor build

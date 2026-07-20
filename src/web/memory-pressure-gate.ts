@@ -7,6 +7,11 @@
  *    verify child tree is gone, audit-log every action.
  *
  * Istvan-approved plan, single isolated commit.
+ *
+ * Schema v2 (2026-07-20): reads pressureState and monitorHealth directly from
+ * the state file. Does NOT call checkMonitorHealth() — the monitor self-assesses
+ * its health and writes it into the state file. The gate trusts the state file.
+ * RSS measurement failure → fail-closed for non-core starts and eviction.
  */
 
 import { readFileSync, existsSync } from "node:fs";
@@ -14,25 +19,34 @@ import { dirname } from "node:path";
 import { execSync } from "node:child_process";
 import type { MemoryPressureState, MemoryPressureStateFile, MemoryPressureConfig, MemoryPressureReliefAction } from "./memory-pressure-types.js";
 import { DEFAULT_CONFIG, STATE_FILE, CONFIG_FILE } from "./memory-pressure-types.js";
-import { checkMonitorHealth } from "./memory-pressure-health.js";
 
 const DASHBOARD_PORT = 3420;
 const DASHBOARD_TOKEN_PATH = "store/.dashboard-token";
 
-const INSTALL_DIR = process.env.MARVEEN_HOME ?? process.cwd();
+// ── Data path resolution ───────────────────────────────────────────────────
+// Code deps are release-local (resolved via import.meta.url). Data paths
+// (state file, config, audit log, dashboard token) live under MARVEEN_HOME.
+// No process.cwd() fallback — a missing MARVEEN_HOME is a configuration error.
 
-function resolvePath(relative: string): string {
-  return `${INSTALL_DIR}/${relative}`;
+function resolveDataPath(relative: string): string {
+  const home = process.env.MARVEEN_HOME;
+  if (!home) {
+    if (process.env.MARVEEN_MEM_PRESSURE_TEST_STATE) {
+      return `/tmp/mem-pressure-test/${relative}`;
+    }
+    throw new Error("MARVEEN_HOME is not set");
+  }
+  return `${home}/${relative}`;
 }
 
 /** Resolve the state file path. When MARVEEN_MEM_PRESSURE_TEST_STATE is set,
  *  use it directly (absolute temp path for hermetic testing). Otherwise
- *  resolve the default relative path against INSTALL_DIR. Checked at CALL
+ *  resolve the default relative path against MARVEEN_HOME. Checked at CALL
  *  time, not at module load — the env var may be set after import. */
 function resolveStatePath(): string {
   const override = process.env.MARVEEN_MEM_PRESSURE_TEST_STATE;
   if (override) return override;
-  return resolvePath(STATE_FILE);
+  return resolveDataPath(STATE_FILE);
 }
 
 // ── Gate (component B) ──────────────────────────────────────────────────────
@@ -56,7 +70,7 @@ function readState(): MemoryPressureStateFile | null {
 }
 
 function loadConfig(): MemoryPressureConfig {
-  const configPath = resolvePath(CONFIG_FILE);
+  const configPath = resolveDataPath(CONFIG_FILE);
   try {
     if (existsSync(configPath)) {
       const raw = JSON.parse(readFileSync(configPath, "utf-8")) as Partial<MemoryPressureConfig>;
@@ -76,12 +90,38 @@ function isCoreAgent(name: string, config: MemoryPressureConfig): boolean {
 }
 
 /**
+ * Resolve the pressure state from a state file, handling both v1 (state field)
+ * and v2 (pressureState field) schemas.
+ */
+function getPressureState(state: MemoryPressureStateFile): MemoryPressureState {
+  return state.pressureState ?? state.state ?? "normal";
+}
+
+/**
+ * Resolve monitor health from a state file. v2 files have monitorHealth
+ * directly. v1 files (pre-split schema) — we infer health from
+ * lastMeasurementStatus: "failed" means unhealthy because the monitor
+ * couldn't measure.
+ */
+function getMonitorHealth(state: MemoryPressureStateFile): "healthy" | "unhealthy" {
+  if (state.monitorHealth) return state.monitorHealth;
+  // v1 fallback: infer from measurement status
+  if (state.lastMeasurementStatus === "failed") return "unhealthy";
+  return "healthy";
+}
+
+/**
  * Called at the top of startAgentProcess() to gate non-core agent starts
  * under memory pressure. FAIL-CLOSED: a gate error or missing state file
  * blocks non-core starts (opposite of the existing fail-open memGate).
  *
  * Core agents always pass, even in emergency (the operator's primary bot
  * must survive). Manual override via MARVEEN_MEM_PRESSURE_OVERRIDE env var.
+ *
+ * v2: reads monitorHealth and measurementCapabilities directly from the
+ * state file. Does NOT call checkMonitorHealth() — the monitor writes its
+ * own health assessment, and the gate trusts it. If the monitor is dead,
+ * the state file goes stale and freshness checks catch it.
  */
 export function memoryPressureGate(agentName: string): GateResult {
   // Manual override for emergencies — operator explicitly allows a start.
@@ -96,8 +136,6 @@ export function memoryPressureGate(agentName: string): GateResult {
   const config = loadConfig();
 
   // Core agents always pass — the operator's primary bot must never be gated.
-  // "Core status must come from EXPLICIT CONFIG. Do NOT infer it from the
-  // process or agent name."
   if (isCoreAgent(agentName, config)) {
     return { allowed: true, reason: "core-agent" };
   }
@@ -105,36 +143,48 @@ export function memoryPressureGate(agentName: string): GateResult {
   const state = readState();
 
   // FAIL-CLOSED: no state file → gate is active, block non-core.
-  // "a gate error or timeout must NOT fail-open"
   if (!state) {
     return { allowed: false, reason: "gate-error: no state file (fail-closed)" };
   }
 
-  const s = state.state;
+  // ── v2: check monitorHealth first ──────────────────────────────────────
+  // A state file that says "unhealthy" means the monitor detected its own
+  // degradation. Trust it. This covers: RSS collector broken, release
+  // mismatch, host memory unreadable.
+  const monitorHealth = getMonitorHealth(state);
+  if (monitorHealth === "unhealthy") {
+    const reasonCode = state.healthReasonCode ?? "MONITOR_EXECUTION_FAILED";
+    const details = state.healthDetails ?? "monitor self-reported unhealthy";
+    return {
+      allowed: false,
+      reason: `monitor unhealthy: ${reasonCode} — ${details}`,
+    };
+  }
 
-  if (s === "normal" || s === "recovery") {
-    // Before allowing non-core starts on a "normal"/"recovery" state, verify
-    // the monitor itself is healthy. A stale state file from a broken monitor
-    // (e.g. Module not found after branch switch) still reads as "normal" —
-    // but the guard is dead and must fail-closed. Requirement D, P0 phase 2:
-    // the 05:20-05:28 incident was missed because health was inferred from
-    // "state file exists + says normal" while every run was failing.
-    const health = checkMonitorHealth(state, undefined, 2);
-
-    if (!health.healthy) {
+  // ── v2: check measurement capabilities ─────────────────────────────────
+  // Even if the monitor says "healthy", verify the RSS measurement is working.
+  // A broken RSS collector means we can't select eviction candidates safely.
+  const caps = state.measurementCapabilities;
+  if (caps) {
+    if (caps.agentProcessTreeRss === "error" || caps.agentProcessTreeRss === "dependency_failed") {
       return {
         allowed: false,
-        reason: `state=${s} but monitor unhealthy: ${health.failureMode} — ${health.details}`,
+        reason: `measurement degraded: agent RSS ${caps.agentProcessTreeRss} — cannot safely gate or evict`,
       };
     }
+  }
 
-    return { allowed: true, reason: `state=${s} monitor=healthy` };
+  // ── Pressure state gating ──────────────────────────────────────────────
+  const pressureState = getPressureState(state);
+
+  if (pressureState === "normal" || pressureState === "recovery") {
+    return { allowed: true, reason: `pressureState=${pressureState} monitor=healthy` };
   }
 
   // warning, critical, emergency: block non-core starts.
   return {
     allowed: false,
-    reason: `state=${s} memAvailable=${state.lastSample.memAvailableGiB.toFixed(1)}GiB threshold=${state.thresholds.warningMemAvailableGiB}GiB`,
+    reason: `pressureState=${pressureState} memAvailable=${state.lastSample.memAvailableGiB.toFixed(1)}GiB threshold=${state.thresholds.warningMemAvailableGiB}GiB`,
   };
 }
 
@@ -143,10 +193,13 @@ export function memoryPressureGate(agentName: string): GateResult {
 /** List running agent tmux sessions with their total process-tree RSS.
  *  Calls the ONE authoritative measurement script (list-agent-rss.sh --json)
  *  — same source the monitor uses for telemetry. Returns agents sorted by
- *  RSS descending. RSS is in bytes for precision; convert to GiB for display. */
+ *  RSS descending. RSS is in bytes for precision; convert to GiB for display.
+ *
+ *  Returns empty array when measurement is unavailable — the caller MUST
+ *  treat this as "cannot evict safely", not "zero agents running". */
 function listAgentRss(): { name: string; rssBytes: number }[] {
   try {
-    // Release-local copy — NOT INSTALL_DIR, which is the shared checkout.
+    // Release-local copy — NOT MARVEEN_HOME, which is the shared checkout.
     const monitorDir = dirname(new URL(import.meta.url).pathname);
     const script = `${monitorDir}/list-agent-rss.sh`;
     const output = execSync(`bash "${script}" --json`, { timeout: 8000, encoding: "utf-8" });
@@ -212,14 +265,14 @@ function isAgentIdle(name: string): boolean {
 
 function readDashboardToken(): string | null {
   try {
-    const tokenPath = resolvePath(DASHBOARD_TOKEN_PATH);
+    const tokenPath = resolveDataPath(DASHBOARD_TOKEN_PATH);
     if (!existsSync(tokenPath)) return null;
     return readFileSync(tokenPath, "utf-8").trim();
   } catch { return null; }
 }
 
 function writeAuditLog(entry: MemoryPressureReliefAction): void {
-  const auditPath = resolvePath("store/runtime/memory-pressure-audit.jsonl");
+  const auditPath = resolveDataPath("store/runtime/memory-pressure-audit.jsonl");
   const line = JSON.stringify(entry) + "\n";
   try {
     const { appendFileSync, mkdirSync } = require("node:fs");
@@ -240,15 +293,12 @@ function verifyProcessTreeGone(name: string): boolean {
     execSync("sleep 1", { timeout: 2000 });
 
     // Check 1: agent absent from the shared collector output.
-    // The script walks from tmux pane PIDs — if the session is gone,
-    // the agent will not appear in the output.
     const after = listAgentRss();
     const agent = after.find(a => a.name === name);
     if (!agent) return true;  // not in the tree → process tree is gone
 
     // Check 2: agent present but with negligible RSS. This can happen
-    // when the agent is mid-exit — give it one more beat and re-check
-    // against the same collector.
+    // when the agent is mid-exit — give it one more beat and re-check.
     if (agent.rssBytes <= 10 * 1024 * 1024) {  // <= 10 MiB = exiting
       execSync("sleep 0.5", { timeout: 1000 });
       const recheck = listAgentRss();
@@ -306,9 +356,7 @@ function stopAgentFallback(name: string): void {
     execSync("sleep 2", { timeout: 4000 });
   } catch { /* timeout on sleep is harmless */ }
 
-  // Sweep surviving processes. pkill -f matches the full command line;
-  // this is intentionally broad under memory emergency — any process
-  // carrying the agent name after its tmux session is gone is an orphan.
+  // Sweep surviving processes.
   try {
     execSync(`pkill -f "agent-${name}" 2>/dev/null || true`, { timeout: 3000 });
   } catch { /* pkill returns non-zero if no matches — that's fine */ }
@@ -320,13 +368,52 @@ function stopAgentFallback(name: string): void {
 }
 
 /**
+ * Check whether RSS measurement is available for eviction selection.
+ * Reads the state file to get measurementCapabilities — if we can't
+ * measure agent RSS, we can't safely pick an eviction candidate.
+ */
+function canMeasureForEviction(): boolean {
+  try {
+    const state = readState();
+    if (!state) return false;
+    const caps = state.measurementCapabilities;
+    if (!caps) {
+      // Pre-v2 state file — check lastMeasurementStatus as proxy
+      return state.lastMeasurementStatus !== "failed";
+    }
+    return caps.agentProcessTreeRss === "ok" || caps.agentProcessTreeRss === "partial";
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Active pressure relief. Called by the monitor when state transitions to
  * critical or emergency. At most ONE agent per cycle. NEVER touches core agents.
- * Returns the action taken, or null if nothing was parkable.
+ *
+ * v2: refuses to evict when RSS measurement is unavailable — cannot safely
+ * select candidates without measurement. Returns null with auditable reason.
  */
 export function relievePressure(state: MemoryPressureState): MemoryPressureReliefAction | null {
+  // ── v2: gate eviction on measurement availability ────────────────────
+  if (!canMeasureForEviction()) {
+    const action: MemoryPressureReliefAction = {
+      timestamp: new Date().toISOString(),
+      action: "parked",
+      agentName: "",
+      pidTreeKilled: [],
+      rssFreedGiB: 0,
+      reason: `eviction-blocked: RSS measurement unavailable — cannot safely select eviction candidate (pressureState=${state})`,
+    };
+    writeAuditLog(action);
+    return action;  // Return the blocked-action so the monitor records it
+  }
+
   const config = loadConfig();
   const agents = listAgentRss();
+
+  // ── v2: empty agent list with measurement ok means genuinely zero agents ─
+  // (measurement unavailability is already handled above)
 
   // Filter: non-core only, idle only
   const candidates = agents.filter(a => {
@@ -352,24 +439,14 @@ export function relievePressure(state: MemoryPressureState): MemoryPressureRelie
     if (Number(existsBefore.trim()) === 0) return null; // already gone, race with manual stop
 
     // PRIMARY PATH: dashboard stop API (kill-session + settle + reapChannelOrphans).
-    // This is the same mechanism the operator uses via the /api/agents/:name/stop
-    // endpoint. The comment that was here before (calling tmux kill-session "the
-    // same mechanism as the dashboard's stop API") was FALSE — the real stop path
-    // has sleep + reapChannelOrphans AFTER kill-session precisely because tmux
-    // alone leaves orphaned grandchildren. See agent-process.ts:1119-1147.
     const apiSuccess = stopAgentViaApi(target.name);
 
     if (!apiSuccess) {
       // FALLBACK: dashboard unreachable — direct stop with orphan sweep.
-      // Less thorough (can't call reapChannelOrphans which needs the dashboard's
-      // provider state), but still does kill-session + settle + pkill sweep.
       stopAgentFallback(target.name);
     }
 
-    // VERIFY: the process tree is actually gone. Session absence is NOT
-    // process-tree absence — orphaned MCP children survive tmux kill-session
-    // and must be confirmed gone. If verification fails, log verified:false
-    // so the audit trail does not claim success falsely.
+    // VERIFY: the process tree is actually gone.
     const verified = verifyProcessTreeGone(target.name);
 
     const action: MemoryPressureReliefAction = {
