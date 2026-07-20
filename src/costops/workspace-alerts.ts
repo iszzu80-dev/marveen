@@ -89,9 +89,9 @@ export function getActiveWorkspaceAlerts(db: Database.Database, now: number): Wo
 }
 
 const ISSUE_MESSAGE: Record<WorkspaceIssueType, string> = {
-  payment_failure: 'fizetési hiba a Google Workspace előfizetésen',
-  suspension_notice: 'felfüggesztési értesítő érkezett a Google Workspace fiókra',
-  suspended: 'a Google Workspace fiók felfüggesztve',
+  payment_failure: 'payment failure on Google Workspace subscription',
+  suspension_notice: 'suspension notice received for Google Workspace account',
+  suspended: 'Google Workspace account suspended',
 }
 const ISSUE_SEVERITY: Record<WorkspaceIssueType, CostWarning['severity']> = {
   payment_failure: 'medium', suspension_notice: 'medium', suspended: 'high',
@@ -125,23 +125,23 @@ export function buildWorkspaceAlertWarnings(db: Database.Database, now: number):
         // not silently drop it (a stale-but-unresolved deadline is worse, not better).
         warnings.push({
           code: `workspace_${r.issue_type}_overdue`, severity: 'high', provider: 'google-workspace',
-          message: `${r.account}: a felfüggesztési határidő (${new Date(r.suspension_date * 1000).toISOString().slice(0, 10)}) már elmúlt, a fiók állapota nem megerősített.`,
+          message: `${r.account}: suspension deadline (${new Date(r.suspension_date * 1000).toISOString().slice(0, 10)}) already passed, account status unconfirmed.`,
           detail: { account: r.account, issue_type: r.issue_type, suspension_date: r.suspension_date },
           warning_type: 'expiry', category: 'productivity', source: 'workspace_alert', confidence: 'measured',
           due_date: new Date(r.suspension_date * 1000).toISOString().slice(0, 10),
-          action: 'Ellenőrizd azonnal a Workspace admin konzolt.',
+          action: 'Check the Workspace admin console immediately.',
         })
         continue
       }
       const severity = severityForDays(daysRemaining) ?? 'low' // always visible once a real deadline exists, even if >30d out
       warnings.push({
         code: `workspace_${r.issue_type}_scheduled`, severity, provider: 'google-workspace',
-        message: `${r.account}: felfüggesztés ${daysRemaining} nap múlva (${new Date(r.suspension_date * 1000).toISOString().slice(0, 10)}), ha a fizetés nem rendeződik.`,
+        message: `${r.account}: suspension in ${daysRemaining} days (${new Date(r.suspension_date * 1000).toISOString().slice(0, 10)}), if payment is not settled.`,
         detail: { account: r.account, issue_type: r.issue_type, suspension_date: r.suspension_date, days_remaining: daysRemaining },
         warning_type: 'expiry', category: 'productivity', source: 'workspace_alert', confidence: 'measured',
         due_date: new Date(r.suspension_date * 1000).toISOString().slice(0, 10),
         current_value: daysRemaining, threshold: EXPIRY_THRESHOLDS.warn, unit: 'day',
-        action: 'Rendezd a fizetési módot a Workspace fiókon.',
+        action: 'Settle the payment method on the Workspace account.',
       })
       continue
     }
@@ -151,7 +151,7 @@ export function buildWorkspaceAlertWarnings(db: Database.Database, now: number):
       message: `${r.account}: ${ISSUE_MESSAGE[r.issue_type]}.`,
       detail: { account: r.account, detected_at: r.detected_at },
       warning_type: 'access', category: 'productivity', source: 'workspace_alert', confidence: 'measured',
-      action: 'Ellenőrizd a fizetési módot / Workspace admin konzolt.',
+      action: 'Check payment method / Workspace admin console.',
     })
   }
   return warnings

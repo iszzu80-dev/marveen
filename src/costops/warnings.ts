@@ -90,12 +90,12 @@ export function getWarnings(
       severity: summary.budget.status === 'hard' ? 'high' : 'medium',
       provider: 'all',
       message: summary.budget.status === 'hard'
-        ? `Havi büdzsé túllépve vagy azon: ${Math.round(summary.budget.operational_used_pct * 100)}% elköltve.`
-        : `Előrejelzés a büdzsé ${Math.round(summary.budget.operational_forecast_pct * 100)}%-át éri el hónap végére.`,
+        ? `Monthly budget exceeded or at limit: ${Math.round(summary.budget.operational_used_pct * 100)}% spent.`
+        : `Forecast reaching ${Math.round(summary.budget.operational_forecast_pct * 100)}% of budget by month end.`,
       detail: { used_pct: summary.budget.operational_used_pct, forecast_pct: summary.budget.operational_forecast_pct, threshold: summary.budget.warning_threshold },
       warning_type: 'cost', category: 'budget', source: 'ledger', confidence: 'measured',
       threshold: Math.round(summary.budget.warning_threshold * 100), current_value: Math.round(summary.budget.operational_used_pct * 100), unit: '%',
-      action: summary.budget.status === 'hard' ? 'Csökkentsd a költést vagy emeld a büdzsét.' : 'Kövesd a hónap hátralévő részét, közel a limithez.',
+      action: summary.budget.status === 'hard' ? 'Reduce spend or increase the budget.' : 'Monitor the rest of the month, approaching limit.',
     })
   }
 
@@ -104,15 +104,15 @@ export function getWarnings(
     if (p.status === 'failed') {
       warnings.push({
         code: 'provider_sync_failed', severity: 'medium', provider: p.provider,
-        message: `${p.provider} szinkron sikertelen (${p.error_code ?? 'ismeretlen hiba'}).`,
+        message: `${p.provider} sync failed (${p.error_code ?? 'unknown error'}).`,
         detail: { last_success: p.last_success, error_code: p.error_code },
         warning_type: 'access', category: categoryForProvider(p.provider), source: 'ledger', confidence: 'measured',
-        action: 'Ellenőrizd a szolgáltató API-kulcsát/jogosultságát.',
+        action: 'Check the provider API key/permissions.',
       })
     } else if (p.stale) {
       warnings.push({
         code: 'provider_sync_stale', severity: 'low', provider: p.provider,
-        message: `${p.provider} adat elavult (${Math.round((p.data_age_secs ?? 0) / 86400)} napja nem szinkronizált).`,
+        message: `${p.provider} data stale (${Math.round((p.data_age_secs ?? 0) / 86400)} days since last sync).`,
         detail: { data_age_secs: p.data_age_secs, last_sync: p.last_sync },
         warning_type: 'access', category: categoryForProvider(p.provider), source: 'ledger', confidence: 'measured',
         current_value: Math.round((p.data_age_secs ?? 0) / 86400), unit: 'day',
@@ -125,7 +125,7 @@ export function getWarnings(
     if (s.past_due) {
       warnings.push({
         code: 'expected_invoice_missing', severity: 'medium', provider: s.provider,
-        message: `${s.name}: várt számla/díjterhelés (${s.next_renewal}) elmúlt, nincs friss adat.`,
+        message: `${s.name}: expected invoice/charge (${s.next_renewal}) overdue, no recent data.`,
         detail: { subscription_id: s.id, next_renewal: s.next_renewal, days_overdue: s.days_until_next_date !== null ? -s.days_until_next_date : null },
         warning_type: 'expiry', category: categoryForProvider(s.provider), source: 'config', confidence: 'manual',
         due_date: s.next_renewal, current_value: s.days_until_next_date !== null ? -s.days_until_next_date : undefined, unit: 'day',
@@ -144,7 +144,7 @@ export function getWarnings(
       if (isFallback && src.spend! / totalOp >= MATERIAL_FRACTION) {
         warnings.push({
           code: 'high_cost_manual_fallback', severity: 'low', provider: src.provider,
-          message: `${src.name}: a költség jelentős hányada (${Math.round((src.spend! / totalOp) * 100)}%) kézi/becsült adaton alapul, nincs valódi számla/API forrás.`,
+          message: `${src.name}: significant portion of cost (${Math.round((src.spend! / totalOp) * 100)}%) is manual/estimated, no real invoice/API source.`,
           detail: { source_id: src.source_id, spend: src.spend, share: Math.round((src.spend! / totalOp) * 100) / 100 },
           warning_type: 'cost', category: categoryForProvider(src.provider), source: 'ledger', confidence: 'estimated',
           current_value: Math.round((src.spend! / totalOp) * 100), threshold: Math.round(MATERIAL_FRACTION * 100), unit: '%',
@@ -159,7 +159,7 @@ export function getWarnings(
     if (Math.abs(summary.render_plan.variance) / base >= MATERIAL_FRACTION) {
       warnings.push({
         code: 'plan_estimate_variance', severity: 'low', provider: 'render',
-        message: `Render terv-alapú becslés (${summary.render_plan.plan_estimate_total}) jelentősen eltér a kézi becsléstől (${summary.render_plan.manual_estimate}).`,
+        message: `Render plan-based estimate (${summary.render_plan.plan_estimate_total}) significantly diverges from manual estimate (${summary.render_plan.manual_estimate}).`,
         detail: { plan_estimate_total: summary.render_plan.plan_estimate_total, manual_estimate: summary.render_plan.manual_estimate, variance: summary.render_plan.variance },
         warning_type: 'cost', category: 'hosting', source: 'ledger', confidence: 'estimated',
         current_value: summary.render_plan.plan_estimate_total, unit: summary.render_plan.currency,
@@ -175,7 +175,7 @@ export function getWarnings(
       if (prev !== undefined && prev > 0 && Math.abs(cur.spend - prev) / prev >= MATERIAL_FRACTION) {
         warnings.push({
           code: 'invoice_amount_changed', severity: 'low', provider: cur.provider,
-          message: `${cur.provider}: ${prev} -> ${cur.spend} (${Math.round(((cur.spend - prev) / prev) * 100)}% változás az előző hónaphoz képest).`,
+          message: `${cur.provider}: ${prev} -> ${cur.spend} (${Math.round(((cur.spend - prev) / prev) * 100)}% change vs previous month).`,
           detail: { previous: prev, current: cur.spend },
           warning_type: 'cost', category: categoryForProvider(cur.provider), source: 'ledger', confidence: 'measured',
           current_value: cur.spend, unit: summary.currency,
@@ -188,7 +188,7 @@ export function getWarnings(
   // from rule 6 above (any material CHANGE, either direction, 15% threshold, low severity,
   // informational). This is one-directional (increase only) with a higher, more urgent
   // threshold. 50% is a recommendation, not business-specified (flagged, same treatment as the
-  // Eskuvő bundle-discount placeholder earlier this session) -- tune once real data exists.
+  // Eskuv{0151} bundle-discount placeholder earlier this session) -- tune once real data exists.
   const LARGE_INCREASE_FRACTION = 0.5
   if (summary.previous_month) {
     const prevByProvider = new Map(summary.previous_month.by_provider.map(p => [p.provider, p.spend]))
@@ -197,11 +197,11 @@ export function getWarnings(
       if (prev !== undefined && prev > 0 && (cur.spend - prev) / prev >= LARGE_INCREASE_FRACTION) {
         warnings.push({
           code: 'large_increase_vs_previous_month', severity: 'medium', provider: cur.provider,
-          message: `${cur.provider}: jelentős növekedés az előző hónaphoz képest (${prev} -> ${cur.spend}, +${Math.round(((cur.spend - prev) / prev) * 100)}%).`,
+          message: `${cur.provider}: significant increase vs previous month (${prev} -> ${cur.spend}, +${Math.round(((cur.spend - prev) / prev) * 100)}%).`,
           detail: { previous: prev, current: cur.spend, threshold_fraction: LARGE_INCREASE_FRACTION },
           warning_type: 'cost', category: categoryForProvider(cur.provider), source: 'ledger', confidence: 'measured',
           current_value: cur.spend, threshold: Math.round(LARGE_INCREASE_FRACTION * 100), unit: '%',
-          action: 'Nézd meg, mi okozta a növekedést -- új szolgáltatás, plan-váltás, vagy anomália.',
+          action: 'Investigate the cause -- new service, plan change, or anomaly.',
         })
       }
     }
@@ -219,10 +219,10 @@ export function getWarnings(
   for (const p of pendingRows) {
     warnings.push({
       code: 'billing_access_needed', severity: 'medium', provider: p.provider,
-      message: `${p.name}: a valós költség nem olvasható ki (hiányzó jogosultság a szolgáltató számlázási API-jához). Nincs kitalált összeg.`,
+      message: `${p.name}: real cost unreadable (missing billing API access). No fabricated amount.`,
       detail: { source_id: p.source_id },
       warning_type: 'access', category: categoryForProvider(p.provider), source: 'config', confidence: 'no_api_or_no_access',
-      action: 'Adj IAM/API jogosultságot a számlázási adathoz, vagy add meg kézzel az összeget.',
+      action: 'Grant IAM/API access to billing data, or enter the amount manually.',
     })
   }
 
@@ -231,16 +231,16 @@ export function getWarnings(
   // low-severity so it sits in the drill-down, not the top actionable list.
   warnings.push({
     code: 'render_spend_limit_unknown', severity: 'low', provider: 'render',
-    message: 'Render költési limit nem lekérdezhető (nincs publikus billing API).',
+    message: 'Render spend limit not queryable (no public billing API).',
     warning_type: 'quota', category: 'hosting', source: 'config', confidence: 'no_api_or_no_access',
-    action: 'Kövesd kézzel a Render dashboardon (Settings -> Billing).',
+    action: 'Track manually on the Render dashboard (Settings -> Billing).',
   })
 
   // 9. Claude Max weekly limit -- no official usage API; only manually visible
   // (agent tmux panes show a rolling %/reset time). Always pending.
   warnings.push({
     code: 'claude_max_weekly_limit_unknown', severity: 'low', provider: 'anthropic',
-    message: 'Claude Max heti limit nem lekérdezhető API-n -- az ágens paneleken (X% / HH:mm reset) manuálisan látható.',
+    message: 'Claude Max weekly limit not queryable via API -- manually visible in agent panes (X% / HH:mm reset).',
     warning_type: 'quota', category: 'ai', source: 'config', confidence: 'no_api_or_no_access',
   })
 
@@ -258,7 +258,7 @@ export function getWarnings(
   if (dsRows.length === 0) {
     warnings.push({
       code: 'deepseek_balance_unknown', severity: 'low', provider: 'deepseek',
-      message: 'DeepSeek egyenleg még nincs rögzítve (nincs korábbi snapshot az arány kiszámításához).',
+      message: 'DeepSeek balance not yet recorded (no prior snapshot to compute ratio).',
       warning_type: 'quota', category: 'ai', source: 'config', confidence: 'no_api_or_no_access',
     })
   } else {
@@ -275,7 +275,7 @@ export function getWarnings(
     // informational gauge (never silent, never severity-escalating on its own).
     warnings.push({
       code: 'deepseek_balance_info', severity: 'low', provider: 'deepseek',
-      message: `DeepSeek előre fizetett egyenleg: ${latest} ${currency}${pct !== null ? ` (${pct}% a legutóbbi feltöltéshez képest)` : ''}.`,
+      message: `DeepSeek prepaid balance: ${latest} ${currency}${pct !== null ? ` (${pct}% a of last top-up)` : ''}.`,
       detail: { latest_balance: latest, peak_balance: peak, currency },
       warning_type: 'quota', category: 'ai', source: 'ledger', confidence: hadObservedDrop ? 'estimated' : 'manual',
       current_value: latest, unit: currency,
@@ -297,11 +297,11 @@ export function getWarnings(
     const [threshold, severity] = tier
     warnings.push({
       code: 'limit_usage_high', severity, provider: l.provider,
-      message: `${l.provider} (${l.limit_type}): ${Math.round(l.usage_pct! * 100)}% felhasználva.`,
+      message: `${l.provider} (${l.limit_type}): ${Math.round(l.usage_pct! * 100)}% used.`,
       detail: { limit_type: l.limit_type, current_usage: l.current_usage, limit_value: l.limit_value, source: l.source },
       warning_type: 'quota', category: categoryForProvider(l.provider), source: 'ledger', confidence: 'estimated',
       current_value: Math.round(l.usage_pct! * 100), threshold: Math.round(threshold * 100), unit: '%',
-      action: severity === 'blocked' ? 'A limit elérve -- azonnali beavatkozás szükséges.' : 'Kövesd a felhasználást, közelít a limithez.',
+      action: severity === 'blocked' ? 'Limit reached -- immediate action required.' : 'Monitor usage, approaching limit.',
     })
   }
 

@@ -18,8 +18,8 @@
 // aggregator (Mason, accounting-core seam, src/costops/schema.ts) calls it,
 // per docs/fork-upstream-policy.md §2a. Same pattern as forecast.ts/fx.ts.
 //
-// GAP-12 acceptance reminder baked into every detector below: "stale adat
-// onmagaban nem okoz erős vagy hibás üzleti allitast" -- a stale/failed sync
+// GAP-12 acceptance reminder baked into every detector below: "stale data
+// alone must not produce a strong or incorrect business claim" -- a stale/failed sync
 // alert is capped at 'warning', never 'critical', and detectors that need a
 // COMPARISON (variance, growth) refuse to fire without a real baseline
 // (never comparing against a fabricated 0).

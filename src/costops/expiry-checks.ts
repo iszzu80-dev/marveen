@@ -87,7 +87,7 @@ export async function checkSslExpiry(hosts: string[], now: number, deps: TlsChec
     try { cert = await connect(host, 443) } catch { cert = null }
     if (!cert) {
       warnings.push({
-        code: 'ssl_check_failed', severity: 'low', provider: 'ssl', message: `${host}: SSL tanúsítvány nem ellenőrizhető (kapcsolódási hiba).`,
+        code: 'ssl_check_failed', severity: 'low', provider: 'ssl', message: `${host}: SSL certificate not verifiable (connection error).`,
         warning_type: 'access', category: 'domains', source: 'tls', confidence: 'no_api_or_no_access', detail: { host },
       })
       continue
@@ -97,11 +97,11 @@ export async function checkSslExpiry(hosts: string[], now: number, deps: TlsChec
     if (!severity) continue // healthy -- no noise
     warnings.push({
       code: 'ssl_expiry_soon', severity, provider: 'ssl',
-      message: `${host}: SSL tanúsítvány ${daysRemaining} nap múlva lejár.`,
+      message: `${host}: SSL certificate expires in ${daysRemaining} days.`,
       detail: { host, expiry_date: cert.validTo },
       warning_type: 'expiry', category: 'domains', source: 'tls', confidence: 'measured',
       expiry_date: cert.validTo, current_value: daysRemaining, threshold: SSL_THRESHOLDS.warn, unit: 'day',
-      action: 'Ellenőrizd a tanúsítvány automatikus megújítását.',
+      action: 'Verify that the certificate auto-renewal is configured.',
     })
   }
   return warnings
@@ -134,7 +134,7 @@ export async function checkDomainExpiry(domains: string[], now: number, deps: Do
     const base = RDAP_BASE[tld]
     if (!base) {
       warnings.push({
-        code: 'domain_expiry_check_unsupported', severity: 'low', provider: 'domain', message: `${domain}: domain-lejárat nem ellenőrizhető (.${tld} TLD nincs támogatva).`,
+        code: 'domain_expiry_check_unsupported', severity: 'low', provider: 'domain', message: `${domain}: domain expiry not checkable (.${tld} TLD not supported).`,
         warning_type: 'access', category: 'domains', source: 'rdap', confidence: 'no_api_or_no_access', detail: { domain },
       })
       continue
@@ -142,7 +142,7 @@ export async function checkDomainExpiry(domains: string[], now: number, deps: Do
     let resp: RdapResponse
     try { resp = await fetchJson(`${base}${domain}`) as RdapResponse } catch {
       warnings.push({
-        code: 'domain_expiry_check_failed', severity: 'low', provider: 'domain', message: `${domain}: domain-lejárat lekérdezése sikertelen.`,
+        code: 'domain_expiry_check_failed', severity: 'low', provider: 'domain', message: `${domain}: domain expiry query failed.`,
         warning_type: 'access', category: 'domains', source: 'rdap', confidence: 'no_api_or_no_access', detail: { domain },
       })
       continue
@@ -154,11 +154,11 @@ export async function checkDomainExpiry(domains: string[], now: number, deps: Do
     if (!severity) continue
     warnings.push({
       code: 'domain_expiry_soon', severity, provider: 'domain',
-      message: `${domain}: domain regisztráció ${daysRemaining} nap múlva lejár.`,
+      message: `${domain}: domain registration expires in ${daysRemaining} days.`,
       detail: { domain, expiry_date: expEvent.eventDate },
       warning_type: 'expiry', category: 'domains', source: 'rdap', confidence: 'measured',
       expiry_date: expEvent.eventDate, current_value: daysRemaining, threshold: DOMAIN_THRESHOLDS.warn, unit: 'day',
-      action: 'Hosszabbítsd meg a domain regisztrációt.',
+      action: 'Renew the domain registration.',
     })
   }
   return warnings

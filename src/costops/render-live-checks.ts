@@ -48,7 +48,7 @@ export async function checkRenderBuildMinutes(
   } catch {
     return [{
       code: 'render_build_minutes_check_failed', severity: 'low', provider: 'render',
-      message: 'Render build-minutes állapot nem lekérdezhető (API hiba).',
+      message: 'Render build-minutes status not queryable (API error).',
       warning_type: 'access', category: 'hosting', source: 'render_api', confidence: 'no_api_or_no_access',
     }]
   }
@@ -75,10 +75,10 @@ export async function checkRenderBuildMinutes(
 
   return [{
     code: 'render_build_minutes_exhausted', severity: 'high', provider: 'render',
-    message: `Render build-percek elfogytak (${mostRecent.serviceName}, ${Math.round(ageSecs / 3600)} órája) -- új deploy blokkolva lehet.`,
+    message: `Render build-minutes exhausted (${mostRecent.serviceName}, ${Math.round(ageSecs / 3600)}h ago) — new deploys may be blocked.`,
     detail: { service_name: mostRecent.serviceName, event_timestamp: mostRecent.timestamp },
     warning_type: 'quota', category: categoryForProvider('render'), source: 'render_api', confidence: 'measured',
     threshold: 100, current_value: 100, unit: '%',
-    action: 'Várj a havi build-percek resetjére, vagy válts magasabb Render csomagra.',
+    action: 'Wait for the monthly build-minutes reset, or upgrade to a higher Render plan.',
   }]
 }
