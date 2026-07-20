@@ -13,6 +13,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { execSync } from "node:child_process";
 import type { MemoryPressureState, MemoryPressureStateFile, MemoryPressureConfig, MemoryPressureReliefAction } from "./memory-pressure-types.js";
 import { DEFAULT_CONFIG, STATE_FILE, CONFIG_FILE } from "./memory-pressure-types.js";
+import { checkMonitorHealth } from "./memory-pressure-health.js";
 
 const DASHBOARD_PORT = 3420;
 const DASHBOARD_TOKEN_PATH = "store/.dashboard-token";
@@ -110,10 +111,23 @@ export function memoryPressureGate(agentName: string): GateResult {
 
   const s = state.state;
 
-  // Recovery: the system was under pressure but has stabilised.
-  // Non-core starts are allowed again.
   if (s === "normal" || s === "recovery") {
-    return { allowed: true, reason: `state=${s}` };
+    // Before allowing non-core starts on a "normal"/"recovery" state, verify
+    // the monitor itself is healthy. A stale state file from a broken monitor
+    // (e.g. Module not found after branch switch) still reads as "normal" —
+    // but the guard is dead and must fail-closed. Requirement D, P0 phase 2:
+    // the 05:20-05:28 incident was missed because health was inferred from
+    // "state file exists + says normal" while every run was failing.
+    const health = checkMonitorHealth(state, undefined, 2);
+
+    if (!health.healthy) {
+      return {
+        allowed: false,
+        reason: `state=${s} but monitor unhealthy: ${health.failureMode} — ${health.details}`,
+      };
+    }
+
+    return { allowed: true, reason: `state=${s} monitor=healthy` };
   }
 
   // warning, critical, emergency: block non-core starts.

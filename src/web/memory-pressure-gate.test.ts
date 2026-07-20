@@ -71,6 +71,10 @@ function writeFixture(state: FixtureState): void {
     thresholds: DEFAULT_CONFIG.thresholds,
     generation: 1,
     lastAction: null,
+    lastSuccessfulMeasurementTime: new Date().toISOString(),
+    lastMeasurementStatus: "ok",
+    monitorBuildCommit: null,
+    releaseId: null,
   };
   const fixture: MemoryPressureStateFile = {
     ...baseFixture,
