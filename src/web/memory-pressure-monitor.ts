@@ -228,6 +228,25 @@ function loadStateFile(statePath: string): MemoryPressureStateFile | null {
   return null;
 }
 
+/** Resolve the running monitor's release metadata. Returns null if not
+ *  installed via install-monitor.sh (e.g. running from source tree). */
+function readReleaseMetadata(): { commit: string | null; releaseId: string | null } {
+  try {
+    // When running from a release, the release.json is next to the JS file.
+    // __dirname equivalent for ESM: import.meta.url → file URL → dirname.
+    const monitorDir = dirname(new URL(import.meta.url).pathname);
+    const manifestPath = `${monitorDir}/release.json`;
+    if (existsSync(manifestPath)) {
+      const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
+      return {
+        commit: manifest.commit ?? null,
+        releaseId: manifest.releaseId ?? null,
+      };
+    }
+  } catch { /* not installed via install-monitor.sh */ }
+  return { commit: null, releaseId: null };
+}
+
 function main(): void {
   const config = loadConfig();
   const statePath = resolveStatePath();
@@ -235,6 +254,9 @@ function main(): void {
   const currentSample = sample(config);
   const prevState = prev?.state ?? "normal";
   const prevSince = prev?.since ?? currentSample.timestamp;
+
+  const measurementOk = currentSample.agentRssMeasurementStatus !== "error";
+  const now = new Date().toISOString();
 
   const nextState = computeNextState(prevState, currentSample, prevSince, config.thresholds);
 
@@ -256,6 +278,9 @@ function main(): void {
     reliefAction = relievePressure(nextState) ?? reliefAction;
   }
 
+  // Release metadata — null if running from source tree (dev mode).
+  const release = readReleaseMetadata();
+
   // First sample ever, or first normal after load — write it.
   const stateFile: MemoryPressureStateFile = {
     state: nextState,
@@ -264,6 +289,16 @@ function main(): void {
     thresholds: config.thresholds,
     generation: (prev?.generation ?? 0) + 1,
     lastAction: reliefAction,
+    // Dead-guard detection fields:
+    // If measurement succeeded, advance lastSuccessfulMeasurementTime.
+    // If it failed, keep the PREVIOUS value — we need to know how long
+    // it has been since the last GOOD measurement, not the last attempt.
+    lastSuccessfulMeasurementTime: measurementOk
+      ? now
+      : (prev?.lastSuccessfulMeasurementTime ?? now),
+    lastMeasurementStatus: measurementOk ? "ok" : "failed",
+    monitorBuildCommit: release.commit ?? prev?.monitorBuildCommit ?? null,
+    releaseId: release.releaseId ?? prev?.releaseId ?? null,
   };
 
   atomicWrite(statePath, JSON.stringify(stateFile, null, 2));

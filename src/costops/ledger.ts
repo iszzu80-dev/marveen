@@ -122,7 +122,18 @@ export function resolveOperational(lines: OpLine[], win: MonthWindow): Operation
   for (const l of lines) { const a = bySource.get(l.source_id); if (a) a.push(l); else bySource.set(l.source_id, [l]) }
   const sourceBest = new Map<string, OpLine>()
   for (const [sid, ls] of bySource) {
-    sourceBest.set(sid, ls.reduce((a, b) => (OPERATIONAL_TIER[b.confidence] || 0) > (OPERATIONAL_TIER[a.confidence] || 0) ? b : a))
+    // Tier first; on an EQUAL tier the fresher row wins (card 097d8355, Istvan's
+    // ruling 2026-07-20). actual_invoice / provider_api / billing_export all sit at
+    // tier 4, so a newly ingested invoice used to tie with an older provider_api row
+    // and lose -- strict `>` keeps the incumbent -- meaning the invoice was stored but
+    // never reached operational_spend. `data_freshness` is an ingest timestamp
+    // (`= @now`, ordered DESC elsewhere), so higher = newer.
+    sourceBest.set(sid, ls.reduce((a, b) => {
+      const ta = OPERATIONAL_TIER[a.confidence] || 0
+      const tb = OPERATIONAL_TIER[b.confidence] || 0
+      if (tb !== ta) return tb > ta ? b : a
+      return b.data_freshness > a.data_freshness ? b : a
+    }))
   }
   // which providers have a provider-derived (tier>=3) source, and which have a REAL
   // measured actual (tier>=4). A real invoice/api actual SUPERSEDES the whole-provider
