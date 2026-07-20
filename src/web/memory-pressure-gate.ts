@@ -10,6 +10,7 @@
  */
 
 import { readFileSync, existsSync } from "node:fs";
+import { dirname } from "node:path";
 import { execSync } from "node:child_process";
 import type { MemoryPressureState, MemoryPressureStateFile, MemoryPressureConfig, MemoryPressureReliefAction } from "./memory-pressure-types.js";
 import { DEFAULT_CONFIG, STATE_FILE, CONFIG_FILE } from "./memory-pressure-types.js";
@@ -145,7 +146,9 @@ export function memoryPressureGate(agentName: string): GateResult {
  *  RSS descending. RSS is in bytes for precision; convert to GiB for display. */
 function listAgentRss(): { name: string; rssBytes: number }[] {
   try {
-    const script = `${INSTALL_DIR}/scripts/list-agent-rss.sh`;
+    // Release-local copy — NOT INSTALL_DIR, which is the shared checkout.
+    const monitorDir = dirname(new URL(import.meta.url).pathname);
+    const script = `${monitorDir}/list-agent-rss.sh`;
     const output = execSync(`bash "${script}" --json`, { timeout: 8000, encoding: "utf-8" });
     const parsed = JSON.parse(output.trim()) as import("./memory-pressure-types.js").AgentRssMeasurement;
     if (parsed.status === "error" || !parsed.agents) return [];

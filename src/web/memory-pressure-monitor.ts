@@ -99,7 +99,10 @@ function readPsiMemorySome(): number {
  * error result with totalRssBytes: null — never a false zero.
  */
 function readAgentRss(): import("./memory-pressure-types.js").AgentRssMeasurement {
-  const script = `${INSTALL_DIR}/scripts/list-agent-rss.sh`;
+  // Release-local copy — NOT INSTALL_DIR, which is the shared checkout.
+  // A branch switch by another agent must not blind the measurement (card 5213e06c).
+  const monitorDir = dirname(new URL(import.meta.url).pathname);
+  const script = `${monitorDir}/list-agent-rss.sh`;
   try {
     const output = execSync(
       `bash "${script}" --json`,

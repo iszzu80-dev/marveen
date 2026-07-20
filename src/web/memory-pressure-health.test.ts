@@ -366,6 +366,48 @@ async function run(): Promise<void> {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // TEST 8: release bundle must not reference INSTALL_DIR for bundled deps
+  //
+  // The monitor copies list-agent-rss.sh into the release directory during
+  // install. If the compiled JS references `${INSTALL_DIR}/scripts/` instead
+  // of the release-local copy, a branch switch on the shared checkout blinds
+  // the measurement. (card 5213e06c — live 07:14, costops-rebased switch
+  // removed scripts/list-agent-rss.sh, every cycle returned error since.)
+  //
+  // This test asserts over the COMPILED BUNDLE, not the source — the source
+  // looked correct to both of us during review, only the built JS told the truth.
+  // ═══════════════════════════════════════════════════════════════════════════
+  {
+    const RELEASES_DIR = join(process.env.MARVEEN_HOME ?? process.cwd(), "releases");
+    const CURRENT_LINK = join(RELEASES_DIR, "monitor-current");
+    if (existsSync(CURRENT_LINK)) {
+      const monitorJs = join(CURRENT_LINK, "memory-pressure-monitor.js");
+      const gateJs = join(CURRENT_LINK, "memory-pressure-gate.js");
+
+      for (const [label, bundlePath] of [["monitor.js", monitorJs], ["gate.js", gateJs]] as const) {
+        if (!existsSync(bundlePath)) {
+          ok(`T8: ${label} exists for INSTALL_DIR audit`, false, bundlePath);
+          continue;
+        }
+        const content = readFileSync(bundlePath, "utf-8");
+        // The ONLY acceptable INSTALL_DIR references in the built bundle are:
+        //   const INSTALL_DIR = ...
+        //   function resolvePath ...
+        //   calls to resolvePath() for state/config/health files
+        // ANY reference of the form INSTALL_DIR/scripts/ is a defect — it means
+        // the build reached through the shared checkout for a bundled dependency.
+        const scriptsRef = content.match(/INSTALL_DIR.*scripts/g);
+        const clean = !scriptsRef;
+        ok(`T8: ${label} does NOT reference INSTALL_DIR for scripts (release-local deps only)`,
+          clean,
+          scriptsRef ? `FOUND: ${scriptsRef.join("; ")}` : "clean");
+      }
+    } else {
+      ok("T8: release symlink exists for bundle audit", false, CURRENT_LINK);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // TEST 6: missing or stale monitor state → non-core lifecycle fail-closed
   //
   // When the monitor is unhealthy (stale state, execution failed), non-core
