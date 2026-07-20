@@ -64,6 +64,14 @@ export interface MemoryPressureStateFile {
   };
   generation: number; // monotonically increasing, for change detection
   lastAction: MemoryPressureReliefAction | null;
+  // ── Dead-guard detection fields (P0 phase 2, requirements C/D) ──────────
+  // Health must NOT be inferred from "timer active + state file exists" alone.
+  // These fields let the health check distinguish a working monitor from one
+  // whose timer fires but whose execution crashes (Module not found, etc.).
+  lastSuccessfulMeasurementTime: string; // ISO 8601 — last time a measurement succeeded
+  lastMeasurementStatus: "ok" | "failed"; // whether the LAST measurement attempt succeeded
+  monitorBuildCommit: string | null;       // source commit of the running monitor build
+  releaseId: string | null;               // which release (monitor-<hash>) is running
 }
 
 export interface MemoryPressureConfig {
