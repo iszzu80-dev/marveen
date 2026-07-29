@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, SERVICE_ID } from '../config.js'
 import { listAgentNames, readAgentRemoteHost } from './agent-config.js'
@@ -9,9 +10,10 @@ import {
   capturePane,
 } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
+import { respawnMainSessionFresh } from './channel-monitor.js'
 import { paneLooksIdle } from '../pane-state.js'
 import { readAutoRestartConfig } from './auto-restart-store.js'
-import { restartDue, dailyDueAtMs, parseHHMM, type AutoRestartConfig } from '../auto-restart.js'
+import { restartDue, dailyDueAtMs, parseHHMM, mainRestartMechanism, type AutoRestartConfig } from '../auto-restart.js'
 
 // Drives per-agent scheduled restarts (see src/auto-restart.ts for the why and
 // the pure due-logic). Mirrors the other watcher loops: a 60s sweep, started
@@ -62,21 +64,46 @@ function paneIsIdle(session: string, host: string | null): boolean {
   return paneLooksIdle(pane)
 }
 
-async function performRestart(name: string, cfg: AutoRestartConfig): Promise<void> {
-  if (name === MAIN_AGENT_ID) {
-    // The main channels session is launchd-managed and channels.sh always
-    // starts a fresh conversation, so 'continue' is not applicable here -- a
-    // kickstart is always a fresh restart. KeepAlive brings it straight back.
+// The main channels session always comes back as a FRESH conversation, so
+// cfg.mode ('continue') never applies to it -- see buildMainSessionRespawnCmd's
+// continueSession: false below and the launchd kickstart on macOS.
+//
+// Two platforms, two mechanisms. Splitting on the launchctl BINARY rather than
+// process.platform is deliberate: the failure we hit was not "wrong OS" but
+// "the binary this code unconditionally exec'd does not exist here", and the
+// binary check is what actually predicts whether the call can work.
+//
+// Why this mattered: on Linux the launchctl leg threw ENOENT on every due slot.
+// performRestart's throw left lastRestart unset, so the runner retried ~every
+// tick, forever -- 248 WARN lines in one morning (2026-07-26) and, more to the
+// point, the main agent's nightly restart had NEVER run on this host. The
+// symptom was invisible: a log line nobody reads, while the dashboard showed
+// auto-restart as enabled and correctly scheduled.
+function restartMainChannelsSession(): void {
+  if (mainRestartMechanism(existsSync('/bin/launchctl')) === 'launchd') {
     const uid = typeof process.getuid === 'function' ? process.getuid() : ''
     // Label keys off SERVICE_ID (defaults to MAIN_AGENT_ID) so it matches the
-    // launchd label the installer wrote.
+    // launchd label the installer wrote. KeepAlive brings it straight back.
     execFileSync('/bin/launchctl', ['kickstart', '-k', `gui/${uid}/com.${SERVICE_ID}.channels`], { timeout: 10_000 })
+    return
+  }
+  // Linux (and any host without launchd): reuse the SAME respawn path the
+  // channel-deafness recovery uses, rather than a second hand-rolled tmux
+  // command. That helper already carries the MCP startup env, the extra
+  // channel plugins, the isolated config dir, the fleet token and the two
+  // orphan reaps -- a bespoke command here would silently drift from it.
+  respawnMainSessionFresh()
+}
+
+function performRestart(name: string, cfg: AutoRestartConfig): void {
+  if (name === MAIN_AGENT_ID) {
+    restartMainChannelsSession()
   } else {
-    await restartAgentProcess(name, { fresh: cfg.mode === 'fresh' })
+    restartAgentProcess(name, { fresh: cfg.mode === 'fresh' })
   }
 }
 
-async function checkAgent(name: string, nowMs: number): Promise<void> {
+function checkAgent(name: string, nowMs: number): void {
   const cfg = readAutoRestartConfig(name)
   if (!cfg.enabled) {
     lastRestart.delete(name) // re-seed cleanly if re-enabled later
@@ -111,7 +138,7 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
   }
 
   try {
-    await performRestart(name, cfg)
+    performRestart(name, cfg)
     lastRestart.set(name, nowMs)
     logger.info({ name, mode: name === MAIN_AGENT_ID ? 'fresh(main)' : cfg.mode }, 'auto-restart: restarted session')
   } catch (err) {
@@ -120,13 +147,13 @@ async function checkAgent(name: string, nowMs: number): Promise<void> {
 }
 
 export function startAutoRestartRunner(): NodeJS.Timeout {
-  async function sweep() {
+  function sweep() {
     const now = Date.now()
     try { checkAgent(MAIN_AGENT_ID, now) } catch (err) { logger.debug({ err }, 'auto-restart: main check error') }
     for (const name of listAgentNames()) {
       try { checkAgent(name, now) } catch (err) { logger.debug({ err, agent: name }, 'auto-restart: agent check error') }
     }
   }
-  setTimeout(() => { void sweep() }, INITIAL_DELAY_MS)
-  return setInterval(() => { void sweep() }, INTERVAL_MS)
+  setTimeout(sweep, INITIAL_DELAY_MS)
+  return setInterval(sweep, INTERVAL_MS)
 }

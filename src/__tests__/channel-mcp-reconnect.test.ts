@@ -6,6 +6,7 @@ vi.mock('node:child_process', () => ({
   execSync: vi.fn(),
 }))
 
+
 vi.mock('../platform.js', () => ({
   resolveFromPath: (name: string) => `/usr/local/bin/${name}`,
 }))
