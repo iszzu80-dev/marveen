@@ -14,7 +14,8 @@ import {
 } from '../../db.js'
 import { normalizeKanbanRefs } from '../kanban-ref-normalize.js'
 import { OWNER_NAME, BOT_NAME, MAIN_AGENT_ID, STORE_DIR, WEB_HOST, WEB_PORT, KANBAN_LABEL_COLORS } from '../../config.js'
-import { listAgentNames, readAgentDisplayName } from '../agent-config.js'
+import { listAgentNames, readAgentDisplayName, readAgentRemoteHost } from '../agent-config.js'
+import { resolveCurrentSessionId } from '../transcript-sources.js'
 import { isAgentRunning } from '../agent-process.js'
 import { resolveKanbanDispatchTarget } from '../../kanban-dispatch.js'
 import { createDispatchSafe, recordAcceptedOutcomeForCard } from '../../costops/dispatch.js'
@@ -98,8 +99,13 @@ function fireKanbanDispatch(id: string): void {
     // P2-A: mint the dispatch_id here (the kanban origin) with the card's known
     // metadata, then carry it on the queued message so the router threads it to
     // the funnel. Best-effort: a measurement failure never blocks the dispatch.
+    // session_id is resolved from the target's newest local transcript so
+    // correlateTokenUsageToDispatches() can actually place this dispatch in the
+    // session timeline; a REMOTE agent's transcripts are on that host, so we
+    // leave it NULL rather than resolve a stale local dir.
     const dispatchId = createDispatchSafe(getDb(), {
       source: 'kanban', agent: target, cardId: id, project: card.project ?? null,
+      sessionId: readAgentRemoteHost(target) ? null : resolveCurrentSessionId(target),
     })
     createAgentMessage(MAIN_AGENT_ID, target, content, null, null, dispatchId)
     markKanbanCardDispatched(id)

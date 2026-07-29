@@ -17,6 +17,7 @@ import {
 import { readClaudeCodeOauthJson } from './claude-credentials.js'
 import { getDb } from '../db.js'
 import { createDispatchSafe } from '../costops/dispatch.js'
+import { resolveSessionIdForCwd } from './transcript-sources.js'
 import { detectPaneState } from '../pane-state.js'
 import { notifyChannel } from '../notify.js'
 
@@ -654,7 +655,18 @@ async function runWorkerAttempt(ctx: WorkerCtx, message: string, timeoutMs: numb
   clearWorkerContext(ctx)
   // P2-A: mint a worker-source dispatch_id and thread it to the funnel.
   // Best-effort: a measurement failure never blocks the worker send.
-  const dispatchId = createDispatchSafe(getDb(), { source: 'worker', agent: MAIN_AGENT_ID, taskType: 'worker' })
+  //
+  // session_id comes from the WORKER's own cwd (~/.<id>-worker), NOT from the
+  // agent-id resolver: the worker is a separate Claude Code session outside
+  // PROJECT_ROOT, so resolving it by the main agent id would stamp this dispatch
+  // with the MAIN pane's session -- attributing the main agent's own tokens to a
+  // worker request. The worker's project dir is currently outside
+  // the token_usage collection mapping, so this link stays inert until that
+  // changes; inert is correct, mis-attributed would not be.
+  const dispatchId = createDispatchSafe(getDb(), {
+    source: 'worker', agent: MAIN_AGENT_ID, taskType: 'worker',
+    sessionId: resolveSessionIdForCwd(ctx.home),
+  })
   await sendPromptToSession(ctx.session, buildWorkerPrompt(message, outPath, donePath), null, { dispatchId })
 
   const start = Date.now()

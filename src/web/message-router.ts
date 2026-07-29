@@ -27,6 +27,7 @@ import {
   sendPromptToSession,
   sessionExistsOnHost,
 } from './agent-process.js'
+import { resolveCurrentSessionId } from './transcript-sources.js'
 import { setLastInboundModality } from './voice-modality.js'
 import { classifyAgentMessage, wrapAgentMessageForDelivery } from './agent-message-wrap.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
@@ -654,9 +655,16 @@ export async function runMessageRouterTick(): Promise<void> {
         // so mint a 'message'-source one here. Channel-inbound (user -> agent)
         // messages are below the work-package threshold and are NOT instrumented
         // (documented threshold). Best-effort: never blocks the send.
+        // session_id: the target's newest LOCAL transcript at send time, so the
+        // window correlation can attribute this session's token rows to this
+        // dispatch. Remote-host targets keep it NULL (their transcripts are not
+        // on this host) -- never a stale local guess.
         let dispatchId = msg.dispatch_id ?? null
         if (!dispatchId && !isChannelInbound) {
-          dispatchId = createDispatchSafe(getDb(), { source: 'message', agent: msg.to_agent })
+          dispatchId = createDispatchSafe(getDb(), {
+            source: 'message', agent: msg.to_agent,
+            sessionId: host ? null : resolveCurrentSessionId(msg.to_agent),
+          })
         }
         // Inline preamble so a fresh session (post hard-restart) doesn't miss
         // the context that explains the tag semantics.

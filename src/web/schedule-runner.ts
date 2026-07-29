@@ -36,6 +36,7 @@ import {
   type ScheduledTask,
 } from './scheduled-tasks-io.js'
 import { listAgentNames, readFileOr, readAgentRemoteHost, agentDir } from './agent-config.js'
+import { resolveCurrentSessionId } from './transcript-sources.js'
 import { channelStateDir } from '../channel-provider.js'
 import {
   agentSessionName,
@@ -524,8 +525,14 @@ async function attemptFireTask(
     // P2-A: mint a scheduler-source dispatch_id for this task and thread it to
     // the funnel. The SAME id is reused on any swallowed-Enter reinjection below
     // (it is the same work-package, not a new one). Best-effort: never blocks.
+    // session_id resolves from the agent's newest LOCAL transcript so the window
+    // correlation can attribute this run's token rows to this dispatch. Two
+    // cases stay NULL rather than guess: a REMOTE agent (transcripts live on the
+    // other host) and a task with a targetSession override (an arbitrary tmux
+    // session has no derivable transcript dir).
     const dispatchId = createDispatchSafe(getDb(), {
       source: 'scheduler', agent: agentName, taskType: task.type,
+      sessionId: (host || task.targetSession) ? null : resolveCurrentSessionId(agentName),
     })
     // forceSend skips the busy-state check above; it must also skip the
     // pre-flight wait-until-idle gate inside sendPromptToSession, otherwise a

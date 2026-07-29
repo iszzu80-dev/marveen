@@ -1,51 +1,15 @@
 import { statSync, readdirSync, existsSync } from 'node:fs'
 import { join, basename } from 'node:path'
-import { homedir } from 'node:os'
 import { createReadStream } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { getDb } from '../db.js'
 import { logger } from '../logger.js'
-import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
 import { deriveProvider } from '../costops/pricing.js'
-
-const PROJECTS_DIR = join(homedir(), '.claude', 'projects')
-
-// Claude Code encodes a project's absolute path into a directory name by
-// replacing every non-alphanumeric/non-dash character with `-`. The main
-// agent's transcripts live under that exact directory, regardless of what
-// the agent calls itself.
-function encodeProjectPath(p: string): string {
-  return p.replace(/[^a-zA-Z0-9-]/g, '-')
-}
-
-interface AgentTranscriptSource {
-  agent: string
-  projectDir: string
-}
-
-function discoverAgentSources(): AgentTranscriptSource[] {
-  const sources: AgentTranscriptSource[] = []
-  if (!existsSync(PROJECTS_DIR)) return sources
-  const mainDirName = encodeProjectPath(PROJECT_ROOT)
-  for (const entry of readdirSync(PROJECTS_DIR)) {
-    const full = join(PROJECTS_DIR, entry)
-    let stat
-    try { stat = statSync(full) } catch { continue }
-    if (!stat.isDirectory()) continue
-
-    // sanitizeAgentName() allows [a-z0-9-], so the old /([a-z]+)$/ silently
-    // skipped every agent with a digit or a hyphen in its name -- the whole
-    // per-project worker fleet (davinci-ocura, vermeer-fressa, ...) never
-    // appeared in the token monitor at all. Not zero usage: no rows.
-    const agentMatch = entry.match(/-agents-([a-z0-9-]+)$/)
-    if (agentMatch) {
-      sources.push({ agent: agentMatch[1], projectDir: full })
-    } else if (entry === mainDirName) {
-      sources.push({ agent: MAIN_AGENT_ID, projectDir: full })
-    }
-  }
-  return sources
-}
+// The transcript-dir -> agent mapping rule lives in ONE place (see
+// transcript-sources.ts); P2-A's resolveCurrentSessionId() reuses the very same
+// helper, so the `-agents-<name>` regex is not duplicated across the two
+// consumers.
+import { discoverAgentSources } from './transcript-sources.js'
 
 function findJsonlFiles(dir: string): string[] {
   const files: string[] = []
