@@ -19,6 +19,9 @@ import { resolveCurrentSessionId } from '../transcript-sources.js'
 import { isAgentRunning } from '../agent-process.js'
 import { resolveKanbanDispatchTarget } from '../../kanban-dispatch.js'
 import { createDispatchSafe, recordAcceptedOutcomeForCard } from '../../costops/dispatch.js'
+import { recordPacketMetadataSafe } from '../../costops/packet-metadata.js'
+import { buildContextPacket, derivePacketMetadata } from '../../context-packet.js'
+import { evaluateDispatchAdmissionSafe } from '../dispatch-admission.js'
 import { generateBreakdown } from '../llm-breakdown.js'
 import { logger } from '../../logger.js'
 import { readBody, json, jsonMaybeGzip } from '../http-helpers.js'
@@ -103,9 +106,50 @@ function fireKanbanDispatch(id: string): void {
     // correlateTokenUsageToDispatches() can actually place this dispatch in the
     // session timeline; a REMOTE agent's transcripts are on that host, so we
     // leave it NULL rather than resolve a stale local dir.
+    // P2-B admission gate: refuse a LARGE work package into a session that is
+    // already too saturated to hold it. taskSize comes from the card's LABELS via
+    // the deployment-local workflow policy (session-efficiency.json) -- never
+    // from a model, and never guessed: with the shipped defaults (empty label
+    // table, agentDefault 'normal') nothing is ever refused, so this is inert
+    // until an operator configures a size label. The gate fails OPEN on any
+    // fault, so a broken config can never stop a dispatch.
+    const cardLabels = getLabelsForCard(id).map(l => l.name)
+    const admission = evaluateDispatchAdmissionSafe({ agent: target, labels: cardLabels })
+    if (!admission.admit) {
+      // Deliberately do NOT markKanbanCardDispatched: the work is deferred, not
+      // dropped, so the next move into in_progress re-fires it once the target
+      // has room. A refusal is never silent -- it lands as a card comment,
+      // because a refusal only the log sees is a lost task.
+      logger.warn({ id, target, state: admission.state, pct: admission.pct, taskSize: admission.taskSize },
+        'Kanban dispatch refused by P2-B admission gate (large task into saturated session)')
+      try {
+        addKanbanComment(id, MAIN_AGENT_ID,
+          `[CONTEXT-GUARD/P2-B] Dispatch to ${target} deferred: ${admission.reason}. ` +
+          `taskSize=${admission.taskSize} (${admission.taskSizeSource}). ` +
+          `The card stays undispatched -- move it to in_progress again once ${target} has context room, ` +
+          `or checkpoint/restart ${target} first.`)
+      } catch (err) {
+        logger.warn({ err, id }, 'Kanban dispatch refusal comment failed')
+      }
+      return
+    }
     const dispatchId = createDispatchSafe(getDb(), {
       source: 'kanban', agent: target, cardId: id, project: card.project ?? null,
       sessionId: readAgentRemoteHost(target) ? null : resolveCurrentSessionId(target),
+    })
+    // P2-B: record the packet metadata for this dispatch. Paths/hashes/sizes
+    // only -- the packet BODY is never persisted. Best-effort by construction
+    // (recordPacketMetadataSafe), so a metadata failure never blocks the send.
+    const packet = buildContextPacket({
+      goal: card.title,
+      cardId: id,
+      taskSize: admission.taskSize,
+      dataSensitivity: 'internal',
+      doneWhen: [`Card #${id} moved to done with a result comment`],
+    })
+    recordPacketMetadataSafe(getDb(), dispatchId, {
+      ...derivePacketMetadata(packet),
+      taskSizeSource: admission.taskSizeSource,
     })
     createAgentMessage(MAIN_AGENT_ID, target, content, null, null, dispatchId)
     markKanbanCardDispatched(id)
