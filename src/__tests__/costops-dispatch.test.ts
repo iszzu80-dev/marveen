@@ -11,6 +11,9 @@ import {
   recordAcceptedOutcomeForCard,
   resolveOutcome,
   correlateTokenUsageToDispatches,
+  loadDispatchAttributionConfig,
+  DEFAULT_MAX_ATTRIBUTION_WINDOW_SECONDS,
+  TERMINAL_OUTCOMES,
   resolveBillingMode,
   loadBillingMap,
   costPerAcceptedTask,
@@ -154,6 +157,214 @@ describe('P2-A window correlation (agent, session_id)', () => {
     createDispatch(db, { source: 'kanban', agent: 'a', cardId: 'c1' }, ms(T0_SEC + 100)) // no session_id
     insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: T0_SEC + 150 })
     expect(correlateTokenUsageToDispatches(db)).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// P2-A gate fix: the attribution window is BOUNDED.
+//
+// The defect these tests pin: the window used to run from a dispatch's
+// created_at until the NEXT dispatch of the same (agent, session_id) -- so the
+// LAST dispatch of a session was open-ended and absorbed every later token row
+// in that session indefinitely (a human typing in the pane hours later,
+// unrelated self-initiated work), systematically inflating the headline KPI
+// cost_per_accepted_task. Two bounds now close it: a terminal outcome, and a
+// configurable hard cap. Rows outside every window stay unattributed.
+// ---------------------------------------------------------------------------
+describe('P2-A window bound 1: a TERMINAL outcome closes the window', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  // A path that deliberately does not exist -> the committed default cap, with
+  // no dependence on whatever store/dispatch-attribution.json a machine has.
+  const NO_CONFIG = join(tmpdir(), 'p2a-no-such-dispatch-attribution.json')
+
+  it('declares exactly accepted/failed/cancelled as terminal (retry+unknown excluded)', () => {
+    expect([...TERMINAL_OUTCOMES].sort()).toEqual(['accepted', 'cancelled', 'failed'])
+    expect(TERMINAL_OUTCOMES).not.toContain('retry')
+    expect(TERMINAL_OUTCOMES).not.toContain('unknown')
+  })
+
+  for (const outcome of ['accepted', 'failed', 'cancelled'] as const) {
+    it(`a row AFTER the '${outcome}' outcome is not attributed; a row before it still is`, () => {
+      const db = getDb()
+      // Last (and only) dispatch of the session -> the open-ended case.
+      const d = createDispatch(db, { source: 'kanban', agent: 'a', sessionId: 's1' }, ms(T0_SEC))
+      recordOutcome(db, { dispatchId: d, outcome }, ms(T0_SEC + 100))
+      insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: T0_SEC + 50 })  // before  -> linked
+      insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: T0_SEC + 100 }) // at      -> linked
+      insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: T0_SEC + 101 }) // after   -> NOT
+      insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: T0_SEC + 9000 })// long after -> NOT
+
+      expect(correlateTokenUsageToDispatches(db, { configPath: NO_CONFIG })).toBe(2)
+      const at = (off: number) => (db.prepare('SELECT dispatch_id FROM token_usage WHERE timestamp = ?').get(T0_SEC + off) as any).dispatch_id
+      expect(at(50)).toBe(d)
+      expect(at(100)).toBe(d)
+      expect(at(101)).toBeNull()
+      expect(at(9000)).toBeNull()
+    })
+  }
+
+  for (const outcome of ['retry', 'unknown'] as const) {
+    it(`a '${outcome}' outcome does NOT close the window (a row after it is still attributed)`, () => {
+      const db = getDb()
+      const d = createDispatch(db, { source: 'kanban', agent: 'a', sessionId: 's1' }, ms(T0_SEC))
+      recordOutcome(db, { dispatchId: d, outcome }, ms(T0_SEC + 100))
+      insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: T0_SEC + 150 })
+      expect(correlateTokenUsageToDispatches(db, { configPath: NO_CONFIG })).toBe(1)
+      const row: any = db.prepare('SELECT dispatch_id FROM token_usage WHERE timestamp = ?').get(T0_SEC + 150)
+      expect(row.dispatch_id).toBe(d)
+    })
+  }
+
+  it('a LATER terminal outcome cannot re-open a window closed by an earlier one', () => {
+    const db = getDb()
+    const d = createDispatch(db, { source: 'kanban', agent: 'a', sessionId: 's1' }, ms(T0_SEC))
+    recordOutcome(db, { dispatchId: d, outcome: 'failed' }, ms(T0_SEC + 100))
+    recordOutcome(db, { dispatchId: d, outcome: 'accepted' }, ms(T0_SEC + 5000))
+    insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: T0_SEC + 3000 })
+    expect(correlateTokenUsageToDispatches(db, { configPath: NO_CONFIG })).toBe(0)
+  })
+
+  it('another dispatch outcome does not close THIS dispatch (bound is per-dispatch)', () => {
+    const db = getDb()
+    const d1 = createDispatch(db, { source: 'kanban', agent: 'a', sessionId: 's1' }, ms(T0_SEC))
+    const d2 = createDispatch(db, { source: 'kanban', agent: 'a', sessionId: 's2' }, ms(T0_SEC))
+    recordOutcome(db, { dispatchId: d2, outcome: 'accepted' }, ms(T0_SEC + 10))
+    insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: T0_SEC + 500 })
+    expect(correlateTokenUsageToDispatches(db, { configPath: NO_CONFIG })).toBe(1)
+    const row: any = db.prepare("SELECT dispatch_id FROM token_usage WHERE session_id = 's1'").get()
+    expect(row.dispatch_id).toBe(d1)
+  })
+})
+
+describe('P2-A window bound 2: the max-window cap (the "absorbs a conversation hours later" case)', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  const NO_CONFIG = join(tmpdir(), 'p2a-no-such-dispatch-attribution.json')
+  const HOUR = 3600
+
+  it('a row beyond the DEFAULT cap is not attributed even as the session\'s last dispatch with no outcome', () => {
+    const db = getDb()
+    // Exactly the reported defect: one dispatch, open-ended window, no outcome.
+    const d = createDispatch(db, { source: 'kanban', agent: 'a', sessionId: 's1' }, ms(T0_SEC))
+    const cap = DEFAULT_MAX_ATTRIBUTION_WINDOW_SECONDS
+    insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: T0_SEC + HOUR })   // 1h  -> linked
+    insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: T0_SEC + cap })    // at cap -> linked
+    insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: T0_SEC + cap + 1 })// past cap -> NOT
+    // The pane-conversation-hours-later row that used to be silently billed.
+    insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: T0_SEC + 12 * HOUR })
+
+    expect(correlateTokenUsageToDispatches(db, { configPath: NO_CONFIG })).toBe(2)
+    const at = (off: number) => (db.prepare('SELECT dispatch_id FROM token_usage WHERE timestamp = ?').get(T0_SEC + off) as any).dispatch_id
+    expect(at(HOUR)).toBe(d)
+    expect(at(cap)).toBe(d)
+    expect(at(cap + 1)).toBeNull()
+    expect(at(12 * HOUR)).toBeNull()
+    // And it stays unattributed -- no invented bucket, no fallback owner.
+    const orphan: any = db.prepare('SELECT COUNT(*) AS n FROM token_usage WHERE dispatch_id IS NULL').get()
+    expect(orphan.n).toBe(2)
+  })
+
+  it('the cap is configurable: a SMALLER cap moves the boundary in', () => {
+    const db = getDb()
+    const d = createDispatch(db, { source: 'kanban', agent: 'a', sessionId: 's1' }, ms(T0_SEC))
+    insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: T0_SEC + 30 })
+    insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: T0_SEC + 120 })
+    expect(correlateTokenUsageToDispatches(db, { maxWindowSeconds: 60 })).toBe(1)
+    const at = (off: number) => (db.prepare('SELECT dispatch_id FROM token_usage WHERE timestamp = ?').get(T0_SEC + off) as any).dispatch_id
+    expect(at(30)).toBe(d)
+    expect(at(120)).toBeNull() // inside the default 6h, outside the 60s cap
+  })
+
+  it('the cap is configurable: a LARGER cap moves the boundary out', () => {
+    const db = getDb()
+    const d = createDispatch(db, { source: 'kanban', agent: 'a', sessionId: 's1' }, ms(T0_SEC))
+    const beyondDefault = T0_SEC + DEFAULT_MAX_ATTRIBUTION_WINDOW_SECONDS + 3 * HOUR
+    insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: beyondDefault })
+    // Same row, same DB: unattributed under the default, attributed under 24h.
+    expect(correlateTokenUsageToDispatches(db, { configPath: NO_CONFIG })).toBe(0)
+    expect(correlateTokenUsageToDispatches(db, { maxWindowSeconds: 24 * HOUR })).toBe(1)
+    const row: any = db.prepare('SELECT dispatch_id FROM token_usage WHERE timestamp = ?').get(beyondDefault)
+    expect(row.dispatch_id).toBe(d)
+  })
+
+  it('a deployment-local config file supplies the cap', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'p2a-attr-'))
+    try {
+      const p = join(dir, 'dispatch-attribution.json')
+      writeFileSync(p, JSON.stringify({ version: 1, max_window_seconds: 90 }))
+      expect(loadDispatchAttributionConfig(p).maxWindowSeconds).toBe(90)
+
+      const db = getDb()
+      const d = createDispatch(db, { source: 'kanban', agent: 'a', sessionId: 's1' }, ms(T0_SEC))
+      insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: T0_SEC + 60 })
+      insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: T0_SEC + 300 })
+      expect(correlateTokenUsageToDispatches(db, { configPath: p })).toBe(1)
+      const at = (off: number) => (db.prepare('SELECT dispatch_id FROM token_usage WHERE timestamp = ?').get(T0_SEC + off) as any).dispatch_id
+      expect(at(60)).toBe(d)
+      expect(at(300)).toBeNull()
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('missing / invalid / non-positive config => the DEFAULT cap, never unbounded', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'p2a-attr-bad-'))
+    try {
+      expect(loadDispatchAttributionConfig(join(dir, 'absent.json')).maxWindowSeconds).toBe(DEFAULT_MAX_ATTRIBUTION_WINDOW_SECONDS)
+      const cases: string[] = [
+        'not json at all',
+        JSON.stringify({}),
+        JSON.stringify({ max_window_seconds: 0 }),
+        JSON.stringify({ max_window_seconds: -1 }),
+        JSON.stringify({ max_window_seconds: 'unbounded' }),
+        JSON.stringify({ max_window_seconds: null }),
+      ]
+      for (const [i, body] of cases.entries()) {
+        const p = join(dir, `bad-${i}.json`)
+        writeFileSync(p, body)
+        expect(loadDispatchAttributionConfig(p).maxWindowSeconds).toBe(DEFAULT_MAX_ATTRIBUTION_WINDOW_SECONDS)
+      }
+      // An invalid EXPLICIT cap degrades to the default too, not to unbounded.
+      const db = getDb()
+      createDispatch(db, { source: 'kanban', agent: 'a', sessionId: 's1' }, ms(T0_SEC))
+      insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: T0_SEC + 48 * HOUR })
+      expect(correlateTokenUsageToDispatches(db, { maxWindowSeconds: 0 })).toBe(0)
+      expect(correlateTokenUsageToDispatches(db, { maxWindowSeconds: Number.POSITIVE_INFINITY })).toBe(0)
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  })
+
+  it('the committed default cap is 6 hours', () => {
+    expect(DEFAULT_MAX_ATTRIBUTION_WINDOW_SECONDS).toBe(21600)
+  })
+})
+
+describe('P2-A correlation is idempotent under the bounds', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  const NO_CONFIG = join(tmpdir(), 'p2a-no-such-dispatch-attribution.json')
+
+  it('running correlation twice yields identical attribution and links nothing new', () => {
+    const db = getDb()
+    const d1 = createDispatch(db, { source: 'kanban', agent: 'a', sessionId: 's1' }, ms(T0_SEC))
+    const d2 = createDispatch(db, { source: 'kanban', agent: 'a', sessionId: 's1' }, ms(T0_SEC + 1000))
+    recordOutcome(db, { dispatchId: d2, outcome: 'accepted' }, ms(T0_SEC + 1500))
+    insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: T0_SEC + 10 })      // d1
+    insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: T0_SEC + 1200 })    // d2
+    insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: T0_SEC + 1600 })    // after outcome
+    insertTokenUsage({ agent: 'a', session_id: 's1', timestamp: T0_SEC + 40000 })   // past cap
+
+    const snapshot = () => db.prepare('SELECT timestamp, dispatch_id FROM token_usage ORDER BY timestamp').all()
+    const first = correlateTokenUsageToDispatches(db, { configPath: NO_CONFIG })
+    const afterFirst = snapshot()
+    const second = correlateTokenUsageToDispatches(db, { configPath: NO_CONFIG })
+    expect(first).toBe(2)
+    expect(second).toBe(0) // nothing double-attributed on a re-run
+    expect(snapshot()).toEqual(afterFirst)
+    expect(afterFirst).toEqual([
+      { timestamp: T0_SEC + 10, dispatch_id: d1 },
+      { timestamp: T0_SEC + 1200, dispatch_id: d2 },
+      { timestamp: T0_SEC + 1600, dispatch_id: null },
+      { timestamp: T0_SEC + 40000, dispatch_id: null },
+    ])
   })
 })
 

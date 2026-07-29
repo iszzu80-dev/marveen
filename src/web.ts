@@ -409,12 +409,18 @@ export function startWebServer(port = 3420): http.Server {
     }
   }, 60 * 60 * 1000)
 
+  // P2-A: both collection paths below also run the dispatch<->token_usage
+  // window correlation, because collectTokenUsage() chains it internally (see
+  // src/web/token-usage.ts) -- collection is what creates the rows the
+  // correlation attributes, so the two are one operation and no collection path
+  // can skip it. The correlation is fault-isolated inside collectTokenUsage, so
+  // a measurement fault cannot turn either of these into a rejected promise.
   const tokenCollectInterval = webOnly ? undefined : setInterval(() => {
     collectTokenUsage().catch(err => logger.warn({ err }, 'Periodic token usage collection failed'))
   }, 60 * 60 * 1000)
   if (!webOnly) {
     collectTokenUsage().catch(err => logger.warn({ err }, 'Startup token usage collection failed'))
-    logger.info('Token usage auto-collect started (1h poll + startup)')
+    logger.info('Token usage auto-collect started (1h poll + startup; each pass also attributes rows to dispatches)')
   }
 
   // LOCAL-FORK: costops seam (keep on rebase). ALL CostOps background tasks
