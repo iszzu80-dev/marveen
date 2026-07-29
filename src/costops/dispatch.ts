@@ -15,7 +15,9 @@
 // DATA SENSITIVITY (hard): no column, id, or log line in this module may carry
 // prompt text, PII, secrets, or credentials. `dispatch_id` is an opaque uuid.
 // The concrete billing-map lives only under gitignored store/; the committed
-// illustrative copy is config-examples/billing-map.example.json.
+// illustrative copy is config-examples/billing-map.example.json. The attribution
+// bounds config follows the same pattern (store/dispatch-attribution.json,
+// example in config-examples/dispatch-attribution.example.json).
 
 import type Database from 'better-sqlite3'
 import { randomUUID } from 'node:crypto'
@@ -310,19 +312,91 @@ export function resolveOutcome(db: Database.Database, dispatchId: string): Outco
 // ---- token_usage <-> dispatch window correlation ---------------------------
 
 /**
+ * Outcomes that CLOSE a dispatch's attribution window. 'retry' and 'unknown'
+ * are deliberately NOT terminal: a retried dispatch is still consuming tokens
+ * for the same work package, and 'unknown' is merely the absence of a verdict.
+ */
+export const TERMINAL_OUTCOMES: readonly OutcomeKind[] = ['accepted', 'failed', 'cancelled']
+
+/**
+ * Default hard cap on how long after its created_at a dispatch may still absorb
+ * token_usage rows. 6 hours: comfortably longer than any single work package
+ * this fleet dispatches (the longest observed multi-hour build sessions), yet
+ * short enough that a pane left idle overnight -- or a human typing in it the
+ * next morning -- can never be billed to the last dispatch of that session.
+ * There is NO unbounded mode: a missing/invalid config falls back to this.
+ */
+export const DEFAULT_MAX_ATTRIBUTION_WINDOW_SECONDS = 6 * 60 * 60 // 21600
+
+/** Deployment-local attribution config (gitignored store/; example is tracked). */
+export const DISPATCH_ATTRIBUTION_CONFIG_PATH = join(PROJECT_ROOT, 'store', 'dispatch-attribution.json')
+
+export interface DispatchAttributionConfig {
+  /** Hard cap in seconds. Always a finite, positive number -- never unbounded. */
+  maxWindowSeconds: number
+}
+
+/**
+ * Load the deployment-local attribution config. Missing file, unreadable file,
+ * invalid JSON, or a non-finite / non-positive max_window_seconds all resolve to
+ * DEFAULT_MAX_ATTRIBUTION_WINDOW_SECONDS -- never to "unbounded".
+ */
+export function loadDispatchAttributionConfig(
+  path: string = DISPATCH_ATTRIBUTION_CONFIG_PATH,
+): DispatchAttributionConfig {
+  if (!existsSync(path)) return { maxWindowSeconds: DEFAULT_MAX_ATTRIBUTION_WINDOW_SECONDS }
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf-8'))
+    return { maxWindowSeconds: sanitizeMaxWindowSeconds(raw?.max_window_seconds) }
+  } catch (err) {
+    logger.warn({ err, path }, 'loadDispatchAttributionConfig: invalid dispatch-attribution.json; using the default cap')
+    return { maxWindowSeconds: DEFAULT_MAX_ATTRIBUTION_WINDOW_SECONDS }
+  }
+}
+
+/** A cap is only honoured when it is a finite positive number; else the default. */
+function sanitizeMaxWindowSeconds(v: unknown): number {
+  return (typeof v === 'number' && Number.isFinite(v) && v > 0)
+    ? Math.floor(v)
+    : DEFAULT_MAX_ATTRIBUTION_WINDOW_SECONDS
+}
+
+/**
  * Attribute token_usage rows to dispatches by dispatch-time window within
- * (agent, session_id): a token_usage row is attributed to the dispatch whose
- * [created_at, next-dispatch-of-same-(agent,session_id)) window contains its
- * timestamp. Deterministic, rule-based, no LLM. Refines (does not replace) the
- * fuzzy kanban correlation. Forward-only: only fills rows where dispatch_id is
- * currently NULL, and only for dispatches that carry a session_id (a dispatch
- * with no session_id cannot be placed into a session's timeline, so it is
- * skipped rather than guessed). Returns the number of token_usage rows linked.
+ * (agent, session_id). Deterministic, rule-based, no LLM. Refines (does not
+ * replace) the fuzzy kanban correlation. Forward-only: only fills rows where
+ * dispatch_id is currently NULL, and only for dispatches that carry a
+ * session_id (a dispatch with no session_id cannot be placed into a session's
+ * timeline, so it is skipped rather than guessed).
+ *
+ * A row is attributed to a dispatch when its timestamp is inside ALL of:
+ *   1. >= dispatch.created_at                        (forward-only from dispatch)
+ *   2. <  next dispatch of the same (agent, session) (unchanged session timeline)
+ *   3. <= created_at + maxWindowSeconds              (BOUND: hard cap)
+ *   4. <= earliest TERMINAL outcome's created_at     (BOUND: outcome closes it)
+ * Bounds 3 and 4 exist because rule 2 alone leaves the LAST dispatch of a
+ * session open-ended, so it would absorb every later row in that session
+ * forever -- a human typing in the pane hours later, or unrelated
+ * self-initiated work -- systematically inflating cost_per_accepted_task.
+ * 'retry'/'unknown' outcomes do NOT close the window (see TERMINAL_OUTCOMES).
+ *
+ * Rows outside every window simply stay unattributed (dispatch_id NULL); that
+ * is the honest result and no bucket is invented for them.
+ *
+ * Idempotent: windows are non-overlapping within a session and only ever
+ * narrowed, and already-linked rows are never touched, so re-running changes
+ * nothing and can never double-attribute. Returns the rows linked this run.
  */
 export function correlateTokenUsageToDispatches(
   db: Database.Database,
-  opts: { agent?: string; sessionId?: string } = {},
+  opts: { agent?: string; sessionId?: string; maxWindowSeconds?: number; configPath?: string } = {},
 ): number {
+  // Explicit caller value wins; otherwise deployment-local config; otherwise the
+  // committed default. An invalid explicit value degrades to the default too.
+  const maxWindowSeconds = opts.maxWindowSeconds !== undefined
+    ? sanitizeMaxWindowSeconds(opts.maxWindowSeconds)
+    : loadDispatchAttributionConfig(opts.configPath).maxWindowSeconds
+
   const where: string[] = ['session_id IS NOT NULL']
   const params: unknown[] = []
   if (opts.agent) { where.push('agent = ?'); params.push(opts.agent) }
@@ -332,21 +406,38 @@ export function correlateTokenUsageToDispatches(
      WHERE ${where.join(' AND ')} ORDER BY agent, session_id, created_at ASC`
   ).all(...params) as { dispatch_id: string; agent: string; session_id: string; created_at: number }[]
 
+  // Earliest terminal outcome per dispatch. MIN, so a later terminal outcome can
+  // never RE-OPEN a window that was already closed.
+  const closedAt = new Map<string, number>()
+  const terminalRows = db.prepare(
+    `SELECT dispatch_id, MIN(created_at) AS closed_at FROM dispatch_outcomes
+     WHERE dispatch_id IS NOT NULL AND outcome IN (${TERMINAL_OUTCOMES.map(() => '?').join(', ')})
+     GROUP BY dispatch_id`
+  ).all(...TERMINAL_OUTCOMES) as { dispatch_id: string; closed_at: number }[]
+  for (const r of terminalRows) closedAt.set(r.dispatch_id, r.closed_at)
+
+  // Bind order: dispatch_id, agent, session_id, from, nextStart, capEnd, outcomeEnd.
   const link = db.prepare(
     `UPDATE token_usage SET dispatch_id = ?
-     WHERE dispatch_id IS NULL AND agent = ? AND session_id = ? AND timestamp >= ? AND timestamp < ?`
+     WHERE dispatch_id IS NULL AND agent = ? AND session_id = ?
+       AND timestamp >= ?      -- 1. forward-only from the dispatch
+       AND timestamp < ?       -- 2. next dispatch of the same (agent, session)
+       AND timestamp <= ?      -- 3. BOUND: created_at + maxWindowSeconds
+       AND timestamp <= ?      -- 4. BOUND: earliest terminal outcome`
   )
   let linked = 0
   const tx = db.transaction(() => {
     for (let i = 0; i < dispatches.length; i++) {
       const d = dispatches[i]
       const next = dispatches[i + 1]
-      // The window ends at the next dispatch of the SAME (agent, session_id);
-      // otherwise it is open-ended (a very large sentinel epoch).
-      const windowEnd = (next && next.agent === d.agent && next.session_id === d.session_id)
+      // Session-timeline end: the next dispatch of the SAME (agent, session_id),
+      // otherwise a sentinel -- which is exactly why bounds 3/4 are required.
+      const nextStart = (next && next.agent === d.agent && next.session_id === d.session_id)
         ? next.created_at
         : Number.MAX_SAFE_INTEGER
-      linked += link.run(d.dispatch_id, d.agent, d.session_id, d.created_at, windowEnd).changes
+      const capEnd = d.created_at + maxWindowSeconds
+      const outcomeEnd = closedAt.get(d.dispatch_id) ?? Number.MAX_SAFE_INTEGER
+      linked += link.run(d.dispatch_id, d.agent, d.session_id, d.created_at, nextStart, capEnd, outcomeEnd).changes
     }
   })
   tx()
