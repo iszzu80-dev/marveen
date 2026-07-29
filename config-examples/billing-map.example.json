@@ -1,0 +1,12 @@
+{
+  "_comment": "P2-A billing-map: maps (provider, auth_profile) -> billing_mode. Copy to store/billing-map.json (gitignored) and fill with your real accounts. There is NO provider-name heuristic: any (provider, auth_profile) pair NOT listed here resolves to 'unknown' (never a false 'free'). Valid billing_mode values: subscription_included | subscription_credit | api_payg | local_compute | unknown. These entries are ILLUSTRATIVE placeholders, not real account data.",
+  "version": 1,
+  "entries": [
+    { "provider": "anthropic", "auth_profile": "max-subscription", "billing_mode": "subscription_included" },
+    { "provider": "anthropic", "auth_profile": "api-key", "billing_mode": "api_payg" },
+    { "provider": "openai", "auth_profile": "chatgpt-plus", "billing_mode": "subscription_included" },
+    { "provider": "openai", "auth_profile": "api-key", "billing_mode": "api_payg" },
+    { "provider": "deepseek", "auth_profile": "api-key", "billing_mode": "api_payg" },
+    { "provider": "local", "auth_profile": "ollama", "billing_mode": "local_compute" }
+  ]
+}
