@@ -444,6 +444,28 @@ export function correlateTokenUsageToDispatches(
   return linked
 }
 
+/**
+ * Best-effort correlation for the token-collection path. The correlation is
+ * MEASUREMENT: it runs immediately after every collection (see
+ * collectTokenUsage), and a fault in it -- a missing P2-A table on an
+ * un-migrated DB, a locked file, anything -- must NOT break the collection that
+ * just wrote real token rows. Returns the rows linked, or 0 if it threw
+ * (logged, not raised). Idempotent by construction (the inner function only
+ * touches `dispatch_id IS NULL` rows), so a swallowed fault simply means the
+ * rows stay unattributed until the next collection retries them.
+ */
+export function correlateTokenUsageToDispatchesSafe(
+  db: Database.Database,
+  opts: { agent?: string; sessionId?: string; maxWindowSeconds?: number; configPath?: string } = {},
+): number {
+  try {
+    return correlateTokenUsageToDispatches(db, opts)
+  } catch (err) {
+    logger.warn({ err }, 'correlateTokenUsageToDispatches failed; token rows stay unattributed (collection unaffected)')
+    return 0
+  }
+}
+
 // ---- billing mode (from deployment-local config, NEVER a heuristic) --------
 
 export interface BillingMapEntry {

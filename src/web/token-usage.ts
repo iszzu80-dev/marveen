@@ -10,6 +10,15 @@ import { deriveProvider } from '../costops/pricing.js'
 // helper, so the `-agents-<name>` regex is not duplicated across the two
 // consumers.
 import { discoverAgentSources } from './transcript-sources.js'
+// P2-A: collection is what CREATES the token_usage rows the dispatch window
+// correlation attributes, so the correlation is chained to the end of
+// collectTokenUsage() itself -- the ONE place every collection path goes
+// through (the hourly interval, the startup pass, and POST
+// /api/token-usage/collect). Wiring it here instead of at each of those three
+// call sites makes it structurally impossible for a collection path to exist
+// that does not correlate. The _Safe variant is used because a measurement
+// fault must never break a collection that already wrote real rows.
+import { correlateTokenUsageToDispatchesSafe } from '../costops/dispatch.js'
 
 function findJsonlFiles(dir: string): string[] {
   const files: string[] = []
@@ -175,7 +184,14 @@ async function parseJsonlFile(
   return { calls: collapseByMessageId(calls), linesRead: lineNum }
 }
 
-export async function collectTokenUsage(): Promise<{ inserted: number; files: number }> {
+/**
+ * `dispatchAttributed` = token_usage rows this pass linked to a dispatch by the
+ * P2-A window correlation (0 when nothing matched, or when the correlation
+ * faulted and was isolated). Returned so the wiring is OBSERVABLE from the
+ * outside -- POST /api/token-usage/collect reports it -- rather than being an
+ * invisible side effect.
+ */
+export async function collectTokenUsage(): Promise<{ inserted: number; files: number; dispatchAttributed: number }> {
   const db = getDb()
   const sources = discoverAgentSources()
   let totalInserted = 0
@@ -241,7 +257,17 @@ export async function collectTokenUsage(): Promise<{ inserted: number; files: nu
     }
   }
 
-  return { inserted: totalInserted, files: totalFiles }
+  // P2-A: attribute the rows we just wrote to their dispatches. Runs on EVERY
+  // collection (hourly interval, startup, manual route) because it hangs off
+  // collectTokenUsage itself. One bounded SQL UPDATE per dispatch window, only
+  // over `dispatch_id IS NULL` rows, so re-running is idempotent and cheap.
+  // Fault-isolated: never throws into the collection above.
+  const dispatchAttributed = correlateTokenUsageToDispatchesSafe(db)
+  if (dispatchAttributed > 0) {
+    logger.info({ dispatchAttributed }, 'P2-A: token_usage rows attributed to dispatches')
+  }
+
+  return { inserted: totalInserted, files: totalFiles, dispatchAttributed }
 }
 
 export interface TokenSummaryModelRow {
