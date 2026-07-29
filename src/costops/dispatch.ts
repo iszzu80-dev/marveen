@@ -1,0 +1,570 @@
+// CostOps Phase 2 / P2-A -- Dispatch & Outcome Attribution (MEASUREMENT ONLY).
+//
+// Gives every Node-side work-package dispatch a stable, opaque `dispatch_id`
+// that links: dispatch -> routing_event -> token_usage -> outcome -> cost, so
+// `cost_per_accepted_task` is computable per agent/profile/model. This is
+// additive to CostOps and changes NO dispatch behaviour: NO runtime routing,
+// NO fallback, NO model switching, NO LLM. Deterministic SQL + rules only.
+//
+// Seam: the DDL below is invoked from initCostOpsSchema(db) (costops/schema.ts,
+// the LOCAL-FORK CostOps seam), NOT from db.ts and NOT as a second parallel
+// seam -- so these tables travel with the rest of CostOps across upstream
+// merges. Marginal cost REUSES costops/pricing.ts (loadPricingConfig +
+// estimateModelCost); there is no second pricing implementation here.
+//
+// DATA SENSITIVITY (hard): no column, id, or log line in this module may carry
+// prompt text, PII, secrets, or credentials. `dispatch_id` is an opaque uuid.
+// The concrete billing-map lives only under gitignored store/; the committed
+// illustrative copy is config-examples/billing-map.example.json.
+
+import type Database from 'better-sqlite3'
+import { randomUUID } from 'node:crypto'
+import { readFileSync, existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { PROJECT_ROOT } from '../config.js'
+import { logger } from '../logger.js'
+import { loadPricingConfig, estimateModelCost, type PricingConfig } from './pricing.js'
+
+// ---- domain types ----------------------------------------------------------
+
+export type DispatchSource =
+  | 'kanban' | 'message' | 'scheduler' | 'worker' | 'reinject' | 'manual'
+
+export type BillingMode =
+  | 'subscription_included' | 'subscription_credit' | 'api_payg' | 'local_compute' | 'unknown'
+
+export type OutcomeKind =
+  | 'accepted' | 'retry' | 'failed' | 'cancelled' | 'unknown'
+
+// ---- schema (idempotent boot DDL; invoked via the CostOps seam) ------------
+
+/**
+ * Create the P2-A measurement tables + the token_usage link column. Idempotent
+ * (CREATE TABLE IF NOT EXISTS + try/catch ALTER), forward-only, nullable. All
+ * new columns are nullable and the tables are independent, so disabling the
+ * feature leaves them inert with zero data loss (rollback constraint). Called
+ * from initCostOpsSchema(db) AFTER token_usage exists (it ALTERs that table).
+ */
+export function initDispatchSchema(db: Database.Database): void {
+  // dispatches: one row per work-package dispatch. Only dispatch_id/created_at/
+  // agent are NOT NULL (per spec); `source` is always known at the origin so it
+  // is populated for every row but kept nullable to match the spec's contract.
+  // NO prompt text / PII / secret column exists here by construction.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS dispatches (
+      dispatch_id      TEXT PRIMARY KEY,
+      created_at       INTEGER NOT NULL,
+      source           TEXT,
+      card_id          TEXT,
+      agent            TEXT NOT NULL,
+      project          TEXT,
+      session_id       TEXT,
+      task_type        TEXT,
+      model_profile    TEXT,
+      configured_model TEXT,
+      runtime_model    TEXT,
+      provider         TEXT,
+      auth_profile     TEXT,
+      billing_mode     TEXT
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_dispatches_agent ON dispatches(agent, created_at)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_dispatches_session ON dispatches(agent, session_id, created_at)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_dispatches_card ON dispatches(card_id)`)
+
+  // routing_events: single structure, CostOps-linked. In Phase 2 essentially
+  // every row is reason_code='default_route', fallback_used=0 (no routing yet).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS routing_events (
+      routing_event_id  TEXT PRIMARY KEY,
+      dispatch_id       TEXT,
+      card_id           TEXT,
+      agent             TEXT,
+      configured_profile TEXT,
+      runtime_profile   TEXT,
+      configured_model  TEXT,
+      runtime_model     TEXT,
+      provider          TEXT,
+      auth_profile      TEXT,
+      billing_mode      TEXT,
+      capacity_state    TEXT,
+      reason_code       TEXT,
+      fallback_used     INTEGER NOT NULL DEFAULT 0,
+      timestamp         INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_routing_events_dispatch ON routing_events(dispatch_id)`)
+
+  // dispatch_outcomes: acceptance/retry/etc. Absence of a row means 'unknown'.
+  // Old dispatches are NEVER backfilled with a guessed outcome.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS dispatch_outcomes (
+      outcome_id        TEXT PRIMARY KEY,
+      dispatch_id       TEXT,
+      outcome           TEXT,
+      retry_of          TEXT,
+      correction_of     TEXT,
+      fallback_event_id TEXT,
+      evidence          TEXT,
+      created_at        INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_dispatch_outcomes_dispatch ON dispatch_outcomes(dispatch_id)`)
+
+  // token_usage <-> dispatch link. Nullable, forward-only, never backfilled
+  // with a guessed value -- disabling the feature leaves this column inert.
+  try { db.exec('ALTER TABLE token_usage ADD COLUMN dispatch_id TEXT') } catch { /* already exists */ }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_token_usage_dispatch ON token_usage(dispatch_id)`)
+}
+
+// ---- write path: create a dispatch (+ its default routing_event) -----------
+
+export interface DispatchInput {
+  source: DispatchSource
+  agent: string
+  cardId?: string | null
+  project?: string | null
+  sessionId?: string | null
+  taskType?: string | null
+  modelProfile?: string | null
+  configuredModel?: string | null
+  runtimeModel?: string | null
+  provider?: string | null
+  authProfile?: string | null
+  billingMode?: BillingMode | null
+}
+
+/**
+ * Insert one dispatch row (opaque uuid id) + its default routing_event. Returns
+ * the dispatch_id. `now` is epoch MILLISECONDS (Date.now()); it is stored as
+ * epoch SECONDS to line up with token_usage.timestamp (seconds) for the window
+ * correlation. Runtime code may use randomUUID/Date.now (allowed in src/).
+ */
+export function createDispatch(db: Database.Database, input: DispatchInput, now: number = Date.now()): string {
+  const id = randomUUID()
+  const createdAt = Math.floor(now / 1000)
+  db.prepare(`
+    INSERT INTO dispatches
+      (dispatch_id, created_at, source, card_id, agent, project, session_id, task_type,
+       model_profile, configured_model, runtime_model, provider, auth_profile, billing_mode)
+    VALUES
+      (@dispatch_id, @created_at, @source, @card_id, @agent, @project, @session_id, @task_type,
+       @model_profile, @configured_model, @runtime_model, @provider, @auth_profile, @billing_mode)
+  `).run({
+    dispatch_id: id,
+    created_at: createdAt,
+    source: input.source,
+    card_id: input.cardId ?? null,
+    agent: input.agent,
+    project: input.project ?? null,
+    session_id: input.sessionId ?? null,
+    task_type: input.taskType ?? null,
+    model_profile: input.modelProfile ?? null,
+    configured_model: input.configuredModel ?? null,
+    runtime_model: input.runtimeModel ?? null,
+    provider: input.provider ?? null,
+    auth_profile: input.authProfile ?? null,
+    billing_mode: input.billingMode ?? null,
+  })
+  // Default routing_event: Phase 2 has NO routing, so every event is the
+  // static default route with no fallback. This rides CostOps (no parallel DB).
+  insertRoutingEvent(db, {
+    dispatchId: id,
+    cardId: input.cardId ?? null,
+    agent: input.agent,
+    configuredProfile: input.modelProfile ?? null,
+    runtimeProfile: input.modelProfile ?? null,
+    configuredModel: input.configuredModel ?? null,
+    runtimeModel: input.runtimeModel ?? null,
+    provider: input.provider ?? null,
+    authProfile: input.authProfile ?? null,
+    billingMode: input.billingMode ?? null,
+    capacityState: 'normal',
+    reasonCode: 'default_route',
+    fallbackUsed: 0,
+  }, createdAt)
+  return id
+}
+
+/**
+ * Best-effort dispatch creation for the hot dispatch paths: a measurement
+ * failure must NEVER break the actual send (additive constraint). Returns the
+ * dispatch_id, or null if the insert threw (logged, not raised).
+ */
+export function createDispatchSafe(db: Database.Database, input: DispatchInput, now: number = Date.now()): string | null {
+  try {
+    return createDispatch(db, input, now)
+  } catch (err) {
+    logger.warn({ err, source: input.source, agent: input.agent }, 'createDispatch failed; dispatch un-instrumented (send unaffected)')
+    return null
+  }
+}
+
+export interface RoutingEventInput {
+  dispatchId: string | null
+  cardId?: string | null
+  agent?: string | null
+  configuredProfile?: string | null
+  runtimeProfile?: string | null
+  configuredModel?: string | null
+  runtimeModel?: string | null
+  provider?: string | null
+  authProfile?: string | null
+  billingMode?: BillingMode | null
+  capacityState?: string | null
+  reasonCode?: string | null
+  fallbackUsed?: 0 | 1
+}
+
+/** Insert one routing_event row (opaque uuid id). `atSec` is epoch seconds. */
+export function insertRoutingEvent(db: Database.Database, ev: RoutingEventInput, atSec: number = Math.floor(Date.now() / 1000)): string {
+  const id = randomUUID()
+  db.prepare(`
+    INSERT INTO routing_events
+      (routing_event_id, dispatch_id, card_id, agent, configured_profile, runtime_profile,
+       configured_model, runtime_model, provider, auth_profile, billing_mode, capacity_state,
+       reason_code, fallback_used, timestamp)
+    VALUES
+      (@routing_event_id, @dispatch_id, @card_id, @agent, @configured_profile, @runtime_profile,
+       @configured_model, @runtime_model, @provider, @auth_profile, @billing_mode, @capacity_state,
+       @reason_code, @fallback_used, @timestamp)
+  `).run({
+    routing_event_id: id,
+    dispatch_id: ev.dispatchId,
+    card_id: ev.cardId ?? null,
+    agent: ev.agent ?? null,
+    configured_profile: ev.configuredProfile ?? null,
+    runtime_profile: ev.runtimeProfile ?? null,
+    configured_model: ev.configuredModel ?? null,
+    runtime_model: ev.runtimeModel ?? null,
+    provider: ev.provider ?? null,
+    auth_profile: ev.authProfile ?? null,
+    billing_mode: ev.billingMode ?? null,
+    capacity_state: ev.capacityState ?? null,
+    reason_code: ev.reasonCode ?? 'default_route',
+    fallback_used: ev.fallbackUsed ?? 0,
+    timestamp: atSec,
+  })
+  return id
+}
+
+// ---- outcomes --------------------------------------------------------------
+
+export interface OutcomeInput {
+  dispatchId: string
+  outcome: OutcomeKind
+  retryOf?: string | null
+  correctionOf?: string | null
+  fallbackEventId?: string | null
+  evidence?: string | null
+}
+
+/** Record a dispatch outcome (opaque uuid id). `now` is epoch milliseconds. */
+export function recordOutcome(db: Database.Database, input: OutcomeInput, now: number = Date.now()): string {
+  const id = randomUUID()
+  db.prepare(`
+    INSERT INTO dispatch_outcomes
+      (outcome_id, dispatch_id, outcome, retry_of, correction_of, fallback_event_id, evidence, created_at)
+    VALUES
+      (@outcome_id, @dispatch_id, @outcome, @retry_of, @correction_of, @fallback_event_id, @evidence, @created_at)
+  `).run({
+    outcome_id: id,
+    dispatch_id: input.dispatchId,
+    outcome: input.outcome,
+    retry_of: input.retryOf ?? null,
+    correction_of: input.correctionOf ?? null,
+    fallback_event_id: input.fallbackEventId ?? null,
+    evidence: input.evidence ?? null,
+    created_at: Math.floor(now / 1000),
+  })
+  return id
+}
+
+/**
+ * Wire `accepted` from kanban status->done: mark every EXISTING dispatch for
+ * this card accepted (evidence 'kanban:done'). It only acts on dispatches that
+ * already exist -- it NEVER creates a dispatch or backfills an outcome for a
+ * card that was never instrumented (old rows stay unknown). Idempotent: a card
+ * that already has an accepted outcome is skipped. Returns rows written.
+ */
+export function recordAcceptedOutcomeForCard(db: Database.Database, cardId: string, now: number = Date.now()): number {
+  const rows = db.prepare('SELECT dispatch_id FROM dispatches WHERE card_id = ?').all(cardId) as { dispatch_id: string }[]
+  let written = 0
+  for (const r of rows) {
+    const already = db.prepare("SELECT 1 FROM dispatch_outcomes WHERE dispatch_id = ? AND outcome = 'accepted' LIMIT 1").get(r.dispatch_id)
+    if (already) continue
+    recordOutcome(db, { dispatchId: r.dispatch_id, outcome: 'accepted', evidence: 'kanban:done' }, now)
+    written++
+  }
+  return written
+}
+
+/** Resolve the current outcome for a dispatch. No outcome row => 'unknown'. */
+export function resolveOutcome(db: Database.Database, dispatchId: string): OutcomeKind {
+  const r = db.prepare(
+    'SELECT outcome FROM dispatch_outcomes WHERE dispatch_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1'
+  ).get(dispatchId) as { outcome: OutcomeKind } | undefined
+  return r?.outcome ?? 'unknown'
+}
+
+// ---- token_usage <-> dispatch window correlation ---------------------------
+
+/**
+ * Attribute token_usage rows to dispatches by dispatch-time window within
+ * (agent, session_id): a token_usage row is attributed to the dispatch whose
+ * [created_at, next-dispatch-of-same-(agent,session_id)) window contains its
+ * timestamp. Deterministic, rule-based, no LLM. Refines (does not replace) the
+ * fuzzy kanban correlation. Forward-only: only fills rows where dispatch_id is
+ * currently NULL, and only for dispatches that carry a session_id (a dispatch
+ * with no session_id cannot be placed into a session's timeline, so it is
+ * skipped rather than guessed). Returns the number of token_usage rows linked.
+ */
+export function correlateTokenUsageToDispatches(
+  db: Database.Database,
+  opts: { agent?: string; sessionId?: string } = {},
+): number {
+  const where: string[] = ['session_id IS NOT NULL']
+  const params: unknown[] = []
+  if (opts.agent) { where.push('agent = ?'); params.push(opts.agent) }
+  if (opts.sessionId) { where.push('session_id = ?'); params.push(opts.sessionId) }
+  const dispatches = db.prepare(
+    `SELECT dispatch_id, agent, session_id, created_at FROM dispatches
+     WHERE ${where.join(' AND ')} ORDER BY agent, session_id, created_at ASC`
+  ).all(...params) as { dispatch_id: string; agent: string; session_id: string; created_at: number }[]
+
+  const link = db.prepare(
+    `UPDATE token_usage SET dispatch_id = ?
+     WHERE dispatch_id IS NULL AND agent = ? AND session_id = ? AND timestamp >= ? AND timestamp < ?`
+  )
+  let linked = 0
+  const tx = db.transaction(() => {
+    for (let i = 0; i < dispatches.length; i++) {
+      const d = dispatches[i]
+      const next = dispatches[i + 1]
+      // The window ends at the next dispatch of the SAME (agent, session_id);
+      // otherwise it is open-ended (a very large sentinel epoch).
+      const windowEnd = (next && next.agent === d.agent && next.session_id === d.session_id)
+        ? next.created_at
+        : Number.MAX_SAFE_INTEGER
+      linked += link.run(d.dispatch_id, d.agent, d.session_id, d.created_at, windowEnd).changes
+    }
+  })
+  tx()
+  return linked
+}
+
+// ---- billing mode (from deployment-local config, NEVER a heuristic) --------
+
+export interface BillingMapEntry {
+  provider: string
+  auth_profile: string
+  billing_mode: BillingMode
+}
+export interface BillingMap {
+  version?: number
+  entries: BillingMapEntry[]
+}
+
+export const BILLING_MAP_PATH = join(PROJECT_ROOT, 'store', 'billing-map.json')
+
+const VALID_BILLING_MODES: ReadonlySet<string> = new Set<BillingMode>([
+  'subscription_included', 'subscription_credit', 'api_payg', 'local_compute', 'unknown',
+])
+
+/**
+ * Resolve billingMode strictly from the config map keyed by (provider,
+ * auth_profile). There is NO provider-name heuristic: an unmapped pair -- even
+ * a well-known provider like 'anthropic' -- resolves to 'unknown', never a
+ * false 'free'/'not_billed'. Null/blank provider or auth_profile => 'unknown'.
+ */
+export function resolveBillingMode(
+  map: BillingMap | null | undefined,
+  provider: string | null | undefined,
+  authProfile: string | null | undefined,
+): BillingMode {
+  if (!map || !provider || !authProfile) return 'unknown'
+  const hit = map.entries.find(e => e.provider === provider && e.auth_profile === authProfile)
+  if (!hit) return 'unknown'
+  return VALID_BILLING_MODES.has(hit.billing_mode) ? hit.billing_mode : 'unknown'
+}
+
+/** Load the deployment-local billing map (gitignored store/). Missing/invalid => null. */
+export function loadBillingMap(path: string = BILLING_MAP_PATH): BillingMap | null {
+  if (!existsSync(path)) return null
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf-8'))
+    if (!raw || !Array.isArray(raw.entries)) return null
+    const entries: BillingMapEntry[] = []
+    for (const e of raw.entries) {
+      if (e && typeof e.provider === 'string' && typeof e.auth_profile === 'string' && typeof e.billing_mode === 'string') {
+        entries.push({ provider: e.provider, auth_profile: e.auth_profile, billing_mode: e.billing_mode as BillingMode })
+      }
+    }
+    return { version: raw.version, entries }
+  } catch (err) {
+    logger.warn({ err, path }, 'loadBillingMap: invalid billing-map.json; treating as absent (unknown)')
+    return null
+  }
+}
+
+// ---- cost_per_accepted_task ------------------------------------------------
+
+export interface CostPerAcceptedGroup {
+  agent: string | null
+  modelProfile: string | null
+  model: string | null
+  provider: string | null
+  taskType: string | null
+  project: string | null
+  billingMode: string | null
+  period: string           // 'YYYY-MM' (UTC)
+  acceptedTasks: number
+  // MARGINAL: actual execution $ (pricing.ts token estimate) attributed to the
+  // accepted dispatches in this group. null when no priced token_usage is
+  // attributable (unpriced model => visibly unknown, never a fake 0).
+  marginalCost: number | null
+  marginalCostPerTask: number | null
+  // ALLOCATED: prorated subscription monthly $ divided across accepted tasks --
+  // computed at (provider, period) level so it never mixes with marginal. null
+  // when there is no subscription line for that provider/period.
+  allocatedCostPerTask: number | null
+}
+
+interface AcceptedTokenRow {
+  dispatch_id: string
+  agent: string | null
+  model_profile: string | null
+  runtime_model: string | null
+  provider: string | null
+  task_type: string | null
+  project: string | null
+  billing_mode: string | null
+  created_at: number
+  tu_model: string | null
+  input_tokens: number | null
+  output_tokens: number | null
+  cache_read_tokens: number | null
+  cache_creation_tokens: number | null
+}
+
+function periodOf(createdAtSec: number): string {
+  const d = new Date(createdAtSec * 1000)
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`
+}
+
+/**
+ * cost_per_accepted_task: join accepted dispatches -> their token_usage (via
+ * dispatch_id) -> pricing (costops/pricing.ts). Returns MARGINAL (actual token
+ * $) and ALLOCATED (prorated subscription monthly / accepted tasks) as SEPARATE
+ * values, never mixed. Grouped by agent, modelProfile, model, provider,
+ * task_type, project, billingMode, period. Mirrors getTokenCostByAgent's
+ * read-function shape; no new endpoint required for P2-A but it is a callable.
+ */
+export function costPerAcceptedTask(
+  db: Database.Database,
+  opts: { pricing?: PricingConfig | null; from?: number; to?: number } = {},
+): CostPerAcceptedGroup[] {
+  const pricing = opts.pricing ?? loadPricingConfig().pricing
+
+  const conds: string[] = ["o.outcome = 'accepted'"]
+  const params: unknown[] = []
+  if (opts.from) { conds.push('d.created_at >= ?'); params.push(opts.from) }
+  if (opts.to) { conds.push('d.created_at < ?'); params.push(opts.to) }
+
+  // LEFT JOIN token_usage: an accepted dispatch counts even when no token_usage
+  // is attributed yet (marginal stays null; acceptedTasks still counts it).
+  const rows = db.prepare(`
+    SELECT d.dispatch_id, d.agent, d.model_profile, d.runtime_model, d.provider,
+           d.task_type, d.project, d.billing_mode, d.created_at,
+           tu.model AS tu_model, tu.input_tokens, tu.output_tokens,
+           tu.cache_read_tokens, tu.cache_creation_tokens
+    FROM dispatches d
+    JOIN dispatch_outcomes o ON o.dispatch_id = d.dispatch_id AND o.outcome = 'accepted'
+    LEFT JOIN token_usage tu ON tu.dispatch_id = d.dispatch_id
+    WHERE ${conds.join(' AND ')}
+  `).all(...params) as AcceptedTokenRow[]
+
+  // Group accumulator. Marginal is summed per token_usage row; acceptedTasks is
+  // counted per DISTINCT dispatch (a dispatch with N token rows is one task).
+  interface Acc {
+    key: string
+    g: Omit<CostPerAcceptedGroup, 'acceptedTasks' | 'marginalCost' | 'marginalCostPerTask' | 'allocatedCostPerTask'>
+    dispatches: Set<string>
+    marginal: number
+    marginalSeen: boolean
+    provider: string | null
+    period: string
+  }
+  const groups = new Map<string, Acc>()
+  // provider+period accepted-task counts, for the allocated denominator.
+  const providerPeriodTasks = new Map<string, Set<string>>()
+
+  for (const r of rows) {
+    const period = periodOf(r.created_at)
+    const model = r.runtime_model ?? r.tu_model ?? null
+    const key = [r.agent, r.model_profile, model, r.provider, r.task_type, r.project, r.billing_mode, period].map(v => v ?? ' ').join('|')
+    let acc = groups.get(key)
+    if (!acc) {
+      acc = {
+        key,
+        g: {
+          agent: r.agent, modelProfile: r.model_profile, model, provider: r.provider,
+          taskType: r.task_type, project: r.project, billingMode: r.billing_mode, period,
+        },
+        dispatches: new Set(),
+        marginal: 0,
+        marginalSeen: false,
+        provider: r.provider,
+        period,
+      }
+      groups.set(key, acc)
+    }
+    acc.dispatches.add(r.dispatch_id)
+
+    const ppKey = `${r.provider ?? ' '}|${period}`
+    if (!providerPeriodTasks.has(ppKey)) providerPeriodTasks.set(ppKey, new Set())
+    providerPeriodTasks.get(ppKey)!.add(r.dispatch_id)
+
+    if (r.input_tokens != null || r.output_tokens != null) {
+      const marginal = estimateModelCost(pricing, model ?? r.tu_model, {
+        input: r.input_tokens ?? 0,
+        output: r.output_tokens ?? 0,
+        cache_read: r.cache_read_tokens ?? 0,
+        cache_creation: r.cache_creation_tokens ?? 0,
+      })
+      if (marginal != null) { acc.marginal += marginal; acc.marginalSeen = true }
+    }
+  }
+
+  return [...groups.values()].map(acc => {
+    const acceptedTasks = acc.dispatches.size
+    const marginalCost = acc.marginalSeen ? round4(acc.marginal) : null
+    const marginalCostPerTask = marginalCost != null && acceptedTasks > 0 ? round4(marginalCost / acceptedTasks) : null
+    const allocatedCostPerTask = allocatedPerTask(db, acc.provider, acc.period, providerPeriodTasks.get(`${acc.provider ?? ' '}|${acc.period}`)?.size ?? acceptedTasks)
+    return { ...acc.g, acceptedTasks, marginalCost, marginalCostPerTask, allocatedCostPerTask }
+  })
+}
+
+/**
+ * Allocated cost per accepted task = (subscription $ for this provider in this
+ * period, from cost_line_items) / (accepted tasks for this provider+period).
+ * null when there is no subscription line -- allocated is never fabricated.
+ */
+function allocatedPerTask(db: Database.Database, provider: string | null, period: string, providerPeriodAcceptedTasks: number): number | null {
+  if (!provider || providerPeriodAcceptedTasks <= 0) return null
+  const [y, m] = period.split('-').map(n => parseInt(n, 10))
+  if (!y || !m) return null
+  const start = Math.floor(Date.UTC(y, m - 1, 1) / 1000)
+  const end = Math.floor(Date.UTC(y, m, 1) / 1000)
+  const row = db.prepare(`
+    SELECT COALESCE(SUM(li.billed_cost), 0) AS total, COUNT(*) AS n
+    FROM cost_line_items li
+    JOIN cost_sources s ON s.id = li.source_id
+    WHERE s.provider = ? AND li.charge_category = 'subscription'
+      AND li.charge_period_start < ? AND li.charge_period_end > ?
+  `).get(provider, end, start) as { total: number; n: number }
+  if (!row || row.n === 0) return null
+  return round4(row.total / providerPeriodAcceptedTasks)
+}
+
+function round4(n: number): number { return Math.round(n * 10000) / 10000 }

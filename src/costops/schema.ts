@@ -16,6 +16,7 @@ import { initPeriodCloseSchema } from './period-close.js'
 import { initBudgetAuditSchema } from './budgets.js'
 import { initOptimizationSchema } from './optimization.js'
 import { initInvoiceSchema } from './invoice.js'
+import { initDispatchSchema } from './dispatch.js'
 
 export function initCostOpsSchema(db: Database.Database): void {
   // CostOps v0.2: model/provider enrichment on the CORE token_usage table
@@ -265,4 +266,10 @@ export function initCostOpsSchema(db: Database.Database): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_entitlements_provider ON entitlements(provider, product)`)
+  // Phase 2 / P2-A (Dispatch & Outcome Attribution): dispatches / routing_events
+  // / dispatch_outcomes tables + the token_usage.dispatch_id link column. Kept
+  // on the CostOps seam (not db.ts, not a parallel init) so the measurement
+  // stack travels with CostOps across upstream merges. Runs last: it ALTERs
+  // token_usage, which the v0.2 block above has already ensured exists.
+  initDispatchSchema(db)
 }

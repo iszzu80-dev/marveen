@@ -115,6 +115,31 @@ export function validatePricing(raw: unknown): PricingLoadResult {
   return { pricing: { version: typeof obj.version === 'number' ? obj.version : 1, currency, models }, exists: true, errors }
 }
 
+/**
+ * Marginal $ (in the pricing config's `currency`) for a single model's token
+ * bundle, at that model's configured per-1M-token rate. This is the ONE place
+ * the per-row pricing arithmetic lives -- getTokenCostEstimate,
+ * getTokenCostByAgent, and the P2-A cost_per_accepted_task join all go through
+ * it, so there is never a second, drifting cost formula. Returns null when the
+ * model is unknown or has no configured rate -- an unpriced model is visibly
+ * UNKNOWN, never a fake 0 (same "never guess" rule as the callers).
+ */
+export function estimateModelCost(
+  pricing: PricingConfig,
+  model: string | null | undefined,
+  tokens: { input?: number; output?: number; cache_read?: number; cache_creation?: number },
+): number | null {
+  if (!model) return null
+  const rate = pricing.models[model]
+  if (!rate) return null
+  return round2(
+    ((tokens.input ?? 0) / 1e6) * rate.input_per_mtok +
+    ((tokens.output ?? 0) / 1e6) * rate.output_per_mtok +
+    ((tokens.cache_read ?? 0) / 1e6) * rate.cache_read_per_mtok +
+    ((tokens.cache_creation ?? 0) / 1e6) * rate.cache_write_per_mtok,
+  )
+}
+
 // ---- deterministic token-cost estimate over token_usage for a month ---------
 
 export interface TokenCostEstimate {
@@ -186,12 +211,10 @@ export function getTokenCostEstimate(
     if (!rate) {
       noRateTokens += tokenSum; unpricedCalls += r.calls; anyUnpriced = true; continue
     }
-    const est = round2(
-      (r.input_tokens / 1e6) * rate.input_per_mtok +
-      (r.output_tokens / 1e6) * rate.output_per_mtok +
-      (r.cache_read_tokens / 1e6) * rate.cache_read_per_mtok +
-      (r.cache_creation_tokens / 1e6) * rate.cache_write_per_mtok,
-    )
+    const est = estimateModelCost(pricing, r.model, {
+      input: r.input_tokens, output: r.output_tokens,
+      cache_read: r.cache_read_tokens, cache_creation: r.cache_creation_tokens,
+    })!
     total += est
     anyPriced = true
     priced_by_model.push({
@@ -286,12 +309,10 @@ export function getTokenCostByAgent(
   for (const r of rows) {
     const rate = r.model ? pricing.models[r.model] : undefined
     if (!r.model || !rate) continue // unpriced (unknown model / no rate) -- volume only, not returned here
-    const est = round2(
-      (r.input_tokens / 1e6) * rate.input_per_mtok +
-      (r.output_tokens / 1e6) * rate.output_per_mtok +
-      (r.cache_read_tokens / 1e6) * rate.cache_read_per_mtok +
-      (r.cache_creation_tokens / 1e6) * rate.cache_write_per_mtok,
-    )
+    const est = estimateModelCost(pricing, r.model, {
+      input: r.input_tokens, output: r.output_tokens,
+      cache_read: r.cache_read_tokens, cache_creation: r.cache_creation_tokens,
+    })!
     const provider = deriveProvider(r.model)
     out.push({
       agent: r.agent, provider, model: r.model,
