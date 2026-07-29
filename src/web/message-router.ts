@@ -12,8 +12,10 @@ import {
   createAgentMessage,
   stampMessageTrace,
   upsertOtelSpan,
+  getDb,
   type AgentMessage,
 } from '../db.js'
+import { createDispatchSafe } from '../costops/dispatch.js'
 import { isQualifiedId } from './federation/address.js'
 import { sendFederatedMessage } from './federation/bridge.js'
 import { getFederationConfig, abandonWindowMsForPeer } from './federation/config.js'
@@ -646,9 +648,19 @@ export async function runMessageRouterTick(): Promise<void> {
         // Observe-only: gateCheck.auditEntry already logged by checkDispatchGate.
         // Delivery proceeds normally.
 
+        // P2-A dispatch threading: reuse the dispatch_id an upstream origin
+        // (kanban/scheduler/worker) already minted and carried on the message;
+        // otherwise this is a bare inter-agent message with no upstream dispatch,
+        // so mint a 'message'-source one here. Channel-inbound (user -> agent)
+        // messages are below the work-package threshold and are NOT instrumented
+        // (documented threshold). Best-effort: never blocks the send.
+        let dispatchId = msg.dispatch_id ?? null
+        if (!dispatchId && !isChannelInbound) {
+          dispatchId = createDispatchSafe(getDb(), { source: 'message', agent: msg.to_agent })
+        }
         // Inline preamble so a fresh session (post hard-restart) doesn't miss
         // the context that explains the tag semantics.
-        await sendPromptToSession(session, prefix + wrapped, host)
+        await sendPromptToSession(session, prefix + wrapped, host, { dispatchId })
         if (!markMessageDelivered(msg.id)) {
           logger.warn({ id: msg.id }, 'markMessageDelivered affected 0 rows (deleted concurrently?)')
         }

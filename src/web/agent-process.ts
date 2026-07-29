@@ -1635,8 +1635,16 @@ export async function sendPromptToSession(
   session: string,
   text: string,
   host: string | null = null,
-  opts: { waitForIdle?: boolean; onBusyTimeout?: 'send' | 'abort'; idleTimeoutMs?: number } = {},
+  opts: { waitForIdle?: boolean; onBusyTimeout?: 'send' | 'abort'; idleTimeoutMs?: number; dispatchId?: string | null } = {},
 ): Promise<'sent' | 'aborted-busy'> {
+  // P2-A: measurement-only delivery receipt. The dispatch ROW is written at the
+  // origin (kanban/message/scheduler/worker), never here -- this funnel only
+  // logs that an instrumented dispatch is being delivered. It deliberately does
+  // NOT import the db / costops modules, so a measurement bug can never block or
+  // slow a real send (additive constraint).
+  if (opts.dispatchId) {
+    logger.debug({ dispatchId: opts.dispatchId, session }, 'delivering instrumented dispatch')
+  }
   await dismissSurveyModalIfPresent(session, host)
   await dismissResumeSummaryModalIfPresent(session, host)
   await dismissModelConsentDialogIfPresent(session, host)

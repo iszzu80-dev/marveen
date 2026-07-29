@@ -15,6 +15,8 @@ import {
   FLEET_OAUTH_TOKEN_PATH,
 } from './agent-process.js'
 import { readClaudeCodeOauthJson } from './claude-credentials.js'
+import { getDb } from '../db.js'
+import { createDispatchSafe } from '../costops/dispatch.js'
 import { detectPaneState } from '../pane-state.js'
 import { notifyChannel } from '../notify.js'
 
@@ -650,7 +652,10 @@ async function runWorkerAttempt(ctx: WorkerCtx, message: string, timeoutMs: numb
   for (const p of [outPath, donePath]) { try { rmSync(p, { force: true }) } catch { /* none */ } }
 
   clearWorkerContext(ctx)
-  await sendPromptToSession(ctx.session, buildWorkerPrompt(message, outPath, donePath))
+  // P2-A: mint a worker-source dispatch_id and thread it to the funnel.
+  // Best-effort: a measurement failure never blocks the worker send.
+  const dispatchId = createDispatchSafe(getDb(), { source: 'worker', agent: MAIN_AGENT_ID, taskType: 'worker' })
+  await sendPromptToSession(ctx.session, buildWorkerPrompt(message, outPath, donePath), null, { dispatchId })
 
   const start = Date.now()
   try {

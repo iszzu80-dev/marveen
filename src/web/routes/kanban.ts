@@ -17,6 +17,7 @@ import { OWNER_NAME, BOT_NAME, MAIN_AGENT_ID, STORE_DIR, WEB_HOST, WEB_PORT, KAN
 import { listAgentNames, readAgentDisplayName } from '../agent-config.js'
 import { isAgentRunning } from '../agent-process.js'
 import { resolveKanbanDispatchTarget } from '../../kanban-dispatch.js'
+import { createDispatchSafe, recordAcceptedOutcomeForCard } from '../../costops/dispatch.js'
 import { generateBreakdown } from '../llm-breakdown.js'
 import { logger } from '../../logger.js'
 import { readBody, json, jsonMaybeGzip } from '../http-helpers.js'
@@ -94,7 +95,13 @@ function fireKanbanDispatch(id: string): void {
     if (!target) return
     const desc = (card.description ?? '').trim()
     const content = `[Kanban feladat #${id}]: ${card.title}${desc ? ' — ' + desc : ''}\n\n${kanbanMoveInstructions(id, target)}`
-    createAgentMessage(MAIN_AGENT_ID, target, content)
+    // P2-A: mint the dispatch_id here (the kanban origin) with the card's known
+    // metadata, then carry it on the queued message so the router threads it to
+    // the funnel. Best-effort: a measurement failure never blocks the dispatch.
+    const dispatchId = createDispatchSafe(getDb(), {
+      source: 'kanban', agent: target, cardId: id, project: card.project ?? null,
+    })
+    createAgentMessage(MAIN_AGENT_ID, target, content, null, null, dispatchId)
     markKanbanCardDispatched(id)
     logger.info({ id, target, assignee: card.assignee }, 'Kanban in_progress dispatch fired')
   } catch (err) {
@@ -249,6 +256,15 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     if (moveKanbanCard(id, status, sort_order ?? 0, actor)) {
       // Wake the assigned agent once when the card enters in_progress.
       if (status === 'in_progress') fireKanbanDispatch(id)
+      // P2-A: kanban status->done is the agent-asserted acceptance signal. Mark
+      // every EXISTING dispatch for this card accepted; a card that was never
+      // instrumented (no dispatch row) gets no outcome -- old rows stay unknown,
+      // never backfilled. Best-effort so it can never block the card move.
+      if (status === 'done') {
+        try { recordAcceptedOutcomeForCard(getDb(), id) } catch (err) {
+          logger.warn({ err, id }, 'P2-A: recordAcceptedOutcomeForCard failed (card move still succeeded)')
+        }
+      }
       json(res, { ok: true })
       return true
     }
