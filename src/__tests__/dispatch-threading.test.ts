@@ -48,7 +48,7 @@ describe('P2-A origin (a) kanban', () => {
 
 describe('P2-A origin (b) inter-agent router', () => {
   it('creates a message-source dispatch when none is carried, then threads it to the funnel', () => {
-    expect(ROUTER).toMatch(/createDispatchSafe\(getDb\(\), \{ source: 'message', agent: msg\.to_agent \}\)/)
+    expect(ROUTER).toMatch(/createDispatchSafe\(getDb\(\), \{\s*source: 'message', agent: msg\.to_agent,/)
     expect(ROUTER).toMatch(/let dispatchId = msg\.dispatch_id/)
     expect(ROUTER).toMatch(/sendPromptToSession\(session, prefix \+ wrapped, host, \{ dispatchId \}\)/)
   })
@@ -69,7 +69,7 @@ describe('P2-A origin (c) scheduler + (e) reinject', () => {
 
 describe('P2-A origin (d) worker', () => {
   it('creates a worker-source dispatch and threads it to the funnel', () => {
-    expect(WORKER).toMatch(/createDispatchSafe\(getDb\(\), \{ source: 'worker', agent: MAIN_AGENT_ID, taskType: 'worker' \}\)/)
+    expect(WORKER).toMatch(/createDispatchSafe\(getDb\(\), \{\s*source: 'worker', agent: MAIN_AGENT_ID, taskType: 'worker',/)
     expect(WORKER).toMatch(/sendPromptToSession\(ctx\.session, buildWorkerPrompt\(message, outPath, donePath\), null, \{ dispatchId \}\)/)
   })
 })
@@ -89,5 +89,46 @@ describe('P2-A db wiring', () => {
     expect(COSTOPS_SCHEMA).toMatch(/initDispatchSchema\(db\)/)
     // db.ts must NOT install it as a separate seam.
     expect(DB).not.toMatch(/initDispatchSchema/)
+  })
+})
+
+// P2-A follow-on: without a session_id on the dispatch row,
+// correlateTokenUsageToDispatches() skips it forever, so the whole attribution
+// chain is inert for real (tmux-driven) traffic. Every origin must now resolve
+// it. Behaviour of the resolver itself is in dispatch-session-resolution.test.ts.
+describe('P2-A follow-on: every origin populates session_id', () => {
+  it('kanban resolves the target agent session, NULL for a remote agent', () => {
+    expect(KANBAN).toMatch(/import \{ resolveCurrentSessionId \} from '\.\.\/transcript-sources\.js'/)
+    expect(KANBAN).toMatch(/sessionId: readAgentRemoteHost\(target\) \? null : resolveCurrentSessionId\(target\)/)
+  })
+
+  it('the router resolves the target agent session, NULL for a remote host', () => {
+    expect(ROUTER).toMatch(/import \{ resolveCurrentSessionId \} from '\.\/transcript-sources\.js'/)
+    expect(ROUTER).toMatch(/sessionId: host \? null : resolveCurrentSessionId\(msg\.to_agent\)/)
+  })
+
+  it('the scheduler resolves the agent session, NULL for remote host or targetSession override', () => {
+    expect(SCHEDULE).toMatch(/import \{ resolveCurrentSessionId \} from '\.\/transcript-sources\.js'/)
+    expect(SCHEDULE).toMatch(/sessionId: \(host \|\| task\.targetSession\) \? null : resolveCurrentSessionId\(agentName\)/)
+  })
+
+  it('the worker resolves by its OWN cwd, never by the main agent id', () => {
+    expect(WORKER).toMatch(/import \{ resolveSessionIdForCwd \} from '\.\/transcript-sources\.js'/)
+    expect(WORKER).toMatch(/sessionId: resolveSessionIdForCwd\(ctx\.home\)/)
+    // Resolving the worker dispatch by MAIN_AGENT_ID would attribute the main
+    // pane's tokens to a worker request -- that mistake must stay out.
+    expect(WORKER).not.toMatch(/resolveCurrentSessionId\(MAIN_AGENT_ID\)/)
+  })
+
+  it('the resolver is measurement-only: it cannot throw into a dispatch path', () => {
+    const RESOLVER = read('../web/transcript-sources.ts')
+    // Both public entry points wrap their whole body and return null on error.
+    for (const fn of ['resolveCurrentSessionId', 'resolveSessionIdForCwd']) {
+      const idx = RESOLVER.indexOf(`export function ${fn}(`)
+      expect(idx).toBeGreaterThan(0)
+      const body = RESOLVER.slice(idx, RESOLVER.indexOf('\n}', idx))
+      expect(body).toMatch(/try \{/)
+      expect(body).toMatch(/\} catch \{\s*\n\s*return null/)
+    }
   })
 })

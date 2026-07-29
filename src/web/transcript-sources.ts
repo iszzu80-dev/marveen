@@ -110,11 +110,13 @@ function readSessionIdFromHead(filePath: string): string | null {
 /**
  * Newest (highest mtime) top-level `*.jsonl` across `dirs` -> its session id.
  *
- * Top-level ONLY, deliberately: a nested `<session-id>/subagents/...` transcript
- * belongs to a sub-agent, not to the tmux pane we are dispatching into, so
- * picking it would stamp a dispatch with a session id the pane never had. Ties
- * on mtime resolve to the lexicographically greatest path, so the result is
- * deterministic rather than readdir-order dependent.
+ * Top-level ONLY, deliberately. Nested `<session-id>/subagents/*.jsonl` files
+ * carry their PARENT session's sessionId (verified against live transcripts), so
+ * including them would add nothing -- but a sub-agent of an OLD session that is
+ * still writing could out-mtime the CURRENT session's top-level file and resolve
+ * the dispatch to the wrong (previous) session. Ties on mtime resolve to the
+ * lexicographically greatest path, so the result is deterministic rather than
+ * readdir-order dependent.
  */
 function newestSessionId(dirs: string[]): string | null {
   let best: { path: string; mtimeMs: number } | null = null
