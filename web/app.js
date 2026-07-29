@@ -10934,7 +10934,22 @@ function chatAvatarHtml(agentName, size = 32) {
   return `<img class="chat-avatar" src="${src}" width="${size}" height="${size}" alt="${escapeHtml(agentName)}" data-agent-name="${escapeHtml(agentName)}" onerror="chatImgError(this)">`
 }
 
+// Guard against the boot race: the Messages page can be opened before the
+// initial /api/marveen fetch resolves window._marveen. Until it does,
+// mainAgentId() returns the literal 'marveen' FALLBACK, which is a real agent
+// id on no install here -- composing to it creates a phantom "marveen" thread
+// that sits pending forever and shows up as a duplicate of the true main agent
+// (torpapa). Resolve _marveen before rendering any chat target.
+async function ensureMarveenLoaded() {
+  if (window._marveen?.agentId) return
+  try {
+    const r = await fetch('/api/marveen')
+    if (r.ok) window._marveen = { ...(window._marveen || {}), ...(await r.json()) }
+  } catch { /* sidebar falls back to the literal id -- best effort */ }
+}
+
 async function loadMessagesPage() {
+  await ensureMarveenLoaded()
   await loadChatAgentList()
 }
 
@@ -11015,8 +11030,12 @@ async function loadChatAgentList() {
     for (const t of threads) {
       if (t.agent) threadIndex.set(t.agent, { lastMsg: t.lastMessage, count: t.count || 0 })
     }
-    // Also include thread agents not in fleet (e.g. the owner's own direct msgs)
+    // Also include thread agents not in fleet (e.g. the owner's own direct msgs).
+    // Suppress the literal 'marveen' fallback id when it is NOT the real main
+    // agent: a stale phantom thread (from the boot-race bug) would otherwise
+    // render as a duplicate of the true main agent.
     for (const t of threads) {
+      if (t.agent === 'marveen' && mainAgentId() !== 'marveen') continue
       if (t.agent && !fleetNames.includes(t.agent) && !CHAT_SYSTEM_AGENTS.has(t.agent)) {
         fleetNames.push(t.agent)
       }
@@ -12882,6 +12901,7 @@ function renderBridgeEnrollSection(body) {
     `<div class="auth-form">` +
       `<input id="authBridgeKeyLine" type="text" autocapitalize="off" spellcheck="false" placeholder="${t('auth.bridge.key_placeholder')}">` +
       `<input id="authBridgeName" type="text" autocapitalize="off" spellcheck="false" maxlength="64" placeholder="${t('auth.bridge.name_placeholder')}">` +
+      `<input id="authBridgeHost" type="text" autocapitalize="off" spellcheck="false" maxlength="253" placeholder="${t('auth.bridge.host_placeholder')}">` +
       `<button class="btn-secondary" id="authBridgeEnrollBtn">${t('auth.bridge.enroll')}</button>` +
       `<div class="auth-form-msg" id="authBridgeMsg"></div>` +
       `<div id="authBridgeBundle" hidden></div>` +
@@ -12895,6 +12915,7 @@ async function bridgeEnrollFromUi() {
   const out = document.getElementById('authBridgeBundle')
   const keyLine = (document.getElementById('authBridgeKeyLine').value || '').trim()
   const name = (document.getElementById('authBridgeName').value || '').trim()
+  const hostOverride = (document.getElementById('authBridgeHost').value || '').trim()
   msg.className = 'auth-form-msg'
   msg.textContent = ''
   out.hidden = true
@@ -12905,7 +12926,7 @@ async function bridgeEnrollFromUi() {
   try {
     const r = await fetch('/api/security/bridge-enroll', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key_line: keyLine, name }),
+      body: JSON.stringify(hostOverride ? { key_line: keyLine, name, host: hostOverride } : { key_line: keyLine, name }),
     })
     const data = await r.json().catch(() => ({}))
     if (!r.ok) { msg.classList.add('err'); msg.textContent = data.error || t('auth.card.err_generic'); return }
@@ -12914,6 +12935,7 @@ async function bridgeEnrollFromUi() {
       (data.warnings && data.warnings.length ? ` (${data.warnings.join('; ')})` : '')
     document.getElementById('authBridgeKeyLine').value = ''
     document.getElementById('authBridgeName').value = ''
+    document.getElementById('authBridgeHost').value = ''
     out.hidden = false
     out.innerHTML =
       `<p class="auth-muted">${t('auth.bridge.bundle_hint', { host: escapeHtml(data.host || '') })}</p>` +

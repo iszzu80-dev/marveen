@@ -82,7 +82,7 @@ interface ParsedCall {
   cacheCreationTokens: number
   /** Tokens in thinking content blocks (estimated from char length / 4). */
   thinkingTokens: number
-  /** Model identifier from the API response, e.g. "claude-sonnet-4-6". CostOps
+  /** Model identifier from the API response, e.g. "claude-sonnet-5". CostOps
    *  v0.2 also reads this (message.model); null on older transcripts without it,
    *  never fabricated. */
   model: string | null
