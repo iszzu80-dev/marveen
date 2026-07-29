@@ -16,7 +16,7 @@ import {
 } from './agent-process.js'
 import { readClaudeCodeOauthJson } from './claude-credentials.js'
 import { getDb } from '../db.js'
-import { createDispatchSafe } from '../costops/dispatch.js'
+import { createDispatchSafe, recordOutcomeSafe } from '../costops/dispatch.js'
 import { resolveSessionIdForCwd } from './transcript-sources.js'
 import { detectPaneState } from '../pane-state.js'
 import { notifyChannel } from '../notify.js'
@@ -691,10 +691,17 @@ async function runWorkerAttempt(ctx: WorkerCtx, message: string, timeoutMs: numb
       }
       if (decision === 'timeout') {
         logger.warn({ reqId, timeoutMs, session: ctx.session }, 'agent-worker: request timed out')
+        // P2-A `failed`: deterministic evidence -- the worker never wrote its
+        // done-file within the request timeout, so this dispatch produced no
+        // result. Best-effort measurement; it cannot affect the return below.
+        if (dispatchId) recordOutcomeSafe(getDb(), { dispatchId, outcome: 'failed', evidence: 'agent-worker:request-timeout' })
         return { kind: 'fail', error: `worker timeout after ${Math.round(timeoutMs / 1000)}s` }
       }
       if (decision === 'dead') {
         logger.warn({ reqId, session: ctx.session }, 'agent-worker: session died mid-request, restarting (fail-fast)')
+        // P2-A `failed`: deterministic evidence -- the tmux session hosting this
+        // dispatch is gone mid-request, so it cannot ever complete.
+        if (dispatchId) recordOutcomeSafe(getDb(), { dispatchId, outcome: 'failed', evidence: 'agent-worker:session-died-mid-request' })
         restartWorkerSession(ctx)
         return { kind: 'fail', error: 'worker session died mid-request' }
       }

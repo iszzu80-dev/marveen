@@ -283,6 +283,28 @@ export function recordOutcome(db: Database.Database, input: OutcomeInput, now: n
 }
 
 /**
+ * Best-effort outcome write for the hot delivery/worker paths, mirroring
+ * createDispatchSafe: recording that a dispatch failed is MEASUREMENT, so it
+ * must never throw into the path that just handled the real failure. Returns
+ * the outcome_id, or null if the insert threw (logged, not raised).
+ */
+export function recordOutcomeSafe(
+  db: Database.Database,
+  input: OutcomeInput,
+  now: number = Date.now(),
+): string | null {
+  try {
+    return recordOutcome(db, input, now)
+  } catch (err) {
+    logger.warn(
+      { err, outcome: input.outcome, dispatchId: input.dispatchId },
+      'recordOutcome failed; dispatch outcome un-recorded (delivery handling unaffected)',
+    )
+    return null
+  }
+}
+
+/**
  * Wire `accepted` from kanban status->done: mark every EXISTING dispatch for
  * this card accepted (evidence 'kanban:done'). It only acts on dispatches that
  * already exist -- it NEVER creates a dispatch or backfills an outcome for a

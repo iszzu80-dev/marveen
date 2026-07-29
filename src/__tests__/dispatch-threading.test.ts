@@ -49,7 +49,10 @@ describe('P2-A origin (a) kanban', () => {
 describe('P2-A origin (b) inter-agent router', () => {
   it('creates a message-source dispatch when none is carried, then threads it to the funnel', () => {
     expect(ROUTER).toMatch(/createDispatchSafe\(getDb\(\), \{\s*source: 'message', agent: msg\.to_agent,/)
-    expect(ROUTER).toMatch(/let dispatchId = msg\.dispatch_id/)
+    // Declared at the top of the per-message loop iteration -- outside BOTH try
+    // blocks -- so the failure branches can record an outcome for it. Proven in
+    // dispatch-outcome-writers.test.ts.
+    expect(ROUTER).toMatch(/let dispatchId: string \| null = msg\.dispatch_id \?\? null/)
     expect(ROUTER).toMatch(/sendPromptToSession\(session, prefix \+ wrapped, host, \{ dispatchId \}\)/)
   })
   it('does not instrument channel-inbound (user) messages -- documented threshold', () => {
