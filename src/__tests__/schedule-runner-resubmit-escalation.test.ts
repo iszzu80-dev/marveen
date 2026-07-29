@@ -47,7 +47,9 @@ describe('schedule-runner: resubmit wiring uses the real clear + re-inject', () 
   })
 
   it('re-injects the full prompt with the idle gate off (box is typing, not idle)', () => {
-    expect(SRC).toMatch(/sendPromptToSession\(session, fullPrompt, host, \{ waitForIdle: false \}\)/)
+    // P2-A: the reinjection reuses the same scheduler dispatchId (same
+    // work-package), so it rides alongside the idle-gate-off flag.
+    expect(SRC).toMatch(/sendPromptToSession\(session, fullPrompt, host, \{ waitForIdle: false, dispatchId \}\)/)
   })
 
   it('routes the resubmit action through the pure decision function', () => {
