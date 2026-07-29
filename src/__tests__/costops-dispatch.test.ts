@@ -6,6 +6,7 @@ import { initDatabase, getDb, createAgentMessage, getPendingMessages } from '../
 import {
   initDispatchSchema,
   createDispatch,
+  createDispatchSafe,
   recordOutcome,
   recordAcceptedOutcomeForCard,
   resolveOutcome,
@@ -314,3 +315,23 @@ describe('P2-A message-carry of dispatch_id (DB layer)', () => {
 })
 
 afterEach(() => {})
+
+// P2-A hard constraint (program principle 20): if the measurement/optimizer layer
+// faults, the agent's normal dispatch path MUST still work. createDispatchSafe is
+// that seam -- a measurement fault returns null instead of propagating. Without
+// this test the try/catch could be refactored away and nothing would notice.
+describe('P2-A measurement faults never block a dispatch', () => {
+  it('createDispatchSafe returns null instead of throwing when the write fails', () => {
+    const broken = { prepare() { throw new Error('simulated measurement failure (disk/schema fault)') } } as never
+    let result: string | null | undefined
+    expect(() => {
+      result = createDispatchSafe(broken, { source: 'message', agent: 'buildfejleszto' }, ms(T0_SEC))
+    }).not.toThrow()
+    expect(result).toBeNull()
+  })
+
+  it('createDispatch (unsafe) DOES throw -- proving the safe wrapper is what isolates the fault', () => {
+    const broken = { prepare() { throw new Error('simulated measurement failure') } } as never
+    expect(() => createDispatch(broken, { source: 'message', agent: 'buildfejleszto' }, ms(T0_SEC))).toThrow()
+  })
+})
