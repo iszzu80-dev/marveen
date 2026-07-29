@@ -17,6 +17,7 @@ import { initBudgetAuditSchema } from './budgets.js'
 import { initOptimizationSchema } from './optimization.js'
 import { initInvoiceSchema } from './invoice.js'
 import { initDispatchSchema } from './dispatch.js'
+import { initPacketMetadataSchema } from './packet-metadata.js'
 
 export function initCostOpsSchema(db: Database.Database): void {
   // CostOps v0.2: model/provider enrichment on the CORE token_usage table
@@ -272,4 +273,8 @@ export function initCostOpsSchema(db: Database.Database): void {
   // stack travels with CostOps across upstream merges. Runs last: it ALTERs
   // token_usage, which the v0.2 block above has already ensured exists.
   initDispatchSchema(db)
+  // Phase 2 / P2-B (Context Packet & Session Efficiency): the optional
+  // packet-metadata tables hanging off a P2-A dispatch row. Same seam, right
+  // after initDispatchSchema because it keys on dispatches.dispatch_id.
+  initPacketMetadataSchema(db)
 }
