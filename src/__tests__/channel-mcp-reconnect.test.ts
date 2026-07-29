@@ -6,6 +6,16 @@ vi.mock('node:child_process', () => ({
   execSync: vi.fn(),
 }))
 
+// The reconnect path used to pace itself with execFileSync('/bin/sleep', …),
+// which the child_process mock above swallowed for free. It now awaits delay()
+// instead (the event-loop fix -- a blocking sleep here made the dashboard go
+// HTTP-deaf under fleet load), and delay() uses a REAL timer, so every one of
+// these cases started spending ~5s of wall clock and tripping vitest's 5000ms
+// limit. Mock it to a resolved promise: these tests assert the key SEQUENCE
+// sent to tmux, never the pacing between keys.
+vi.mock('../web/delay.js', () => ({
+  delay: () => Promise.resolve(),
+}))
 
 vi.mock('../platform.js', () => ({
   resolveFromPath: (name: string) => `/usr/local/bin/${name}`,
