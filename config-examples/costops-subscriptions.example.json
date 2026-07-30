@@ -9,7 +9,8 @@
     "amount": "OMITTED (not 0) when genuinely unknown -- set amount_source to say why.",
     "amount_source": "invoice | manual_fallback | no_invoice_found | pending_permission",
     "weekly_limit_tokens": "OPTIONAL absolute ceiling, only if a real one is known. No provider here publishes one; absent means limits.ts reports 'unknown' instead of inventing a denominator.",
-    "usage_snapshot": "OPTIONAL. A MANUAL reading off a provider usage screen -- percent plus the VERBATIM reset label, never a derived token count and never a parsed calendar date. P2-C promotes this into provider_ratelimit_snapshots with confidence 'manual'; the storage layer REFUSES to let it claim 'measured', because no Anthropic quota/usage API exists (re-verified 2026-07-30)."
+    "usage_snapshot": "OPTIONAL. A MANUAL reading off a provider usage screen -- percent plus the VERBATIM reset label, never a derived token count and never a parsed calendar date. P2-C promotes this into provider_ratelimit_snapshots with confidence 'manual'; the storage layer REFUSES to let it claim 'measured', because no Anthropic quota/usage API exists (re-verified 2026-07-30).",
+    "authProfile": "OPTIONAL (card 3ce58384). Which auth profile (as stamped on dispatches.auth_profile, e.g. 'host_default' or 'configdir:.claude-personal') this entry's facts are FOR. Absent means provider-wide, exactly the pre-3ce58384 behaviour -- no forced migration. Configure one entry PER auth profile, as the two 'example-plan-with-manual-usage-*' entries below do, to get accurate independent capacity instead of one shared reading across two independent quota pools."
   },
   "subscriptions": [
     {
@@ -24,9 +25,10 @@
       "notes": "no invoice amount available yet"
     },
     {
-      "id": "example-plan-with-manual-usage",
-      "name": "Example Plan With Manual Usage",
+      "id": "example-plan-with-manual-usage-host-default",
+      "name": "Example Plan With Manual Usage (host_default profile)",
       "provider": "anthropic",
+      "authProfile": "host_default",
       "source": "anthropic",
       "status": "active",
       "billing_period": "monthly",
@@ -36,6 +38,24 @@
         "as_of": "2099-01-08T21:00:00+02:00",
         "session_pct": 5,
         "weekly_pct": 19,
+        "weekly_reset_label": "Tue 08:59",
+        "fable_pct": 0
+      }
+    },
+    {
+      "id": "example-plan-with-manual-usage-personal-profile",
+      "name": "Example Plan With Manual Usage (configdir:.claude-personal profile)",
+      "provider": "anthropic",
+      "authProfile": "configdir:.claude-personal",
+      "source": "anthropic",
+      "status": "active",
+      "billing_period": "monthly",
+      "next_renewal": "2099-01-20",
+      "amount_source": "no_invoice_found",
+      "usage_snapshot": {
+        "as_of": "2099-01-08T21:00:00+02:00",
+        "session_pct": 40,
+        "weekly_pct": 88,
         "weekly_reset_label": "Tue 08:59",
         "fable_pct": 0
       }

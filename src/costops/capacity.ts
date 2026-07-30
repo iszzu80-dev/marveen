@@ -159,17 +159,27 @@ export function assertNoRecommendationLanguage(payload: unknown): void {
 // ---- figure builders -------------------------------------------------------
 
 /**
- * Usage for one subscription, from the newest capacity snapshot for its provider.
+ * Usage for one subscription, from the newest capacity snapshot for its provider
+ * (and, when the subscription entry names one, its specific auth profile --
+ * card 3ce58384).
+ *
+ * `sub.authProfile` set -> EXACT match only: a provider-wide (unlabelled)
+ * snapshot does NOT answer for a specific profile, so an old/undifferentiated
+ * reading can never be silently presented as this profile's own figure.
+ * `sub.authProfile` unset -> provider-wide query, byte-identical to
+ * pre-3ce58384 behaviour (no forced migration).
  *
  * Confidence comes from the SNAPSHOT ROW, not from this function's opinion: codex's
  * provider metadata read is 'measured', a Claude usage-screen reading is 'manual'.
  * No snapshot => unknown with the reason, never 0.
  */
 export function usageFigure(db: Database.Database, sub: SubscriptionLifecycle, now: number): CapacityFigure {
-  const snap = latestRateLimitSnapshot(db, sub.provider)
+  const snap = latestRateLimitSnapshot(db, sub.provider, sub.authProfile)
   if (!snap) {
     return unknownFigure(
-      `no capacity snapshot for provider '${sub.provider}' -- nothing has been observed or supplied yet`,
+      sub.authProfile
+        ? `no capacity snapshot for provider '${sub.provider}' auth profile '${sub.authProfile}' -- nothing has been observed or supplied yet for this specific profile`
+        : `no capacity snapshot for provider '${sub.provider}' -- nothing has been observed or supplied yet`,
       'fraction',
     )
   }

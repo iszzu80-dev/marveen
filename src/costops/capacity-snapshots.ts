@@ -74,6 +74,13 @@ export function assertSnapshotConfidence(source: SnapshotSource, confidence: Usa
 
 export interface RateLimitSnapshotInput {
   provider: string
+  /**
+   * Which auth profile this reading is FOR, when the collector knows (card
+   * 3ce58384). Absent/null means provider-wide -- the reading is not claimed
+   * to be specific to any one login. Never guess one in to make a reading
+   * look more precise than it is.
+   */
+  authProfile?: string | null
   /** Provider-side limit identifier, when it has one. */
   limitId?: string | null
   /** 0..100 percent of the window CONSUMED. */
@@ -93,6 +100,7 @@ export interface RateLimitSnapshotInput {
 
 export interface RateLimitSnapshotRow {
   provider: string
+  auth_profile: string | null
   limit_id: string | null
   used_percent: number
   window_duration_mins: number | null
@@ -121,14 +129,15 @@ export function writeRateLimitSnapshot(db: Database.Database, input: RateLimitSn
   if (!input.dedupKey) throw new Error('capacity snapshot: dedupKey is required (idempotency)')
   const info = db.prepare(`
     INSERT INTO provider_ratelimit_snapshots
-      (provider, limit_id, used_percent, window_duration_mins, resets_at, reset_label,
+      (provider, auth_profile, limit_id, used_percent, window_duration_mins, resets_at, reset_label,
        plan_type, usage_confidence, snapshot_source, dedup_key, captured_at)
     VALUES
-      (@provider, @limit_id, @used_percent, @window_duration_mins, @resets_at, @reset_label,
+      (@provider, @auth_profile, @limit_id, @used_percent, @window_duration_mins, @resets_at, @reset_label,
        @plan_type, @usage_confidence, @snapshot_source, @dedup_key, @captured_at)
     ON CONFLICT(dedup_key) DO NOTHING
   `).run({
     provider: input.provider,
+    auth_profile: input.authProfile ?? null,
     limit_id: input.limitId ?? null,
     used_percent: input.usedPercent,
     window_duration_mins: input.windowDurationMins ?? null,
@@ -143,15 +152,39 @@ export function writeRateLimitSnapshot(db: Database.Database, input: RateLimitSn
   return info.changes > 0
 }
 
-/** The newest snapshot for a provider, or null. Never a synthesised default. */
-export function latestRateLimitSnapshot(db: Database.Database, provider: string): RateLimitSnapshotRow | null {
-  const row = db.prepare(`
-    SELECT provider, limit_id, used_percent, window_duration_mins, resets_at, reset_label,
-           plan_type, usage_confidence, snapshot_source, captured_at
-    FROM provider_ratelimit_snapshots
-    WHERE provider = ?
-    ORDER BY captured_at DESC
-    LIMIT 1
-  `).get(provider) as RateLimitSnapshotRow | undefined
-  return row ?? null
+/**
+ * The newest snapshot for a provider, or null. Never a synthesised default.
+ *
+ * `authProfile` contract (card 3ce58384): omitted/undefined -> PROVIDER-WIDE
+ * query, byte-identical to the pre-migration behaviour (matches every row for
+ * this provider regardless of its auth_profile column, newest wins). Passed
+ * as a specific string -> EXACT match only (`auth_profile = ?`) -- a
+ * provider-wide row (auth_profile IS NULL) does NOT satisfy a specific-profile
+ * query, so an old/unlabelled observation can never be silently presented as
+ * "this named profile is healthy/constrained". No match -> null, which the
+ * caller reports as unknown, never borrowed from a sibling profile.
+ */
+export function latestRateLimitSnapshot(
+  db: Database.Database,
+  provider: string,
+  authProfile?: string,
+): RateLimitSnapshotRow | null {
+  const row = authProfile === undefined
+    ? db.prepare(`
+        SELECT provider, auth_profile, limit_id, used_percent, window_duration_mins, resets_at,
+               reset_label, plan_type, usage_confidence, snapshot_source, captured_at
+        FROM provider_ratelimit_snapshots
+        WHERE provider = ?
+        ORDER BY captured_at DESC
+        LIMIT 1
+      `).get(provider)
+    : db.prepare(`
+        SELECT provider, auth_profile, limit_id, used_percent, window_duration_mins, resets_at,
+               reset_label, plan_type, usage_confidence, snapshot_source, captured_at
+        FROM provider_ratelimit_snapshots
+        WHERE provider = ? AND auth_profile = ?
+        ORDER BY captured_at DESC
+        LIMIT 1
+      `).get(provider, authProfile)
+  return (row as RateLimitSnapshotRow | undefined) ?? null
 }

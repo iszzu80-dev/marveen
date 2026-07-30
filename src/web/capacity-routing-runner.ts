@@ -24,32 +24,27 @@
 // practice since store/model-fallback.json never existed). Extending
 // channels.sh to read the same overlay is future work, not a silent gap.
 //
-// CAPACITY GRANULARITY DECISION (marveen 2026-07-30: "not a to-do note" --
-// the fleet genuinely runs TWO Anthropic auth profiles today, `host_default`
-// and `configdir:.claude-personal`, each an independent quota pool; live
-// dispatch rows already tell them apart via dispatches.auth_profile). This
-// pass reads capacity PER PROVIDER, not per (provider, authProfile): P2-C's
-// subscriptions config (store/costops-subscriptions.json) has one entry per
-// PROVIDER, with no authProfile field, so `capacityStateFor()` below matches
-// by provider alone and both Anthropic auth profiles currently read the SAME
-// usage figure. THE EXACT MIS-READ THIS CAUSES: if `host_default` is the one
-// actually near its plan limit while `configdir:.claude-personal` still has
-// headroom, this registry reports BOTH as constrained (an agent on the
-// healthy profile is denied a fallback it should be entitled to, or is
-// wrongly routed away from a primary that was fine for IT specifically) --
-// or the reverse, a genuinely exhausted profile reads as healthy because the
-// OTHER profile's fresher reading is what got stored last. Both directions
-// are silent: nothing in the current data model can tell them apart.
-// DECISION (this pass): document precisely rather than extend the schema now
-// -- fixing it means adding a nullable `auth_profile` column to
-// `provider_ratelimit_snapshots` (idempotent ALTER, same pattern as the
-// existing usage_confidence/snapshot_source columns in schema.ts) plus an
-// optional `authProfile` field per entry in the subscriptions config, and
-// teaching whatever supplies a manual/collector reading which auth profile it
-// is FOR. That is a P2-C (already-shipped, already-live) schema extension,
-// not a Phase 3 addition, and doing it inside this branch would silently
-// widen this phase's blast radius onto merged, running code. Left for a
-// follow-up item under P2-C, named exactly instead of left implicit.
+// CAPACITY GRANULARITY (card 3ce58384, 2026-07-30 -- RESOLVED, was deferred
+// out of Phase 3 per marveen's explicit acceptance in card 59b383a9). The
+// fleet runs TWO Anthropic auth profiles, `host_default` and
+// `configdir:.claude-personal`, each an independent quota pool; live dispatch
+// rows already tell them apart via dispatches.auth_profile. Phase 3 shipped
+// reading capacity PER PROVIDER only: THE MIS-READ THAT CAUSED (now fixed) --
+// if `host_default` was near its plan limit while `configdir:.claude-personal`
+// had headroom, the registry reported BOTH as constrained, or the reverse (a
+// genuinely exhausted profile reading healthy because the other profile's
+// fresher reading is what got stored last). Both directions were silent.
+//
+// FIX: `provider_ratelimit_snapshots` gained a nullable `auth_profile` column
+// (idempotent ALTER, schema.ts) and `SubscriptionEntry` gained an optional
+// `authProfile` field (subscriptions.ts). `findSubscriptionFor()` below
+// matches an EXACT (provider, authProfile) entry first; only when none exists
+// does it fall back to a provider-wide entry (no authProfile set) -- which is
+// exactly today's pre-fix behaviour, so an operator who has not configured
+// per-profile entries sees NO change (no forced migration). `usageFigure()`
+// (capacity.ts) and `latestRateLimitSnapshot()` (capacity-snapshots.ts) carry
+// the same exact-match-vs-provider-wide contract: a provider-wide (unlabelled)
+// snapshot never answers for a query that names a specific profile.
 
 import { logger } from '../logger.js'
 import { getDb } from '../db.js'
@@ -61,7 +56,7 @@ import { resolveAuthProfile } from '../costops/dispatch-identity.js'
 import { resolveAgentConfigDir } from './claude-plans.js'
 import { deriveProvider } from '../costops/pricing.js'
 import { loadSubscriptionsConfig } from '../costops/subscriptions.js'
-import { deriveLifecycle } from '../costops/subscriptions.js'
+import { deriveLifecycle, type SubscriptionLifecycle } from '../costops/subscriptions.js'
 import { usageFigure, freshnessOf, CAPACITY_STALE_AFTER_SECONDS } from '../costops/capacity.js'
 import { insertRoutingEvent, resolveOutcome } from '../costops/dispatch.js'
 import { detectsUsageLimit } from '../model-fallback.js'
@@ -107,7 +102,28 @@ function isPackageOpen(db: Database.Database, agent: string): { open: boolean; d
   return { open: !terminal, dispatchId }
 }
 
-function capacityStateFor(
+/**
+ * Find the subscription entry that answers for (provider, authProfile) --
+ * card 3ce58384. Most specific wins: an entry configured for this EXACT auth
+ * profile is preferred over a provider-wide entry, so two profiles with their
+ * own entries get independent answers instead of sharing one. A provider-wide
+ * entry (no authProfile set) still answers for ANY profile of that provider
+ * when no more specific entry exists -- this is what "no forced migration"
+ * means: an operator who has not configured per-profile entries keeps exactly
+ * today's behaviour.
+ */
+export function findSubscriptionFor(
+  lifecycle: SubscriptionLifecycle[],
+  provider: string,
+  authProfile: string,
+): SubscriptionLifecycle | null {
+  const exact = lifecycle.find((s) => s.provider === provider && s.authProfile === authProfile)
+  if (exact) return exact
+  const wide = lifecycle.find((s) => s.provider === provider && !s.authProfile)
+  return wide ?? null
+}
+
+export function capacityStateFor(
   db: Database.Database,
   provider: string,
   authProfile: string,
@@ -116,8 +132,7 @@ function capacityStateFor(
 ): CapacityState {
   const { config } = loadSubscriptionsConfig()
   const lifecycle = deriveLifecycle(config, now)
-  // Honest coarseness (see file header): matched by provider only.
-  const sub = lifecycle.find((s) => s.provider === provider)
+  const sub = findSubscriptionFor(lifecycle, provider, authProfile)
   if (!sub) {
     return deriveCapacityState({
       usageFraction: null, usageConfidence: 'unknown', ageSeconds: null,

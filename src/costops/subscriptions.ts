@@ -22,6 +22,14 @@ export interface SubscriptionEntry {
   id: string
   name: string
   provider: string
+  // Card 3ce58384: OPTIONAL. Which auth profile (as stamped on
+  // dispatches.auth_profile, e.g. 'host_default' or
+  // 'configdir:.claude-personal') this specific entry's facts/usage_snapshot
+  // are FOR. Absent means provider-wide -- exactly today's behaviour, no
+  // forced migration. Configure one entry per auth profile to get accurate
+  // per-profile capacity instead of one shared reading across independent
+  // quota pools.
+  authProfile?: string
   source: string             // where the lifecycle fact came from, e.g. 'google_play' | 'anthropic' | 'openai'
   status: SubscriptionStatus
   paid_until?: string        // 'YYYY-MM-DD', renews-then-ends date if canceled
@@ -67,11 +75,11 @@ const EMPTY: SubscriptionsConfig = { version: 1, subscriptions: [] }
 
 const EXAMPLE_CONFIG = {
   version: 1,
-  _doc: 'CostOps v0.7 subscription lifecycle facts. Copy to store/costops-subscriptions.json. paid_until/next_renewal are ISO dates (YYYY-MM-DD). amount is omitted (not 0) when genuinely unknown -- set amount_source accordingly. usage_snapshot (card 2ed90db1) is an OPTIONAL manual reading off a Claude usage screen -- percent + a raw reset label only, never a derived token count; weekly_pct is what feeds the 80% alert.',
+  _doc: 'CostOps v0.7 subscription lifecycle facts. Copy to store/costops-subscriptions.json. paid_until/next_renewal are ISO dates (YYYY-MM-DD). amount is omitted (not 0) when genuinely unknown -- set amount_source accordingly. usage_snapshot (card 2ed90db1) is an OPTIONAL manual reading off a Claude usage screen -- percent + a raw reset label only, never a derived token count; weekly_pct is what feeds the 80% alert. authProfile (card 3ce58384) is OPTIONAL -- set it to configure per-auth-profile capacity (e.g. two Anthropic logins with independent quotas) instead of one shared reading for the whole provider.',
   subscriptions: [
     { id: 'claude-pro-google-play', name: 'Claude Pro', provider: 'anthropic', source: 'google_play', status: 'canceled', paid_until: '2026-07-16', amount_source: 'invoice', notes: 'cancellation notice received; active until paid_until, then ends' },
     {
-      id: 'anthropic-max', name: 'Claude Max', provider: 'anthropic', source: 'anthropic', status: 'active', next_renewal: '2026-07-20', amount_source: 'manual_fallback', notes: 'no invoice amount available yet',
+      id: 'anthropic-max', name: 'Claude Max', provider: 'anthropic', authProfile: 'host_default', source: 'anthropic', status: 'active', next_renewal: '2026-07-20', amount_source: 'manual_fallback', notes: 'no invoice amount available yet',
       usage_snapshot: { as_of: '2026-07-08T21:00:00+02:00', session_pct: 5, weekly_pct: 19, weekly_reset_label: 'Tue 08:59', fable_pct: 0 },
     },
     { id: 'openai-chatgpt', name: 'ChatGPT Plus', provider: 'openai', source: 'openai', status: 'active', amount_source: 'no_invoice_found' },
@@ -142,6 +150,9 @@ export function validateSubscriptionsConfig(raw: unknown): SubscriptionsLoadResu
     subscriptions.push({
       id: s.id, name: s.name,
       provider: typeof s.provider === 'string' ? s.provider : 'other',
+      // Blank/non-string -> undefined, never coerced to '' (a '' authProfile
+      // must not accidentally exact-match a stray '' elsewhere).
+      authProfile: (typeof s.authProfile === 'string' && s.authProfile.trim()) ? s.authProfile.trim() : undefined,
       source: typeof s.source === 'string' ? s.source : 'unknown',
       status,
       paid_until: typeof s.paid_until === 'string' ? s.paid_until : undefined,

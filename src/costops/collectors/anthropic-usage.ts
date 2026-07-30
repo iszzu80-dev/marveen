@@ -80,6 +80,11 @@ export function syncAnthropicUsageSnapshot(
     const snap = s.usage_snapshot!
     const landed = writeRateLimitSnapshot(db, {
       provider: 'anthropic',
+      // Card 3ce58384: threads the subscription entry's own authProfile (if
+      // the operator configured per-profile entries) so this snapshot can be
+      // matched exactly by usageFigure(), instead of landing as a
+      // provider-wide row every profile's query would otherwise share.
+      authProfile: s.authProfile ?? null,
       limitId: `${s.id}|weekly`,
       usedPercent: snap.weekly_pct,
       windowDurationMins: null,

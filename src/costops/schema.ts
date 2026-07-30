@@ -224,6 +224,16 @@ export function initCostOpsSchema(db: Database.Database): void {
   try { db.exec(`ALTER TABLE provider_ratelimit_snapshots ADD COLUMN reset_label TEXT`) } catch { /* already exists */ }
   try { db.exec(`ALTER TABLE provider_ratelimit_snapshots ADD COLUMN dedup_key TEXT`) } catch { /* already exists */ }
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ratelimit_snapshots_dedup ON provider_ratelimit_snapshots(dedup_key)`)
+  // Card 3ce58384 (Phase 3 P2-C follow-up, 2026-07-30): the fleet runs TWO
+  // independent Anthropic quota pools (auth profiles host_default and
+  // configdir:.claude-personal), but a snapshot row had no way to say which
+  // one it was FOR -- every reading looked provider-wide, so one profile's
+  // exhaustion could read as both profiles' exhaustion, or the reverse.
+  // Nullable, additive, same idempotent-ALTER pattern as the three columns
+  // above: a pre-migration row (auth_profile NULL) stays a legitimate
+  // PROVIDER-WIDE observation, not a broken row -- see capacity-snapshots.ts's
+  // latestRateLimitSnapshot() for the exact-match-vs-provider-wide contract.
+  try { db.exec(`ALTER TABLE provider_ratelimit_snapshots ADD COLUMN auth_profile TEXT`) } catch { /* already exists */ }
   // CostOps Phase 0: baseline for the 7-day source-reliability observation window
   // (gap-analysis P0.4). One row per capture -- the whole source inventory
   // (lifecycle + freshness + sync status per source) as a sanitized JSON snapshot,
