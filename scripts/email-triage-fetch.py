@@ -10,7 +10,7 @@ Usage: python3 scripts/email-triage-fetch.py [--window 4d] [--mark id1,id2,...]
 """
 import json, subprocess, sys, os, re, time
 
-REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REPO = os.environ.get("MARVEEN_REPO_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE = os.path.join(REPO, "store", "email-triage-state.json")
 SERVERS = {
     "private": os.path.join(REPO, "mcp-servers", "google-private-mcp.py"),
