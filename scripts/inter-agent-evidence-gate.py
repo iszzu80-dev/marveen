@@ -146,6 +146,27 @@ SEQ_REF_RE = re.compile(r'#(\d{1,4})\b')
 # Also: "kanban <hex8>" or "card <hex8>"
 KANBAN_WORD_RE = re.compile(r'(?:kanban|card|k[aá]rtya)\s+(?:#\s*)?([a-f0-9]{8})', re.IGNORECASE)
 
+# Card 9682c5ee: a path's own clause can assert that it does NOT exist (e.g.
+# "the runner is inert only because store/model-fallback.json is absent").
+# The absence IS the finding there -- it must not be counted as a missing
+# deliverable. Scoped to the CLAUSE containing the specific path occurrence,
+# never the whole message: an absence word anywhere in a long message must
+# not excuse an unrelated claimed-but-missing path (see
+# extract_absence_asserted_paths).
+ABSENCE_RE = re.compile(
+    r'\b(?:absent|missing|does\s+not\s+exist|doesn\'t\s+exist|no\s+longer\s+exists?|'
+    r'never\s+(?:created|existed)|nincs|hi[aá]nyzik)\b',
+    re.IGNORECASE
+)
+# "no <path>" is checked positionally (word "no" immediately preceding the
+# path match) rather than as a clause-wide keyword, since "no" alone is too
+# common a word to scope to a whole clause without false-suppressing misses.
+_NO_PRECEDES_RE = re.compile(r'\bno\s*$', re.IGNORECASE)
+# Clause boundary: sentence-ending punctuation followed by whitespace, or a
+# newline. Deliberately NOT a bare '.' -- path extensions (model-fallback.json)
+# have no space after the internal dot, so this never splits inside a path.
+_CLAUSE_BOUNDARY_RE = re.compile(r'[.;]\s|\n')
+
 
 def load_token():
     """Load dashboard API token."""
@@ -235,6 +256,59 @@ def extract_file_paths(content):
             paths.add(p)
 
     return list(paths)
+
+
+def _clause_around(content, start, end):
+    """Return the sentence-like clause containing content[start:end], bounded
+    by _CLAUSE_BOUNDARY_RE on either side. Scopes absence-detection to the
+    sentence mentioning a path, not the whole message."""
+    left = 0
+    for b in _CLAUSE_BOUNDARY_RE.finditer(content, 0, start):
+        left = b.end()
+    right = len(content)
+    b2 = _CLAUSE_BOUNDARY_RE.search(content, end)
+    if b2:
+        right = b2.start()
+    return content[left:right]
+
+
+def _is_absence_asserted(content, start, end):
+    """True if THIS specific path occurrence (content[start:end]) sits in a
+    clause asserting the path does not exist, rather than claiming it as
+    delivered."""
+    if ABSENCE_RE.search(_clause_around(content, start, end)):
+        return True
+    preceding = content[max(0, start - 12):start]
+    return bool(_NO_PRECEDES_RE.search(preceding))
+
+
+def extract_absence_asserted_paths(content):
+    """Paths where EVERY mention in `content` sits in a clause asserting that
+    path's own non-existence (card 9682c5ee). A path mentioned in even one
+    clause that does NOT assert absence is left alone -- this must not become
+    a blanket allowlist that swallows a real miss elsewhere in a long message
+    (e.g. an unrelated "wrote <path>" claim for a genuinely missing file)."""
+    if not content:
+        return set()
+    stripped = re.sub(r'https?://\S+', ' ', content)
+
+    always_absent = {}  # path -> True only while every occurrence so far asserted absence
+
+    def _scan(rx, filter_fn=None):
+        for m in rx.finditer(stripped):
+            p = m.group(0).strip().lstrip('-').strip()
+            while p and p[0] in '- \t*':
+                p = p[1:].strip()
+            if not p or (filter_fn and not filter_fn(p)):
+                continue
+            asserted = _is_absence_asserted(stripped, m.start(), m.end())
+            always_absent[p] = asserted if p not in always_absent else (always_absent[p] and asserted)
+
+    _scan(PATH_RE, _is_deliverable_path)
+    _scan(PATH_NOEXT_RE, _is_deliverable_path)
+    _scan(ABS_PATH_RE)
+
+    return {p for p, always in always_absent.items() if always}
 
 
 def resolve_path(raw_path):
@@ -382,6 +456,11 @@ def check_message(db, row, token, dry_run=False):
     if not paths:
         return None  # completion claim but no file paths to verify
 
+    # Card 9682c5ee: a path whose own clause asserts it does NOT exist is not
+    # a missing deliverable -- the absence IS the finding. Excluded from the
+    # missing check only, never removed from `paths` itself.
+    absence_asserted = extract_absence_asserted_paths(content)
+
     # Resolve and check each path
     missing = []
     found = []
@@ -389,6 +468,8 @@ def check_message(db, row, token, dry_run=False):
         resolved = resolve_path(p)
         if resolved:
             found.append((p, resolved))
+        elif p in absence_asserted:
+            continue
         else:
             missing.append(p)
 
