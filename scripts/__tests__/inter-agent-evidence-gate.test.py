@@ -267,6 +267,16 @@ class TestCommaConjunctionClauseBoundary(unittest.TestCase):
         result = eg.check_message(None, row, token=None, dry_run=True)
         self.assertEqual(result["verdict"], "PASS")
 
+    def test_6b_single_dash_parenthetical_also_stays_suppressed(self):
+        # Same construction, single spaced dash instead of a double/em-dash
+        # -- the single-dash boundary tried in 75801b6 had the identical
+        # false-positive shape and was reverted along with the em-dash one.
+        # Comma-only was never vulnerable to either variant.
+        content = f"DONE: The overlay file - {FAKE_ABSENT_TRACKED} - does not exist yet."
+        row = (29, "marveen", "buildfejleszto", content, "pending", 0)
+        result = eg.check_message(None, row, token=None, dry_run=True)
+        self.assertEqual(result["verdict"], "PASS")
+
     def test_7_probe2_self_referential_shape_correctly_stays_suppressed(self):
         # The e0742bbd probe's own construction ("Deliverable written to X --
         # a path ... that genuinely does not exist.") IS an absence assertion
