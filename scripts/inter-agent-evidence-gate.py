@@ -311,6 +311,37 @@ def extract_absence_asserted_paths(content):
     return {p for p, always in always_absent.items() if always}
 
 
+def gitignored_paths(paths):
+    """Card dc0fb6f0: return the SUBSET of `paths` that are gitignored (a
+    gitignored path -- e.g. store/model-fallback.json under .gitignore's
+    `store/` -- can never be a committed deliverable, structurally, no clause
+    parsing needed). Batched via `git check-ignore --stdin` (one subprocess
+    call, not one per path), run with REPO_ROOT as cwd.
+
+    FAILS OPEN: on any error (git missing, not a repo, timeout, unexpected
+    exit code) this returns an EMPTY set -- i.e. nothing is excused -- rather
+    than silently treating every path as ignored. A structural filter that
+    errors into "skip all" would hide every real miss at once, which is a
+    worse failure mode than this rule not firing at all.
+    """
+    if not paths:
+        return set()
+    try:
+        proc = subprocess.run(
+            ['git', 'check-ignore', '--stdin'],
+            input='\n'.join(paths), capture_output=True, text=True,
+            cwd=str(REPO_ROOT), timeout=10,
+        )
+    except Exception:
+        return set()
+    # 0 = at least one path is ignored, 1 = none are (both normal outcomes,
+    # NOT errors). Anything else (128: not a repo / git missing / bad usage)
+    # is a real failure -- fail open, do not trust the (likely empty) output.
+    if proc.returncode not in (0, 1):
+        return set()
+    return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+
+
 def resolve_path(raw_path):
     """Resolve a file path against known project roots. Returns resolved path or None."""
     p = Path(raw_path)
@@ -460,6 +491,12 @@ def check_message(db, row, token, dry_run=False):
     # a missing deliverable -- the absence IS the finding. Excluded from the
     # missing check only, never removed from `paths` itself.
     absence_asserted = extract_absence_asserted_paths(content)
+    # Card dc0fb6f0: a gitignored path can never be a committed deliverable,
+    # structurally -- complements (does not replace) the clause-scoping above.
+    # A gitignored path still whose absence is NOT asserted in the clause
+    # (e.g. a bare "wrote store/x.json") is excused here instead; a TRACKED
+    # path that is genuinely missing is never excused by this filter.
+    gitignored = gitignored_paths(paths)
 
     # Resolve and check each path
     missing = []
@@ -468,7 +505,7 @@ def check_message(db, row, token, dry_run=False):
         resolved = resolve_path(p)
         if resolved:
             found.append((p, resolved))
-        elif p in absence_asserted:
+        elif p in absence_asserted or p in gitignored:
             continue
         else:
             missing.append(p)
