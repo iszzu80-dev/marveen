@@ -49,9 +49,42 @@ A skip is not a substitute for a fix: if a test in the default sweep starts fail
 fix the regression, or add a *specific, written* skip reason. Never delete a failing test file to
 make the runner green; that converts a known gap into a hidden one.
 
+## 3. Live-data assumption check (`npm run verify:context-windows`)
+
+`scripts/verify-context-window-assumptions.ts` re-measures every recognized model's REAL peak
+context (from `token_usage`) against what `src/context-guard.ts`'s `contextLimitForModel` currently
+assumes for it. Unlike the other two surfaces, this one reads the LIVE production database, not a
+worktree fixture — it only means something run against the real install.
+
+Card `585c056c` part 2 (2026-07-30): `contextLimitForModel`'s sonnet-5 assumption (200k) was
+justified by a comment stating a specific observation ("never observed above 198k across 14 days").
+That claim silently went 4.7x stale (real peak 935,023) before anyone re-checked it, and — because a
+different fix (part 1) started trusting this exact registry where it previously hadn't — the stale
+assumption briefly created a live false-restart band for a running model. An empirical constant whose
+justification is a stated observation must have something that re-checks the observation, or the
+comment becomes a lie nobody notices. This script is that check; the pure comparison
+(`findContextWindowViolations`) is unit-tested with synthetic data, this is the live-data wrapper.
+
+Run it (read-only, no writes, safe against the live install):
+
+```bash
+npm run verify:context-windows
+```
+
+Exit 0 = every recognized model's real peak still fits its assumed window (with the same
+accounting-overshoot tolerance the context guard already uses elsewhere). Exit 1 = an assumption in
+`src/context-guard.ts` has gone stale — the printed evidence names exactly which model and by how
+much; update the family list/limit from it, the same way part 2 of card 585c056c did.
+
+This is not currently on an automatic schedule — running it is a manual/operator step today. Wiring
+it into a periodic heartbeat (so drift is caught without anyone remembering to run it by hand) is a
+reasonable next step and is exactly the class of gap this whole card was about — noted here rather
+than silently left undone.
+
 ## Where this fits in the release routine
 
-Run both (`npm test` and `npm run test:scripts`) before:
+Run all three (`npm test`, `npm run test:scripts`, and — against the real install only —
+`npm run verify:context-windows`) before:
 - merging a feature/fix branch to `develop`,
 - rebuilding and restarting the live dashboard (`npm run build` + `systemctl --user restart
   marveen-dashboard.service`),

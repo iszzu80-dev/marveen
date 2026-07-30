@@ -98,42 +98,67 @@ export const CONTEXT_LIMIT_TIERS = [200_000, 500_000, 1_000_000] as const
  * Base context window inferred from the model id.
  *
  * The `[1m]` suffix is an explicit operator opt-in and always wins. Beyond
- * that, the current Fable/Mythos/Opus families run 1M windows in Claude Code
- * WITHOUT the suffix -- verified from live sources, not assumed: the Models
- * API reports 1M for all of them, and this host's own transcripts show
- * sessions genuinely reaching it (measured 2026-07-27: fable-5 976k, geri
- * fable-5 911k, opus-4-8 985k-999k, opus-5 979k). The previous blanket-200k
- * guess made the guard read a fable-5 session at 21% real usage as "106%
- * full" and force-restart working agents all day (17 hard-threshold events
- * on 2026-07-27, two of them killing samu mid-task and losing dispatched
- * instructions).
+ * that, the current Fable/Mythos/Opus/Sonnet-5 families run 1M windows in
+ * Claude Code WITHOUT the suffix -- verified from live sources, not assumed:
+ * the Models API reports 1M for all of them, and this host's own transcripts
+ * show sessions genuinely reaching it (measured 2026-07-27: fable-5 976k,
+ * geri fable-5 911k, opus-4-8 985k-999k, opus-5 979k). The previous
+ * blanket-200k guess made the guard read a fable-5 session at 21% real usage
+ * as "106% full" and force-restart working agents all day (17 hard-threshold
+ * events on 2026-07-27, two of them killing samu mid-task and losing
+ * dispatched instructions).
  *
- * Sonnet stays at 200k deliberately: this host has never observed a sonnet
- * session above 198k (sonnet-5 max 197,885 across 14 days), so 200k is the
- * evidenced effective window there. Haiku is 200k by spec. Unknown models
- * stay conservative at 200k -- calibrateLimit and the runner's persisted
- * high-water mark step the denominator up from live evidence, and
- * over-estimating would blind the proactive tiers (the 2026-07-26 failure
- * mode), while under-estimating is loud and self-correcting.
+ * CORRECTION (card 585c056c part 2, 2026-07-30): this comment used to claim
+ * sonnet stayed at 200k because "this host has never observed a sonnet
+ * session above 198k (sonnet-5 max 197,885 across 14 days)" -- a STATED,
+ * checkable observation. It went stale without anyone noticing: re-measured
+ * across 243,524 claude-sonnet-5 turns (message.model, not current agent
+ * config), the real peak is 935,023 -- 4.7x the claimed ceiling. Worse than
+ * a blind spot: because this card's OWN structural fix (part 1) replaced the
+ * shell script's separate map -- which happened to have sonnet-5 correct at
+ * 1000000 -- with a read from THIS registry, landing the wrong 200k value
+ * created a live FALSE-RESTART BAND (170k-200k real tokens reads as
+ * 85%-100%, restarting a session at ~17-20% real usage, which then climbs
+ * and gets killed again -- a restart loop). Fixed by moving sonnet-5 into
+ * the 1M family below (matching its measured behaviour) and narrowing the
+ * 200k family to the OLDER sonnet-4-x line specifically (peak measured
+ * 173,237 across 648 turns -- comfortably under 200k, unaffected).
+ * scripts/verify-context-window-assumptions.ts is the guard this should have
+ * had the first time: it re-measures every family against live token_usage
+ * and fails loud the moment a stated observation like this one stops holding,
+ * instead of a comment quietly becoming a lie.
+ *
+ * Haiku is 200k by spec (small sample, 2 measured turns, peak 43,406 --
+ * comfortably consistent). Unknown models stay conservative at 200k --
+ * calibrateLimit and the runner's persisted high-water mark step the
+ * denominator up from live evidence, and over-estimating would blind the
+ * proactive tiers (the 2026-07-26 failure mode), while under-estimating is
+ * loud and self-correcting.
  */
-const ONE_MILLION_FAMILIES = [/fable-\d/, /mythos-\d/, /opus-4-[6-9]/, /opus-[5-9]\b/]
+const ONE_MILLION_FAMILIES = [/fable-\d/, /mythos-\d/, /opus-4-[6-9]/, /opus-[5-9]\b/, /sonnet-[5-9]\b/]
 
 // Explicitly EVIDENCED at 200k, not merely "unmatched -> default". Distinct
 // from the unknown-model fallthrough below: card 585c056c needs to tell a
 // model this codebase has actually seen apart from one it has never heard of
-// (see isRecognizedContextModel).
-const TWO_HUNDRED_K_FAMILIES = [/sonnet-\d/, /haiku-\d/]
+// (see isRecognizedContextModel). sonnet-4-x ONLY -- sonnet-5+ moved to the
+// 1M family above (measured peak 935,023, card 585c056c part 2).
+const TWO_HUNDRED_K_FAMILIES = [/sonnet-4-\d/, /haiku-\d/]
 
-// DeepSeek's real window is much smaller than the Claude families and was
-// previously tracked ONLY in a second, hand-maintained map in
-// scripts/fleet-context-guard.sh (card 585c056c) -- a second registry that
-// can drift from this one (and did: this file's default silently gave
-// DeepSeek 200k while the shell script's copy said 180k). Consolidated here
-// as the single source: 180k, matching that script's own comment ("empirically
-// ... deepseek froze ~176k") -- a conservative ceiling just above the observed
-// freeze point, not a new number invented for this change.
+// DeepSeek's real window was previously tracked ONLY in a second,
+// hand-maintained map in scripts/fleet-context-guard.sh (card 585c056c part
+// 1) -- a second registry that can drift from this one (and did: this
+// file's default silently gave DeepSeek 200k while the shell script's copy
+// said 180k). CORRECTED AGAIN in part 2: 180k was itself stale -- measured
+// across 17,513 deepseek-v4-pro turns, 1,493 (8.5%) exceed 180k, with a
+// genuine cluster at 339k-342k (not one outlier), so 180k undercounts by
+// nearly 2x. Stepped to the next real tier (500k) rather than hand-picking
+// a number just above the observed peak, the same tiering CONTEXT_LIMIT_TIERS
+// already uses for calibration. DeepSeek agents are not currently run
+// (standing fleet rule) so this had zero live blast radius, but it sat wrong
+// in the same file this card is correcting and would have misled the same
+// way the moment anyone restarted one.
 const DEEPSEEK_FAMILIES = [/deepseek/]
-const DEEPSEEK_CONTEXT_LIMIT = 180_000
+const DEEPSEEK_CONTEXT_LIMIT = 500_000
 
 export function contextLimitForModel(model: string | null | undefined): number {
   if (typeof model !== 'string') return 200_000
@@ -440,4 +465,54 @@ export function decideGuard(
       return none('waiting for restarted session')
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Card 585c056c part 2: the guard for the class of bug, not just the number.
+//
+// contextLimitForModel's family limits are each justified by a STATED
+// OBSERVATION in the comment above (e.g. "sonnet-5 max 197,885 across 14
+// days"). That is what let marveen catch the sonnet defect at all -- but
+// nothing enforced the claim, so it silently went 4.7x stale before anyone
+// re-checked it. This is the re-check, kept as a PURE function (no DB) so it
+// is unit-testable with synthetic rows; scripts/verify-context-window-
+// assumptions.ts supplies the real ones from live token_usage.
+// ---------------------------------------------------------------------------
+
+export interface ModelPeakObservation {
+  model: string
+  /** MAX observed (input + cache_read + cache_creation) tokens for this model. */
+  peak: number
+  /** How many turns this peak is drawn from -- context for how much to trust it. */
+  turnCount: number
+}
+
+export interface ContextWindowViolation extends ModelPeakObservation {
+  /** What contextLimitForModel currently claims for this model. */
+  assumedLimit: number
+  /** assumedLimit * CALIBRATION_OVERSHOOT_TOLERANCE -- the real peak exceeds even this. */
+  toleratedLimit: number
+}
+
+/**
+ * Which observations DISPROVE their model's assumed context window -- i.e.
+ * contextLimitForModel(model) claims a ceiling the live data has already
+ * exceeded, even after the same accounting-overshoot tolerance the rest of
+ * this file already uses (CALIBRATION_OVERSHOOT_TOLERANCE). An unrecognised
+ * model is skipped here -- this function's job is "is the recognised
+ * registry still accurate", not "warn about unknown models" (that is
+ * isRecognizedContextModel's job, at the runner/script layer that consumes
+ * live data with no calibration).
+ */
+export function findContextWindowViolations(observations: ModelPeakObservation[]): ContextWindowViolation[] {
+  const violations: ContextWindowViolation[] = []
+  for (const obs of observations) {
+    if (!isRecognizedContextModel(obs.model)) continue
+    const assumedLimit = contextLimitForModel(obs.model)
+    const toleratedLimit = assumedLimit * CALIBRATION_OVERSHOOT_TOLERANCE
+    if (obs.peak > toleratedLimit) {
+      violations.push({ ...obs, assumedLimit, toleratedLimit })
+    }
+  }
+  return violations
 }
