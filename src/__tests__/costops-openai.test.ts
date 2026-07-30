@@ -42,6 +42,28 @@ describe('mapOpenAiCosts (pure, offline)', () => {
     expect(mapOpenAiCosts(null, { periodStart: START, periodEnd: END, fxUsdHuf: 360, idSalt: 's', now: START })).toHaveLength(0)
   })
 
+  // Card 23912ca4: this mapper never went through toHuf()/EUR's guard at all --
+  // it hand-rolled its own `usdTotal * fxUsdHuf` and stored the result as an
+  // HUF-currency, provider_api-confidence line UNCONDITIONALLY. At fxUsdHuf=0
+  // that fabricated "openai-api cost this month: 0 Ft, confidence: provider_api"
+  // -- a HIGH-confidence lie, worse than the toHuf() case because it had no
+  // null escape hatch at all.
+  it('a zero fxUsdHuf produces NO line -- real USD spend is not fabricated into 0 HUF', () => {
+    const lines = mapOpenAiCosts(fixturePage([1.5, 2.0, 0.5]), { periodStart: START, periodEnd: END, fxUsdHuf: 0, idSalt: 'salt', now: START })
+    expect(lines).toHaveLength(0)
+  })
+
+  it('a negative fxUsdHuf is treated the same as zero -- no fabricated line', () => {
+    const lines = mapOpenAiCosts(fixturePage([1.5]), { periodStart: START, periodEnd: END, fxUsdHuf: -1, idSalt: 'salt', now: START })
+    expect(lines).toHaveLength(0)
+  })
+
+  it('a valid rate still produces the line -- the guard does not break the working path', () => {
+    const lines = mapOpenAiCosts(fixturePage([1.5, 2.0, 0.5]), { periodStart: START, periodEnd: END, fxUsdHuf: 360, idSalt: 'salt', now: START })
+    expect(lines).toHaveLength(1)
+    expect(lines[0].amount).toBe(Math.round(4.0 * 360 * 100) / 100)
+  })
+
   // Card 320c477a: data_freshness_at must be the INGEST instant (opts.now), never
   // a bucket end_time. The live collision this guards against: an openai-api
   // provider_api row was stamped 2026-08-01 (a bucket end_time) instead of its
@@ -111,5 +133,34 @@ describe('openaiCollector + syncOpenAiCollector (offline stub, no live call)', (
     expect(r.ok).toBe(false)
     expect(r.status).toBe('error')
     expect((db.prepare("SELECT COUNT(*) c FROM cost_line_items WHERE source_id='openai-api'").get() as { c: number }).c).toBe(0)
+  })
+
+  // Card 23912ca4: an unconfigured USD rate must be an explicit, actionable
+  // BLOCKER (status/error field), not a silent 0-import that looks identical to
+  // "there was no OpenAI spend this month".
+  it('an unset (0) USD rate is a loud blocker -- no import, an actionable error, no provider call side-effect hidden', async () => {
+    const db = getDb()
+    const now = Math.floor(Date.UTC(2026, 6, 10) / 1000)
+    const r = await syncOpenAiCollector(db, now, { apiKey: 'sk-admin-stub', fxUsdHuf: 0, httpGetJson: async () => fixturePage([2.0, 2.0]) })
+    expect(r.ok).toBe(false)
+    expect(r.status).toBe('error')
+    expect(r.error).toMatch(/rate is not configured/i)
+    expect((db.prepare("SELECT COUNT(*) c FROM cost_line_items WHERE source_id='openai-api'").get() as { c: number }).c).toBe(0)
+  })
+
+  it('a negative USD rate is also a blocker, not a silent import', async () => {
+    const db = getDb()
+    const now = Math.floor(Date.UTC(2026, 6, 10) / 1000)
+    const r = await syncOpenAiCollector(db, now, { apiKey: 'sk-admin-stub', fxUsdHuf: -5, httpGetJson: async () => fixturePage([2.0]) })
+    expect(r.ok).toBe(false)
+    expect((db.prepare("SELECT COUNT(*) c FROM cost_line_items WHERE source_id='openai-api'").get() as { c: number }).c).toBe(0)
+  })
+
+  it('once a real rate is configured, the same run imports normally', async () => {
+    const db = getDb()
+    const now = Math.floor(Date.UTC(2026, 6, 10) / 1000)
+    const r = await syncOpenAiCollector(db, now, { apiKey: 'sk-admin-stub', fxUsdHuf: 360, httpGetJson: async () => fixturePage([2.0, 2.0]) })
+    expect(r.ok).toBe(true)
+    expect((db.prepare("SELECT billed_cost FROM cost_line_items WHERE source_id='openai-api'").get() as { billed_cost: number }).billed_cost).toBe(4.0 * 360)
   })
 })

@@ -51,6 +51,13 @@ export function mapOpenAiCosts(
     }
   }
   if (!any) return []
+  // Card 23912ca4: a zero/unconfigured fxUsdHuf must never fabricate a 0 HUF
+  // line -- that would read as "OpenAI cost this month: nothing", which is
+  // false; the real cost is unknown-in-HUF, not zero. No line at all until a
+  // real rate exists (idempotent dedup_key means a later re-run with a real
+  // rate fills this in). Guarded here too, not only in the caller, so a
+  // future direct caller of this pure mapper cannot bypass the check.
+  if (!(opts.fxUsdHuf > 0)) return []
   const monthKey = new Date(opts.periodStart * 1000).toISOString().slice(0, 7)
   const amountHuf = Math.round(usdTotal * opts.fxUsdHuf * 100) / 100
   return [{
@@ -122,9 +129,18 @@ export async function syncOpenAiCollector(
   let fxUsdHuf = deps.fxUsdHuf
   if (fxUsdHuf === undefined) {
     try {
-      const { loadRenderPricing } = await import('./render.js')
-      fxUsdHuf = loadRenderPricing().pricing.fx_usd_huf || 0
+      const { loadFxRates } = await import('../fx-config.js')
+      fxUsdHuf = loadFxRates().rates.USD ?? 0
     } catch { fxUsdHuf = 0 }
+  }
+  // Card 23912ca4: fail fast with an explicit blocker instead of silently
+  // storing a fabricated 0 HUF line (the mapper also guards this on its own,
+  // but the point of failing HERE is the actionable error message).
+  if (!(fxUsdHuf > 0)) {
+    return {
+      ok: false, provider: 'openai', status: 'error', imported_count: 0,
+      error: 'USD->HUF rate is not configured (store/costops-fx.json) -- costs were NOT converted or stored; set the rate and re-run',
+    }
   }
   const httpGetJson = deps.httpGetJson || (async (url: string, headers: Record<string, string>) => {
     const r = await fetch(url, { method: 'GET', headers })
@@ -132,7 +148,7 @@ export async function syncOpenAiCollector(
     return r.json()
   })
   const w = monthWindow(now)
-  const opts = { periodStart: w.start, periodEnd: w.end, secret: apiKey, fxUsdHuf: fxUsdHuf || 0, idSalt: 'openai-salt', httpGetJson, now }
+  const opts = { periodStart: w.start, periodEnd: w.end, secret: apiKey, fxUsdHuf, idSalt: 'openai-salt', httpGetJson, now }
   const res = await runCollector({ db, collector: openaiCollector, opts, now })
   return {
     ok: res.status === 'ok', provider: 'openai', status: res.status,

@@ -125,11 +125,14 @@ export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
       let fxUsdHuf = 0
       let fxEurHuf = 0
       try {
-        const { loadRenderPricing } = await import('../../costops/collectors/render.js')
-        const p = loadRenderPricing().pricing
-        fxUsdHuf = p.fx_usd_huf || 0
-        fxEurHuf = p.fx_eur_huf || 0
-      } catch { /* fx 0 -> USD/EUR entries flagged */ }
+        // Card 23912ca4: single provider-neutral fx source, not the Render
+        // pricing file -- that file is Render plan-price data, not an fx fact,
+        // and it disappears the moment Render config is cleaned up.
+        const { loadFxRates } = await import('../../costops/fx-config.js')
+        const rates = loadFxRates().rates
+        fxUsdHuf = rates.USD ?? 0
+        fxEurHuf = rates.EUR ?? 0
+      } catch { /* fx unset -> USD/EUR entries correctly flagged unconvertible, never a fabricated 0 */ }
       const { ingestEmailCosts } = await import('../../costops/email-ingest.js')
       const result = ingestEmailCosts(getDb(), entries as import('../../costops/email-ingest.js').EmailCostEntry[], { fxUsdHuf, fxEurHuf, now })
       json(res, { ok: result.errors.length === 0, ...result })
@@ -768,11 +771,12 @@ export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
       const now = Math.floor(Date.now() / 1000)
       let fxUsdHuf = 0, fxEurHuf = 0
       try {
-        const { loadRenderPricing } = await import('../../costops/collectors/render.js')
-        const p = loadRenderPricing().pricing
-        fxUsdHuf = p.fx_usd_huf || 0
-        fxEurHuf = p.fx_eur_huf || 0
-      } catch { /* fx 0 -> non-HUF entries rejected as unconvertible */ }
+        // Card 23912ca4: same single provider-neutral fx source as email-ingest.
+        const { loadFxRates } = await import('../../costops/fx-config.js')
+        const rates = loadFxRates().rates
+        fxUsdHuf = rates.USD ?? 0
+        fxEurHuf = rates.EUR ?? 0
+      } catch { /* fx unset -> non-HUF entries correctly rejected as unconvertible */ }
       const { createManualCost, updateManualCost, deleteManualCost } = await import('../../costops/manual-entry.js')
       const result = method === 'POST'
         ? createManualCost(getDb(), body, { fxUsdHuf, fxEurHuf, now })

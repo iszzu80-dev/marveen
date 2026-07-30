@@ -41,7 +41,7 @@ describe('costops manual cost entry (card a1552362, item 3)', () => {
     const db = getDb()
     createManualCost(db, { source_id: 'figma', name: 'Figma', provider: 'figma', amount: 15, currency: 'USD', month: '2026-07' }, { fxUsdHuf: 360, now: NOW })
     const row = db.prepare(`SELECT fx_source, conversion_method FROM cost_line_items WHERE dedup_key = 'manual|figma|2026-07'`).get() as any
-    expect(row.fx_source).toBe('render_pricing_config')
+    expect(row.fx_source).toBe('manual') // v0.9 (card 23912ca4): rate source moved off the Render pricing file
     expect(row.conversion_method).toBe('service_date_rate')
   })
 

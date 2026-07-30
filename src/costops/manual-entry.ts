@@ -99,9 +99,11 @@ export function createManualCost(
     fx_rate: wasConverted ? appliedFxRate : null,
     fx_date: wasConverted ? opts.now : null,
     // Phase 1 (GAP-09): a manual entry has no invoice date to prefer --
-    // 'service_date_rate' (the entry's own month), same rate source as
-    // every other conversion in this codebase (Render pricing config).
-    fx_source: wasConverted ? 'render_pricing_config' : null,
+    // 'service_date_rate' (the entry's own month).
+    // v0.9 (card 23912ca4): rate now comes from the provider-neutral
+    // store/costops-fx.json (fx-config.ts), an operator-configured value, hence
+    // 'manual' -- was 'render_pricing_config' until the source moved.
+    fx_source: wasConverted ? 'manual' : null,
     conversion_method: wasConverted ? 'service_date_rate' : null,
   })
   return { ok: true }
@@ -139,7 +141,8 @@ export function updateManualCost(
     original_currency: wasConverted ? cur : null,
     fx_rate: wasConverted ? appliedFxRate : null,
     fx_date: wasConverted ? opts.now : null,
-    fx_source: wasConverted ? 'render_pricing_config' : null,
+    // v0.9 (card 23912ca4): see createManualCost's comment above.
+    fx_source: wasConverted ? 'manual' : null,
     conversion_method: wasConverted ? 'service_date_rate' : null,
   })
   return { ok: true }

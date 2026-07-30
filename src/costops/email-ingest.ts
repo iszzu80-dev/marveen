@@ -12,6 +12,7 @@
 import { createHash } from 'node:crypto'
 import type Database from 'better-sqlite3'
 import { checkPeriodWritable } from './period-close.js'
+import { resolveFxRate, roundHuf } from './fx.js'
 
 export interface EmailCostEntry {
   source_id: string          // stable id, e.g. 'anthropic-max' or 'aws'
@@ -42,25 +43,24 @@ function monthWindow(month: string): { start: number; end: number } | null {
  * currency -> flagged (null), not guessed. v0.8 (card 6f4d1332): EUR previously fell through to
  * "unconvertible" even though EUR-denominated email invoices are a real, expected case (the
  * requirements doc's own worked example is an EUR invoice) -- added the EUR branch alongside USD.
+ *
+ * v0.9 (card 23912ca4): delegates to fx.ts's resolveFxRate() instead of two hand-copied
+ * per-currency `if` branches. The hand-copied version is WHY this bug existed: the EUR branch
+ * carried a `> 0` guard and a comment explaining why a zero rate must never convert; the USD
+ * branch was added first, never got the same guard, and nothing forced the two to be kept in
+ * sync. Building both from ONE data-driven rate table removes the drift, not just this one
+ * instance of it -- a THIRD currency added here now gets the guard automatically instead of by
+ * whoever remembers to copy it.
  */
 export function toHuf(amount: number, currency: string, fxUsdHuf: number, fxEurHuf = 0): number | null {
-  const cur = (currency || 'HUF').toUpperCase()
-  if (cur === 'HUF') return Math.round(amount * 100) / 100
-  if (cur === 'USD') return Math.round(amount * fxUsdHuf * 100) / 100
-  // A zero/unconfigured fxEurHuf is not a valid rate -- converting against it would fabricate a
-  // fake 0 HUF amount (explicitly forbidden). Falls through to "unconvertible", same as any
-  // other unconfigured currency, until fx_eur_huf is set in the Render pricing config.
-  if (cur === 'EUR' && fxEurHuf > 0) return Math.round(amount * fxEurHuf * 100) / 100
-  // Other currencies not converted here (would need their own fx) -- caller should pre-convert.
-  return null
+  const rate = resolveFxRate(currency || 'HUF', { USD: fxUsdHuf, EUR: fxEurHuf })
+  if (rate == null) return null
+  return roundHuf(amount * rate)
 }
 
 /** The fx rate actually used for a given currency, for retaining alongside the converted amount. */
 export function fxRateFor(currency: string, fxUsdHuf: number, fxEurHuf: number): number | null {
-  const cur = (currency || 'HUF').toUpperCase()
-  if (cur === 'USD') return fxUsdHuf
-  if (cur === 'EUR' && fxEurHuf > 0) return fxEurHuf
-  return null
+  return resolveFxRate(currency || 'HUF', { USD: fxUsdHuf, EUR: fxEurHuf })
 }
 
 /**
@@ -136,9 +136,11 @@ export function ingestEmailCosts(
         // alongside the pre-existing fx_rate/fx_date columns above. This is
         // an email-derived invoice -- 'invoice_date_rate' reflects that the
         // rate is tied to the invoice event, not a bare usage period.
-        // fxUsdHuf/fxEurHuf always come from the Render pricing config (the
-        // only rate source wired in today, see collectors/render.ts).
-        fx_source: wasConverted ? 'render_pricing_config' : null,
+        // v0.9 (card 23912ca4): fxUsdHuf/fxEurHuf come from the provider-neutral
+        // store/costops-fx.json (see fx-config.ts) -- an operator-configured
+        // rate, not an automated feed, hence 'manual'. Was 'render_pricing_config'
+        // until the rate source moved out of the Render pricing file.
+        fx_source: wasConverted ? 'manual' : null,
         conversion_method: wasConverted ? 'invoice_date_rate' : null,
       })
       out.ingested++
