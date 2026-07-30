@@ -1,5 +1,9 @@
 # Card 585c056c Part 2 — Producer Report (devops)
 
+**Addendum (same day, after marveen's gate).** Two rounds of marveen re-checking the delivered
+guard found real gaps in the guard itself, not the value fix. Both addressed below, each proven
+against real production data with marveen's own exact mutation. See "Gate addendum" near the end.
+
 Follow-up to the structural fix (part 1, merged `develop f424ee4`). Marveen re-measured live data
 AFTER arming the structural fix and found the registry it now trusts had a stale value: sonnet-5 was
 assumed 200k, real measured peak is 935,023 (4.7x). Worse: because part 1 correctly replaced the
@@ -67,6 +71,47 @@ guard means something beyond today's one historical number.
   this branch's base (`f424ee4`, my changes moved aside): **286 files / 3920 passed / 1 skipped.**
   Delta: **+0 files, +5 tests, 0 regressions** (the 5 new `findContextWindowViolations` tests; no new
   test FILE since they were added into the existing `context-guard.test.ts`).
+
+## Gate addendum 1 — "freshness" framing corrected to "no stored baseline" (commit `7822f8c`)
+
+Marveen's re-check (via deliverylead) found the sonnet-5 claim was not a true number that went
+stale — the comment (authored 2026-07-29 08:25, citing a 14-day window) was already disproven by
+62,861 turns inside that exact window at the time it was written. Their stated concern: a
+"freshness" check keyed to a remembered baseline would have recorded the false claim as its own
+baseline and never caught it.
+
+Checked before redesigning: `findContextWindowViolations`/`verify-context-window-assumptions.ts`
+already has no stored baseline — the query has no date filter, nothing cached between runs, full
+corpus every call. No functional change needed. Reworded the doc comments (the previous "freshness"
+framing invited exactly this reading) and added a test proving the verdict depends only on
+peak-vs-current-assumed-limit, never on turn count or "since when" (1 turn of disproving evidence
+flags identically to 250,000 turns of it).
+
+## Gate addendum 2 — the verifier was blind to its own origin case (commit `9d53af8`)
+
+Marveen's own mutation (removing sonnet-5 from the family lists, making it exactly as unrecognized
+as opus-5 was when it killed deliverylead) left the verifier GREEN — "SKIP, not this check's job" —
+while a model with 74,898 real turns sat entirely outside the registry. `findContextWindowViolations`
+only ever audits models `isRecognizedContextModel` already lets through, so it structurally could not
+see this class.
+
+Added `findUnrecognizedModelsInUse` (new, pure, exported): flags an unrecognized model with real
+fleet usage, exempting only the `<synthetic>` aggregation artifact (`peak <= 0`, live-verified: 555
+rows, 0 peak — not real usage regardless of row count) and negligible one-off probes (`turnCount`
+below `MIN_TURNS_FOR_REQUIRED_RECOGNITION = 10`, set above haiku's 2 genuine probe turns and below
+`deepseek-v4-flash`'s 89 genuine in-fleet-use turns, the smallest real figure measured on this host).
+`verify-context-window-assumptions.ts` now exits 1 and prints a loud `REGISTRY-GAP` line for either
+failure mode.
+
+**Proven against real production data with marveen's own exact mutation**: removed sonnet-5 from
+`ONE_MILLION_FAMILIES`, ran the script against the live `store/claudeclaw.db` — printed
+`REGISTRY-GAP: claude-sonnet-5 ... peak 935,023 across 74,898 turns`, exit 1. Reverted (`diff`
+clean), reran, exit 0. Plus 5 synthetic-fixture tests (the mutation scenario, the `<synthetic>`
+exemption, the negligible-turn-count exemption, the at-threshold boundary, and confirming an
+already-recognized model is left to the other function).
+
+Final verification after both addenda: tsc 0, build 0, full suite **286 files / 3931 passed / 1
+skipped**, 0 regressions across all three commits on this branch.
 
 ## What I did not do
 
