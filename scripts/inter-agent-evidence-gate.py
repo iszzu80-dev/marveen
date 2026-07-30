@@ -195,25 +195,30 @@ _NO_PRECEDES_RE = re.compile(r'\bno\s*$', re.IGNORECASE)
 # own. This needs a different signal (e.g. NLP) to resolve safely and is
 # left for a future card if it proves to matter in practice.
 #
-# REJECTED, do not re-attempt without a real counter-example: colon and a
-# spaced dash/em-dash were added and then REVERTED (2026-07-30, same day).
+# DASH REJECTED, do not re-attempt without a real counter-example: a spaced
+# dash/em-dash boundary was added and then REVERTED (2026-07-30, same day).
 # The trigger was card e0742bbd's own probe comment ("Deliverable written to
 # X -- a path ... that genuinely does not exist."), where the em-dash keeps
 # X's absence phrase out of X's clause once split. But that probe sentence is
 # self-contradictory prose no real producer writes (claiming delivery of X
 # and X's absence in one breath) -- an artifact of the probe's own
 # explanation being inside its own test input, not a genuine miss. Marveen
-# measured the actual cost of the dash/colon widening against ordinary
-# prose and found a REAL false positive on the dominant construction this
-# fleet's own comments use constantly: "The overlay file -- <path> -- does
-# not exist yet." Splitting on both em-dashes isolates <path> into its own
-# clause with NO absence wording nearby, flagging a deliverable that a human
-# reading the sentence would correctly read as intentionally, legitimately
-# absent. That is a real, common-case regression for a defect that was not
-# real. If a dash/colon case ever needs revisiting, it needs a genuine
-# example of a MISSED deliverable in real usage, not a probe's self-
-# referential wording.
-_CLAUSE_BOUNDARY_RE = re.compile(r'[.,;]\s|\n')
+# measured the actual cost of the dash widening against ordinary prose (a
+# matrix of 6 cases, comma-conjunction variants + parenthetical-suppression
+# variants, cross-checked against a clean fixture after catching their own
+# fixture contamination -- see the git log) and found a REAL false positive
+# on the dominant construction this fleet's own comments use constantly:
+# "The overlay file -- <path> -- does not exist yet." Splitting on both
+# em-dashes isolates <path> into its own clause with NO absence wording
+# nearby, flagging a deliverable that a human reading the sentence would
+# correctly read as intentionally, legitimately absent. That is a real,
+# common-case regression for a defect that was not real. COLON STAYS,
+# measured safe in the same comparison (a colon is used far more often as a
+# single directional label -- "Status: X" -- than as a paired bracket the
+# way a dash commonly is, so it was not the source of the false positive).
+# If a dash case ever needs revisiting, it needs a genuine example of a
+# MISSED deliverable in real usage, not a probe's self-referential wording.
+_CLAUSE_BOUNDARY_RE = re.compile(r'[.,;:]\s|\n')
 
 
 def load_token():

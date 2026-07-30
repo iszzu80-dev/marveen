@@ -215,6 +215,37 @@ class TestCommaConjunctionClauseBoundary(unittest.TestCase):
         self.assertIn(FAKE_ABSENT_TRACKED, asserted)
         self.assertNotIn(FAKE_MISSING, asserted)
 
+    def test_3_colon_boundary(self):
+        # Restored (colon stays; only dash was reverted): marveen's own
+        # comparison matrix measured colon safe -- it is used far more often
+        # as a single directional label ("Status: X") than as a paired
+        # bracket the way a dash commonly is, which is what caused the
+        # dash false positive.
+        content = f"DONE: {FAKE_ABSENT_TRACKED} is absent: I wrote {FAKE_MISSING} with the fix."
+        asserted = eg.extract_absence_asserted_paths(content)
+        self.assertIn(FAKE_ABSENT_TRACKED, asserted)
+        self.assertNotIn(FAKE_MISSING, asserted)
+
+    def test_3b_known_gap_colon_bracketed_parenthetical_is_a_false_positive(self):
+        # Documented, NOT fixed -- structurally the SAME risk as the reverted
+        # em-dash case, just with colon as the bracket: "The overlay file:
+        # <path>: does not exist yet." splits into 3 clauses at BOTH colons,
+        # so <path>'s own clause loses "does not exist" and gets WRONGLY
+        # FLAGGED, even though a human reading the sentence agrees it is a
+        # legitimate absence claim (same read as marveen's em-dash example).
+        # Accepted as a known, low-probability residual rather than
+        # reverting colon too -- double-colon-as-a-paired-bracket is a much
+        # rarer English construction than a double-dash/em-dash aside (colon
+        # is normally used ONCE, to label: "Status: X", not paired to
+        # bracket a middle clause the way a dash commonly is). Flagged to
+        # marveen explicitly rather than silently accepted; characterizes
+        # CURRENT (imperfect) behavior so a future change to it is a
+        # deliberate decision, not a silent regression either direction.
+        content = f"DONE: The overlay file: {FAKE_ABSENT_TRACKED}: does not exist yet."
+        row = (26, "marveen", "buildfejleszto", content, "pending", 0)
+        result = eg.check_message(None, row, token=None, dry_run=True)
+        self.assertEqual(result["verdict"], "MISSING")  # known false positive, see comment above
+
     def test_5_newline_boundary(self):
         content = f"DONE:\n{FAKE_ABSENT_TRACKED} is absent\nI wrote {FAKE_MISSING} with the fix."
         asserted = eg.extract_absence_asserted_paths(content)
