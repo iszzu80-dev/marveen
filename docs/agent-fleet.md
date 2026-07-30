@@ -250,10 +250,16 @@ mode 600); the server sources only reference those field names. The blanket igno
 defense-in-depth: it makes it impossible to ever commit a token pasted into a server file.
 
 The cost of that is real: a fix to an MCP server is otherwise lost on reinstall, with no diff
-history. `scripts/sync-mcp-servers.sh` closes that without tracking anything, mirroring
-`scripts/sync-scheduled-scripts.sh` (card `d3f9fd90`): it pins the sources into the gitignored
-`releases/mcp-servers-<stamp>/` tree with a `release.json` recording each file's sha256, and
-symlinks `releases/mcp-servers-current`.
+history. `scripts/sync-mcp-servers.sh` closes that without tracking anything: it pins the sources into
+`$HOME/.marveen-mcp-pin/mcp-servers-<stamp>/` (override with `MARVEEN_MCP_PIN_ROOT`) with a
+`release.json` recording each file's sha256, and symlinks `.../mcp-servers-current`.
+
+**The pin lives OUTSIDE the repo on purpose, and the first version got this wrong.** It originally
+pinned into `releases/`, which is also gitignored -- so a fresh clone had neither the servers nor
+the pin, and `--restore` reported "no current release" and restored nothing. A durability
+mechanism that could not survive the event it existed for. Caught by simulating an actual reinstall
+rather than reasoning about one. **Limit, stated rather than implied: `$HOME` survives a repo
+re-clone, which is the real reinstall case here; it does NOT survive a new machine.**
 
     scripts/sync-mcp-servers.sh              # pin the current sources as a new release
     scripts/sync-mcp-servers.sh --status     # hashes + DRIFT vs the working tree
