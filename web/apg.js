@@ -28,6 +28,7 @@ window.Apg = window.Apg || {}
   let cardDetailRequestSequence = 0
   let overviewRequestSequence = 0
   let activityRequestSequence = 0
+  let approvalsRequestSequence = 0
 
   function html(value) {
     return escapeHtml(String(value ?? ''))
@@ -614,6 +615,28 @@ window.Apg = window.Apg || {}
   Apg.onApprovalsRendered = async function onApprovalsRendered() {
     const container = document.getElementById('apgApprovalsSection')
     if (!container) return
+    const requestSequence = ++approvalsRequestSequence
+
+    // Backward compat (spec 22): APG_MODE=off must leave the DOM as if this
+    // module were absent -- without this check, an empty "APG döntések"
+    // section would still render (and be un-hidden) even with APG fully off.
+    let mode
+    try {
+      const summary = await fetchJson('/api/apg/summary')
+      if (requestSequence !== approvalsRequestSequence) return
+      mode = summary.mode
+    } catch {
+      if (requestSequence !== approvalsRequestSequence) return
+      container.innerHTML = ''
+      container.hidden = true
+      return
+    }
+    if (mode === 'off') {
+      container.innerHTML = ''
+      container.hidden = true
+      return
+    }
+
     const pending = approvalsData().filter(
       (approval) => approval.category === 'apg_decision' && approval.status === 'pending'
     )
@@ -661,19 +684,18 @@ window.Apg = window.Apg || {}
     const container = document.getElementById('apgActivitySection')
     if (!container) return
     const requestSequence = ++activityRequestSequence
-    container.hidden = false
-    container.innerHTML = `<p class="apg-loading">${translated('apg.common.loading')}</p>`
+    // Stay hidden while we don't yet know the mode -- avoids a visible
+    // loading-state flash on every activity refresh when APG is off (spec
+    // 22: off must leave the DOM effectively unchanged, not intrusive).
     try {
       const summary = await fetchJson('/api/apg/summary')
       if (requestSequence !== activityRequestSequence) return
       if (summary.mode === 'off' || summary.enabled === false) {
-        container.innerHTML = `
-          <details class="apg-activity-block">
-            <summary>${translated('apg.activity.title')}</summary>
-            <p class="apg-empty">${translated('apg.activity.off')}</p>
-          </details>`
+        container.innerHTML = ''
+        container.hidden = true
         return
       }
+      container.hidden = false
       if (summary.projection_error) {
         container.innerHTML = `
           <details class="apg-activity-block" open>
