@@ -188,3 +188,32 @@ export function latestRateLimitSnapshot(
       `).get(provider, authProfile)
   return (row as RateLimitSnapshotRow | undefined) ?? null
 }
+
+export interface BalanceSnapshotRow {
+  provider: string
+  currency: string
+  balance: number
+  captured_at: number
+}
+
+/**
+ * The newest prepaid-balance snapshot for a provider, or null. Never a
+ * synthesised default -- card 6976aaa2 (capacity-routing off a prepaid
+ * balance): an absent/unread balance must resolve to 'unknown' capacity,
+ * never a fabricated 'available'. Written by
+ * costops/collectors/deepseek.ts; this is the single reader, mirroring
+ * latestRateLimitSnapshot's role for provider_ratelimit_snapshots so a
+ * second inline `SELECT ... provider_balance_snapshots` copy does not
+ * accumulate here the way it already has in limits.ts/warnings.ts/
+ * forecast-capture.ts (pre-existing, out of this card's scope to refactor).
+ */
+export function latestBalanceSnapshot(db: Database.Database, provider: string): BalanceSnapshotRow | null {
+  const row = db.prepare(`
+    SELECT provider, currency, balance, captured_at
+    FROM provider_balance_snapshots
+    WHERE provider = ?
+    ORDER BY captured_at DESC
+    LIMIT 1
+  `).get(provider) as BalanceSnapshotRow | undefined
+  return row ?? null
+}

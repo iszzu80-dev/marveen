@@ -58,6 +58,7 @@ import { deriveProvider } from '../costops/pricing.js'
 import { loadSubscriptionsConfig } from '../costops/subscriptions.js'
 import { deriveLifecycle, type SubscriptionLifecycle } from '../costops/subscriptions.js'
 import { usageFigure, freshnessOf, CAPACITY_STALE_AFTER_SECONDS } from '../costops/capacity.js'
+import { latestBalanceSnapshot } from '../costops/capacity-snapshots.js'
 import { insertRoutingEvent, resolveOutcome } from '../costops/dispatch.js'
 import { detectsUsageLimit } from '../model-fallback.js'
 import {
@@ -68,6 +69,7 @@ import {
 } from './capacity-routing-store.js'
 import {
   deriveCapacityState,
+  deriveCapacityStateFromBalance,
   resolveRuntimeRouting,
   shouldClimbBackToPrimary,
   classifyError,
@@ -123,6 +125,34 @@ export function findSubscriptionFor(
   return wide ?? null
 }
 
+// Card 6976aaa2 (Istvan GO 2026-07-30). DeepSeek is a PREPAID account, not a
+// subscription plan -- there is no subscriptions-config entry to find and
+// none should be invented (that would fabricate a plan window DeepSeek does
+// not have). Owner rule, verbatim: fall back to DeepSeek IFF its balance is
+// above a small safety floor. $1.00 chosen as a conservative, easily-adjusted
+// devops decision (per the card: "balance->threshold = owner/devops
+// decision") -- current live balance is ~$8.74 (2026-07-30), so this is not
+// tuned to today's number, it is "stop routing well before the account can
+// hit exactly zero mid-request", the same spirit as the accounting-overshoot
+// margins elsewhere in this program. Not a per-agent/per-request budget --
+// a single account-wide floor, matching the single account-wide balance this
+// reads from.
+export const DEEPSEEK_BALANCE_FLOOR_USD = 1.0
+
+function capacityStateForDeepSeekBalance(
+  db: Database.Database,
+  now: number,
+  activeBlockingSignal: boolean,
+): CapacityState {
+  if (activeBlockingSignal) return 'blocked'
+  const snap = latestBalanceSnapshot(db, 'deepseek')
+  const fresh = freshnessOf(snap?.captured_at ?? null, now)
+  return deriveCapacityStateFromBalance(
+    { balanceUsd: snap?.balance ?? null, ageSeconds: fresh.age_seconds, staleAfterSeconds: CAPACITY_STALE_AFTER_SECONDS },
+    DEEPSEEK_BALANCE_FLOOR_USD,
+  )
+}
+
 export function capacityStateFor(
   db: Database.Database,
   provider: string,
@@ -130,6 +160,13 @@ export function capacityStateFor(
   now: number,
   activeBlockingSignal: boolean,
 ): CapacityState {
+  // DeepSeek: prepaid balance, not a subscription window -- see
+  // capacityStateForDeepSeekBalance's header comment. Checked before the
+  // subscriptions-config path below so a stray deepseek subscriptions.json
+  // entry (there should never be one) cannot silently take over.
+  if (provider === 'deepseek') {
+    return capacityStateForDeepSeekBalance(db, now, activeBlockingSignal)
+  }
   const { config } = loadSubscriptionsConfig()
   const lifecycle = deriveLifecycle(config, now)
   const sub = findSubscriptionFor(lifecycle, provider, authProfile)

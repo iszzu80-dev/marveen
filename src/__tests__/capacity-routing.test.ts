@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   deriveCapacityState,
+  deriveCapacityStateFromBalance,
   isRoutable,
   classifyError,
   isFallbackEligible,
@@ -13,6 +14,7 @@ import {
   MAX_FALLBACK_CANDIDATES,
   MAX_AUTO_FALLBACKS_PER_PACKAGE,
   type CapacityInputs,
+  type BalanceCapacityInputs,
   type FallbackCandidate,
 } from '../capacity-routing.js'
 
@@ -91,6 +93,54 @@ describe('isRoutable', () => {
     expect(isRoutable('limited')).toBe(false)
     expect(isRoutable('blocked')).toBe(false)
     expect(isRoutable('unknown')).toBe(false)
+  })
+})
+
+describe('deriveCapacityStateFromBalance (card 6976aaa2: DeepSeek prepaid-balance capacity)', () => {
+  const FLOOR = 1.0
+
+  function balanceInputs(overrides: Partial<BalanceCapacityInputs> = {}): BalanceCapacityInputs {
+    return { balanceUsd: 8.74, ageSeconds: 60, staleAfterSeconds: STALE_AFTER, ...overrides }
+  }
+
+  it('GUARD TEST 1: balance above the floor -> available', () => {
+    expect(deriveCapacityStateFromBalance(balanceInputs({ balanceUsd: 8.74 }), FLOOR)).toBe('available')
+    // Just above the floor still counts.
+    expect(deriveCapacityStateFromBalance(balanceInputs({ balanceUsd: 1.01 }), FLOOR)).toBe('available')
+  })
+
+  it('GUARD TEST 2: balance at or below the floor -> blocked (not routable)', () => {
+    expect(deriveCapacityStateFromBalance(balanceInputs({ balanceUsd: 1.0 }), FLOOR)).toBe('blocked')
+    expect(deriveCapacityStateFromBalance(balanceInputs({ balanceUsd: 0.5 }), FLOOR)).toBe('blocked')
+    expect(deriveCapacityStateFromBalance(balanceInputs({ balanceUsd: 0 }), FLOOR)).toBe('blocked')
+    expect(deriveCapacityStateFromBalance(balanceInputs({ balanceUsd: -3 }), FLOOR)).toBe('blocked')
+    expect(isRoutable('blocked')).toBe(false)
+  })
+
+  it('GUARD TEST 3: no snapshot at all -> unknown, never a fabricated available', () => {
+    expect(deriveCapacityStateFromBalance(balanceInputs({ balanceUsd: null, ageSeconds: null }), FLOOR)).toBe('unknown')
+  })
+
+  it('GUARD TEST 3 (stale variant): a snapshot older than staleAfterSeconds -> unknown, NOT degraded', () => {
+    // Deliberately stricter than deriveCapacityState's window-staleness
+    // handling (which degrades to 'degraded', still routable) -- a dollar
+    // balance can be spent to zero by anything between snapshots, so an old
+    // reading is not "close enough".
+    const state = deriveCapacityStateFromBalance(balanceInputs({ balanceUsd: 8.74, ageSeconds: STALE_AFTER + 1 }), FLOOR)
+    expect(state).toBe('unknown')
+    expect(state).not.toBe('degraded')
+    expect(state).not.toBe('available')
+  })
+
+  it('an active blocking signal is not this function\'s concern -- that is capacityStateForDeepSeekBalance\'s short-circuit', () => {
+    // deriveCapacityStateFromBalance has no activeBlockingSignal field by
+    // design (a pane-detected limit banner is a Claude-plan concept, not a
+    // prepaid-balance one) -- the runner checks it before ever calling this.
+    expect(deriveCapacityStateFromBalance(balanceInputs({ balanceUsd: 8.74 }), FLOOR)).toBe('available')
+  })
+
+  it('never fabricates available: a positive but unreadable/absent balance is still unknown, not assumed healthy', () => {
+    expect(deriveCapacityStateFromBalance({ balanceUsd: null, ageSeconds: 5, staleAfterSeconds: STALE_AFTER }, FLOOR)).toBe('unknown')
   })
 })
 

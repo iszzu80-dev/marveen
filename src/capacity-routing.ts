@@ -83,6 +83,49 @@ export function isRoutable(state: CapacityState): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Prepaid-balance capacity (card 6976aaa2: DeepSeek fallback availability)
+// ---------------------------------------------------------------------------
+
+export interface BalanceCapacityInputs {
+  /** USD balance, or null when there is no reading at all. */
+  balanceUsd: number | null
+  /** Age in seconds of the underlying observation; null when there is none. */
+  ageSeconds: number | null
+  staleAfterSeconds: number
+}
+
+/**
+ * Owner rule, verbatim (card 6976aaa2, Istvan GO 2026-07-30): an agent may
+ * fall back to a PREPAID provider (e.g. DeepSeek) IFF it has prepaid balance
+ * above a small named floor -- balance present -> available, at/below floor
+ * -> not routable. This is a DIFFERENT shape than deriveCapacityState: a
+ * dollar balance against a safety floor is not a fraction of a plan window,
+ * so it is not run through that function (a balance is not "usage" and a
+ * floor is not a "threshold of a window").
+ *
+ * Deliberately stricter than deriveCapacityState's staleness handling: a
+ * stale WINDOW reading degrades to 'degraded' (still routable) because a
+ * token count within a session is slow-moving and the overshoot tolerance
+ * already covers normal drift. A stale BALANCE reading is 'unknown' outright
+ * (per this card's own guard tests) -- money can be spent to zero by
+ * anything at any time between snapshots, so an old balance is not "close
+ * enough", it is simply not known to be true right now.
+ *
+ * No usable reading (null balance, or stale beyond staleAfterSeconds) ->
+ * 'unknown'. Never fabricates 'available' from an absent or untrustworthy
+ * observation -- the same fail-safe contract as deriveCapacityState.
+ */
+export function deriveCapacityStateFromBalance(
+  inputs: BalanceCapacityInputs,
+  floorUsd: number,
+): CapacityState {
+  if (inputs.balanceUsd === null) return 'unknown'
+  const stale = inputs.ageSeconds === null || inputs.ageSeconds > inputs.staleAfterSeconds
+  if (stale) return 'unknown'
+  return inputs.balanceUsd > floorUsd ? 'available' : 'blocked'
+}
+
+// ---------------------------------------------------------------------------
 // Error classification
 // ---------------------------------------------------------------------------
 
