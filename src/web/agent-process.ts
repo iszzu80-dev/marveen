@@ -20,6 +20,7 @@ import {
   type FirstRunGateKind,
 } from '../pane-state.js'
 import { agentDir, listAgentNames, readAgentModel, readAgentClaudeConfigDir, readAgentClaudePlan, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName, readAgentRemoteConfig, readAgentRemoteHost, readAgentMemoryIsolation } from './agent-config.js'
+import { resolveRuntimeModel } from './capacity-routing-store.js'
 import { resolveAgentConfigDir } from './claude-plans.js'
 import { provisionMemoryBoundaryDir } from './memory-boundary.js'
 import { renameSharedCredentialsIfSafe } from './claude-credentials-guard.js'
@@ -818,7 +819,11 @@ function startRemoteAgentProcess(
     }
   }
 
-  const model = readAgentModel(name)
+  // Phase 3 (card 59b383a9): resolveRuntimeModel is the choke point. It reads
+  // the runtime overlay (if any, and only if still trust-enabled), else falls
+  // straight through to the configured model -- readAgentModel/agent config
+  // itself is never touched here.
+  const model = resolveRuntimeModel(name, readAgentModel(name))
   const cmd = buildRemoteLaunchCommand({ workdir, model, continue: hasPriorSession })
 
   try {
@@ -944,7 +949,9 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
 
     // `openrouter-auto:<tier>` resolves to the tier's current recommended model
     // (weekly-refreshed); a concrete OpenRouter id (contains '/') passes through.
-    const model = resolveOpenRouterModel(readAgentModel(name))
+    // Phase 3 (card 59b383a9): resolveRuntimeModel is the choke point (see the
+    // remote-launch call site above for the full note).
+    const model = resolveOpenRouterModel(resolveRuntimeModel(name, readAgentModel(name)))
     const authMode = readAgentAuthMode(name)
     const isClaude = model.startsWith('claude-')
     const isDeepseek = model.startsWith('deepseek-')

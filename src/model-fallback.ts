@@ -9,9 +9,20 @@
 // After a revert window with no limit in sight, it climbs back to the primary.
 //
 // This module is dependency-free so every decision is unit-testable without a
-// clock, tmux, or the filesystem. The I/O (capture-pane, model write, restart)
-// lives in src/web/model-fallback-runner.ts; the config store lives in
+// clock, tmux, or the filesystem. The config store lives in
 // src/web/model-fallback-store.ts.
+//
+// RETIRED AT THE RUNNER LEVEL (Phase 3, card 59b383a9, 2026-07-30): the I/O
+// binding that used to live in src/web/model-fallback-runner.ts wrote the
+// downgrade/revert straight into agent config (writeModelFor/writeMainModel)
+// -- the exact "configuredPrimary is never overwritten" violation Phase 3
+// forbids. That runner is deleted; src/web/capacity-routing-runner.ts is its
+// capacity-aware, config-write-free replacement and REUSES detectsUsageLimit
+// below as one input signal. decideModelAction/nextFallbackModel/the chain
+// constants stay here, still tested (model-fallback.test.ts), because nothing
+// currently calls them at runtime -- deleting tested pure logic that a future
+// single-ladder use could still call is not required by this phase, only the
+// config-write action was.
 
 // Resolved full model IDs, mirroring MODEL_ALIASES in src/web/agent-config.ts.
 // chain[0] is the primary (what we revert UP to); each subsequent entry is the

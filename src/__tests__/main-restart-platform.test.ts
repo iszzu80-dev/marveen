@@ -35,10 +35,17 @@ const SRC = join(import.meta.dirname, '..')
 
 // Every module that can restart the main channels session on a schedule or in
 // response to a fault. Add new ones here.
+// web/model-fallback-runner.ts was one of the three original offenders (see
+// the incident note above) but was DELETED under Phase 3 (card 59b383a9,
+// 2026-07-30): its main-restart action was reachable only through the same
+// config-write (writeMainModel) that phase forbids outright, so removing the
+// write retired the whole runner rather than leaving a config-write-free
+// husk. capacity-routing-runner.ts is its sub-agent-only replacement and does
+// not restart the main session at all (see that file's header for the
+// documented scope gap) -- so it does not belong in this list.
 const RUNNERS = [
   'web/context-guard-runner.ts',
   'web/auto-restart-runner.ts',
-  'web/model-fallback-runner.ts',
 ] as const
 
 function read(rel: string): string {

@@ -26,7 +26,7 @@ import { startInboxNudgeWatcher } from './web/inbox-nudge-watcher.js'
 import { startStuckToolCallWatcher } from './web/stuck-tool-call-watcher.js'
 import { startReauthHealer } from './web/reauth-healer.js'
 import { startAutoRestartRunner } from './web/auto-restart-runner.js'
-import { startModelFallbackRunner } from './web/model-fallback-runner.js'
+import { startCapacityRoutingRunner } from './web/capacity-routing-runner.js'
 import { startContextGuardRunner } from './web/context-guard-runner.js'
 import { collectTokenUsage } from './web/token-usage.js'
 import { startCostOpsBackgroundTasks } from './costops/reliability-observation.js'  // LOCAL-FORK: costops seam (keep on rebase)
@@ -375,8 +375,12 @@ export function startWebServer(port = 3420): http.Server {
   const autoRestartInterval = webOnly ? undefined : startAutoRestartRunner()
   if (!webOnly) logger.info('Auto-restart runner started (60s poll, 40s offset)')
 
-  const modelFallbackInterval = webOnly ? undefined : startModelFallbackRunner()
-  if (!webOnly) logger.info('Model-fallback runner started (60s poll, 50s offset)')
+  // Phase 3 (card 59b383a9) supersedes the old model-fallback-on-limit runner:
+  // that runner's action was a config write (writeModelFor/writeMainModel),
+  // exactly the violation this phase forbids. capacity-routing-runner applies
+  // a runtime overlay instead -- see src/web/capacity-routing-runner.ts.
+  const capacityRoutingInterval = webOnly ? undefined : startCapacityRoutingRunner()
+  if (!webOnly) logger.info('Capacity-routing runner started (60s poll, 55s offset)')
 
   const contextGuardInterval = webOnly ? undefined : startContextGuardRunner()
   if (!webOnly) logger.info('Context-guard runner started (5min poll, 4.5min initial delay)')
@@ -533,7 +537,7 @@ export function startWebServer(port = 3420): http.Server {
     if (inboxNudgeInterval) clearInterval(inboxNudgeInterval)
     if (reauthHealerInterval) clearInterval(reauthHealerInterval)
     clearInterval(autoRestartInterval)
-    clearInterval(modelFallbackInterval)
+    clearInterval(capacityRoutingInterval)
     clearInterval(contextGuardInterval)
     clearInterval(approvalTimeoutInterval)
     clearInterval(authSessionSweepInterval)
