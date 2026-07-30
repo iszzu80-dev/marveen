@@ -38,10 +38,8 @@ export function mapOpenAiCosts(
   const page = (raw && typeof raw === 'object') ? raw as OpenAiCostsPage : {}
   const buckets = Array.isArray(page.data) ? page.data : []
   let usdTotal = 0
-  let latestEnd = 0
   let any = false
   for (const b of buckets) {
-    if (typeof b.end_time === 'number' && b.end_time > latestEnd) latestEnd = b.end_time
     for (const r of (Array.isArray(b.results) ? b.results : [])) {
       const rawAmt = r.amount?.value
       const amt = typeof rawAmt === 'number' ? rawAmt : parseFloat(String(rawAmt ?? ''))
@@ -66,7 +64,7 @@ export function mapOpenAiCosts(
     usage_type: 'api_usage',
     quantity: null,
     unit: null,
-    data_freshness_at: latestEnd || opts.now,
+    data_freshness_at: opts.now,
     raw_ref_hash: hashRef(opts.idSalt, `openai-costs|${monthKey}`),
     dedup_key: `provider|openai|${OPENAI_API_SOURCE}|${monthKey}|provider_api`,
   }]
@@ -86,7 +84,7 @@ export const openaiCollector: ProviderCollector = {
     const raw = await opts.httpGetJson(url, headers)
     const lines = mapOpenAiCosts(raw, {
       periodStart: opts.periodStart, periodEnd: opts.periodEnd,
-      fxUsdHuf: opts.fxUsdHuf, idSalt: opts.idSalt, now: opts.periodStart,
+      fxUsdHuf: opts.fxUsdHuf, idSalt: opts.idSalt, now: opts.now,
     })
     return { raw, lines }
   },
@@ -134,7 +132,7 @@ export async function syncOpenAiCollector(
     return r.json()
   })
   const w = monthWindow(now)
-  const opts = { periodStart: w.start, periodEnd: w.end, secret: apiKey, fxUsdHuf: fxUsdHuf || 0, idSalt: 'openai-salt', httpGetJson }
+  const opts = { periodStart: w.start, periodEnd: w.end, secret: apiKey, fxUsdHuf: fxUsdHuf || 0, idSalt: 'openai-salt', httpGetJson, now }
   const res = await runCollector({ db, collector: openaiCollector, opts, now })
   return {
     ok: res.status === 'ok', provider: 'openai', status: res.status,

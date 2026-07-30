@@ -24,7 +24,7 @@ const FIXTURE = {
 
 function opts(httpGetJson: HttpGetJson): CollectOpts {
   const w = monthWindow(NOW)
-  return { periodStart: w.start, periodEnd: w.end, secret: SECRET, fxUsdHuf: FX, idSalt: 'salt', httpGetJson }
+  return { periodStart: w.start, periodEnd: w.end, secret: SECRET, fxUsdHuf: FX, idSalt: 'salt', httpGetJson, now: NOW }
 }
 
 describe('describeShape (types only, no values)', () => {
@@ -55,6 +55,10 @@ describe('dryRunCollector (offline, persists NOTHING to cost_line_items)', () =>
     expect(rep.plannedLines[0].amount).toBe(15445.5)
     expect(rep.plannedLines[0].confidence).toBe('provider_api')
     expect(rep.dedupKeys).toEqual(['provider|anthropic|anthropic-api|2026-07|provider_api'])
+    // 320c477a: data_freshness_at is the real collection instant (opts.now =
+    // NOW, 2026-07-15), never the period start (2026-07-01) or the fixture's
+    // ending_at (2026-07-31) -- both of which the collector used to leak through.
+    expect(rep.plannedLines[0].data_freshness_at).toBe(NOW)
     // sanitized response shape present, types only
     expect(rep.responseShape).not.toBeNull()
     expect((rep.responseShape as any).keys.has_more).toBe('boolean')

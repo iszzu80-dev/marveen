@@ -41,6 +41,22 @@ describe('mapOpenAiCosts (pure, offline)', () => {
     expect(mapOpenAiCosts({ object: 'page', data: [] }, { periodStart: START, periodEnd: END, fxUsdHuf: 360, idSalt: 's', now: START })).toHaveLength(0)
     expect(mapOpenAiCosts(null, { periodStart: START, periodEnd: END, fxUsdHuf: 360, idSalt: 's', now: START })).toHaveLength(0)
   })
+
+  // Card 320c477a: data_freshness_at must be the INGEST instant (opts.now), never
+  // a bucket end_time. The live collision this guards against: an openai-api
+  // provider_api row was stamped 2026-08-01 (a bucket end_time) instead of its
+  // real collection time, so it won an equal-tier freshness tiebreak
+  // (ledger.ts) against a real 2026-07-19 invoice that should have stood.
+  it('320c477a: data_freshness_at is opts.now, never a bucket end_time -- even when every bucket ends after now', () => {
+    // Every bucket's end_time is deliberately AFTER `now`, mirroring the live
+    // collision where the API's own period boundary was later than collection time.
+    const now = START + 3600 // 1h into the period, all bucket end_times are later
+    const lines = mapOpenAiCosts(fixturePage([1.5, 2.0, 0.5]), { periodStart: START, periodEnd: END, fxUsdHuf: 360, idSalt: 'salt', now })
+    expect(lines[0].data_freshness_at).toBe(now)
+    // None of the buckets' end_times leaked through as the freshness value.
+    expect(lines[0].data_freshness_at).not.toBe(START + 86400)
+    expect(lines[0].data_freshness_at).not.toBe(START + 3 * 86400)
+  })
 })
 
 describe('openaiCollector + syncOpenAiCollector (offline stub, no live call)', () => {
@@ -51,11 +67,23 @@ describe('openaiCollector + syncOpenAiCollector (offline stub, no live call)', (
     const w = monthWindow(now)
     const opts: CollectOpts = {
       periodStart: w.start, periodEnd: w.end, secret: 'sk-admin-never-logged', fxUsdHuf: 360, idSalt: 'openai-salt',
-      httpGetJson: async () => fixturePage([3.0, 1.0]),
+      httpGetJson: async () => fixturePage([3.0, 1.0]), now,
     }
     const lines = await openaiCollector.collect(opts)
     expect(lines).toHaveLength(1)
     expect(lines[0].amount).toBe(Math.round(4.0 * 360 * 100) / 100)
+  })
+
+  it('320c477a: collectRaw wires opts.now (not opts.periodStart) into data_freshness_at', async () => {
+    const w = monthWindow(START)
+    const distinctNow = w.start + 12 * 86400 // well inside the period, far from periodStart
+    const opts: CollectOpts = {
+      periodStart: w.start, periodEnd: w.end, secret: 'sk-admin-never-logged', fxUsdHuf: 360, idSalt: 'openai-salt',
+      httpGetJson: async () => fixturePage([3.0, 1.0]), now: distinctNow,
+    }
+    const { lines } = await openaiCollector.collectRaw!(opts)
+    expect(lines[0].data_freshness_at).toBe(distinctNow)
+    expect(lines[0].data_freshness_at).not.toBe(w.start)
   })
 
   it('sync imports a provider_api line + import_run using a stubbed key and fetcher (idempotent)', async () => {
