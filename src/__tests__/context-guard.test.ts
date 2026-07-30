@@ -6,6 +6,8 @@ import {
   calibrateLimit,
   CALIBRATION_OVERSHOOT_TOLERANCE,
   findContextWindowViolations,
+  findUnrecognizedModelsInUse,
+  MIN_TURNS_FOR_REQUIRED_RECOGNITION,
   decideGuard,
   DEFAULT_CONTEXT_GUARD,
   INITIAL_GUARD_STATE,
@@ -260,6 +262,50 @@ describe('findContextWindowViolations (card 585c056c part 2: the observation mus
   it('skips a model this registry does not recognize -- not this function\'s job (isRecognizedContextModel\'s)', () => {
     expect(findContextWindowViolations([
       { model: 'some-brand-new-model', peak: 5_000_000, turnCount: 1 },
+    ])).toEqual([])
+  })
+})
+
+describe('findUnrecognizedModelsInUse (card 585c056c gate addition: the check was blind to its own origin case)', () => {
+  it('MUTATION PROOF -- the exact scenario marveen\'s gate found: removing sonnet-5 from the registry must FAIL, not silently skip', () => {
+    // Reproduces marveen's own mutation: contextLimitForModel/
+    // isRecognizedContextModel no longer recognize 'claude-sonnet-5' (as if
+    // it were removed from ONE_MILLION_FAMILIES), while the observation
+    // still carries its real, large usage. findContextWindowViolations alone
+    // would report nothing (that function only audits recognized models --
+    // proven by the empty-array test above with 'some-brand-new-model').
+    // findUnrecognizedModelsInUse is what must catch this.
+    const asIfUnregistered = [{ model: 'claude-nova-9-not-yet-in-any-family-list', peak: 935_023, turnCount: 74_898 }]
+    expect(findContextWindowViolations(asIfUnregistered)).toEqual([]) // confirms the blind spot exists
+    const gaps = findUnrecognizedModelsInUse(asIfUnregistered)
+    expect(gaps).toHaveLength(1)
+    expect(gaps[0]).toMatchObject({ model: 'claude-nova-9-not-yet-in-any-family-list', peak: 935_023, turnCount: 74_898 })
+  })
+
+  it('does NOT flag the <synthetic>-shaped aggregation artifact (peak <= 0 is not real usage, regardless of row count)', () => {
+    // The live artifact this card's audit actually found: peak=0, 555 rows.
+    // Real usage cannot be zero tokens; treat it as a data artifact, not a
+    // registry gap, no matter how many rows it has.
+    expect(findUnrecognizedModelsInUse([
+      { model: '<synthetic>', peak: 0, turnCount: 555 },
+    ])).toEqual([])
+  })
+
+  it('does NOT flag a negligible one-off probe (turnCount below the threshold)', () => {
+    expect(findUnrecognizedModelsInUse([
+      { model: 'someone-testing-a-new-model-once', peak: 900_000, turnCount: MIN_TURNS_FOR_REQUIRED_RECOGNITION - 1 },
+    ])).toEqual([])
+  })
+
+  it('DOES flag a model right at the "real usage" threshold', () => {
+    expect(findUnrecognizedModelsInUse([
+      { model: 'a-new-model-actually-in-use', peak: 50_000, turnCount: MIN_TURNS_FOR_REQUIRED_RECOGNITION },
+    ])).toHaveLength(1)
+  })
+
+  it('does NOT flag a model the registry already recognizes -- that is findContextWindowViolations\'s job', () => {
+    expect(findUnrecognizedModelsInUse([
+      { model: 'claude-sonnet-5', peak: 935_023, turnCount: 243_524 },
     ])).toEqual([])
   })
 })

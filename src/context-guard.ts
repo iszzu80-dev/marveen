@@ -528,3 +528,53 @@ export function findContextWindowViolations(observations: ModelPeakObservation[]
   }
   return violations
 }
+
+/**
+ * A model in REAL daily fleet use that this registry does not recognize at
+ * all -- card 585c056c's gate finding (marveen, 2026-07-30): the check above
+ * only audits models isRecognizedContextModel already lets through, so it
+ * was structurally blind to the exact failure that started this card
+ * (claude-opus-5 ran thousands of turns unrecognized, silently defaulting to
+ * 200k, before anyone noticed). Proven by marveen's own mutation: removing
+ * sonnet-5 from the family lists left the verifier green -- "SKIP, not this
+ * check's job" -- while a model with 74,898 real turns sat outside the
+ * registry.
+ */
+export interface RegistryGap {
+  model: string
+  peak: number
+  turnCount: number
+}
+
+/**
+ * Below this many turns, an unrecognized model is exempt: a one-off probe,
+ * a manual test run, not something with enough real fleet usage to demand
+ * the registry know about it yet. Chosen well above what a stray manual
+ * invocation could plausibly generate (haiku's 2 measured turns, a genuine
+ * one-off probe, must stay exempt) and well below any model actually
+ * running as a fleet agent day to day (deepseek-v4-flash's 89 turns, the
+ * smallest REAL agent-usage figure measured on this host, clears it easily).
+ */
+export const MIN_TURNS_FOR_REQUIRED_RECOGNITION = 10
+
+/**
+ * Which unrecognized-model observations have enough real usage that
+ * silently skipping them would recreate this card's original defect.
+ * Exempt: `peak <= 0` (the `<synthetic>` aggregation artifact and anything
+ * shaped like it -- a model with zero real tokens ever recorded is not real
+ * usage, by construction, regardless of row count) and a turnCount below
+ * MIN_TURNS_FOR_REQUIRED_RECOGNITION (negligible, not "in daily fleet use").
+ * Everything else here is the registry gap findContextWindowViolations
+ * cannot see, because that function only ever audits models the registry
+ * already claims to know.
+ */
+export function findUnrecognizedModelsInUse(observations: ModelPeakObservation[]): RegistryGap[] {
+  const gaps: RegistryGap[] = []
+  for (const obs of observations) {
+    if (isRecognizedContextModel(obs.model)) continue
+    if (obs.peak <= 0) continue
+    if (obs.turnCount < MIN_TURNS_FOR_REQUIRED_RECOGNITION) continue
+    gaps.push({ model: obs.model, peak: obs.peak, turnCount: obs.turnCount })
+  }
+  return gaps
+}
