@@ -178,14 +178,20 @@ combination is corrected the moment it's read, never silently kept).
    acceptance quality + retry trend) — `OptimizationSummary` exposes no acceptance-rate or
    retry-trend field at this aggregation layer today. Not fabricated; named in a code comment at
    the exact point it would have gone.
-6. **No live end-to-end browser check was performed** in this pass. `src/index.ts` spawns agent
-   processes and touches credential files on boot, which is unsafe to run casually in a build
-   worktree — every verification in this card was done via `tsc`, the full automated suite, and
-   route-level smoke tests against a real in-memory DB (the same pattern already established for
-   every other `web/costops/*.js`-adjacent route in this repo, which likewise has no automated
-   frontend test harness and is verified by manual browser testing). **A manual browser check of
-   the live page is still recommended before this is considered fully proven,** consistent with
-   how every other page in this dashboard is actually verified.
+6. **No live end-to-end browser check was performed** in this pass, and unlike gaps 1–5 this is
+   not a scope boundary — it is unperformed verification against the owner spec's own acceptance
+   criteria. `src/index.ts` spawns agent processes and touches credential files on boot, which is
+   unsafe to run casually in a build worktree, so every verification in this card was done via
+   `tsc`, the full automated suite, and route-level smoke tests against a real in-memory DB (the
+   same pattern already established for every other `web/costops/*.js`-adjacent route in this
+   repo). That is a correct and sufficient proof for everything it covers, but section 21's
+   acceptance list is explicitly conjunctive ("csak ha MIND teljesül") and three of its items —
+   light+dark, desktop+tablet+mobil, and keyboard+screen-reader alapok — cannot be established
+   without actually rendering the page. **Those three items are therefore UNMET, not merely
+   pending a nice-to-have follow-up.** Overall status: **MET-EXCEPT-RENDER** — every gate-able-
+   without-a-browser criterion in section 21 passes; the render-dependent criteria are open until
+   someone performs that check, pre-go-live. (Correction credited to deliverylead's review of this
+   card, 2026-07-31.)
 
 ## 10. Tests
 
@@ -246,6 +252,9 @@ No upstream issue/PR opened — none requested by the owner GO for this card.
 ## 13. Final report
 
 See the kanban card `12d5c98d` comment thread and the bus report to marveen for the full
-mit/hogyan/eredmény breakdown per commit. Verdict: see final bus message —
-**OPTIMIZATION DASHBOARD DONE**, with the gaps in §9 named explicitly as scope boundaries, not
-hidden failures.
+mit/hogyan/eredmény breakdown per commit. Verdict: **MET-EXCEPT-RENDER**. Gaps 1–5 in §9 are real
+scope boundaries, not hidden failures. Gap 6 is different in kind: three literal items in section
+21's conjunctive acceptance list (light+dark, desktop+tablet+mobil, keyboard+screen-reader alapok)
+are currently unproven because no live render was performed, and stay open until someone does that
+check pre-go-live. Everything gate-able without a browser — backend, config, dependency rules,
+both rollback levels, i18n completeness — is proven and DONE.
