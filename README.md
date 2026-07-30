@@ -47,6 +47,7 @@ Részletes, funkciónkénti leírások a [`docs/`](docs/README.md) mappában —
 | Vault & titkosítás | [docs/vault.md](docs/vault.md) |
 | Dream-engine | [docs/dream-engine.md](docs/dream-engine.md) |
 | Háttér-feladatok | [docs/background-tasks.md](docs/background-tasks.md) |
+| Testing (`npm test` + `npm run test:scripts`) | [docs/testing.md](docs/testing.md) |
 | Ütemezett feladatok | [docs/scheduled-tasks.md](docs/scheduled-tasks.md) |
 | Költöztetés (másik gépre) | [docs/MIGRATION.md](docs/MIGRATION.md) |
 | Beszélgetés-folytonosság | [docs/conversation-continuity.md](docs/conversation-continuity.md) |
