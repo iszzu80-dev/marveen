@@ -108,6 +108,82 @@ window.Costops = window.Costops || {}
     return C().segmentedBar(segments)
   }
 
+  // ---- P2-C: ELŐFIZETÉS / KAPACITÁS ---------------------------------------------------------
+  // Every figure arrives as { value, confidence, freshness, blocker, unit }. A null value is
+  // rendered as "nincs adat" WITH its blocker as the tooltip -- never as 0, because a 0 that
+  // means "measured zero" and a 0 that means "we cannot see it" look identical on a dashboard
+  // and are opposite facts. Confidence is always shown next to the number, so a manual reading
+  // never sits on screen looking like a live measurement.
+  const CONFIDENCE_LABEL = {
+    measured: 'mért',
+    manual: 'kézi',
+    inferred: 'következtetett',
+    unknown: 'nincs adat',
+  }
+
+  function confidenceBadge(conf) {
+    const cls = conf === 'measured' ? 'cc-ok' : conf === 'manual' ? 'cc-neutral' : conf === 'inferred' ? 'cc-warn' : 'cc-muted-seg'
+    return `<span class="cc-conf-badge ${cls}">${esc(CONFIDENCE_LABEL[conf] || conf)}</span>`
+  }
+
+  function freshnessLabel(fr) {
+    if (!fr || fr.as_of == null) return 'nincs megfigyelés'
+    const mins = Math.floor((fr.age_seconds || 0) / 60)
+    const human = mins < 60 ? mins + ' perc' : mins < 1440 ? Math.floor(mins / 60) + ' óra' : Math.floor(mins / 1440) + ' nap'
+    return (fr.stale ? 'ELAVULT · ' : '') + human
+  }
+
+  // Renders a percentage figure, or an explicit no-data cell carrying the reason.
+  function figurePct(f) {
+    if (!f || f.value == null) {
+      return `<span class="cc-muted" title="${esc((f && f.blocker) || 'nincs adat')}">nincs adat</span> ${confidenceBadge('unknown')}`
+    }
+    return `<span class="cc-cap-value">${pct(f.value)}%</span> ${confidenceBadge(f.confidence)}`
+  }
+
+  function figureCount(f) {
+    if (!f || f.value == null) {
+      return `<span class="cc-muted" title="${esc((f && f.blocker) || 'nincs adat')}">nincs adat</span> ${confidenceBadge('unknown')}`
+    }
+    return `<span class="cc-cap-value">${esc(String(f.value))}</span> ${confidenceBadge(f.confidence)}`
+  }
+
+  function renderCapacity(payload) {
+    const cap = payload && payload.capacity
+    const rows = (cap && cap.subscriptions) || []
+    if (!rows.length) {
+      const why = (cap && cap.notes && cap.notes[0]) || 'Nincs konfigurált előfizetés.'
+      return `<div class="cc-muted">${esc(why)}</div>`
+    }
+    const body = rows.map((s) => {
+      const bc = s.billing_cycle || {}
+      const cycle = [
+        bc.period && bc.period !== 'unknown' ? bc.period : 'ciklus: nincs megadva',
+        bc.next_renewal ? 'megújul ' + bc.next_renewal : null,
+        bc.paid_until ? 'fizetve ' + bc.paid_until : null,
+        bc.past_due ? 'LEJÁRT' : null,
+      ].filter(Boolean).join(' · ')
+      return `
+        <div class="cc-cap-row">
+          <div class="cc-cap-head">
+            <span class="cc-cap-name">${esc(s.name)}</span>
+            <span class="cc-cap-status cc-sev-${esc(s.status)}">${esc(s.status)}</span>
+            <span class="cc-cap-sub">${esc(cycle)}</span>
+          </div>
+          <div class="cc-cap-grid">
+            <div class="cc-cap-cell"><div class="cc-cap-label">Felhasználva</div><div>${figurePct(s.usage)}</div>
+              <div class="cc-cap-fresh">${esc(freshnessLabel(s.usage && s.usage.freshness))}</div></div>
+            <div class="cc-cap-cell"><div class="cc-cap-label">Kihasználatlan</div><div>${figurePct(s.unused_capacity)}</div></div>
+            <div class="cc-cap-cell"><div class="cc-cap-label">Túlfolyás</div><div>${figurePct(s.overflow)}</div></div>
+            <div class="cc-cap-cell"><div class="cc-cap-label">Blokkolt munka</div><div>${figureCount(s.blocked_work)}</div></div>
+            <div class="cc-cap-cell"><div class="cc-cap-label">API-ra tolt munka</div><div>${figureCount(s.work_pushed_to_api)}</div></div>
+          </div>
+        </div>`
+    }).join('')
+    const notes = (cap.notes || []).map((n) => `<div class="cc-cap-note">${esc(n)}</div>`).join('')
+    return body + notes
+  }
+
   function renderHero(summary) {
     const b = summary.budget
     const forecastPct = b ? pct(b.operational_forecast_pct) : null
@@ -136,13 +212,15 @@ window.Costops = window.Costops || {}
 
   async function render(root, month) {
     root.innerHTML = '<div class="cc-loading">Betöltés...</div>'
-    let summary, period, alerts, recommendations
+    let summary, period, alerts, recommendations, subscriptions
     try {
-      [summary, period, alerts, recommendations] = await Promise.all([
+      [summary, period, alerts, recommendations, subscriptions] = await Promise.all([
         window.Costops.Api.summary(month),
         window.Costops.Api.period(6, month),
         window.Costops.Api.alerts('active').catch(() => ({ alerts: [] })),
         window.Costops.Api.recommendations('open').catch(() => ({ recommendations: [] })),
+        // P2-C: capacity must never take the whole Áttekintés down with it.
+        window.Costops.Api.subscriptions().catch(() => null),
       ])
     } catch (e) {
       root.innerHTML = `<div class="cc-error">Betöltés sikertelen: ${esc(e.message)}</div>`
@@ -164,6 +242,10 @@ window.Costops = window.Costops || {}
           <div class="cc-section-title">TOP KÖLTSÉGFORRÁSOK</div>
           ${renderTopSources(summary.all_sources)}
         </div>
+      </div>
+      <div class="cc-section">
+        <div class="cc-section-title">ELŐFIZETÉS / KAPACITÁS</div>
+        ${renderCapacity(subscriptions)}
       </div>
       <div class="cc-section">
         <div class="cc-section-title">ADATBIZALOM</div>

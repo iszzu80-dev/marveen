@@ -16,6 +16,7 @@ export const SUBSCRIPTIONS_EXAMPLE_PATH = join(PROJECT_ROOT, 'store', 'costops-s
 
 export type SubscriptionStatus = 'active' | 'canceled' | 'expired' | 'unknown'
 export type AmountSource = 'invoice' | 'manual_fallback' | 'no_invoice_found' | 'pending_permission'
+export type SubscriptionBillingPeriod = 'monthly' | 'annual' | 'weekly' | 'unknown'
 
 export interface SubscriptionEntry {
   id: string
@@ -28,6 +29,11 @@ export interface SubscriptionEntry {
   amount?: number            // per-period amount, omitted entirely if unknown (never 0-fabricated)
   currency?: string
   amount_source: AmountSource
+  // P2-C: the billing CYCLE, stated by the operator -- never derived from the
+  // renewal date. Two consecutive next_renewal dates a month apart do not prove a
+  // monthly plan (an annual plan mid-term looks identical from one date), so an
+  // unset value stays 'unknown' rather than being guessed from the calendar.
+  billing_period?: SubscriptionBillingPeriod
   notes?: string
   // v0.8 (card 6f4d1332 §5): optional real ceiling, only if the operator supplies one. No official
   // Claude Max/ChatGPT quota API exists (checked) -- absent, limits.ts reports the usage
@@ -105,6 +111,7 @@ export function ensureExampleSubscriptions(): void {
 
 const VALID_STATUS = new Set(['active', 'canceled', 'expired', 'unknown'])
 const VALID_AMOUNT_SOURCE = new Set(['invoice', 'manual_fallback', 'no_invoice_found', 'pending_permission'])
+const VALID_BILLING_PERIOD = new Set(['monthly', 'annual', 'weekly', 'unknown'])
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 
 export function validateSubscriptionsConfig(raw: unknown): SubscriptionsLoadResult {
@@ -142,6 +149,11 @@ export function validateSubscriptionsConfig(raw: unknown): SubscriptionsLoadResu
       amount: typeof s.amount === 'number' ? s.amount : undefined,
       currency: typeof s.currency === 'string' ? s.currency : undefined,
       amount_source,
+      // An unrecognised value is NOT silently coerced to 'monthly' -- it becomes
+      // 'unknown', which the capacity view then reports as unknown.
+      billing_period: VALID_BILLING_PERIOD.has(s.billing_period as string)
+        ? s.billing_period as SubscriptionBillingPeriod
+        : 'unknown',
       notes: typeof s.notes === 'string' ? s.notes : undefined,
       weekly_limit_tokens: typeof s.weekly_limit_tokens === 'number' ? s.weekly_limit_tokens : undefined,
       five_hour_limit_tokens: typeof s.five_hour_limit_tokens === 'number' ? s.five_hour_limit_tokens : undefined,

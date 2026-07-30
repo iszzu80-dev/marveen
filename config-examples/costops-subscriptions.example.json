@@ -1,0 +1,55 @@
+{
+  "_doc": "ILLUSTRATIVE ONLY. Copy to store/costops-subscriptions.json (gitignored) and put the real plans there -- no concrete plan name, price, account or usage figure belongs in this tracked file. Consumed by src/costops/subscriptions.ts and, for the P2-C capacity view, src/costops/capacity.ts.",
+  "version": 1,
+  "_fields": {
+    "status": "active | canceled | expired | unknown",
+    "billing_period": "P2-C. monthly | annual | weekly | unknown. STATED by the operator, never derived: two renewal dates a month apart do not prove a monthly plan, so an unset value stays 'unknown' rather than being guessed from the calendar.",
+    "paid_until": "YYYY-MM-DD. The renews-then-ends date when status is canceled.",
+    "next_renewal": "YYYY-MM-DD. The next charge date when status is active.",
+    "amount": "OMITTED (not 0) when genuinely unknown -- set amount_source to say why.",
+    "amount_source": "invoice | manual_fallback | no_invoice_found | pending_permission",
+    "weekly_limit_tokens": "OPTIONAL absolute ceiling, only if a real one is known. No provider here publishes one; absent means limits.ts reports 'unknown' instead of inventing a denominator.",
+    "usage_snapshot": "OPTIONAL. A MANUAL reading off a provider usage screen -- percent plus the VERBATIM reset label, never a derived token count and never a parsed calendar date. P2-C promotes this into provider_ratelimit_snapshots with confidence 'manual'; the storage layer REFUSES to let it claim 'measured', because no Anthropic quota/usage API exists (re-verified 2026-07-30)."
+  },
+  "subscriptions": [
+    {
+      "id": "example-assistant-plan",
+      "name": "Example Assistant Plan",
+      "provider": "example-provider",
+      "source": "example-provider",
+      "status": "active",
+      "billing_period": "monthly",
+      "next_renewal": "2099-01-15",
+      "amount_source": "manual_fallback",
+      "notes": "no invoice amount available yet"
+    },
+    {
+      "id": "example-plan-with-manual-usage",
+      "name": "Example Plan With Manual Usage",
+      "provider": "anthropic",
+      "source": "anthropic",
+      "status": "active",
+      "billing_period": "monthly",
+      "next_renewal": "2099-01-20",
+      "amount_source": "no_invoice_found",
+      "usage_snapshot": {
+        "as_of": "2099-01-08T21:00:00+02:00",
+        "session_pct": 5,
+        "weekly_pct": 19,
+        "weekly_reset_label": "Tue 08:59",
+        "fable_pct": 0
+      }
+    },
+    {
+      "id": "example-canceled-plan",
+      "name": "Example Canceled Plan",
+      "provider": "example-provider",
+      "source": "example-store",
+      "status": "canceled",
+      "billing_period": "annual",
+      "paid_until": "2099-02-16",
+      "amount_source": "invoice",
+      "notes": "cancellation notice received; active until paid_until, then ends"
+    }
+  ]
+}

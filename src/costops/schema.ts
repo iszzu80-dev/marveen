@@ -18,6 +18,7 @@ import { initOptimizationSchema } from './optimization.js'
 import { initInvoiceSchema } from './invoice.js'
 import { initDispatchSchema } from './dispatch.js'
 import { initPacketMetadataSchema } from './packet-metadata.js'
+import { initSaturationEventsSchema } from './saturation-events.js'
 
 export function initCostOpsSchema(db: Database.Database): void {
   // CostOps v0.2: model/provider enrichment on the CORE token_usage table
@@ -196,6 +197,33 @@ export function initCostOpsSchema(db: Database.Database): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_ratelimit_snapshots_provider ON provider_ratelimit_snapshots(provider, captured_at)`)
+  // Phase 2 / P2-C: confidence + provenance on every capacity snapshot.
+  //
+  // There is NO official Claude/Anthropic quota or usage API (re-checked
+  // 2026-07-30 -- Anthropic's Admin API exposes COST, not remaining quota), so an
+  // anthropic weekly-usage figure can only ever be an operator-supplied MANUAL
+  // reading off the usage screen. Such a figure must never be storable as if it
+  // were measured, and the old table had no column in which to say so: every row
+  // looked identical whether it came from a real provider metadata read or a
+  // human retyping a percentage. usage_confidence ('measured' | 'manual' |
+  // 'inferred' | 'unknown') + snapshot_source make that explicit per row, and
+  // capacity-snapshots.ts's writeRateLimitSnapshot() is the ONLY writer -- it
+  // refuses 'measured' for any non-measured source, so the mislabel is not
+  // reachable rather than merely discouraged.
+  //
+  // reset_label carries a provider's VERBATIM reset text (e.g. 'Tue 08:59') for
+  // the case where no real epoch reset exists; it is never parsed into a
+  // fabricated timestamp (resets_at stays NULL then).
+  //
+  // dedup_key + its UNIQUE index make re-reading the SAME manual snapshot on
+  // every scheduled tick idempotent, instead of accumulating 24 identical rows a
+  // day that would then look like 24 independent observations. Pre-migration rows
+  // keep dedup_key NULL, which SQLite's UNIQUE index permits repeatedly.
+  try { db.exec(`ALTER TABLE provider_ratelimit_snapshots ADD COLUMN usage_confidence TEXT`) } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE provider_ratelimit_snapshots ADD COLUMN snapshot_source TEXT`) } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE provider_ratelimit_snapshots ADD COLUMN reset_label TEXT`) } catch { /* already exists */ }
+  try { db.exec(`ALTER TABLE provider_ratelimit_snapshots ADD COLUMN dedup_key TEXT`) } catch { /* already exists */ }
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ratelimit_snapshots_dedup ON provider_ratelimit_snapshots(dedup_key)`)
   // CostOps Phase 0: baseline for the 7-day source-reliability observation window
   // (gap-analysis P0.4). One row per capture -- the whole source inventory
   // (lifecycle + freshness + sync status per source) as a sanitized JSON snapshot,
@@ -277,4 +305,9 @@ export function initCostOpsSchema(db: Database.Database): void {
   // packet-metadata tables hanging off a P2-A dispatch row. Same seam, right
   // after initDispatchSchema because it keys on dispatches.dispatch_id.
   initPacketMetadataSchema(db)
+  // Phase 2 / P2-C: observed context-saturation events. Same seam. Must come
+  // after initDispatchSchema because a recorded event may carry a dispatch_id --
+  // and, crucially, may NOT (an admission REFUSAL creates no dispatch at all,
+  // which is exactly the case that was previously invisible to every read path).
+  initSaturationEventsSchema(db)
 }

@@ -155,10 +155,24 @@ export async function syncCodexRateLimit(
     recordRun(db, 'error', 0, now, 'unparseable rateLimits result')
     return { ok: false, provider: CODEX_PROVIDER, status: 'error', imported_count: 0, error: 'parse_error' }
   }
-  db.prepare(`INSERT INTO provider_ratelimit_snapshots (provider, limit_id, used_percent, window_duration_mins, resets_at, plan_type, captured_at)
-    VALUES (?,?,?,?,?,?,?)`).run(
-    CODEX_PROVIDER, snap.limitId, snap.usedPercent, snap.windowDurationMins, snap.resetsAt, snap.planType, now,
-  )
+  // P2-C: goes through the ONE guarded writer, which stamps confidence +
+  // provenance. Codex is the one capacity source that may claim 'measured': the
+  // app-server metadata read is the provider reporting its own usedPercent, not a
+  // human retyping a number. The guard in capacity-snapshots.ts is what stops any
+  // other collector from borrowing that label.
+  const { writeRateLimitSnapshot } = await import('../capacity-snapshots.js')
+  writeRateLimitSnapshot(db, {
+    provider: CODEX_PROVIDER,
+    limitId: snap.limitId,
+    usedPercent: snap.usedPercent,
+    windowDurationMins: snap.windowDurationMins,
+    resetsAt: snap.resetsAt,
+    planType: snap.planType,
+    source: 'provider_metadata_api',
+    confidence: 'measured',
+    dedupKey: `codex|ratelimit|${now}`,
+    capturedAt: now,
+  })
   recordRun(db, 'ok', 1, now, null)
   return { ok: true, provider: CODEX_PROVIDER, status: 'ok', imported_count: 1, used_percent: snap.usedPercent }
 }

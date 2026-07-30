@@ -11,6 +11,8 @@ import { loadPricingConfig } from '../../costops/pricing.js'
 import { syncFixedCostsToLedger, getCostSummary, getCostSources, monthWindow } from '../../costops/ledger.js'
 import { getPeriodTrend } from '../../costops/period.js'
 import { loadSubscriptionsConfig, deriveLifecycle } from '../../costops/subscriptions.js'
+import { buildCapacityReport } from '../../costops/capacity.js'
+import { buildPhase2Kpis } from '../../costops/kpi.js'
 import { getWarnings } from '../../costops/warnings.js'
 import {
   exportCostRows, rowsToCsv, exportSourceInventory, sourceInventoryToCsv,
@@ -87,8 +89,22 @@ export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
         // app-server metadata read (account/rateLimits/read) -- zero quota, no LLM.
         const { syncCodexRateLimit } = await import('../../costops/collectors/codex.js')
         result = await syncCodexRateLimit(db, now)
+      } else if (provider === 'anthropic') {
+        // P2-C: two distinct anthropic signals, both attempted. COST comes from the
+        // Admin API (needs an admin key); CAPACITY has no API at all and can only be
+        // the operator's manual snapshot -- see collectors/anthropic-usage.ts.
+        const { syncAnthropicCostReport } = await import('../../costops/collectors/anthropic.js')
+        const { syncAnthropicUsageSnapshot } = await import('../../costops/collectors/anthropic-usage.js')
+        const cost = await syncAnthropicCostReport(db, now)
+        const usage = syncAnthropicUsageSnapshot(db, now)
+        result = { ok: cost.ok || usage.ok, provider: 'anthropic', cost, usage } as { ok: boolean }
+      } else if (provider === 'all') {
+        // P2-C: the same due-checked sweep the background runner performs, forced.
+        const { runScheduledCollectorSync } = await import('../../costops/collectors/scheduled-sync.js')
+        const report = await runScheduledCollectorSync(db, now, { force: true })
+        result = { ok: report.outcomes.some(o => o.status === 'ok'), ...report } as { ok: boolean }
       } else {
-        json(res, { error: `unsupported provider '${provider}' (supported: render, openai, github, deepseek, codex)` }, 400); return true
+        json(res, { error: `unsupported provider '${provider}' (supported: render, openai, github, deepseek, codex, anthropic, all)` }, 400); return true
       }
       json(res, result, result.ok ? 200 : 502)
     } catch (err) {
@@ -518,14 +534,55 @@ export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
 
   // v0.7: subscription lifecycle (active/canceled/paid_until/next_renewal),
   // config-derived facts only -- no Gmail access, no raw email/PII.
+  //
+  // P2-C: the lifecycle facts alone answered nothing about CAPACITY, so the
+  // response now also carries the capacity picture (usage / unused / overflow /
+  // blocked work / work pushed to API), every figure with its own confidence and
+  // freshness. The original `subscriptions` / `config_present` / `config_errors`
+  // keys are unchanged, so existing readers keep working. Phase 2 is visibility
+  // only: buildCapacityReport() refuses to return a payload containing an
+  // upgrade/downgrade recommendation (that is Phase 4).
   if (path === '/api/costs/subscriptions' && method === 'GET') {
     try {
       const now = Math.floor(Date.now() / 1000)
       const { config, exists, errors } = loadSubscriptionsConfig()
-      json(res, { subscriptions: deriveLifecycle(config, now), config_present: exists, config_errors: errors })
+      const lifecycle = deriveLifecycle(config, now)
+      const capacity = buildCapacityReport(getDb(), lifecycle, now)
+      json(res, {
+        subscriptions: lifecycle,
+        config_present: exists,
+        config_errors: errors,
+        capacity,
+      })
     } catch (err) {
       logger.error({ err }, 'CostOps subscriptions failed')
       json(res, { error: 'Cost subscriptions failed' }, 500)
+    }
+    return true
+  }
+
+  // P2-C: the Phase 2 KPI read surface -- cost_per_accepted_task (marginal AND
+  // allocated, never mixed) plus acceptance/retry/failure/token/packet/saturation/
+  // fallback figures, grouped by agent, modelProfile, model, provider, task_type,
+  // project, billingMode and period. Every KPI with no data behind it returns an
+  // explicit unknown with the missing denominator named, never a 0.
+  // ?month=YYYY-MM, or ?from=&to= as epoch seconds.
+  if (path === '/api/costs/kpi' && method === 'GET') {
+    try {
+      const now = Math.floor(Date.now() / 1000)
+      const monthKey = url.searchParams.get('month') || undefined
+      let from = parseInt(url.searchParams.get('from') || '', 10)
+      let to = parseInt(url.searchParams.get('to') || '', 10)
+      if (!Number.isFinite(from) || !Number.isFinite(to)) {
+        const w = monthWindow(now, monthKey)
+        from = w.start
+        to = w.end
+      }
+      const { pricing } = loadPricingConfig()
+      json(res, buildPhase2Kpis(getDb(), { from, to, pricing, now }))
+    } catch (err) {
+      logger.error({ err }, 'CostOps Phase 2 KPI read failed')
+      json(res, { error: 'Cost KPI read failed' }, 500)
     }
     return true
   }

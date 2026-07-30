@@ -23,6 +23,7 @@ import { resolveDispatchIdentitySafe } from '../../costops/dispatch-identity.js'
 import { recordPacketMetadataSafe } from '../../costops/packet-metadata.js'
 import { buildContextPacket, derivePacketMetadata } from '../../context-packet.js'
 import { evaluateDispatchAdmissionSafe } from '../dispatch-admission.js'
+import { recordSaturationEventSafe } from '../../costops/saturation-events.js'
 import { generateBreakdown } from '../llm-breakdown.js'
 import { logger } from '../../logger.js'
 import { readBody, json, jsonMaybeGzip } from '../http-helpers.js'
@@ -116,6 +117,22 @@ function fireKanbanDispatch(id: string): void {
     // fault, so a broken config can never stop a dispatch.
     const cardLabels = getLabelsForCard(id).map(l => l.name)
     const admission = evaluateDispatchAdmissionSafe({ agent: target, labels: cardLabels })
+    // P2-C: record the gate's own MEASURED observation, for both outcomes. Before
+    // this, a refusal left no trace in the measurement stack at all (no dispatch
+    // row is created for refused work), so `context_saturation_events` had no data
+    // source and the one event that stops work was invisible to every read path.
+    // Only measured observations are stored -- a fail-open default is not an
+    // observation. Best-effort: never blocks the dispatch.
+    recordSaturationEventSafe(getDb(), {
+      agent: target,
+      cardId: id,
+      state: admission.state,
+      pct: admission.pct,
+      taskSize: admission.taskSize,
+      admitted: admission.admit,
+      refusalCode: admission.refusalCode ?? null,
+      measured: admission.measured,
+    })
     if (!admission.admit) {
       // Deliberately do NOT markKanbanCardDispatched: the work is deferred, not
       // dropped, so the next move into in_progress re-fires it once the target

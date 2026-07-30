@@ -51,6 +51,11 @@ window.Costops = window.Costops || {}
     alerts: (status) => getJson('/api/costs/alerts' + qs({ status: status || 'all' })),
     recommendations: (status) => getJson('/api/costs/recommendations' + qs({ status: status || 'all' })),
     sourceInventory: () => getJson('/api/costs/source-inventory'),
+    // P2-C: subscription lifecycle + the capacity picture (usage / unused / overflow /
+    // blocked work / work pushed to API), every figure carrying its own confidence
+    // and freshness. Visibility only -- the payload contains no plan recommendation.
+    subscriptions: () => getJson('/api/costs/subscriptions'),
+    kpi: (month) => getJson('/api/costs/kpi' + qs({ month })),
     reconciliation: (month) => getJson('/api/costs/reconciliation' + qs({ month })),
     budgets: (month) => getJson('/api/costs/budgets' + qs({ month })),
     forecastSnapshots: (month) => getJson('/api/costs/forecast-snapshots' + qs({ month })),

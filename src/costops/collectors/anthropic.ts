@@ -113,3 +113,65 @@ export const anthropicCollector: ProviderCollector = {
     return (await this.collectRaw!(opts)).lines
   },
 }
+
+/**
+ * Vault secret id for the Anthropic ADMIN API key (organisation cost report).
+ * This is NOT the key any agent runs on -- the Admin API needs an admin-scoped
+ * key, which a normal API key cannot substitute for.
+ */
+export const ANTHROPIC_VAULT_SECRET_ID = 'anthropic_admin_key'
+
+/**
+ * P2-C: LIVE read-only Anthropic cost-report sync.
+ *
+ * The collector above shipped with the mapper, the fixture and the request
+ * builder -- and ZERO call sites, in production or in a scheduler. It was dead
+ * code, which is the same defect P2-A already paid a gate cycle for
+ * (correlateTokenUsageToDispatches had storage but no invocation). This wrapper is
+ * the call site, mirroring syncOpenAiCollector exactly.
+ *
+ * When no admin key is in the Vault this returns a precise, non-secret blocker and
+ * imports NOTHING -- it never falls back to a guess. Note also what this does NOT
+ * provide: cost is not capacity. Claude quota/usage has no API at all; that gap is
+ * handled honestly in anthropic-usage.ts.
+ */
+export async function syncAnthropicCostReport(
+  db: import('better-sqlite3').Database,
+  now: number,
+  deps: { httpGetJson?: import('./types.js').HttpGetJson; apiKey?: string | null; fxUsdHuf?: number } = {},
+): Promise<{ ok: boolean; provider: string; status: string; imported_count: number; error?: string; period?: string }> {
+  const { runCollector } = await import('./runner.js')
+  const { monthWindow } = await import('../ledger.js')
+  let apiKey = deps.apiKey
+  if (apiKey === undefined) {
+    try {
+      const { getSecret } = await import('../../web/vault.js')
+      apiKey = getSecret(ANTHROPIC_VAULT_SECRET_ID)
+    } catch { apiKey = null }
+  }
+  if (!apiKey) {
+    return {
+      ok: false, provider: 'anthropic', status: 'error', imported_count: 0,
+      error: `no Anthropic admin key in vault (${ANTHROPIC_VAULT_SECRET_ID})`,
+    }
+  }
+  let fxUsdHuf = deps.fxUsdHuf
+  if (fxUsdHuf === undefined) {
+    try {
+      const { loadRenderPricing } = await import('./render.js')
+      fxUsdHuf = loadRenderPricing().pricing.fx_usd_huf || 0
+    } catch { fxUsdHuf = 0 }
+  }
+  const httpGetJson = deps.httpGetJson || (async (url: string, headers: Record<string, string>) => {
+    const r = await fetch(url, { method: 'GET', headers })
+    if (!r.ok) throw new Error(`anthropic admin api ${r.status}`)
+    return r.json()
+  })
+  const w = monthWindow(now)
+  const opts = { periodStart: w.start, periodEnd: w.end, secret: apiKey, fxUsdHuf: fxUsdHuf || 0, idSalt: 'anthropic-salt', httpGetJson }
+  const res = await runCollector({ db, collector: anthropicCollector, opts, now })
+  return {
+    ok: res.status === 'ok', provider: 'anthropic', status: res.status,
+    imported_count: res.importedCount, error: res.errorMessageSanitized || undefined, period: w.key,
+  }
+}

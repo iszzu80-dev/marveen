@@ -247,3 +247,25 @@ main.costs-cc-active { max-width: 1500px; }
   .cc-bar-row { grid-template-columns: 1fr auto; }
   .cc-pair-row { grid-template-columns: 1fr auto; }
 }
+
+/* P2-C: ELŐFIZETÉS / KAPACITÁS. Every figure is shown WITH its confidence badge, and a
+   missing figure renders as an explicit "nincs adat" (the reason in its title attribute)
+   rather than as 0 -- a measured zero and an unobservable value must not look identical. */
+.cc-cap-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
+.cc-cap-row:last-of-type { border-bottom: none; }
+.cc-cap-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.cc-cap-name { font-weight: 600; }
+.cc-cap-status { font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.04em; padding: 1px 6px; border-radius: 4px; background: var(--info-soft); color: var(--text-muted); }
+.cc-cap-status.cc-sev-active { background: var(--success-soft); color: var(--success); }
+.cc-cap-status.cc-sev-canceled, .cc-cap-status.cc-sev-expired { background: var(--danger-soft); color: var(--danger); }
+.cc-cap-sub { font-size: 0.78em; color: var(--text-muted); }
+.cc-cap-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+.cc-cap-cell { min-width: 0; }
+.cc-cap-label { font-size: 0.72em; color: var(--text-muted); margin-bottom: 2px; }
+.cc-cap-value { font-weight: 600; }
+.cc-cap-fresh { font-size: 0.7em; color: var(--text-muted); margin-top: 2px; }
+.cc-cap-note { font-size: 0.78em; color: var(--text-muted); margin-top: 8px; padding-left: 10px; border-left: 2px solid var(--border); }
+.cc-conf-badge { font-size: 0.68em; text-transform: uppercase; letter-spacing: 0.03em; padding: 1px 5px; border-radius: 4px; background: var(--info-soft); color: var(--text-muted); white-space: nowrap; }
+.cc-conf-badge.cc-ok { background: var(--success-soft); color: var(--success); }
+.cc-conf-badge.cc-warn { background: var(--danger-soft); color: var(--danger); }
+.cc-conf-badge.cc-neutral { background: var(--info-soft); color: var(--accent); }

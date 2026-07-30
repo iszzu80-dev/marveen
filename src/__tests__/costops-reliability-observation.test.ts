@@ -54,45 +54,45 @@ describe('startCostOpsBackgroundTasks (boot seam, docs/fork-upstream-policy.md Â
   afterEach(() => { vi.useRealTimers() })
 
   it('captures a snapshot immediately at boot, then again every 24h, via a single call', () => {
-    const handle = startCostOpsBackgroundTasks()
+    const handles = startCostOpsBackgroundTasks()
     try {
       expect(listReliabilitySnapshots(getDb())).toHaveLength(1) // immediate boot capture
       vi.advanceTimersByTime(24 * 60 * 60 * 1000)
       expect(listReliabilitySnapshots(getDb())).toHaveLength(2) // one interval tick later
     } finally {
-      clearInterval(handle)
+      handles.forEach(clearInterval)
     }
   })
 
   it('the same single call also captures a Phase 1 forecast snapshot (TOTAL row, no sources yet)', async () => {
     const { listForecastSnapshots } = await import('../costops/forecast-capture.js')
-    const handle = startCostOpsBackgroundTasks()
+    const handles = startCostOpsBackgroundTasks()
     try {
       const stored = listForecastSnapshots(getDb())
       expect(stored.length).toBeGreaterThan(0)
       expect(stored.some(s => s.source_id === null)).toBe(true) // whole-deployment TOTAL row
     } finally {
-      clearInterval(handle)
+      handles.forEach(clearInterval)
     }
   })
 
   it('the same single call also runs the Phase 3 alerts capture without throwing (empty DB, no candidates expected)', async () => {
     const { listAlerts } = await import('../costops/alerts-store.js')
-    const handle = startCostOpsBackgroundTasks()
+    const handles = startCostOpsBackgroundTasks()
     try {
       expect(listAlerts(getDb())).toEqual([])
     } finally {
-      clearInterval(handle)
+      handles.forEach(clearInterval)
     }
   })
 
   it('the same single call also runs the Phase 4 optimization recommendation capture without throwing (empty DB, no candidates expected)', async () => {
     const { listAllRecommendations } = await import('../costops/recommendations-store.js')
-    const handle = startCostOpsBackgroundTasks()
+    const handles = startCostOpsBackgroundTasks()
     try {
       expect(listAllRecommendations(getDb())).toEqual([])
     } finally {
-      clearInterval(handle)
+      handles.forEach(clearInterval)
     }
   })
 })

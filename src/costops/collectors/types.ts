@@ -51,7 +51,12 @@ export interface ProviderCollector {
 // Phase 1 (GAP-07): 'locked' added -- a concurrent run for the same provider
 // was already in flight, so this run skipped entirely without touching any
 // data (see import-durability.ts's withImportLock).
-export type ImportStatus = 'ok' | 'partial' | 'rate_limited' | 'error' | 'dry_run' | 'locked'
+// P2-C: 'skipped' added -- the collector was DUE and really attempted, but had
+// nothing it could legitimately do (no credential available to it, no manual
+// snapshot to promote, no API in existence). It is deliberately distinct from
+// 'error' (something broke, retry may help) and from 'ok' (data landed): a
+// documented hard blocker must not read as either a failure to fix or a success.
+export type ImportStatus = 'ok' | 'partial' | 'rate_limited' | 'error' | 'dry_run' | 'locked' | 'skipped'
 
 // A sanitized description of a value's STRUCTURE -- types, object keys, and
 // array lengths ONLY. It carries NO scalar values, so no secret, account id,

@@ -424,10 +424,13 @@ export function startWebServer(port = 3420): http.Server {
   }
 
   // LOCAL-FORK: costops seam (keep on rebase). ALL CostOps background tasks
-  // (currently: the Phase 0 reliability-snapshot capture) are owned by this
-  // one call -- see src/costops/reliability-observation.ts.
-  const costOpsBackgroundInterval = webOnly ? undefined : startCostOpsBackgroundTasks()
-  if (!webOnly) logger.info('CostOps background tasks started (reliability-snapshot: 24h poll + startup)')
+  // (currently: the Phase 0 reliability-snapshot capture + the P2-C provider
+  // collector sync) are owned by this one call -- see
+  // src/costops/reliability-observation.ts. P2-C: this is the ONLY in-process
+  // caller of the provider collectors; without it they are dead code that a
+  // dashboard read cannot distinguish from a working measurement path.
+  const costOpsBackgroundIntervals = webOnly ? [] : startCostOpsBackgroundTasks()
+  if (!webOnly) logger.info('CostOps background tasks started (reliability-snapshot: 24h poll + startup; collector sync: 15min due-check + startup)')
 
   // NOTE: startMcpListChecker() is intentionally NOT called here.
   //
@@ -538,7 +541,7 @@ export function startWebServer(port = 3420): http.Server {
     if (federationPollerInterval) clearInterval(federationPollerInterval)
     if (capabilityRunnerInterval) clearInterval(capabilityRunnerInterval)
     clearInterval(tokenCollectInterval)
-    clearInterval(costOpsBackgroundInterval)
+    costOpsBackgroundIntervals.forEach(clearInterval)
     return origClose(cb)
   }
 
