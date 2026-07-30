@@ -438,9 +438,14 @@ export interface PacketMetadata {
   /** sha256 hex per referenced artifact, index-aligned with referencedArtifacts. */
   contentHashes: string[]
   estimatedFreshTokens: number
-  /** Confidence marker. Always 'estimated' from this code path -- the number is
-   *  a heuristic and must never be presented as measured. */
-  estimateConfidence: EstimateConfidence
+  /** Confidence marker, persisted as free-text TEXT NOT NULL (see
+   *  costops/packet-metadata.ts). Always literally 'estimated' when produced by
+   *  derivePacketMetadata() below -- the number is a heuristic and must never be
+   *  presented as measured -- but the field itself is a provenance string, not
+   *  a closed enum: other recorders may stamp a different non-empty marker
+   *  (e.g. the method name) and the KPI layer surfaces whatever was actually
+   *  stored rather than assuming the literal. */
+  estimateConfidence: EstimateConfidence | string
   estimateMethod: string
   taskSize: TaskSize | null
   contextBudgetClass: ContextBudgetClass | null
