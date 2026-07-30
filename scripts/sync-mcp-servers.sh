@@ -19,9 +19,8 @@
 # The accepted-but-real cost of that decision: every fix to an MCP server was
 # lost on reinstall / fresh clone / new machine, and nothing preserved them.
 # devops's SERVER_INFO fix (google-private-mcp.py, google-zst -> google-private)
-# was disk-local only. This closes that gap the same way scripts/
-# sync-scheduled-scripts.sh closed it for the scheduled-task deps: pin into the
-# gitignored releases/ tree, which no `git checkout` can touch.
+# was disk-local only. This pins them OUTSIDE the repo so a re-clone can restore
+# them -- see the PIN_ROOT note below for why "inside the repo" failed.
 #
 # Unlike sync-scheduled-scripts.sh, there is no `git show <ref>:<path>` option
 # here — these files exist ONLY in the working tree by design, so the working
@@ -39,7 +38,16 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RELEASES_DIR="$REPO_ROOT/releases"
+# Card d95ac444 follow-up (2026-07-30): the pin MUST live OUTSIDE the repo.
+# The first version put it in $REPO_ROOT/releases, which is gitignored -- so a
+# fresh clone had neither mcp-servers/ (gitignored by owner decision) NOR the
+# pin, and --restore had nothing to restore from. A durability mechanism that
+# does not survive the event it exists for. Verified by simulating a reinstall:
+# clone -> 0 server files, 0 releases entries -> "ERROR: no current release".
+# $HOME survives a repo re-clone, which is the actual reinstall case here.
+# It does NOT survive a new machine -- see --status output and the runbook.
+PIN_ROOT="${MARVEEN_MCP_PIN_ROOT:-$HOME/.marveen-mcp-pin}"
+RELEASES_DIR="$PIN_ROOT"
 CURRENT_LINK="$RELEASES_DIR/mcp-servers-current"
 SRC_DIR="$REPO_ROOT/mcp-servers"
 
