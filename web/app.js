@@ -393,6 +393,7 @@ function switchPage(pageId) {
   if (pageId === 'tokenUsage') loadTokenUsage()
   if (pageId === 'costs') loadCosts()
   if (pageId === 'costs-cc') window.Costops.mount()
+  if (pageId === 'optimization') window.Optimization.mount()
   if (pageId === 'ideas') loadIdeasPage()
   if (pageId === 'archived') loadArchivedPage()
   if (pageId === 'naplo') loadNaplo()
@@ -443,7 +444,7 @@ const SIDEBAR_GROUPS = [
   // upstream nav change; keep them listed here, not only in the HTML.
   { key: 'team',        labelKey: 'nav.group.team',        pages: ['agents', 'activity', 'team', 'messages', 'tasks', 'bgTasks'] },
   { key: 'knowledge',   labelKey: 'nav.group.knowledge',   pages: ['memories', 'skills', 'research', 'ideas'] },
-  { key: 'stats',       labelKey: 'nav.group.stats',       pages: ['costs-cc', 'tokenUsage'] },
+  { key: 'stats',       labelKey: 'nav.group.stats',       pages: ['costs-cc', 'tokenUsage', 'optimization'] },
   { key: 'system',      labelKey: 'nav.group.system',      pages: ['status', 'naplo', 'updates', 'settings', 'vault'] },
   { key: 'connections', labelKey: 'nav.group.connections', pages: ['connectors', 'federation', 'migrate'] },
 ]
@@ -527,6 +528,7 @@ const NAV_I18N = {
   // 'costs' page. Without this entry renderNav() leaves the hardcoded Hungarian
   // label in place and the sidebar stays untranslated in English.
   'costs-cc': 'nav.costs',
+  optimization: 'nav.optimization',
 }
 
 function renderNav() {
