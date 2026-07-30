@@ -128,7 +128,7 @@ and confirmed already correct.
 
 - `npx tsc --noEmit`: clean, re-run after every stage's fixes (not just Codex's own report).
 - `node --check web/apg.js web/app.js web/lang/*.js web/sw.js`: clean.
-- New tests: `src/__tests__/apg-ui-routes.test.ts` (13 route-smoke tests — off-mode default,
+- New tests: `src/__tests__/apg-ui-routes.test.ts` (12 route-smoke tests — off-mode default,
   absolute-master-off across a card override, mode precedence card>project>global once not off,
   enforced-downgrade reason requirement, sidecar-unavailable degrading to 200 not 500, idempotency
   replay vs genuine-conflict, limit/offset clamping + 400s, corrupted-scope-overrides-file
