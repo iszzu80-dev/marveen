@@ -17,6 +17,7 @@ import {
 import { readClaudeCodeOauthJson } from './claude-credentials.js'
 import { getDb } from '../db.js'
 import { createDispatchSafe, recordOutcomeSafe } from '../costops/dispatch.js'
+import { resolveDispatchIdentitySafe } from '../costops/dispatch-identity.js'
 import { resolveSessionIdForCwd } from './transcript-sources.js'
 import { detectPaneState } from '../pane-state.js'
 import { notifyChannel } from '../notify.js'
@@ -663,9 +664,19 @@ async function runWorkerAttempt(ctx: WorkerCtx, message: string, timeoutMs: numb
   // worker request. The worker's project dir is currently outside
   // the token_usage collection mapping, so this link stays inert until that
   // changes; inert is correct, mis-attributed would not be.
+  //
+  // P2-C identity: the worker launches with a LITERAL --model (WORKER_MODEL) and
+  // its OWN isolated CLAUDE_CONFIG_DIR (ctx.configDir), so both are passed as
+  // overrides. Resolving them from MAIN_AGENT_ID would stamp the main pane's
+  // model and login onto worker requests -- the same mis-attribution the
+  // session_id note above avoids.
   const dispatchId = createDispatchSafe(getDb(), {
     source: 'worker', agent: MAIN_AGENT_ID, taskType: 'worker',
     sessionId: resolveSessionIdForCwd(ctx.home),
+    ...resolveDispatchIdentitySafe(MAIN_AGENT_ID, {
+      configuredModel: WORKER_MODEL,
+      configDir: ctx.configDir,
+    }),
   })
   await sendPromptToSession(ctx.session, buildWorkerPrompt(message, outPath, donePath), null, { dispatchId })
 

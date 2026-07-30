@@ -1,12 +1,16 @@
 {
-  "_comment": "P2-A billing-map: maps (provider, auth_profile) -> billing_mode. Copy to store/billing-map.json (gitignored) and fill with your real accounts. There is NO provider-name heuristic: any (provider, auth_profile) pair NOT listed here resolves to 'unknown' (never a false 'free'). Valid billing_mode values: subscription_included | subscription_credit | api_payg | local_compute | unknown. These entries are ILLUSTRATIVE placeholders, not real account data.",
+  "_comment": "P2-A/P2-C billing-map: maps (provider, auth_profile) -> billing_mode. Copy to store/billing-map.json (gitignored) and fill with your real accounts. There is NO provider-name heuristic: any (provider, auth_profile) pair NOT listed here resolves to 'unknown' (never a false 'free'). Valid billing_mode values: subscription_included | subscription_credit | api_payg | local_compute | unknown. These entries are ILLUSTRATIVE placeholders, not real account data.",
+  "_provider": "provider comes from costops/pricing.ts deriveProvider(model): anthropic | openai | deepseek | google | xai | mistral | meta | unknown.",
+  "_auth_profile": "auth_profile is what P2-C stamps on a dispatch, in one of exactly three namespaced forms: 'plan:<id>' for an agent bound to a named Claude plan (a store/claude-plans.json id); 'configdir:<path-relative-to-$HOME>' for an agent bound to a raw claudeConfigDir, and for the agent-worker's isolated dir; 'host_default' for an agent bound to neither, i.e. running on Claude Code's default config dir. An absolute path is never stored. To see the values YOUR install produces: SELECT DISTINCT provider, auth_profile FROM dispatches.",
   "version": 1,
   "entries": [
-    { "provider": "anthropic", "auth_profile": "max-subscription", "billing_mode": "subscription_included" },
-    { "provider": "anthropic", "auth_profile": "api-key", "billing_mode": "api_payg" },
-    { "provider": "openai", "auth_profile": "chatgpt-plus", "billing_mode": "subscription_included" },
-    { "provider": "openai", "auth_profile": "api-key", "billing_mode": "api_payg" },
-    { "provider": "deepseek", "auth_profile": "api-key", "billing_mode": "api_payg" },
-    { "provider": "local", "auth_profile": "ollama", "billing_mode": "local_compute" }
+    { "provider": "anthropic", "auth_profile": "plan:example-personal", "billing_mode": "subscription_included" },
+    { "provider": "anthropic", "auth_profile": "plan:example-team", "billing_mode": "subscription_included" },
+    { "provider": "anthropic", "auth_profile": "configdir:.claude-example-alt", "billing_mode": "subscription_included" },
+    { "provider": "anthropic", "auth_profile": "configdir:.example-worker/.claude-config", "billing_mode": "subscription_included" },
+    { "provider": "anthropic", "auth_profile": "host_default", "billing_mode": "api_payg" },
+    { "provider": "openai", "auth_profile": "plan:example-chatgpt", "billing_mode": "subscription_included" },
+    { "provider": "deepseek", "auth_profile": "host_default", "billing_mode": "api_payg" },
+    { "provider": "unknown", "auth_profile": "configdir:.example-local-runner", "billing_mode": "local_compute" }
   ]
 }

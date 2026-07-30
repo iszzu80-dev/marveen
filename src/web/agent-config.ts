@@ -120,6 +120,21 @@ export function readAgentModel(name: string): string {
   return resolveAgentModelDetailed(name).model
 }
 
+// The `modelProfile` field as CONFIGURED (not as resolved). Null when absent,
+// blank or non-string. Whether it was actually HONOURED is a separate question,
+// answered by resolveAgentModelDetailed().source === 'model_profile' -- callers
+// that report cost per profile must check both (see costops/dispatch-identity).
+export function readAgentModelProfile(name: string): string | null {
+  const configPath = join(agentDir(name), 'agent-config.json')
+  try {
+    const config = JSON.parse(readFileOr(configPath, '{}'))
+    if (typeof config.modelProfile === 'string' && config.modelProfile.trim()) {
+      return config.modelProfile.trim()
+    }
+  } catch { /* fall through */ }
+  return null
+}
+
 // Card c755f4b2 Block B. Passing null REMOVES the key rather than writing a
 // null: an absent field and an explicit null must not become two ways of
 // saying the same thing in a config a human also edits by hand.

@@ -24,6 +24,7 @@ import {
   getDb,
 } from '../db.js'
 import { createDispatchSafe } from '../costops/dispatch.js'
+import { resolveDispatchIdentitySafe } from '../costops/dispatch-identity.js'
 import { toPendingRetryView, classifyTelegramSendError, type PendingRetryView } from '../pending-retries.js'
 import {
   SCHEDULED_TASK_PREAMBLE,
@@ -530,9 +531,12 @@ async function attemptFireTask(
     // cases stay NULL rather than guess: a REMOTE agent (transcripts live on the
     // other host) and a task with a targetSession override (an arbitrary tmux
     // session has no derivable transcript dir).
+    // P2-C: stamp the identity columns for this run. The reinjection path below
+    // reuses the SAME dispatch row, so it needs no second stamp.
     const dispatchId = createDispatchSafe(getDb(), {
       source: 'scheduler', agent: agentName, taskType: task.type,
       sessionId: (host || task.targetSession) ? null : resolveCurrentSessionId(agentName),
+      ...resolveDispatchIdentitySafe(agentName),
     })
     // forceSend skips the busy-state check above; it must also skip the
     // pre-flight wait-until-idle gate inside sendPromptToSession, otherwise a

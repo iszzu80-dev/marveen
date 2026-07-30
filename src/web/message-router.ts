@@ -16,6 +16,7 @@ import {
   type AgentMessage,
 } from '../db.js'
 import { createDispatchSafe, recordOutcomeSafe, type OutcomeKind } from '../costops/dispatch.js'
+import { resolveDispatchIdentitySafe } from '../costops/dispatch-identity.js'
 import { isQualifiedId } from './federation/address.js'
 import { sendFederatedMessage } from './federation/bridge.js'
 import { getFederationConfig, abandonWindowMsForPeer } from './federation/config.js'
@@ -697,9 +698,13 @@ export async function runMessageRouterTick(): Promise<void> {
         // dispatchId was seeded from msg.dispatch_id at the top of this loop
         // iteration (outside the try, so the failure branches can see it).
         if (!dispatchId && !isChannelInbound) {
+          // P2-C: stamp the identity columns from the TARGET agent's config
+          // (it is the agent that will burn the tokens). Best-effort: a resolver
+          // fault stamps un-attributed rather than blocking the delivery.
           dispatchId = createDispatchSafe(getDb(), {
             source: 'message', agent: msg.to_agent,
             sessionId: host ? null : resolveCurrentSessionId(msg.to_agent),
+            ...resolveDispatchIdentitySafe(msg.to_agent),
           })
         }
         // Inline preamble so a fresh session (post hard-restart) doesn't miss

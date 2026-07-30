@@ -19,6 +19,7 @@ import { resolveCurrentSessionId } from '../transcript-sources.js'
 import { isAgentRunning } from '../agent-process.js'
 import { resolveKanbanDispatchTarget } from '../../kanban-dispatch.js'
 import { createDispatchSafe, recordAcceptedOutcomeForCard } from '../../costops/dispatch.js'
+import { resolveDispatchIdentitySafe } from '../../costops/dispatch-identity.js'
 import { recordPacketMetadataSafe } from '../../costops/packet-metadata.js'
 import { buildContextPacket, derivePacketMetadata } from '../../context-packet.js'
 import { evaluateDispatchAdmissionSafe } from '../dispatch-admission.js'
@@ -133,9 +134,15 @@ function fireKanbanDispatch(id: string): void {
       }
       return
     }
+    // P2-C: stamp the identity columns (model_profile / configured_model /
+    // runtime_model / provider / auth_profile / billing_mode). P2-A created them
+    // but no origin populated them, so cost_per_accepted_task could only group by
+    // agent. Best-effort by construction (resolveDispatchIdentitySafe): a
+    // resolver fault stamps un-attributed instead of blocking the dispatch.
     const dispatchId = createDispatchSafe(getDb(), {
       source: 'kanban', agent: target, cardId: id, project: card.project ?? null,
       sessionId: readAgentRemoteHost(target) ? null : resolveCurrentSessionId(target),
+      ...resolveDispatchIdentitySafe(target),
     })
     // P2-B: record the packet metadata for this dispatch. Paths/hashes/sizes
     // only -- the packet BODY is never persisted. Best-effort by construction
