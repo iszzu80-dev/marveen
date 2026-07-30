@@ -1,0 +1,26 @@
+{
+  "_doc": "Illustrative Lean Optimization configuration only. The real deployment-local file lives gitignored at store/optimization-config.json.",
+  "version": 1,
+  "masterEnabled": true,
+  "preset": "active",
+  "modules": {
+    "measurement": true,
+    "contextEfficiency": true,
+    "capacityMonitoring": true,
+    "runtimeRouting": true,
+    "recommendations": true,
+    "marketWatch": true,
+    "benchmarkRecommendations": true
+  },
+  "routing": {
+    "automaticFallback": true,
+    "trustedProvidersOnly": true,
+    "maxFallbacksPerProfile": 2,
+    "maxAutomaticFallbacksPerDispatch": 1
+  },
+  "ui": {
+    "defaultWindow": "30d",
+    "showAllocationCost": true
+  },
+  "lastEnabledConfiguration": null
+}
