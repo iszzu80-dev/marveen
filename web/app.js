@@ -686,6 +686,7 @@ if (document.readyState !== 'loading') {
   renderNav()
   renderStaticI18n()
 }
+if (window.Apg && typeof window.Apg.mount === 'function') window.Apg.mount()
 
 // ============================================================
 // === Activity (live agent status) ===
@@ -783,6 +784,7 @@ function renderActivity(entries) {
       '</div>'
     )
   }).join('')
+  document.dispatchEvent(new CustomEvent('marveen:activity-rendered'))
 }
 
 // Event delegation: clicking a running activity-card opens the terminal modal
@@ -1211,6 +1213,7 @@ function renderKanban() {
     swimlaneBoard.hidden = false
     renderSwimlaneBoard(grouped, embeddedSubtaskIds)
   }
+  document.dispatchEvent(new CustomEvent('marveen:kanban-rendered'))
 }
 
 const KANBAN_STATUS_DEFS = [
@@ -2359,6 +2362,7 @@ async function showCardDetail(card) {
     }
   }
 
+  document.dispatchEvent(new CustomEvent('marveen:kanban-card-opened', { detail: { cardId: card.id } }))
   openModal(cardDetailOverlay)
 }
 
@@ -11452,6 +11456,7 @@ async function loadOverview() {
         act.appendChild(item)
       }
     }
+    document.dispatchEvent(new CustomEvent('marveen:overview-rendered'))
   } catch (err) {
     document.getElementById('overviewActivity').innerHTML = '<div style="color:var(--text-muted);font-size:13px">' + t('overview.error', { msg: escapeHtml(String(err.message || err)) }) + '</div>'
   }
@@ -12740,6 +12745,7 @@ function _renderApprovalsTable() {
   tbody.querySelectorAll('.approvals-decide').forEach(btn => {
     btn.addEventListener('click', () => _resolveApproval(btn.dataset.id, btn.dataset.decision))
   })
+  document.dispatchEvent(new CustomEvent('marveen:approvals-rendered'))
 }
 
 function _approvalBadge(status) {

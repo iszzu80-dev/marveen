@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/costops/costops.css">
   <link rel="stylesheet" href="/optimization/optimization.css">
+  <link rel="stylesheet" href="/apg.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.css">
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10/lib/addon-fit.js"></script>
@@ -275,6 +276,7 @@
 
     <!-- === Overview Page (default) === -->
     <div class="page" id="overviewPage">
+      <div id="apgOverviewSection" class="apg-overview-section" hidden></div>
       <div class="overview-stats">
         <div class="overview-stat">
           <div class="overview-stat-label" data-i18n="overview.stat.agents">Aktív ügynökök</div>
@@ -484,6 +486,7 @@
       <div class="activity-list" id="activityList">
         <p class="activity-empty" data-i18n="activity.loading">Betöltés…</p>
       </div>
+      <div id="apgActivitySection" hidden></div>
     </div>
 
     <!-- === Tasks (Schedules) Page === -->
@@ -1153,6 +1156,7 @@
 
 <!-- === Approvals Page === -->
     <div class="page" id="approvalsPage" hidden>
+      <div id="apgApprovalsSection" hidden></div>
       <div class="page-header">
         <div class="page-header-row">
           <div>
@@ -2162,6 +2166,7 @@
             </div>
           </div>
         </div>
+        <div id="cardDetailApgPanel" hidden></div>
         <div class="detail-actions" style="gap:8px">
           <button class="btn-secondary" id="cardBreakdownBtn">⚡ <span data-i18n="kanban.modal.breakdown_btn">AI szétbont</span></button>
           <button class="btn-secondary" id="cardEditBtn" data-i18n="common.btn.edit">Szerkesztés</button>
@@ -3313,6 +3318,7 @@
   <script src="/optimization/optimization-decisions.js"></script>
   <script src="/optimization/optimization-controls.js"></script>
   <script src="/optimization/optimization-shell.js"></script>
+  <script src="/apg.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>
