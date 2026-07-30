@@ -189,6 +189,30 @@ describe('contextLimitForModel / calibrateLimit', () => {
 })
 
 describe('findContextWindowViolations (card 585c056c part 2: the observation must keep holding)', () => {
+  it('has no stored baseline to fool -- the verdict depends only on peak vs assumed limit, never on sample size or "since when"', () => {
+    // The sonnet comment was not a true number that aged -- it was false the
+    // day it was written (2026-07-29 08:25), and the disproving rows already
+    // existed inside the exact 14-day window it cited. A design that checks
+    // "has this grown since a remembered baseline" would have recorded the
+    // false claim AS its own baseline on day one and never flagged it. This
+    // function has no baseline at all: it takes whatever observation it is
+    // handed and compares ONLY peak vs contextLimitForModel's CURRENT claim.
+    // Proof: a disproving peak on 1 turn of evidence is flagged exactly like
+    // the same peak on a quarter-million turns -- turnCount changes nothing,
+    // because there is no "wait and see if it grows" logic to satisfy.
+    const oneTurn = findContextWindowViolations([{ model: 'claude-haiku-9', peak: 900_000, turnCount: 1 }])
+    const manyTurns = findContextWindowViolations([{ model: 'claude-haiku-9', peak: 900_000, turnCount: 243_524 }])
+    expect(oneTurn).toHaveLength(1)
+    expect(manyTurns).toHaveLength(1)
+    expect(oneTurn[0].assumedLimit).toBe(manyTurns[0].assumedLimit)
+    // Real-data proof this actually holds (not just this synthetic case): the
+    // producer report for card 585c056c part 2 records running
+    // scripts/verify-context-window-assumptions.ts against the LIVE
+    // production database with the false sonnet-5 assumption temporarily
+    // restored -- it failed on that single run, immediately, with the exact
+    // numbers marveen's re-measurement found.
+  })
+
   it('flags a model whose real peak disproves its assumed window -- the exact sonnet incident, locked as a regression', () => {
     // Reproduces the actual bug: the OLD assumption (sonnet-4-x-shaped 200k
     // claim applied to sonnet-5) against the REAL measured peak (935,023

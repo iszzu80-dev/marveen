@@ -470,13 +470,25 @@ export function decideGuard(
 // ---------------------------------------------------------------------------
 // Card 585c056c part 2: the guard for the class of bug, not just the number.
 //
-// contextLimitForModel's family limits are each justified by a STATED
-// OBSERVATION in the comment above (e.g. "sonnet-5 max 197,885 across 14
-// days"). That is what let marveen catch the sonnet defect at all -- but
-// nothing enforced the claim, so it silently went 4.7x stale before anyone
-// re-checked it. This is the re-check, kept as a PURE function (no DB) so it
-// is unit-testable with synthetic rows; scripts/verify-context-window-
-// assumptions.ts supplies the real ones from live token_usage.
+// CORRECTION TO THIS GUARD'S OWN FRAMING (marveen, same day): the sonnet
+// claim was not a true number that went stale -- it was false THE DAY IT WAS
+// WRITTEN. The comment (authored 2026-07-29 08:25) cited "never observed
+// above 198k across 14 days"; that exact 14-day window already contained
+// 62,861 turns above 200,000. A "has this drifted since we last checked"
+// freshness check keyed to a stored baseline would have passed on day one
+// and every day after, because there was never a true baseline to drift from.
+//
+// What actually defends against that: this function (and the script that
+// feeds it) does NOT compare against a stored/remembered baseline. Every
+// call re-derives the observation from the FULL corpus -- scripts/verify-
+// context-window-assumptions.ts's query has no date filter, no "since last
+// run" state, nothing cached. It recomputes the same way on day one, day
+// 1000, or if run the instant the false comment above was written: the
+// corpus already contained the disproving rows before the claim was typed,
+// so this check would have failed immediately, not eventually. Proven, not
+// asserted: running it against the real database with the false 200k
+// assumption temporarily restored produced the violation on the FIRST run
+// (see the producer report / test "flags the exact historical incident").
 // ---------------------------------------------------------------------------
 
 export interface ModelPeakObservation {
