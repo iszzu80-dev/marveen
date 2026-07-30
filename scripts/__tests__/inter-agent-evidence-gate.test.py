@@ -185,5 +185,95 @@ class TestGitignoreFilter(unittest.TestCase):
         self.assertEqual(result, set())
 
 
+class TestCommaConjunctionClauseBoundary(unittest.TestCase):
+    """Card bc6b2b98: the load-bearing guard ("an absence clause about one
+    path must not excuse a genuinely-missing DIFFERENT path in the same
+    message") held across '.', ';' and newline but LEAKED across a comma
+    conjunction -- "X is absent, and I wrote Y" put both claims in one clause,
+    so X's absence assertion suppressed Y too (a false NEGATIVE: worse than
+    the false positives 9682c5ee/dc0fb6f0 fixed, since it ships a missing
+    deliverable as done). Cases derived from the POLICY (clause-scoped, not
+    message-scoped), not from what the old implementation happened to split
+    on -- that gap is exactly how the bug shipped past the original guard test."""
+
+    def test_1_absence_then_comma_and_missing(self):
+        content = f"DONE: {FAKE_ABSENT_TRACKED} is absent, and I wrote {FAKE_MISSING} with the fix."
+        self.assertIn(FAKE_ABSENT_TRACKED, eg.extract_absence_asserted_paths(content))
+        self.assertNotIn(FAKE_MISSING, eg.extract_absence_asserted_paths(content))
+        row = (20, "marveen", "buildfejleszto", content, "pending", 0)
+        result = eg.check_message(None, row, token=None, dry_run=True)
+        self.assertEqual(result["verdict"], "MISSING")
+        self.assertEqual(result["paths_missing"], [FAKE_MISSING])
+
+    def test_2_missing_then_comma_and_absence_reversed_order(self):
+        content = f"DONE: I wrote {FAKE_MISSING}, and {FAKE_ABSENT_TRACKED} is absent."
+        self.assertIn(FAKE_ABSENT_TRACKED, eg.extract_absence_asserted_paths(content))
+        self.assertNotIn(FAKE_MISSING, eg.extract_absence_asserted_paths(content))
+        row = (21, "marveen", "buildfejleszto", content, "pending", 0)
+        result = eg.check_message(None, row, token=None, dry_run=True)
+        self.assertEqual(result["verdict"], "MISSING")
+        self.assertEqual(result["paths_missing"], [FAKE_MISSING])
+
+    def test_3_no_longer_exists_two_tracked_paths_comma_and(self):
+        # Both paths tracked (no gitignore interaction) -- isolates this to
+        # being purely a clause-boundary defect, not a gitignore one.
+        other_absent = "scripts/install-monitor-fake-bc6b2b98.sh"
+        content = f"DONE: {other_absent} no longer exists, and I wrote {FAKE_MISSING} with the change."
+        missing_asserted = eg.extract_absence_asserted_paths(content)
+        self.assertIn(other_absent, missing_asserted)
+        self.assertNotIn(FAKE_MISSING, missing_asserted)
+
+    def test_4_comma_but_conjunction(self):
+        content = f"DONE: {FAKE_ABSENT_TRACKED} is absent, but I wrote {FAKE_MISSING} anyway."
+        asserted = eg.extract_absence_asserted_paths(content)
+        self.assertIn(FAKE_ABSENT_TRACKED, asserted)
+        self.assertNotIn(FAKE_MISSING, asserted)
+
+    def test_5_comma_so_conjunction(self):
+        content = f"DONE: {FAKE_ABSENT_TRACKED} is absent, so I wrote {FAKE_MISSING} instead."
+        asserted = eg.extract_absence_asserted_paths(content)
+        self.assertIn(FAKE_ABSENT_TRACKED, asserted)
+        self.assertNotIn(FAKE_MISSING, asserted)
+
+    def test_6_comma_while_conjunction(self):
+        content = f"DONE: {FAKE_ABSENT_TRACKED} is absent, while I wrote {FAKE_MISSING} separately."
+        asserted = eg.extract_absence_asserted_paths(content)
+        self.assertIn(FAKE_ABSENT_TRACKED, asserted)
+        self.assertNotIn(FAKE_MISSING, asserted)
+
+    def test_7_hungarian_comma_es_conjunction(self):
+        # ", es" (unaccented, as agent messages sometimes drop accents) and
+        # ", és" (accented) both need to split -- bilingual per the card scope.
+        content_unaccented = f"KESZ: {FAKE_ABSENT_TRACKED} nincs, es megirtam {FAKE_MISSING}-t is."
+        self.assertIn(FAKE_ABSENT_TRACKED, eg.extract_absence_asserted_paths(content_unaccented))
+        self.assertNotIn(FAKE_MISSING, eg.extract_absence_asserted_paths(content_unaccented))
+        content_accented = f"KESZ: {FAKE_ABSENT_TRACKED} nincs, és megirtam {FAKE_MISSING}-t is."
+        self.assertIn(FAKE_ABSENT_TRACKED, eg.extract_absence_asserted_paths(content_accented))
+        self.assertNotIn(FAKE_MISSING, eg.extract_absence_asserted_paths(content_accented))
+
+    def test_8_hungarian_comma_de_conjunction(self):
+        content = f"KESZ: {FAKE_ABSENT_TRACKED} nincs, de megirtam {FAKE_MISSING}-t is."
+        asserted = eg.extract_absence_asserted_paths(content)
+        self.assertIn(FAKE_ABSENT_TRACKED, asserted)
+        self.assertNotIn(FAKE_MISSING, asserted)
+
+    def test_9_single_path_absence_via_comma_and_still_suppresses(self):
+        # Non-regression (9682c5ee): a legitimate single-path absence claim
+        # phrased with a trailing ", and" clause about something else (not a
+        # path at all) must still suppress the absence-asserted path.
+        content = f"DONE: {FAKE_ABSENT_TRACKED} is absent, and that is expected."
+        self.assertIn(FAKE_ABSENT_TRACKED, eg.extract_absence_asserted_paths(content))
+        row = (22, "marveen", "buildfejleszto", content, "pending", 0)
+        result = eg.check_message(None, row, token=None, dry_run=True)
+        self.assertEqual(result["verdict"], "PASS")
+
+    def test_10_bare_gitignored_path_no_absence_clause_still_no_hit(self):
+        # Non-regression (dc0fb6f0): unaffected by the clause-boundary widening.
+        content = f"DONE: wrote {FAKE_ABSENT} with the new config."
+        row = (23, "marveen", "buildfejleszto", content, "pending", 0)
+        result = eg.check_message(None, row, token=None, dry_run=True)
+        self.assertEqual(result["verdict"], "PASS")
+
+
 if __name__ == "__main__":
     unittest.main()

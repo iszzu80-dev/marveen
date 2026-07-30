@@ -162,10 +162,21 @@ ABSENCE_RE = re.compile(
 # path match) rather than as a clause-wide keyword, since "no" alone is too
 # common a word to scope to a whole clause without false-suppressing misses.
 _NO_PRECEDES_RE = re.compile(r'\bno\s*$', re.IGNORECASE)
-# Clause boundary: sentence-ending punctuation followed by whitespace, or a
-# newline. Deliberately NOT a bare '.' -- path extensions (model-fallback.json)
-# have no space after the internal dot, so this never splits inside a path.
-_CLAUSE_BOUNDARY_RE = re.compile(r'[.;]\s|\n')
+# Clause boundary: sentence-ending punctuation followed by whitespace, a
+# newline, OR a comma-joined coordinating conjunction ("X is absent, and I
+# wrote Y"). Card bc6b2b98: without the conjunction alternative, a comma
+# conjunction leaves both claims in ONE clause, so an absence assertion about
+# X leaks across the comma and suppresses a genuinely-missing Y in the same
+# sentence -- a FALSE NEGATIVE (worse than the false positives 9682c5ee/
+# dc0fb6f0 fixed: a false positive costs one triage, a false negative ships a
+# missing deliverable as done). Bilingual (English + Hungarian, accented and
+# not, since agent messages mix both and accents are sometimes dropped).
+# Deliberately NOT a bare '.' -- path extensions (model-fallback.json) have no
+# space after the internal dot, so this never splits inside a path.
+_CLAUSE_BOUNDARY_RE = re.compile(
+    r'[.;]\s|\n|,\s*(?:and|but|so|while|es|és|de)\b',
+    re.IGNORECASE
+)
 
 
 def load_token():
