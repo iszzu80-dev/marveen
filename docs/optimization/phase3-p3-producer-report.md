@@ -1,5 +1,9 @@
 # Lean Optimization Phase 3 — Producer Report (devops)
 
+**Round 2 (2026-07-30, responding to gate comment 8261).** Marveen's gate found one real
+must-fix and one real decision, both addressed below (see "Gate fix — round 2"). Round-1 sections
+are left below unedited except where superseded, so the finding trail stays legible.
+
 Card `59b383a9`. This is a **producer report, not the as-built** — per the program's own rule
 (`lean-optimization-phase2-4-program-state.md`: "marveen gates independently and never accepts on
 report alone"), I build on a branch and report evidence; marveen verifies independently and writes
@@ -21,28 +25,79 @@ Context packet: `docs/optimization/phase3-context-packet.md`.
 | `src/web.ts` (edited) | Registers `startCapacityRoutingRunner()` instead of the deleted runner. |
 | `src/model-fallback.ts` (comment only) | Header updated to record the retirement; `detectsUsageLimit`/`decideModelAction`/chain constants are untouched and still tested (`model-fallback.test.ts`, unchanged, still green) — nothing calls the chain-walk path at runtime any more, but deleting tested pure logic was not required by this phase, only the config-write action was. |
 | `src/__tests__/main-restart-platform.test.ts` (edited) | Removed the deleted file from its `RUNNERS` list, with a comment recording why. |
-| 3 new test files | `capacity-routing.test.ts` (34 tests), `capacity-routing-store.test.ts` (15), `capacity-routing-no-config-write.test.ts` (5). |
+| 4 new test files (round 2 total; see below) | `capacity-routing.test.ts` (34), `capacity-routing-store.test.ts` (15), `capacity-routing-no-config-write.test.ts` (5 at round 1, trimmed to 3 at round 2), `agent-config-write-allowlist.test.ts` (4, added round 2). |
 
-## Two honest scope gaps (not silently dropped)
+## Gate fix — round 2 (comment 8261)
 
-1. **Main agent (marveen) is not routed.** It launches via `hardRestartMarveenChannels()` /
-   channels.sh, which reads `.claude/settings.json` inside the `claude` binary itself — there is no
-   TS-side `--model` flag construction to intercept the way there is for sub-agents in
-   `agent-process.ts`. Extending it means either touching channels.sh or writing that config file
-   (the latter being exactly what is forbidden). Left exactly as configured, which was already the
-   live behaviour (the old runner's main path was config-write and never actually fired — `store/
-   model-fallback.json` never existed). Sub-agents only, this pass.
-2. **Capacity figures are per-provider, not per-(provider, authProfile).** P2-C's subscriptions
-   config has no per-auth-profile granularity yet, so two auth profiles under one provider currently
-   share one capacity figure. The registry key stays `(provider, authProfile)` throughout so this can
-   be sharpened later without a shape change — only today's figure *source* is coarser than the key.
+**Must-fix: the config-write guard gated modules I wrote, not the path the code takes.**
+`capacity-routing-no-config-write.test.ts` hand-listed two files (`capacity-routing-runner.ts`,
+`capacity-routing-store.ts`) and scanned only those. Marveen proved that insufficient by inserting
+`writeAgentModel(name, model)` directly into `agent-process.ts`'s `startAgentProcess`, right after
+the `resolveRuntimeModel` call — a file not on the hand-picked list. tsc 0, the 3 capacity-routing
+files 54/54, full suite green: invisible.
 
-## Verification (mine, as producer — marveen's own independent gate is separate and pending)
+**Fix, inverted to default-deny** (new file `src/__tests__/agent-config-write-allowlist.test.ts`):
+scans every `.ts` file under `src/` (not a curated subset) for a call to
+`writeAgentModel`/`writeAgentModelProfile`/`writeMainModel`/`writeModelFor`, and allowlists exactly
+one legitimate site — `web/routes/agents.ts`, the operator-facing REST endpoint — with the reason
+written inline. A new module anywhere on (or off) the routing path is covered by construction: it
+either doesn't call these symbols, or does and must be consciously allowlisted. The old hand-listed
+loop was removed from `capacity-routing-no-config-write.test.ts` (that file now only checks the
+deleted-runner facts + a narrower, faster, explicitly-non-substitute check on
+`resolveRuntimeModel`'s own body).
+
+Three proofs, each mutated live and reverted clean (`diff` against a pre-mutation backup):
+1. **Marveen's exact mutation** (import `writeAgentModel` + call it right after `resolveRuntimeModel`
+   in `startAgentProcess`, `agent-process.ts`) → the new test goes RED, naming the exact file and
+   symbol (`web/agent-process.ts: calls writeAgentModel(...)`).
+2. **The legitimate operator write stays GREEN**: `web/routes/agents.ts` calls
+   `writeAgentModel`/`writeAgentModelProfile` in 4 places (agent create + PATCH) and is correctly
+   excluded — verified both by the "no unallowlisted violations" test passing and by a dedicated
+   test asserting the allowlist entry is not decorative (it does genuinely match a real call).
+3. **Removing the allowlist entry** (`ALLOWLIST = {}`) → the SAME `web/routes/agents.ts` calls are
+   now correctly flagged as violations, RED — proving the entry is load-bearing, so the allowlist
+   cannot silently grow (an entry that stops mattering would be caught the same way).
+
+**Decision (not a to-do note): capacity granularity stays per-provider this pass, documented
+precisely rather than extended.** The fleet genuinely runs two independent Anthropic auth profiles
+today — `host_default` and `configdir:.claude-personal` — each its own quota pool; live
+`dispatches.auth_profile` rows already distinguish them. This registry currently reads capacity
+PER PROVIDER (P2-C's `store/costops-subscriptions.json` has one entry per provider, no `authProfile`
+field), so both profiles read the SAME usage figure. **The exact mis-read this causes, named
+precisely**: if `host_default` is near its limit while `configdir:.claude-personal` has headroom,
+both report constrained (an agent on the healthy profile is wrongly denied/routed away) — or the
+reverse, a genuinely exhausted profile reads healthy because the other profile's fresher reading is
+what was last stored. Both directions are silent; nothing in the current data model distinguishes
+them. **Why documented rather than fixed now**: closing this means adding a nullable `auth_profile`
+column to `provider_ratelimit_snapshots` (idempotent ALTER, same pattern as the existing
+`usage_confidence`/`snapshot_source` columns) plus an `authProfile` field per subscriptions-config
+entry, and teaching every manual/collector reading which profile it is FOR — a P2-C (already-shipped,
+already-live) schema extension, not a Phase 3 change, and doing it inside this branch would silently
+widen this phase's blast radius onto merged, running code. Named as a follow-up item under P2-C, not
+left implicit. Full statement lives in `capacity-routing-runner.ts`'s header comment (`CAPACITY
+GRANULARITY DECISION`), which this report mirrors.
+
+**Main-agent scope boundary, restated as accepted (not forgotten)**: marveen accepted this in comment
+8261 — "the main session is service-managed and its model comes from `.claude/settings.json`, which
+this phase must not write." Restated here and in the runner's header as a settled boundary, not a
+pending gap.
+
+## Verification after round 2
 
 - `npx tsc --noEmit`: exit 0. `npm run build`: exit 0.
-- **Full suite: 281 files, 3875 passed / 1 skipped, exit 0.** Baseline (Phase 2 P2-C acceptance, this
-  program-state doc): 278 files / 3821 passed / 1 skipped. Delta: **+3 files, +54 tests, 0 regressions**
-  — exactly the 3 new test files and their 54 tests; nothing else moved.
+- **Full suite: 282 files, 3877 passed / 1 skipped, exit 0.** Baseline (Phase 2 P2-C acceptance):
+  278 files / 3821 passed / 1 skipped. Delta: **+4 files, +56 tests, 0 regressions** — the 4 new test
+  files (`capacity-routing.test.ts` 34, `capacity-routing-store.test.ts` 15,
+  `capacity-routing-no-config-write.test.ts` 3 after trimming, `agent-config-write-allowlist.test.ts`
+  4) and nothing else moved.
+- Round-2 mutations (3, listed above) + round-1 mutations (4, listed below) = 7 total, all reverted
+  clean and re-verified green.
+
+## Verification — round 1 (superseded numbers, kept for the finding trail)
+
+- `npx tsc --noEmit`: exit 0. `npm run build`: exit 0.
+- Full suite at round 1: 281 files, 3875 passed / 1 skipped, exit 0 (before the round-2 guard
+  replacement changed the test count to 282/3877 — see "Verification after round 2" above).
 - Mutations run by me and reverted clean (verified via `diff` against a pre-mutation backup, not
   just `git status`):
   1. `capacity-routing-runner.ts`: reintroduced a `writeAgentModel(...)` call on the apply path →

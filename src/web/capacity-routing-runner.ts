@@ -10,24 +10,46 @@
 // (src/capacity-routing.js) and replaces the action with a runtime-overlay
 // write/clear (src/web/capacity-routing-store.js) instead of a config write.
 //
-// SCOPE GAP (honest, not silently dropped): the MAIN agent (marveen) is
-// launched via hardRestartMarveenChannels() / channels.sh, which reads
-// .claude/settings.json directly inside the `claude` binary itself -- there is
-// no TS-side --model flag construction to intercept the way there is for
-// sub-agents in agent-process.ts. Routing main therefore has no choke point
-// to hook without either extending channels.sh or writing to that config file
-// (the latter being exactly what is forbidden). This sweep covers sub-agents
-// only; main is left exactly as configured, which was already the live
-// behaviour (the old runner's main path was config-write, and inert in
-// practice since store/model-fallback.json never existed). A future phase
-// item is to extend channels.sh with the same overlay read.
+// SCOPE BOUNDARY (accepted by marveen 2026-07-30, card 59b383a9 comment
+// 8261: "the main session is service-managed and its model comes from
+// .claude/settings.json, which this phase must not write"): the MAIN agent
+// (marveen) is launched via hardRestartMarveenChannels() / channels.sh, which
+// reads .claude/settings.json directly inside the `claude` binary itself --
+// there is no TS-side --model flag construction to intercept the way there is
+// for sub-agents in agent-process.ts. Extending routing to main would require
+// either changing channels.sh's own launch path or writing that config file,
+// the latter being exactly what this phase forbids. This sweep covers
+// sub-agents only; main is left exactly as configured, which was already the
+// live behaviour (the old runner's main path was config-write, and inert in
+// practice since store/model-fallback.json never existed). Extending
+// channels.sh to read the same overlay is future work, not a silent gap.
 //
-// SCOPE GAP (honest): capacity figures are read PER PROVIDER (P2-C's
-// subscriptions config has no per-authProfile granularity yet), so two auth
-// profiles under the same provider currently share one capacity figure. The
-// registry key is still (provider, authProfile) throughout so this can be
-// sharpened later without a shape change -- only the current figure source is
-// coarser than the key.
+// CAPACITY GRANULARITY DECISION (marveen 2026-07-30: "not a to-do note" --
+// the fleet genuinely runs TWO Anthropic auth profiles today, `host_default`
+// and `configdir:.claude-personal`, each an independent quota pool; live
+// dispatch rows already tell them apart via dispatches.auth_profile). This
+// pass reads capacity PER PROVIDER, not per (provider, authProfile): P2-C's
+// subscriptions config (store/costops-subscriptions.json) has one entry per
+// PROVIDER, with no authProfile field, so `capacityStateFor()` below matches
+// by provider alone and both Anthropic auth profiles currently read the SAME
+// usage figure. THE EXACT MIS-READ THIS CAUSES: if `host_default` is the one
+// actually near its plan limit while `configdir:.claude-personal` still has
+// headroom, this registry reports BOTH as constrained (an agent on the
+// healthy profile is denied a fallback it should be entitled to, or is
+// wrongly routed away from a primary that was fine for IT specifically) --
+// or the reverse, a genuinely exhausted profile reads as healthy because the
+// OTHER profile's fresher reading is what got stored last. Both directions
+// are silent: nothing in the current data model can tell them apart.
+// DECISION (this pass): document precisely rather than extend the schema now
+// -- fixing it means adding a nullable `auth_profile` column to
+// `provider_ratelimit_snapshots` (idempotent ALTER, same pattern as the
+// existing usage_confidence/snapshot_source columns in schema.ts) plus an
+// optional `authProfile` field per entry in the subscriptions config, and
+// teaching whatever supplies a manual/collector reading which auth profile it
+// is FOR. That is a P2-C (already-shipped, already-live) schema extension,
+// not a Phase 3 addition, and doing it inside this branch would silently
+// widen this phase's blast radius onto merged, running code. Left for a
+// follow-up item under P2-C, named exactly instead of left implicit.
 
 import { logger } from '../logger.js'
 import { getDb } from '../db.js'
