@@ -195,30 +195,41 @@ _NO_PRECEDES_RE = re.compile(r'\bno\s*$', re.IGNORECASE)
 # own. This needs a different signal (e.g. NLP) to resolve safely and is
 # left for a future card if it proves to matter in practice.
 #
-# DASH REJECTED, do not re-attempt without a real counter-example: a spaced
-# dash/em-dash boundary was added and then REVERTED (2026-07-30, same day).
-# The trigger was card e0742bbd's own probe comment ("Deliverable written to
-# X -- a path ... that genuinely does not exist."), where the em-dash keeps
-# X's absence phrase out of X's clause once split. But that probe sentence is
-# self-contradictory prose no real producer writes (claiming delivery of X
-# and X's absence in one breath) -- an artifact of the probe's own
-# explanation being inside its own test input, not a genuine miss. Marveen
-# measured the actual cost of the dash widening against ordinary prose (a
-# matrix of 6 cases, comma-conjunction variants + parenthetical-suppression
-# variants, cross-checked against a clean fixture after catching their own
-# fixture contamination -- see the git log) and found a REAL false positive
-# on the dominant construction this fleet's own comments use constantly:
-# "The overlay file -- <path> -- does not exist yet." Splitting on both
-# em-dashes isolates <path> into its own clause with NO absence wording
-# nearby, flagging a deliverable that a human reading the sentence would
-# correctly read as intentionally, legitimately absent. That is a real,
-# common-case regression for a defect that was not real. COLON STAYS,
-# measured safe in the same comparison (a colon is used far more often as a
-# single directional label -- "Status: X" -- than as a paired bracket the
-# way a dash commonly is, so it was not the source of the false positive).
-# If a dash case ever needs revisiting, it needs a genuine example of a
-# MISSED deliverable in real usage, not a probe's self-referential wording.
-_CLAUSE_BOUNDARY_RE = re.compile(r'[.,;:]\s|\n')
+# DASH AND COLON REJECTED, do not re-attempt without a real counter-example
+# from actual usage: both were tried and REVERTED the same day (2026-07-30).
+#
+# The trigger for the dash was card e0742bbd's own probe comment ("Deliverable
+# written to X -- a path ... that genuinely does not exist."), where a
+# dash/em-dash boundary keeps X's absence phrase out of X's clause once
+# split. But that probe sentence is self-contradictory prose no real producer
+# writes (claiming delivery of X and X's absence in one breath) -- an
+# artifact of the probe's own explanation being inside its own test input,
+# not a genuine miss. Measured against ordinary prose, dash produces a REAL
+# false positive on the dominant construction this fleet's own comments use
+# constantly: "The overlay file -- <path> -- does not exist yet." Splitting
+# on both em-dashes isolates <path> into its own clause with no absence
+# wording nearby, flagging a deliverable a human reader would correctly read
+# as intentionally, legitimately absent.
+#
+# Colon was ALSO tried (kept for one commit, thought safe because a colon is
+# usually a single directional label rather than a paired bracket) and is
+# the SAME defect in a different costume: in label-style phrasing the
+# absence word sits BEFORE the colon and the path AFTER it --
+# "Missing: <path>.", "Absent: <path>.", "The deliverable does not exist:
+# <path>." -- so splitting there leaves the path's own clause with NO
+# absence vocabulary, and it reads as a delivery claim. This is not a rare
+# shape: it is the format this very gate's OWN output uses ("evidence-check:
+# MISSING -- ..."), so a colon boundary would penalise precisely the
+# careful, structured absence findings this rule exists to honor -- a guard
+# that punishes the behaviour it is meant to protect gets routed around.
+#
+# Comma alone is not vulnerable to either shape: nothing in ordinary English
+# puts the absence word and the path in a comma-separated label/bracket pair
+# the way "Label: X" or "-- X --" does. If dash or colon ever needs
+# revisiting, it needs a genuine example of a MISSED deliverable from real
+# usage, not a probe's self-referential wording or a plausible-sounding
+# hypothetical -- both of the reverted attempts were exactly that.
+_CLAUSE_BOUNDARY_RE = re.compile(r'[.,;]\s|\n')
 
 
 def load_token():
