@@ -97,8 +97,17 @@ Deliberately deferred to this acceptance step so the fleet was not churned mid-p
    *Gotcha worth keeping:* assignment is `PUT /api/kanban/:id` (not PATCH — PATCH answers
    "Not found"), and the assignee must be set BEFORE the move, or the move succeeds, fires nothing,
    and leaves no trace that measurement did not happen.
-   The `accepted` writer fires when that card reaches `done`; still unobserved as of this writing,
-   and named here rather than assumed.
+   **Now fully closed.** devops fixed the card (a real one-line defect) and moved it to `done`, which
+   produced the **first `accepted` outcome in the system's history**:
+   `0c7098e0-5ce3-4ad9-8cd2-2006630cecc4` → dispatch `54974e59`, `outcome` = `accepted`,
+   `evidence` = `kanban:done`. So the Phase 2 attribution chain is now proven end-to-end **in
+   production**, not only by test: a kanban move mints a stamped dispatch, and closing the card writes
+   an accepted outcome against it.
+   I did not accept devops's fix on its report either — I re-ran the stdio `initialize` handshake
+   against both MCP servers myself and confirmed the names now differ (`google-private` vs
+   `google-zst`). devops's own caveat also checks out: `git check-ignore` → `.gitignore:45:
+   mcp-servers/`, 0 tracked files, so that fix is disk-local and would be lost on a reinstall. Carded
+   separately as `d95ac444` rather than left as a footnote.
 2. **Anthropic subscription capacity is honestly blind.** `anthropic-usage-snapshot` skipped with
    `no anthropic subscription in store/costops-subscriptions.json`; the second gate would then require
    a `usage_snapshot`, because **Anthropic exposes no quota/usage API (re-verified 2026-07-30)** and
@@ -117,12 +126,16 @@ Deliberately deferred to this acceptance step so the fleet was not churned mid-p
    resolving it via `MAIN_AGENT_ID` would have mis-attributed the main pane's tokens, so inert was
    the correct trade and a test pins it). Sub-agent transcripts carry the parent sessionId, so their
    tokens fold into the parent package.
-6. **Canary volume: 17 real dispatches / 17 routing events at the time of writing**, against the
-   card's ">= 20" target. Coverage is complete — both resolution paths (explicit model AND
-   `modelProfile`), both billing modes (`subscription_included` AND `api_payg`), and all three live
-   origins (`message`, `scheduler`, `kanban`) are represented. The shortfall is **volume only**, and it
-   accrues from real traffic. Stated rather than rounded up, and NOT padded with synthetic dispatches:
-   inflating the count with pings would defeat the purpose of a canary.
+6. **Canary: MET — 20 real dispatches / 20 routing events**, against the card's ">= 20" target,
+   and **not one of them synthetic**. Coverage is complete: both resolution paths (explicit `model`
+   AND `modelProfile`), both billing modes (`subscription_included` AND `api_payg`), and all three
+   live origins (`scheduler` 10, `message` 6, `kanban` 4).
+   The count was closed by dispatching genuine backlog work that needed doing anyway — the CostOps
+   `data_freshness` under-count (`320c477a`, which understates operational spend by ~18k Ft and would
+   have corrupted Phase 4's inputs), the shared-checkout scheduled-task breakage (`d3f9fd90`), and the
+   dead MK Golden Suite CI (`908ebaf3`). **Padding the count with pings was available and deliberately
+   not used**: a canary inflated with synthetic traffic measures nothing, and would have made this very
+   number a lie.
 
 ## Process finding worth keeping
 The P2-C producer's first run died on a transient 529 with **~2900 lines uncommitted**, and the
