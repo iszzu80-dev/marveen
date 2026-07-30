@@ -118,12 +118,57 @@ export const CONTEXT_LIMIT_TIERS = [200_000, 500_000, 1_000_000] as const
  */
 const ONE_MILLION_FAMILIES = [/fable-\d/, /mythos-\d/, /opus-4-[6-9]/, /opus-[5-9]\b/]
 
+// Explicitly EVIDENCED at 200k, not merely "unmatched -> default". Distinct
+// from the unknown-model fallthrough below: card 585c056c needs to tell a
+// model this codebase has actually seen apart from one it has never heard of
+// (see isRecognizedContextModel).
+const TWO_HUNDRED_K_FAMILIES = [/sonnet-\d/, /haiku-\d/]
+
+// DeepSeek's real window is much smaller than the Claude families and was
+// previously tracked ONLY in a second, hand-maintained map in
+// scripts/fleet-context-guard.sh (card 585c056c) -- a second registry that
+// can drift from this one (and did: this file's default silently gave
+// DeepSeek 200k while the shell script's copy said 180k). Consolidated here
+// as the single source: 180k, matching that script's own comment ("empirically
+// ... deepseek froze ~176k") -- a conservative ceiling just above the observed
+// freeze point, not a new number invented for this change.
+const DEEPSEEK_FAMILIES = [/deepseek/]
+const DEEPSEEK_CONTEXT_LIMIT = 180_000
+
 export function contextLimitForModel(model: string | null | undefined): number {
   if (typeof model !== 'string') return 200_000
   const m = model.toLowerCase()
   if (m.includes('[1m]')) return 1_000_000
   if (ONE_MILLION_FAMILIES.some(rx => rx.test(m))) return 1_000_000
+  if (DEEPSEEK_FAMILIES.some(rx => rx.test(m))) return DEEPSEEK_CONTEXT_LIMIT
   return 200_000
+}
+
+/**
+ * Whether `model` is one this registry actually recognises -- matched by the
+ * `[1m]` suffix, a 1M family, an explicitly-evidenced 200k family, or the
+ * DeepSeek family -- as opposed to falling through to contextLimitForModel's
+ * conservative 200k DEFAULT for a model it has never seen.
+ *
+ * Card 585c056c: contextLimitForModel's fallthrough is a deliberately safe
+ * choice FOR THE CALIBRATING RUNNER (context-guard-runner.ts), which steps the
+ * denominator up from live evidence when the default proves wrong (see
+ * calibrateLimit) -- under-estimating there is loud and self-correcting. A
+ * consumer with NO calibration (a one-shot check, e.g. a cron script) has no
+ * such correction, so silently accepting the 200k default for a genuinely
+ * unknown model reproduces exactly this card's incident (a new/unlisted model
+ * reads as if it were a 200k model until someone notices the restarts are
+ * wrong). Such a consumer should call this FIRST and refuse to compute or act
+ * on a percentage when it returns false, rather than trust the fallthrough.
+ */
+export function isRecognizedContextModel(model: string | null | undefined): boolean {
+  if (typeof model !== 'string') return false
+  const m = model.toLowerCase()
+  if (m.includes('[1m]')) return true
+  if (ONE_MILLION_FAMILIES.some(rx => rx.test(m))) return true
+  if (TWO_HUNDRED_K_FAMILIES.some(rx => rx.test(m))) return true
+  if (DEEPSEEK_FAMILIES.some(rx => rx.test(m))) return true
+  return false
 }
 
 /**

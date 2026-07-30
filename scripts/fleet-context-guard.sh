@@ -34,24 +34,51 @@ SKIP_AGENTS="marveen"
 [ -f "$TOKEN_FILE" ] || { echo "no dashboard token"; exit 0; }
 TOKEN=$(cat "$TOKEN_FILE")
 
-# Two-tier detection: parse /api/agents, map model -> context window.
+# Two-tier detection: parse /api/agents.
+#
+# Card 585c056c (2026-07-30): this used to hand-maintain its OWN model->window
+# map here (a second registry, next to src/context-guard.ts's canonical one),
+# which drifted -- it never had claude-opus-5, so both agents running it
+# (architect, deliverylead) fell through to a 200000 default against a real
+# ~1M window, inflating every percentage ~5x. deliverylead was fresh-restarted
+# at "150% context" -- ~30% of its REAL window, on a 92% threshold. 174
+# recovery dirs under store/recovery/*/*proactive* carry a reason.txt with a
+# percentage over 100, which is arithmetic proof of the same defect: a
+# percentage of a window cannot exceed the window.
+#
+# Fixed by consuming the SAME registry the dashboard already resolves
+# server-side (src/context-guard.ts's contextLimitForModel /
+# isRecognizedContextModel, exposed as contextLimit/contextLimitKnown on
+# /api/agents) instead of re-deriving one here. A model contextLimitKnown=false
+# (this registry has never seen it) produces NO reading -- logged loudly to
+# stderr (captured by the cron redirect into store/logs/fleet-context-guard.log),
+# never a silent default-then-restart. And pct>100 is impossible by definition
+# and is refused as a bug signal rather than acted on, regardless of source.
+#
 # Emit "<agent> <pct> <level>" lines (level=warn|critical) for agents at/over WARN_THRESHOLD.
 OVER=$(curl -s -m 15 -H "Authorization: Bearer $TOKEN" "$DASH_URL/api/agents" 2>/dev/null | python3 -c "
 import json,sys
 WARN=$WARN_THRESHOLD
 CRIT=$THRESHOLD
-# effective context windows (empirically: sonnet-5/opus run to ~1M; deepseek froze ~176k)
-WIN={'claude-sonnet-5':1000000,'claude-opus-4-8':1000000,'claude-opus-4-8[1m]':1000000,'deepseek-v4-pro':180000}
 try: ags=json.load(sys.stdin)
 except Exception: sys.exit(0)
 for a in ags:
     ct=a.get('contextTokens') or 0
     if not ct: continue
-    win=WIN.get(a.get('model'),200000)
+    if not a.get('contextLimitKnown'):
+        print(f\"fleet-context-guard: UNKNOWN-MODEL {a.get('name')} model={a.get('model')!r} -- no context reading (add it to src/context-guard.ts's family lists, card 585c056c)\", file=sys.stderr)
+        continue
+    win=a.get('contextLimit')
+    if not win or win <= 0:
+        print(f\"fleet-context-guard: BAD-CONTEXT-LIMIT {a.get('name')} contextLimit={win!r} -- no context reading\", file=sys.stderr)
+        continue
     pct=round(100*ct/win)
+    if pct>100:
+        print(f\"fleet-context-guard: IMPOSSIBLE-PCT {a.get('name')} pct={pct} ct={ct} win={win} -- a percentage cannot exceed the window; treating as a bug signal, no action taken\", file=sys.stderr)
+        continue
     if pct>=CRIT: print(a.get('name'),pct,'critical')
     elif pct>=WARN: print(a.get('name'),pct,'warn')
-" 2>/dev/null)
+")
 
 now=$(date +%s)
 recovered=0

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   normalizeContextGuardConfig,
   contextLimitForModel,
+  isRecognizedContextModel,
   calibrateLimit,
   CALIBRATION_OVERSHOOT_TOLERANCE,
   decideGuard,
@@ -78,8 +79,32 @@ describe('contextLimitForModel / calibrateLimit', () => {
     expect(contextLimitForModel('claude-sonnet-5')).toBe(200_000)
     expect(contextLimitForModel('claude-haiku-4-5')).toBe(200_000)
     expect(contextLimitForModel('claude-opus-4-5')).toBe(200_000)
-    expect(contextLimitForModel('deepseek-v4-pro')).toBe(200_000)
+    // Card 585c056c: DeepSeek's own evidenced ceiling (~176k observed) is now
+    // consolidated HERE instead of only in scripts/fleet-context-guard.sh's
+    // separate, drifted Python map -- was silently 200k (the generic
+    // unknown-model default) before this fix.
+    expect(contextLimitForModel('deepseek-v4-pro')).toBe(180_000)
     expect(contextLimitForModel(null)).toBe(200_000)
+  })
+
+  it('isRecognizedContextModel distinguishes an evidenced model from an unseen one (card 585c056c)', () => {
+    // Every family contextLimitForModel gives a NON-default answer for is "recognized".
+    expect(isRecognizedContextModel('claude-opus-4-8[1m]')).toBe(true)
+    expect(isRecognizedContextModel('claude-fable-5')).toBe(true)
+    expect(isRecognizedContextModel('claude-mythos-5')).toBe(true)
+    expect(isRecognizedContextModel('claude-opus-4-8')).toBe(true)
+    expect(isRecognizedContextModel('claude-opus-5')).toBe(true)
+    expect(isRecognizedContextModel('claude-sonnet-5')).toBe(true)
+    expect(isRecognizedContextModel('claude-haiku-4-5')).toBe(true)
+    expect(isRecognizedContextModel('deepseek-v4-pro')).toBe(true)
+    // A model this registry has never seen (the exact 2026-07-30 incident
+    // shape, one layer up from just adding opus-5): NOT recognized, so a
+    // no-calibration consumer knows to refuse a reading rather than silently
+    // trust contextLimitForModel's 200k default.
+    expect(isRecognizedContextModel('claude-opus-3')).toBe(false)
+    expect(isRecognizedContextModel('some-brand-new-model')).toBe(false)
+    expect(isRecognizedContextModel(null)).toBe(false)
+    expect(isRecognizedContextModel(undefined)).toBe(false)
   })
 
   it('defaults the handoff timeout to 20 minutes (6 was shorter than a working turn)', () => {
