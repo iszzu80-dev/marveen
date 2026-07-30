@@ -227,6 +227,28 @@ class TestCommaConjunctionClauseBoundary(unittest.TestCase):
         self.assertIn(FAKE_ABSENT_TRACKED, asserted)
         self.assertNotIn(FAKE_MISSING, asserted)
 
+    def test_4b_double_hyphen_boundary(self):
+        # Found LIVE 2026-07-30 via card e0742bbd's own probe comment: " -- "
+        # (double hyphen, this codebase's own constant parenthetical style)
+        # is a distinct separator from the single spaced dash above -- \s-\s
+        # does not match it (the char after the first '-' is another '-').
+        content = f"DONE: wrote {FAKE_MISSING} -- {FAKE_ABSENT_TRACKED} is a path that genuinely does not exist."
+        asserted = eg.extract_absence_asserted_paths(content)
+        self.assertIn(FAKE_ABSENT_TRACKED, asserted)
+        self.assertNotIn(FAKE_MISSING, asserted)
+
+    def test_4c_reproduces_the_live_e0742bbd_probe_text_verbatim(self):
+        # The exact sentence shape that exposed the gap, reworded onto fixture
+        # paths. Regression pin for this specific live incident.
+        content = (
+            f"DONE: PROBE, deliberately un-sanitised. Deliverable written to {FAKE_MISSING} "
+            f"-- a path under a prefix that IS flaggable and that genuinely does not exist."
+        )
+        row = (30, "marveen", "buildfejleszto", content, "pending", 0)
+        result = eg.check_message(None, row, token=None, dry_run=True)
+        self.assertEqual(result["verdict"], "MISSING")
+        self.assertEqual(result["paths_missing"], [FAKE_MISSING])
+
     def test_5_newline_boundary(self):
         content = f"DONE:\n{FAKE_ABSENT_TRACKED} is absent\nI wrote {FAKE_MISSING} with the fix."
         asserted = eg.extract_absence_asserted_paths(content)

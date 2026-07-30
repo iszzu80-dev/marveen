@@ -200,7 +200,21 @@ _NO_PRECEDES_RE = re.compile(r'\bno\s*$', re.IGNORECASE)
 # token either (PATH_RE/PATH_NOEXT_RE/ABS_PATH_RE all exclude them from the
 # path character class), so widening to include them carries no risk of
 # splitting inside a filename.
-_CLAUSE_BOUNDARY_RE = re.compile(r'[.,;:]\s|\n|\s-\s')
+#
+# \s[-—–]+\s (one or more ASCII hyphens or em/en-dash, spaced) rather than a
+# single \s-\s: found live, 2026-07-30, during bc6b2b98's own gate probe
+# (card e0742bbd) -- a parenthetical aside introduced by " -- " (double
+# hyphen, the exact style this codebase's own comments use constantly) put a
+# genuinely-missing path in the SAME clause as an unrelated explanatory
+# phrase that happened to contain the literal ABSENCE_RE keyword "does not
+# exist" ("Deliverable written to X -- a path ... that genuinely does not
+# exist."), so the path was wrongly excused. \s-\s alone does not match " -- "
+# (the char after the first '-' is another '-', not whitespace), so it missed
+# this. Same safety argument as the comma/colon widening: a hyphen run only
+# creates a boundary with spaces on BOTH sides, so a hyphenated identifier or
+# filename ("also-fake-bc6b2b98", no surrounding spaces) is never mistaken
+# for one.
+_CLAUSE_BOUNDARY_RE = re.compile(r'[.,;:]\s|\n|\s[-—–]+\s')
 
 
 def load_token():
