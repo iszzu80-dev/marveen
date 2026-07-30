@@ -295,6 +295,52 @@ class TestCommaConjunctionClauseBoundary(unittest.TestCase):
         self.assertIn(FAKE_ABSENT_TRACKED, asserted)
         self.assertNotIn(FAKE_MISSING, asserted)
 
+    # -- deliverylead's own kill-shot cases against the FIRST fix (candidate
+    # C, the conjunction word-list this branch shipped and then abandoned in
+    # 75801b6): five conjunctions/phrasings NOT in that list, each of which
+    # silently swallowed a genuine miss under it. Named explicitly per
+    # marveen's instruction so a future refactor back toward a word-list
+    # approach fails these tests by name, not just generically -- the
+    # bare-punctuation design (any comma is a boundary, no word list) passes
+    # all five for the same reason it passes every other conjunction: it
+    # never looks at the word at all.
+    def test_13_deliverylead_comma_plus(self):
+        content = f"DONE: {FAKE_ABSENT_TRACKED} is absent, plus I wrote {FAKE_MISSING} anyway."
+        asserted = eg.extract_absence_asserted_paths(content)
+        self.assertIn(FAKE_ABSENT_TRACKED, asserted)
+        self.assertNotIn(FAKE_MISSING, asserted)
+
+    def test_14_deliverylead_comma_also(self):
+        content = f"DONE: {FAKE_ABSENT_TRACKED} is absent, also I wrote {FAKE_MISSING} separately."
+        asserted = eg.extract_absence_asserted_paths(content)
+        self.assertIn(FAKE_ABSENT_TRACKED, asserted)
+        self.assertNotIn(FAKE_MISSING, asserted)
+
+    def test_15_deliverylead_comma_valamint(self):
+        # Hungarian "valamint" (as well as / and also) -- not in the
+        # original word list (which only had es/és/de).
+        content = f"KESZ: {FAKE_ABSENT_TRACKED} nincs, valamint megirtam {FAKE_MISSING}-t is."
+        asserted = eg.extract_absence_asserted_paths(content)
+        self.assertIn(FAKE_ABSENT_TRACKED, asserted)
+        self.assertNotIn(FAKE_MISSING, asserted)
+
+    def test_16_deliverylead_comma_illetve(self):
+        # Hungarian "illetve" (or rather / respectively) -- also not in the
+        # original word list.
+        content = f"KESZ: {FAKE_ABSENT_TRACKED} nincs, illetve megirtam {FAKE_MISSING}-t is."
+        asserted = eg.extract_absence_asserted_paths(content)
+        self.assertIn(FAKE_ABSENT_TRACKED, asserted)
+        self.assertNotIn(FAKE_MISSING, asserted)
+
+    def test_17_deliverylead_bare_comma_no_conjunction_at_all(self):
+        # No conjunction word whatsoever -- just a comma. The word-list
+        # approach had no case for this at all; the bare-punctuation
+        # approach does not need one.
+        content = f"DONE: {FAKE_ABSENT_TRACKED} is absent, I wrote {FAKE_MISSING} anyway."
+        asserted = eg.extract_absence_asserted_paths(content)
+        self.assertIn(FAKE_ABSENT_TRACKED, asserted)
+        self.assertNotIn(FAKE_MISSING, asserted)
+
     # -- non-regressions --
 
     def test_10_single_path_absence_via_trailing_comma_clause_still_suppresses(self):
