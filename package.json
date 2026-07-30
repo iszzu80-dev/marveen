@@ -9,6 +9,7 @@
     "dev": "tsx src/index.ts",
     "setup": "tsx scripts/setup.ts",
     "status": "tsx scripts/status.ts",
+    "verify:context-windows": "tsx scripts/verify-context-window-assumptions.ts",
     "remote-enroll": "tsx scripts/remote-access-enroll.ts",
     "dashboard-user": "tsx scripts/dashboard-user.ts",
     "test": "vitest run",
