@@ -74,7 +74,7 @@ describe('render collector via runner (offline)', () => {
     const stub: HttpGetJson = async (url) => url.includes('postgres') ? RAW.postgres : RAW.services
     const col = makeRenderCollector(PRICING)
     const w = monthWindow(NOW)
-    const rep = await dryRunCollector({ db: getDb(), collector: col, opts: { periodStart: w.start, periodEnd: w.end, secret: 'rnd_SECRET', fxUsdHuf: 0, idSalt: 'salt', httpGetJson: stub }, now: NOW })
+    const rep = await dryRunCollector({ db: getDb(), collector: col, opts: { periodStart: w.start, periodEnd: w.end, secret: 'rnd_SECRET', fxUsdHuf: 0, idSalt: 'salt', httpGetJson: stub, now: NOW }, now: NOW })
     expect(rep.status).toBe('dry_run')
     expect(rep.plannedLines[0].amount).toBe(22800)
     const n = getDb().prepare("SELECT COUNT(*) n FROM cost_line_items").get() as { n: number }
@@ -85,13 +85,18 @@ describe('render collector via runner (offline)', () => {
     const stub: HttpGetJson = async (url) => url.includes('postgres') ? RAW.postgres : RAW.services
     const col = makeRenderCollector(PRICING)
     const w = monthWindow(NOW)
-    const o = { periodStart: w.start, periodEnd: w.end, secret: 'rnd_SECRET', fxUsdHuf: 0, idSalt: 'salt', httpGetJson: stub }
+    const o = { periodStart: w.start, periodEnd: w.end, secret: 'rnd_SECRET', fxUsdHuf: 0, idSalt: 'salt', httpGetJson: stub, now: NOW }
     await runCollector({ db: getDb(), collector: col, opts: o, now: NOW })
     await runCollector({ db: getDb(), collector: col, opts: o, now: NOW }) // re-run
-    const rows = getDb().prepare("SELECT confidence, billed_cost FROM cost_line_items WHERE source_id='render-plan'").all() as Array<{ confidence: string; billed_cost: number }>
+    const rows = getDb().prepare("SELECT confidence, billed_cost, data_freshness FROM cost_line_items WHERE source_id='render-plan'").all() as Array<{ confidence: string; billed_cost: number; data_freshness: number }>
     expect(rows).toHaveLength(1) // idempotent
     expect(rows[0].confidence).toBe('provider_plan_estimate')
     expect(rows[0].billed_cost).toBe(22800)
+    // 320c477a: data_freshness is the real collection instant (NOW, 2026-07-15),
+    // never the billing period start (2026-07-01) that used to leak through
+    // collectRaw's internal wiring.
+    expect(rows[0].data_freshness).toBe(NOW)
+    expect(rows[0].data_freshness).not.toBe(w.start)
     // secret never in import_runs
     expect(JSON.stringify(getDb().prepare('SELECT * FROM import_runs').all())).not.toContain('rnd_SECRET')
   })
@@ -110,7 +115,7 @@ describe('summary: render plan is advisory (no override of manual)', () => {
     db.prepare("INSERT INTO cost_line_items (source_id,charge_period_start,charge_period_end,charge_category,service_name,billed_cost,currency,confidence,data_freshness,dedup_key,created_at) VALUES ('render-hosting',?,?,'subscription','Render hosting',30000,'HUF','manual',?,'fixed|render-hosting|2026-07',?)").run(w.start, w.end, NOW, NOW)
     // import the plan-based estimate
     const stub: HttpGetJson = async (url) => url.includes('postgres') ? RAW.postgres : RAW.services
-    await runCollector({ db, collector: makeRenderCollector(PRICING), opts: { periodStart: w.start, periodEnd: w.end, secret: 'x', fxUsdHuf: 0, idSalt: 'salt', httpGetJson: stub }, now: NOW })
+    await runCollector({ db, collector: makeRenderCollector(PRICING), opts: { periodStart: w.start, periodEnd: w.end, secret: 'x', fxUsdHuf: 0, idSalt: 'salt', httpGetJson: stub, now: NOW }, now: NOW })
 
     const s = getCostSummary(db, emptyConfig(), NOW)
     // headline current_spend = manual 30000 ONLY (plan estimate excluded)

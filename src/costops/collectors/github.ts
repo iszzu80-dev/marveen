@@ -93,7 +93,7 @@ export function makeGitHubCollector(user: string = GITHUB_BILLING_USER): Provide
       const raw = await opts.httpGetJson(url, headers)
       const lines = mapGitHubUsage(raw, {
         periodStart: opts.periodStart, periodEnd: opts.periodEnd,
-        fxUsdHuf: opts.fxUsdHuf, idSalt: opts.idSalt, now: opts.periodStart,
+        fxUsdHuf: opts.fxUsdHuf, idSalt: opts.idSalt, now: opts.now,
       })
       return { raw, lines }
     },
@@ -143,7 +143,7 @@ export async function syncGitHubCollector(
     return r.json()
   })
   const w = monthWindow(now)
-  const opts = { periodStart: w.start, periodEnd: w.end, secret: apiKey, fxUsdHuf: fxUsdHuf || 0, idSalt: 'github-salt', httpGetJson }
+  const opts = { periodStart: w.start, periodEnd: w.end, secret: apiKey, fxUsdHuf: fxUsdHuf || 0, idSalt: 'github-salt', httpGetJson, now }
   const res = await runCollector({ db, collector: githubCollector, opts, now })
   return {
     ok: res.status === 'ok', provider: 'github', status: res.status,

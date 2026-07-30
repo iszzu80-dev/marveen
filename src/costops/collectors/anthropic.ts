@@ -52,11 +52,8 @@ export function mapAnthropicCostReport(
   const report = (raw && typeof raw === 'object') ? raw as AnthropicCostReport : {}
   const buckets = Array.isArray(report.data) ? report.data : []
   let usdTotal = 0
-  let latestEnd = 0
   let any = false
   for (const b of buckets) {
-    const endSec = b.ending_at ? Math.floor(new Date(b.ending_at).getTime() / 1000) : 0
-    if (endSec > latestEnd) latestEnd = endSec
     for (const r of (Array.isArray(b.results) ? b.results : [])) {
       const amt = typeof r.amount === 'number' ? r.amount : parseFloat(String(r.amount ?? ''))
       if (!isFinite(amt)) continue
@@ -80,7 +77,7 @@ export function mapAnthropicCostReport(
     usage_type: 'api_usage',
     quantity: null,
     unit: null,
-    data_freshness_at: latestEnd || opts.now,
+    data_freshness_at: opts.now,
     raw_ref_hash: hashRef(opts.idSalt, `anthropic-cost-report|${monthKey}`),
     dedup_key: `provider|anthropic|${ANTHROPIC_API_SOURCE}|${monthKey}|provider_api`,
   }]
@@ -105,7 +102,7 @@ export const anthropicCollector: ProviderCollector = {
     const raw = await opts.httpGetJson(url, headers)
     const lines = mapAnthropicCostReport(raw, {
       periodStart: opts.periodStart, periodEnd: opts.periodEnd,
-      fxUsdHuf: opts.fxUsdHuf, idSalt: opts.idSalt, now: opts.periodStart,
+      fxUsdHuf: opts.fxUsdHuf, idSalt: opts.idSalt, now: opts.now,
     })
     return { raw, lines }
   },
@@ -168,7 +165,7 @@ export async function syncAnthropicCostReport(
     return r.json()
   })
   const w = monthWindow(now)
-  const opts = { periodStart: w.start, periodEnd: w.end, secret: apiKey, fxUsdHuf: fxUsdHuf || 0, idSalt: 'anthropic-salt', httpGetJson }
+  const opts = { periodStart: w.start, periodEnd: w.end, secret: apiKey, fxUsdHuf: fxUsdHuf || 0, idSalt: 'anthropic-salt', httpGetJson, now }
   const res = await runCollector({ db, collector: anthropicCollector, opts, now })
   return {
     ok: res.status === 'ok', provider: 'anthropic', status: res.status,

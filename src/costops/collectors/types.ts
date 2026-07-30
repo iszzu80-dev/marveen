@@ -34,6 +34,12 @@ export interface CollectOpts {
   fxUsdHuf: number
   idSalt: string                  // for raw_ref_hash
   httpGetJson: HttpGetJson        // injected -- offline in tests
+  // The real collection instant (epoch seconds). This is an INGEST timestamp,
+  // never a billing-period boundary -- a collector must not substitute
+  // periodStart/periodEnd for it (card 320c477a: doing so left data_freshness
+  // carrying a period-END date, which then out-won a real invoice on an
+  // equal-tier freshness tiebreak).
+  now: number
 }
 
 export interface ProviderCollector {

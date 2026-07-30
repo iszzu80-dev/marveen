@@ -253,7 +253,7 @@ export async function syncRenderCollector(
   })
   const w = monthWindow(now)
   const collector = makeRenderCollector(pricing)
-  const opts = { periodStart: w.start, periodEnd: w.end, secret: apiKey, fxUsdHuf: pricing.fx_usd_huf, idSalt: 'render-salt', httpGetJson }
+  const opts = { periodStart: w.start, periodEnd: w.end, secret: apiKey, fxUsdHuf: pricing.fx_usd_huf, idSalt: 'render-salt', httpGetJson, now }
   // pre-compute the sanitized breakdown for the run detail (no raw IDs)
   let detail: RenderBreakdown | null = null
   try {
@@ -282,7 +282,7 @@ export function makeRenderCollector(pricing: RenderPricing): ProviderCollector {
       const raw = { services, postgres }
       const { lines } = mapRenderPlanCost(raw, {
         periodStart: opts.periodStart, periodEnd: opts.periodEnd,
-        pricing, idSalt: opts.idSalt, now: opts.periodStart,
+        pricing, idSalt: opts.idSalt, now: opts.now,
       })
       return { raw, lines }
     },

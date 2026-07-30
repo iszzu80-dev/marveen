@@ -27,7 +27,7 @@ const FIXTURE = {
 
 function opts(httpGetJson: HttpGetJson): CollectOpts {
   const w = monthWindow(NOW)
-  return { periodStart: w.start, periodEnd: w.end, secret: 'sk-SECRET-must-not-leak-1234567890', fxUsdHuf: FX, idSalt: 'salt', httpGetJson }
+  return { periodStart: w.start, periodEnd: w.end, secret: 'sk-SECRET-must-not-leak-1234567890', fxUsdHuf: FX, idSalt: 'salt', httpGetJson, now: NOW }
 }
 
 describe('anthropic mapper (pure, offline)', () => {
@@ -47,6 +47,18 @@ describe('anthropic mapper (pure, offline)', () => {
   it('returns [] for an empty report', () => {
     const w = monthWindow(NOW)
     expect(mapAnthropicCostReport({ data: [] }, { periodStart: w.start, periodEnd: w.end, fxUsdHuf: FX, idSalt: 's', now: NOW })).toHaveLength(0)
+  })
+
+  // Card 320c477a: data_freshness_at must be the INGEST instant (opts.now),
+  // never the bucket's ending_at -- the anthropic-cost-report mapper carried
+  // the exact same defect as the openai one (both fell back to a period-end
+  // date instead of always using the collection time).
+  it('320c477a: data_freshness_at is opts.now, never the bucket ending_at', () => {
+    const w = monthWindow(NOW)
+    const endingAtEpoch = Math.floor(new Date('2026-07-31T00:00:00Z').getTime() / 1000)
+    const lines = mapAnthropicCostReport(FIXTURE, { periodStart: w.start, periodEnd: w.end, fxUsdHuf: FX, idSalt: 'salt', now: NOW })
+    expect(lines[0].data_freshness_at).toBe(NOW)
+    expect(lines[0].data_freshness_at).not.toBe(endingAtEpoch)
   })
 })
 

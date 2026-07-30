@@ -43,9 +43,14 @@ describe('githubCollector + syncGitHubCollector (offline stub)', () => {
     const r1 = await syncGitHubCollector(db, now, { apiKey: 'ghp-stub', fxUsdHuf: 360, httpGetJson: async () => report([]) })
     expect(r1.ok).toBe(true)
     expect(r1.imported_count).toBe(1)
-    const row = db.prepare("SELECT billed_cost, confidence FROM cost_line_items WHERE source_id='github'").get() as { billed_cost: number; confidence: string }
+    const row = db.prepare("SELECT billed_cost, confidence, data_freshness FROM cost_line_items WHERE source_id='github'").get() as { billed_cost: number; confidence: string; data_freshness: number }
     expect(row.billed_cost).toBe(0)
     expect(row.confidence).toBe('provider_api')
+    // 320c477a: data_freshness is the real collection instant (now, 2026-07-10),
+    // never the billing period start (2026-07-01) that used to leak through
+    // collectRaw's internal wiring.
+    expect(row.data_freshness).toBe(now)
+    expect(row.data_freshness).not.toBe(monthWindow(now).start)
     // idempotent
     await syncGitHubCollector(db, now, { apiKey: 'ghp-stub', fxUsdHuf: 360, httpGetJson: async () => report([]) })
     expect((db.prepare("SELECT COUNT(*) c FROM cost_line_items WHERE source_id='github'").get() as { c: number }).c).toBe(1)
