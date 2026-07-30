@@ -162,21 +162,45 @@ ABSENCE_RE = re.compile(
 # path match) rather than as a clause-wide keyword, since "no" alone is too
 # common a word to scope to a whole clause without false-suppressing misses.
 _NO_PRECEDES_RE = re.compile(r'\bno\s*$', re.IGNORECASE)
-# Clause boundary: sentence-ending punctuation followed by whitespace, a
-# newline, OR a comma-joined coordinating conjunction ("X is absent, and I
-# wrote Y"). Card bc6b2b98: without the conjunction alternative, a comma
-# conjunction leaves both claims in ONE clause, so an absence assertion about
-# X leaks across the comma and suppresses a genuinely-missing Y in the same
-# sentence -- a FALSE NEGATIVE (worse than the false positives 9682c5ee/
-# dc0fb6f0 fixed: a false positive costs one triage, a false negative ships a
-# missing deliverable as done). Bilingual (English + Hungarian, accented and
-# not, since agent messages mix both and accents are sometimes dropped).
+# Clause boundary: any major clause-ending punctuation (., ; , :) followed by
+# whitespace, a newline, or a spaced dash (" - "). Card bc6b2b98 (deliverylead,
+# confirmed independently by marveen): "X is absent, and I wrote Y" put both
+# claims in ONE clause because comma was not a boundary, so X's absence
+# assertion leaked across the comma and suppressed a genuinely-missing Y --
+# a FALSE NEGATIVE (worse than the false positives 9682c5ee/dc0fb6f0 fixed: a
+# false positive costs one triage, a false negative ships a missing
+# deliverable as done).
+#
+# Originally fixed with a comma+conjunction-word alternation (and/but/so/
+# while/es/és/de), but marveen's gate review pointed out that list can never
+# be exhaustive (yet, nor, meanwhile, other languages...) and re-ships this
+# exact bug for any conjunction not enumerated. A bare comma (like the
+# existing bare period/semicolon) needs no conjunction list and is VERIFIED
+# SAFE: every plausible mis-split (e.g. a comma-delimited list/parenthetical
+# INSIDE one legitimate absence clause, "X, which was never created, is
+# absent") lands on the OVER-reporting side -- it can turn a real absence
+# clause into a false positive (one wasted triage), never the reverse (a
+# real miss silently swallowed). Per this whole episode's standing rule,
+# prefer over-splitting to under-splitting. Colon and a spaced dash are
+# structurally identical separators (also excluded from PATH_RE's own
+# character class, so neither can appear inside a matched path token) and
+# get the same treatment for the same reason, rather than waiting for a
+# THIRD round of "the fix covered some separators, not this one."
+#
+# KNOWN RESIDUAL GAP (documented, not fixed here): a conjunction with NO
+# preceding comma ("X is absent and I wrote Y") is not caught, because a bare
+# "and"/"but" mid-sentence is too commonly part of a single clause's own
+# predicate ("is absent and unused") to safely treat as a boundary on its
+# own. This needs a different signal (e.g. NLP) to resolve safely and is
+# left for a future card if it proves to matter in practice.
+#
 # Deliberately NOT a bare '.' -- path extensions (model-fallback.json) have no
-# space after the internal dot, so this never splits inside a path.
-_CLAUSE_BOUNDARY_RE = re.compile(
-    r'[.;]\s|\n|,\s*(?:and|but|so|while|es|és|de)\b',
-    re.IGNORECASE
-)
+# space after the internal dot, so this never splits inside a path -- and by
+# the same logic, none of ',', ';', ':' can appear inside a matched path
+# token either (PATH_RE/PATH_NOEXT_RE/ABS_PATH_RE all exclude them from the
+# path character class), so widening to include them carries no risk of
+# splitting inside a filename.
+_CLAUSE_BOUNDARY_RE = re.compile(r'[.,;:]\s|\n|\s-\s')
 
 
 def load_token():
