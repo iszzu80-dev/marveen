@@ -180,7 +180,7 @@ export async function tryHandleApg(ctx: RouteContext): Promise<boolean> {
       offset,
     })
     if ('error' in result) {
-      json(res, { items: [], total: 0, error: result.error })
+      json(res, { items: [], total: 0, limit, offset, error: result.error })
       return true
     }
     const items: ApgUiWorkItemSummary[] = result.items

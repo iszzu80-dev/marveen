@@ -177,4 +177,57 @@ describe('APG UI API (route smoke)', () => {
     expect(await tryHandleApg(ctx)).toBe(true)
     expect(out.body.overrides).toEqual([])
   })
+
+  it('GET /api/apg/work-items clamps limit to [1,500] and offset to >=0, 400s on non-numeric input', async () => {
+    const overLimit = fakeCtx('/api/apg/work-items?limit=99999')
+    await tryHandleApg(overLimit.ctx)
+    expect(overLimit.out.body.limit).toBe(500)
+
+    const zeroLimit = fakeCtx('/api/apg/work-items?limit=0')
+    await tryHandleApg(zeroLimit.ctx)
+    expect(zeroLimit.out.body.limit).toBe(1)
+
+    const negOffset = fakeCtx('/api/apg/work-items?offset=-5')
+    await tryHandleApg(negOffset.ctx)
+    expect(negOffset.out.body.offset).toBe(0)
+
+    const badLimit = fakeCtx('/api/apg/work-items?limit=not-a-number')
+    await tryHandleApg(badLimit.ctx)
+    expect(badLimit.out.status).toBe(400)
+
+    const badMode = fakeCtx('/api/apg/work-items?mode=super-enforced')
+    await tryHandleApg(badMode.ctx)
+    expect(badMode.out.status).toBe(400)
+  })
+
+  it('a corrupted scope-overrides.json degrades to empty instead of crashing the request', async () => {
+    const { writeFileSync, mkdirSync } = await import('node:fs')
+    const { dirname } = await import('node:path')
+    mkdirSync(dirname(SCOPE_OVERRIDES_PATH), { recursive: true })
+    writeFileSync(SCOPE_OVERRIDES_PATH, '{not valid json::')
+
+    const { ctx, out } = fakeCtx('/api/apg/scope-overrides')
+    expect(await tryHandleApg(ctx)).toBe(true)
+    expect(out.status).toBe(200)
+    expect(out.body.overrides).toEqual([])
+
+    // and the mode resolver still works (falls back to global, no throw)
+    const summary = fakeCtx('/api/apg/summary?kanban_card_id=0f75d35d')
+    expect(await tryHandleApg(summary.ctx)).toBe(true)
+    expect(summary.out.status).toBe(200)
+  })
+
+  it('PUT /api/apg/scope-overrides rejects an unknown mode and an unknown scope_type', async () => {
+    const badMode = fakeCtxWithBody('/api/apg/scope-overrides', 'PUT', {
+      scope_type: 'kanban_card', scope_id: '0f75d35d', mode: 'super-enforced', actor: 'test', reason: '',
+    })
+    expect(await tryHandleApg(badMode.ctx)).toBe(true)
+    expect(badMode.out.status).toBe(400)
+
+    const badScope = fakeCtxWithBody('/api/apg/scope-overrides', 'PUT', {
+      scope_type: 'workspace', scope_id: 'x', mode: 'observe', actor: 'test', reason: '',
+    })
+    expect(await tryHandleApg(badScope.ctx)).toBe(true)
+    expect(badScope.out.status).toBe(400)
+  })
 })
