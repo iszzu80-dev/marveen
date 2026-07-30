@@ -180,12 +180,13 @@ _NO_PRECEDES_RE = re.compile(r'\bno\s*$', re.IGNORECASE)
 # INSIDE one legitimate absence clause, "X, which was never created, is
 # absent") lands on the OVER-reporting side -- it can turn a real absence
 # clause into a false positive (one wasted triage), never the reverse (a
-# real miss silently swallowed). Per this whole episode's standing rule,
-# prefer over-splitting to under-splitting. Colon and a spaced dash are
-# structurally identical separators (also excluded from PATH_RE's own
-# character class, so neither can appear inside a matched path token) and
-# get the same treatment for the same reason, rather than waiting for a
-# THIRD round of "the fix covered some separators, not this one."
+# real miss silently swallowed).
+#
+# Deliberately NOT a bare '.' -- path extensions (model-fallback.json) have no
+# space after the internal dot, so this never splits inside a path -- and by
+# the same logic ',' and ';' can't appear inside a matched path token either
+# (PATH_RE/PATH_NOEXT_RE/ABS_PATH_RE exclude them from the path character
+# class), so adding comma carries no risk of splitting inside a filename.
 #
 # KNOWN RESIDUAL GAP (documented, not fixed here): a conjunction with NO
 # preceding comma ("X is absent and I wrote Y") is not caught, because a bare
@@ -194,27 +195,25 @@ _NO_PRECEDES_RE = re.compile(r'\bno\s*$', re.IGNORECASE)
 # own. This needs a different signal (e.g. NLP) to resolve safely and is
 # left for a future card if it proves to matter in practice.
 #
-# Deliberately NOT a bare '.' -- path extensions (model-fallback.json) have no
-# space after the internal dot, so this never splits inside a path -- and by
-# the same logic, none of ',', ';', ':' can appear inside a matched path
-# token either (PATH_RE/PATH_NOEXT_RE/ABS_PATH_RE all exclude them from the
-# path character class), so widening to include them carries no risk of
-# splitting inside a filename.
-#
-# \s[-—–]+\s (one or more ASCII hyphens or em/en-dash, spaced) rather than a
-# single \s-\s: found live, 2026-07-30, during bc6b2b98's own gate probe
-# (card e0742bbd) -- a parenthetical aside introduced by " -- " (double
-# hyphen, the exact style this codebase's own comments use constantly) put a
-# genuinely-missing path in the SAME clause as an unrelated explanatory
-# phrase that happened to contain the literal ABSENCE_RE keyword "does not
-# exist" ("Deliverable written to X -- a path ... that genuinely does not
-# exist."), so the path was wrongly excused. \s-\s alone does not match " -- "
-# (the char after the first '-' is another '-', not whitespace), so it missed
-# this. Same safety argument as the comma/colon widening: a hyphen run only
-# creates a boundary with spaces on BOTH sides, so a hyphenated identifier or
-# filename ("also-fake-bc6b2b98", no surrounding spaces) is never mistaken
-# for one.
-_CLAUSE_BOUNDARY_RE = re.compile(r'[.,;:]\s|\n|\s[-—–]+\s')
+# REJECTED, do not re-attempt without a real counter-example: colon and a
+# spaced dash/em-dash were added and then REVERTED (2026-07-30, same day).
+# The trigger was card e0742bbd's own probe comment ("Deliverable written to
+# X -- a path ... that genuinely does not exist."), where the em-dash keeps
+# X's absence phrase out of X's clause once split. But that probe sentence is
+# self-contradictory prose no real producer writes (claiming delivery of X
+# and X's absence in one breath) -- an artifact of the probe's own
+# explanation being inside its own test input, not a genuine miss. Marveen
+# measured the actual cost of the dash/colon widening against ordinary
+# prose and found a REAL false positive on the dominant construction this
+# fleet's own comments use constantly: "The overlay file -- <path> -- does
+# not exist yet." Splitting on both em-dashes isolates <path> into its own
+# clause with NO absence wording nearby, flagging a deliverable that a human
+# reading the sentence would correctly read as intentionally, legitimately
+# absent. That is a real, common-case regression for a defect that was not
+# real. If a dash/colon case ever needs revisiting, it needs a genuine
+# example of a MISSED deliverable in real usage, not a probe's self-
+# referential wording.
+_CLAUSE_BOUNDARY_RE = re.compile(r'[.,;]\s|\n')
 
 
 def load_token():

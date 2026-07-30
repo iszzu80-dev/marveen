@@ -215,55 +215,44 @@ class TestCommaConjunctionClauseBoundary(unittest.TestCase):
         self.assertIn(FAKE_ABSENT_TRACKED, asserted)
         self.assertNotIn(FAKE_MISSING, asserted)
 
-    def test_3_colon_boundary(self):
-        content = f"DONE: {FAKE_ABSENT_TRACKED} is absent: I wrote {FAKE_MISSING} with the fix."
-        asserted = eg.extract_absence_asserted_paths(content)
-        self.assertIn(FAKE_ABSENT_TRACKED, asserted)
-        self.assertNotIn(FAKE_MISSING, asserted)
-
-    def test_4_spaced_dash_boundary(self):
-        content = f"DONE: {FAKE_ABSENT_TRACKED} is absent - I wrote {FAKE_MISSING} with the fix."
-        asserted = eg.extract_absence_asserted_paths(content)
-        self.assertIn(FAKE_ABSENT_TRACKED, asserted)
-        self.assertNotIn(FAKE_MISSING, asserted)
-
-    def test_4b_double_hyphen_boundary(self):
-        # Found LIVE 2026-07-30 via card e0742bbd's own probe comment: " -- "
-        # (double hyphen, this codebase's own constant parenthetical style)
-        # is a distinct separator from the single spaced dash above -- \s-\s
-        # does not match it (the char after the first '-' is another '-').
-        content = f"DONE: wrote {FAKE_MISSING} -- {FAKE_ABSENT_TRACKED} is a path that genuinely does not exist."
-        asserted = eg.extract_absence_asserted_paths(content)
-        self.assertIn(FAKE_ABSENT_TRACKED, asserted)
-        self.assertNotIn(FAKE_MISSING, asserted)
-
-    def test_4c_reproduces_the_live_e0742bbd_probe_text_verbatim(self):
-        # The exact sentence shape that exposed the gap, reworded onto fixture
-        # paths. Regression pin for this specific live incident.
-        content = (
-            f"DONE: PROBE, deliberately un-sanitised. Deliverable written to {FAKE_MISSING} "
-            f"-- a path under a prefix that IS flaggable and that genuinely does not exist."
-        )
-        row = (30, "marveen", "buildfejleszto", content, "pending", 0)
-        result = eg.check_message(None, row, token=None, dry_run=True)
-        self.assertEqual(result["verdict"], "MISSING")
-        self.assertEqual(result["paths_missing"], [FAKE_MISSING])
-
     def test_5_newline_boundary(self):
         content = f"DONE:\n{FAKE_ABSENT_TRACKED} is absent\nI wrote {FAKE_MISSING} with the fix."
         asserted = eg.extract_absence_asserted_paths(content)
         self.assertIn(FAKE_ABSENT_TRACKED, asserted)
         self.assertNotIn(FAKE_MISSING, asserted)
 
-    def test_6_dash_inside_a_hyphenated_filename_is_not_a_boundary(self):
-        # \s-\s requires SPACES on both sides -- a hyphen inside an
-        # identifier/filename ("also-fake", no surrounding spaces) must not
-        # be mistaken for a clause separator.
-        hyphenated = "scripts/also-fake-bc6b2b98-dash-check.py"
-        content = f"DONE: {FAKE_ABSENT_TRACKED} is absent, and I wrote {hyphenated} with the fix."
-        asserted = eg.extract_absence_asserted_paths(content)
-        self.assertIn(FAKE_ABSENT_TRACKED, asserted)
-        self.assertNotIn(hyphenated, asserted)
+    # -- colon and dash/em-dash were tried as boundary characters and
+    # REVERTED the same day (see _CLAUSE_BOUNDARY_RE's own comment for the
+    # full account): marveen found a real false positive on the dominant
+    # em-dash-parenthetical construction this fleet's comments use
+    # constantly. These two tests pin the CORRECT (non-flagging) behavior
+    # for the exact sentences that drove the reversion, so neither the
+    # colon nor the dash widening can quietly return.
+
+    def test_6_marveens_overlay_file_em_dash_parenthetical_stays_suppressed(self):
+        # "The overlay file -- <path> -- does not exist yet." is ordinary,
+        # common prose (a path bracketed by an em-dash aside), not a
+        # completion claim about a DIFFERENT thing -- it must stay
+        # correctly suppressed, not flagged.
+        content = f"DONE: The overlay file -- {FAKE_ABSENT_TRACKED} -- does not exist yet."
+        row = (24, "marveen", "buildfejleszto", content, "pending", 0)
+        result = eg.check_message(None, row, token=None, dry_run=True)
+        self.assertEqual(result["verdict"], "PASS")
+
+    def test_7_probe2_self_referential_shape_correctly_stays_suppressed(self):
+        # The e0742bbd probe's own construction ("Deliverable written to X --
+        # a path ... that genuinely does not exist.") IS an absence assertion
+        # about X read naturally -- self-contradictory prose no real
+        # producer writes, not a genuine miss. Marveen's re-analysis, not a
+        # gap: this must stay suppressed, matching the ALREADY-CORRECT
+        # 9682c5ee behavior (no dash-boundary change needed or wanted here).
+        content = (
+            f"DONE: PROBE, deliberately un-sanitised. Deliverable written to {FAKE_MISSING} "
+            f"-- a path under a prefix that IS flaggable and that genuinely does not exist."
+        )
+        row = (25, "marveen", "buildfejleszto", content, "pending", 0)
+        result = eg.check_message(None, row, token=None, dry_run=True)
+        self.assertEqual(result["verdict"], "PASS")
 
     # -- reversed order + multi-path (unaffected by which punctuation, kept
     # on comma since that is the card's own reported case) --
