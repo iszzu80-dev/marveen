@@ -12827,7 +12827,7 @@ window.addEventListener('beforeunload', (e) => {
 // entry never requires a frontend change just to render a sane heading.
 function settingsModuleLabel(mod) {
   const key = `settings.module.${mod}`
-  const known = { kanban: true, system: true, heartbeat: true, audit: true, ideabox: true, channels: true, security: true, autonomy: true }
+  const known = { kanban: true, system: true, heartbeat: true, audit: true, ideabox: true, channels: true, security: true, autonomy: true, apg: true }
   return known[mod] ? t(key) : (mod.charAt(0).toUpperCase() + mod.slice(1))
 }
 

@@ -2,16 +2,7 @@
 window.Apg = window.Apg || {}
 
 ;(function (Apg) {
-  const DISPLAY_STATE_LABELS = {
-    clarification: 'Tisztázás',
-    evidence_needed: 'Bizonyíték szükséges',
-    executing: 'Végrehajtás alatt',
-    verifying: 'Ellenőrzés alatt',
-    decision_needed: 'Döntésre vár',
-    blocked: 'Blokkolt',
-    accepted: 'Elfogadva',
-    off: 'Kikapcsolva',
-  }
+  const DISPLAY_STATES = ['clarification', 'evidence_needed', 'executing', 'verifying', 'decision_needed', 'blocked', 'accepted', 'off']
 
   const STAT_DEFS = [
     { key: 'active', labelKey: 'apg.overview.active', severity: 'info' },
@@ -23,11 +14,11 @@ window.Apg = window.Apg || {}
   ]
 
   const QUICK_FILTERS = [
-    { id: 'attention', label: 'APG: Figyelmet kér' },
-    { id: 'decision', label: 'APG: Döntésre vár' },
-    { id: 'blocked', label: 'APG: Blokkolt' },
-    { id: 'verifying', label: 'APG: Ellenőrzés alatt' },
-    { id: 'done-not-accepted', label: 'APG: Kész, nincs elfogadva' },
+    { id: 'attention', labelKey: 'apg.kanban.filter.attention' },
+    { id: 'decision', labelKey: 'apg.kanban.filter.decision' },
+    { id: 'blocked', labelKey: 'apg.kanban.filter.blocked' },
+    { id: 'verifying', labelKey: 'apg.kanban.filter.verifying' },
+    { id: 'done-not-accepted', labelKey: 'apg.kanban.filter.done_not_accepted' },
   ]
 
   const activeKanbanFilters = new Set()
@@ -51,7 +42,8 @@ window.Apg = window.Apg || {}
   }
 
   function stateLabel(state) {
-    return DISPLAY_STATE_LABELS[state] || state || DISPLAY_STATE_LABELS.off
+    const key = DISPLAY_STATES.includes(state) ? state : 'off'
+    return t(`apg.state.${key}`)
   }
 
   function severityForState(state) {
@@ -108,11 +100,11 @@ window.Apg = window.Apg || {}
     return data
   }
 
-  function retryBanner(retry) {
+  function retryBanner() {
     return `
       <div class="apg-degraded apg-severity-danger">
-        <span>Az APG állapota jelenleg nem olvasható. A Marveen többi funkciója működik.</span>
-        <button type="button" class="apg-retry-btn">Újrapróbálás</button>
+        <span>${translated('apg.common.degraded')}</span>
+        <button type="button" class="apg-retry-btn">${translated('apg.common.retry')}</button>
       </div>`
   }
 
@@ -122,7 +114,7 @@ window.Apg = window.Apg || {}
 
   function overviewAttentionHtml(items) {
     if (!items.length) {
-      return '<p class="apg-empty">Az APG nem talált figyelmet igénylő folyamatot.</p>'
+      return `<p class="apg-empty">${translated('apg.overview.empty')}</p>`
     }
     return `
       <div class="apg-attention-list">
@@ -281,7 +273,7 @@ window.Apg = window.Apg || {}
     } catch (error) {
       body.innerHTML = `
         <div class="apg-degraded apg-severity-danger">
-          <span>APG state unavailable: ${html(error.message)}</span>
+          <span>${translated('apg.common.unavailable', { msg: error.message })}</span>
           <button type="button" class="apg-retry-btn">${translated('apg.common.retry')}</button>
         </div>`
       body.querySelector('.apg-retry-btn')?.addEventListener('click', () => {
@@ -350,7 +342,7 @@ window.Apg = window.Apg || {}
       button.type = 'button'
       button.className = 'apg-quick-filter'
       button.dataset.apgFilter = filter.id
-      button.textContent = filter.label
+      button.textContent = t(filter.labelKey)
       button.classList.toggle('active', activeKanbanFilters.has(filter.id))
       button.addEventListener('click', () => {
         if (activeKanbanFilters.has(filter.id)) activeKanbanFilters.delete(filter.id)
@@ -371,11 +363,11 @@ window.Apg = window.Apg || {}
     if (!row) return
     const message = document.createElement('span')
     message.className = 'apg-kanban-unavailable apg-severity-danger'
-    message.textContent = 'APG state unavailable'
+    message.textContent = t('apg.common.unavailable_short')
     const button = document.createElement('button')
     button.type = 'button'
     button.className = 'apg-retry-btn'
-    button.textContent = 'Újrapróbálás'
+    button.textContent = t('apg.common.retry')
     button.addEventListener('click', retry)
     message.appendChild(button)
     row.appendChild(message)
@@ -393,16 +385,16 @@ window.Apg = window.Apg || {}
       if (!footer) continue
 
       const card = cards.find((candidate) => candidate.id === item.kanban_card_id)
-      let label = `APG · ${stateLabel(item.display_state)}`
+      let label = t('apg.kanban.badge.label', { state: stateLabel(item.display_state) })
       let severity = severityForState(item.display_state)
       if (item.acceptance_status === 'accepted') {
-        label = 'Függetlenül elfogadva'
+        label = t('apg.kanban.badge.accepted')
         severity = 'success'
       } else if (
         card?.status === 'done'
         && (item.acceptance_status === 'produced' || item.acceptance_status === 'verifying')
       ) {
-        label = 'Elkészült · még nincs elfogadva'
+        label = t('apg.kanban.badge.done_not_accepted')
         severity = 'warning'
       }
 
@@ -452,8 +444,8 @@ window.Apg = window.Apg || {}
     container.innerHTML = `
       <section class="apg-card-detail-section">
         <div class="apg-degraded apg-severity-danger">
-          <span>APG state unavailable${message ? ': ' + html(message) : ''}</span>
-          <button type="button" class="apg-retry-btn">Újrapróbálás</button>
+          <span>${message ? translated('apg.common.unavailable', { msg: message }) : translated('apg.common.unavailable_short')}</span>
+          <button type="button" class="apg-retry-btn">${translated('apg.common.retry')}</button>
         </div>
       </section>`
     container.querySelector('.apg-retry-btn')?.addEventListener('click', retry)
@@ -506,7 +498,7 @@ window.Apg = window.Apg || {}
           </div>
           <p class="apg-next-action">${html(detail.next_action)}</p>
           <details>
-            <summary>Technikai részletek megjelenítése</summary>
+            <summary>${translated('apg.detail.technical_details')}</summary>
             <div class="apg-technical-grid">
               <section>
                 <h5>${translated('apg.detail.claims')}</h5>
@@ -548,12 +540,13 @@ window.Apg = window.Apg || {}
   }
 
   function decisionLabel(action) {
-    return {
-      accept: 'Elfogadom',
-      request_evidence: 'További bizonyíték kell',
-      return_for_fix: 'Visszaküldöm javításra',
-      block: 'Blokkolom',
-    }[action] || action
+    const keys = {
+      accept: 'apg.approvals.action.accept',
+      request_evidence: 'apg.approvals.action.request_evidence',
+      return_for_fix: 'apg.approvals.action.return_for_fix',
+      block: 'apg.approvals.action.block',
+    }
+    return keys[action] ? t(keys[action]) : action
   }
 
   function showDecisionMessage(approvalId, message, danger) {
@@ -570,15 +563,15 @@ window.Apg = window.Apg || {}
   async function submitDecision(approvalId, action, button) {
     let note
     if (action === 'block') {
-      note = window.prompt('A blokkolás oka:')
+      note = window.prompt(t('apg.approvals.block_prompt'))
       if (note == null) return
       note = note.trim()
       if (!note) {
-        window.alert('A blokkolás okát kötelező megadni.')
+        window.alert(t('apg.approvals.block_required'))
         return
       }
-      if (!window.confirm('Biztosan blokkolod ezt az APG-döntést?')) return
-    } else if (!window.confirm(`${decisionLabel(action)}?`)) {
+      if (!window.confirm(t('apg.approvals.block_confirm'))) return
+    } else if (!window.confirm(t('apg.approvals.confirm_generic', { action: decisionLabel(action) }))) {
       return
     }
 
@@ -611,7 +604,7 @@ window.Apg = window.Apg || {}
           true
         )
       } else {
-        showDecisionMessage(approvalId, `APG state unavailable: ${error.message}`, true)
+        showDecisionMessage(approvalId, t('apg.common.unavailable', { msg: error.message }), true)
       }
     } finally {
       card?.querySelectorAll('button').forEach((candidate) => { candidate.disabled = false })
@@ -646,10 +639,10 @@ window.Apg = window.Apg || {}
                 <p>${html(approval.agent_id)}</p>
               </div>
               <div class="apg-decision-actions">
-                <button type="button" class="btn-primary btn-compact" data-apg-action="accept">Elfogadom</button>
-                <button type="button" class="btn-secondary btn-compact" data-apg-action="request_evidence">További bizonyíték kell</button>
-                <button type="button" class="btn-secondary btn-compact" data-apg-action="return_for_fix">Visszaküldöm javításra</button>
-                <button type="button" class="btn-danger btn-compact" data-apg-action="block">Blokkolom</button>
+                <button type="button" class="btn-primary btn-compact" data-apg-action="accept">${translated('apg.approvals.action.accept')}</button>
+                <button type="button" class="btn-secondary btn-compact" data-apg-action="request_evidence">${translated('apg.approvals.action.request_evidence')}</button>
+                <button type="button" class="btn-secondary btn-compact" data-apg-action="return_for_fix">${translated('apg.approvals.action.return_for_fix')}</button>
+                <button type="button" class="btn-danger btn-compact" data-apg-action="block">${translated('apg.approvals.action.block')}</button>
               </div>
               <p class="apg-decision-message" hidden></p>
             </article>`).join('')}
@@ -676,16 +669,16 @@ window.Apg = window.Apg || {}
       if (summary.mode === 'off' || summary.enabled === false) {
         container.innerHTML = `
           <details class="apg-activity-block">
-            <summary>APG események</summary>
-            <p class="apg-empty">Az APG ki van kapcsolva.</p>
+            <summary>${translated('apg.activity.title')}</summary>
+            <p class="apg-empty">${translated('apg.activity.off')}</p>
           </details>`
         return
       }
       if (summary.projection_error) {
         container.innerHTML = `
           <details class="apg-activity-block" open>
-            <summary>APG események</summary>
-            ${retryBanner(Apg.onActivityRendered)}
+            <summary>${translated('apg.activity.title')}</summary>
+            ${retryBanner()}
           </details>`
         bindRetry(container, Apg.onActivityRendered)
         return
@@ -693,22 +686,22 @@ window.Apg = window.Apg || {}
       const items = Array.isArray(summary.attention_items) ? summary.attention_items : []
       container.innerHTML = `
         <details class="apg-activity-block">
-          <summary>APG események</summary>
-          <p class="apg-activity-note">Figyelmet igénylő APG-elemekből készült összegzés, nem teljes eseménynapló.</p>
+          <summary>${translated('apg.activity.title')}</summary>
+          <p class="apg-activity-note">${translated('apg.activity.note')}</p>
           ${items.length ? `<ul class="apg-activity-list">${items.slice(0, 5).map((item) => `
             <li>
               <span class="apg-state-pill apg-severity-${severityForState(item.display_state)}">${html(stateLabel(item.display_state))}</span>
               <strong>${html(item.title)}</strong>
               <span>${html(item.reason)}</span>
               <time>${html(formatAge(item.age_seconds))}</time>
-            </li>`).join('')}</ul>` : '<p class="apg-empty">Az APG nem talált figyelmet igénylő folyamatot.</p>'}
+            </li>`).join('')}</ul>` : `<p class="apg-empty">${translated('apg.overview.empty')}</p>`}
         </details>`
     } catch {
       if (requestSequence !== activityRequestSequence) return
       container.innerHTML = `
         <details class="apg-activity-block" open>
-          <summary>APG események</summary>
-          ${retryBanner(Apg.onActivityRendered)}
+          <summary>${translated('apg.activity.title')}</summary>
+          ${retryBanner()}
         </details>`
       bindRetry(container, Apg.onActivityRendered)
     }
