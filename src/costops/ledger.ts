@@ -135,10 +135,81 @@ export interface OperationalResult {
 }
 
 /**
+ * Card dec9ae64: within one source+period, decide which WINNING representation
+ * (tier, then the consumption/package accounting rule for an equal-tier
+ * collision between DIFFERENT confidence classes, then freshness only as a
+ * last resort between lines of the exact same kind) applies -- and return
+ * EVERY line belonging to that winning class, never a single picked line.
+ *
+ * A different confidence class at equal tier (e.g. a provider_api snapshot vs
+ * an actual_invoice for the same charge, or the top-up/package accounting
+ * rule) is a genuinely different MEASUREMENT CHANNEL for the same underlying
+ * charge, so that collision still resolves to exactly one winning class.
+ * But two lines that share the winning class's EXACT confidence string are,
+ * by construction of this codebase's dedup_key scheme (provider+invoice_ref+
+ * period for actual_invoice, source+month for provider_api), never duplicates
+ * of one event -- they are distinct charges (Render bills per usage cycle;
+ * two receipts in a month is ordinary) and the caller must SUM them, not pick
+ * between them. Picking-one is the bug this card found: two actual_invoice
+ * receipts for one month, and every surface should have summed both.
+ *
+ * `tierOf` is injected so this one algorithm serves both the v0.4 operational
+ * resolver (OPERATIONAL_TIER, where actual_invoice/provider_api/billing_export
+ * share tier 4) and the legacy v0.3 headline resolver (CONF_PRIORITY, which
+ * gives all 6 confidences distinct values -- so for that caller a tie only
+ * ever means the exact same confidence, and the accounting-rule branch below
+ * is simply never reached).
+ */
+export function resolveSourceWinners<T extends { confidence: string; data_freshness: number; source_type?: string }>(
+  lines: T[],
+  now: number,
+  tierOf: (confidence: string) => number,
+): T[] {
+  if (lines.length <= 1) return lines
+  const rep = lines.reduce((a, b) => {
+    const ta = tierOf(a.confidence)
+    const tb = tierOf(b.confidence)
+    if (tb !== ta) return tb > ta ? b : a
+
+    // Equal tier -> the ACCOUNTING RULE decides before freshness.
+    const consume = prefersConsumption(a.source_type ?? b.source_type)
+    const aIsConsumption = CONSUMPTION_CONF.has(a.confidence)
+    const bIsConsumption = CONSUMPTION_CONF.has(b.confidence)
+    if (aIsConsumption !== bIsConsumption) {
+      if (consume) return bIsConsumption ? b : a          // top-up: consumption wins
+      return bIsConsumption ? a : b                        // package: the invoice wins
+    }
+
+    // Same kind of line -> fall back to freshness, but a stamp in the FUTURE
+    // cannot mean "fresher". A period-END date reaching data_freshness is a
+    // known data defect (card 320c477a) and must not decide anything.
+    // "Future" is measured against the caller's `now`, not the wall clock.
+    const fa = a.data_freshness > now ? -Infinity : a.data_freshness
+    const fb = b.data_freshness > now ? -Infinity : b.data_freshness
+    return fb > fa ? b : a
+  })
+  return lines.filter(l => l.confidence === rep.confidence)
+}
+
+/** Sum a resolved-winners group into one line, carrying the shared confidence
+ *  and the group's own metadata (from the first winner), with billed_cost
+ *  summed across every distinct charge and data_freshness the freshest seen. */
+function sumWinners<T extends { billed_cost: number; data_freshness: number }>(winners: T[]): T {
+  if (winners.length === 1) return winners[0]
+  return {
+    ...winners[0],
+    billed_cost: winners.reduce((s, l) => s + l.billed_cost, 0),
+    data_freshness: winners.reduce((m, l) => Math.max(m, l.data_freshness), winners[0].data_freshness),
+  }
+}
+
+/**
  * Resolve the provider-preferred OPERATIONAL spend for a set of month lines.
- * Per source -> best line by OPERATIONAL_TIER. Per provider -> if it has any
- * provider-derived source, its manual/estimate sources are excluded from operational
- * (fallback only). No double counting. `win` is used for the forecast run-rate.
+ * Per source -> the winning line(s) by OPERATIONAL_TIER, summed if more than
+ * one distinct charge shares the winning class (resolveSourceWinners). Per
+ * provider -> if it has any provider-derived source, its manual/estimate
+ * sources are excluded from operational (fallback only). No double counting.
+ * `win` is used for the forecast run-rate.
  *
  * `now` (epoch sec) is the reference instant for the future-stamp guard below.
  * It is a parameter and not a `Date.now()` read so that this function is a pure
@@ -150,34 +221,8 @@ export function resolveOperational(lines: OpLine[], win: MonthWindow, now: numbe
   for (const l of lines) { const a = bySource.get(l.source_id); if (a) a.push(l); else bySource.set(l.source_id, [l]) }
   const sourceBest = new Map<string, OpLine>()
   for (const [sid, ls] of bySource) {
-    // Tier first; on an EQUAL tier the fresher row wins (card 097d8355, Istvan's
-    // ruling 2026-07-20). actual_invoice / provider_api / billing_export all sit at
-    // tier 4, so a newly ingested invoice used to tie with an older provider_api row
-    // and lose -- strict `>` keeps the incumbent -- meaning the invoice was stored but
-    // never reached operational_spend. `data_freshness` is an ingest timestamp
-    // (`= @now`, ordered DESC elsewhere), so higher = newer.
-    sourceBest.set(sid, ls.reduce((a, b) => {
-      const ta = OPERATIONAL_TIER[a.confidence] || 0
-      const tb = OPERATIONAL_TIER[b.confidence] || 0
-      if (tb !== ta) return tb > ta ? b : a
-
-      // Equal tier -> the ACCOUNTING RULE decides before freshness.
-      const consume = prefersConsumption(a.source_type ?? b.source_type)
-      const aIsConsumption = CONSUMPTION_CONF.has(a.confidence)
-      const bIsConsumption = CONSUMPTION_CONF.has(b.confidence)
-      if (aIsConsumption !== bIsConsumption) {
-        if (consume) return bIsConsumption ? b : a          // top-up: consumption wins
-        return bIsConsumption ? a : b                        // package: the invoice wins
-      }
-
-      // Same kind of line -> fall back to freshness, but a stamp in the FUTURE
-      // cannot mean "fresher". A period-END date reaching data_freshness is a
-      // known data defect (card 320c477a) and must not decide anything.
-      // "Future" is measured against the caller's `now`, not the wall clock.
-      const fa = a.data_freshness > now ? -Infinity : a.data_freshness
-      const fb = b.data_freshness > now ? -Infinity : b.data_freshness
-      return fb > fa ? b : a
-    }))
+    const winners = resolveSourceWinners(ls, now, c => OPERATIONAL_TIER[c] || 0)
+    sourceBest.set(sid, sumWinners(winners))
   }
   // which providers have a provider-derived (tier>=3) source, and which have a REAL
   // measured actual (tier>=4). A real invoice/api actual SUPERSEDES the whole-provider
@@ -379,7 +424,15 @@ export interface CostSummary {
   render_plan: {
     currency: string
     plan_estimate_total: number
+    // Despite the field name (kept for back-compat, see manual_estimate_actual_source),
+    // this is the resolved headline figure for render's non-plan-estimate
+    // sources, whatever its real provenance -- NOT necessarily a manual entry.
+    // Card dec9ae64: a real actual_invoice was being presented under a name
+    // that implies a guess. manual_estimate_actual_source/_confidence below
+    // carry the truth; read those before assuming this number is a manual figure.
     manual_estimate: number
+    manual_estimate_actual_source: string  // 'provider_api' | 'email_invoice' | 'manual_entry' | 'no_data' | 'mixed'
+    manual_estimate_confidence: string     // the resolved confidence, or 'mixed' if render has >1 non-plan source at different confidences
     variance: number
     confidence: string
     data_freshness_at: number | null
@@ -464,7 +517,24 @@ export function getCostSummary(
   const ACT_CONF = ['provider_api', 'billing_export', 'actual_invoice']
   const reconcile: CostSummary['reconcile'] = []
   for (const [sid, ls] of bySource) {
-    const resolved = ls.reduce((a, b) => (CONF_PRIORITY[b.confidence] || 0) > (CONF_PRIORITY[a.confidence] || 0) ? b : a)
+    // Card dec9ae64: CONF_PRIORITY gives all 6 confidences distinct values, so
+    // a tie here only ever means the SAME confidence -- multiple distinct
+    // charges (e.g. two actual_invoice receipts in one month), summed rather
+    // than picked-one. resolveSourceWinners is the SAME resolver
+    // resolveOperational uses (parameterized on CONF_PRIORITY here instead of
+    // OPERATIONAL_TIER), so this surface and the operational one can no
+    // longer disagree about which lines constitute the winning group.
+    const winners = resolveSourceWinners(ls, now, c => CONF_PRIORITY[c] || 0)
+    const rep = winners[0]
+    const resolved: LineRow = winners.length === 1 ? rep : {
+      ...rep,
+      billed_cost: winners.reduce((s, l) => s + l.billed_cost, 0),
+      data_freshness: winners.reduce((m, l) => Math.max(m, l.data_freshness), rep.data_freshness),
+      // Per-invoice original-currency metadata no longer corresponds to a
+      // single line once summed -- null it rather than showing one of the
+      // summed invoices' figures as if it were the whole combined amount.
+      original_amount: null, original_currency: null, fx_rate: null, fx_date: null,
+    }
     current_spend += resolved.billed_cost
     const sourceForecast = resolved.charge_category === 'usage'
       ? resolved.billed_cost / win.fractionElapsed
@@ -539,10 +609,21 @@ export function getCostSummary(
   // v0.3 Render plan-based estimate (ADVISORY): manual render estimate vs plan-based
   // estimate vs variance. NEVER folded into current_spend. Empty until a Render import.
   const plan_estimate_total = round2(planLines.reduce((s, l) => s + l.billed_cost, 0))
+  const renderNonPlanSources = srcRows.filter(r => r.provider === 'render' && !advisorySourceIds.has(r.id))
   const manual_render_estimate = round2(
-    srcRows.filter(r => r.provider === 'render' && !advisorySourceIds.has(r.id))
-      .reduce((s, r) => s + (perSource.get(r.id) || 0), 0),
+    renderNonPlanSources.reduce((s, r) => s + (perSource.get(r.id) || 0), 0),
   )
+  // Card dec9ae64: the field is named manual_estimate for back-compat, but the
+  // resolved figure is not necessarily a manual entry -- expose its real
+  // provenance so a reader (and the portfolio engine) can tell an invoiced
+  // number from a guess. 'mixed' when render has more than one non-plan
+  // source and they don't all agree (rare: usually one render-hosting source).
+  const renderProvenances = new Set(renderNonPlanSources.map(r => perSourceActualSource.get(r.id) || 'no_data'))
+  const manual_render_actual_source = renderNonPlanSources.length === 0 ? 'no_data'
+    : renderProvenances.size === 1 ? [...renderProvenances][0] : 'mixed'
+  const renderConfidences = new Set(renderNonPlanSources.map(r => perSourceConfidence.get(r.id) || 'no_data'))
+  const manual_render_confidence = renderNonPlanSources.length === 0 ? 'no_data'
+    : renderConfidences.size === 1 ? [...renderConfidences][0] : 'mixed'
   const planFreshness = planLines.reduce((m, l) => Math.max(m, l.data_freshness), 0) || null
   // v0.5: latest successful Render sync -> sanitized breakdown (service_count, plan
   // breakdown, undercount) + last_sync for the dashboard Render detail.
@@ -553,6 +634,8 @@ export function getCostSummary(
     currency: config.currency,
     plan_estimate_total,
     manual_estimate: manual_render_estimate,
+    manual_estimate_actual_source: manual_render_actual_source,
+    manual_estimate_confidence: manual_render_confidence,
     variance: round2(plan_estimate_total - manual_render_estimate),
     confidence: 'provider_plan_estimate',
     data_freshness_at: planFreshness,

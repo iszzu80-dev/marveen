@@ -185,11 +185,22 @@ describe('getCostSummary v0.4 operational fields', () => {
   // clock, not the wall clock. Without it this assertion silently became
   // vacuous 12 days after NOW and then flipped to a real failure -- the stamp
   // it calls "future" was no longer in the future when the suite actually ran.
+  //
+  // Card dec9ae64: uses provider_api + billing_export (two DIFFERENT
+  // consumption-class confidences, both tier 4) rather than two same-confidence
+  // rows -- since resolveSourceWinners now SUMS lines that share the exact
+  // same confidence (distinct charges, e.g. two actual_invoice receipts), a
+  // same-confidence pair here would no longer exercise the freshness tiebreak
+  // at all, it would just sum. Two different confidences at equal tier is
+  // also the only way this scenario could occur for REAL: one source_id's
+  // provider_api row has a per-source+month dedup_key (at most one ever
+  // exists), so two literal provider_api duplicates for one source+period
+  // cannot arise from real ingestion.
   it('a FUTURE freshness stamp cannot beat a real one', () => {
     const win = monthWindow(NOW)
     const r = resolveOperational([
       { source_id: 'z-api', provider: 'z', billed_cost: 100, charge_category: 'usage', confidence: 'provider_api', data_freshness: NOW },
-      { source_id: 'z-api', provider: 'z', billed_cost: 7, charge_category: 'usage', confidence: 'provider_api', data_freshness: NOW + 12 * 86400 },
+      { source_id: 'z-api', provider: 'z', billed_cost: 7, charge_category: 'usage', confidence: 'billing_export', data_freshness: NOW + 12 * 86400 },
     ], win, NOW)
     expect(r.operational_spend).toBe(100)
   })
@@ -201,7 +212,7 @@ describe('getCostSummary v0.4 operational fields', () => {
     const win = monthWindow(NOW)
     const r = resolveOperational([
       { source_id: 'z-api', provider: 'z', billed_cost: 100, charge_category: 'usage', confidence: 'provider_api', data_freshness: NOW - 12 * 86400 },
-      { source_id: 'z-api', provider: 'z', billed_cost: 7, charge_category: 'usage', confidence: 'provider_api', data_freshness: NOW },
+      { source_id: 'z-api', provider: 'z', billed_cost: 7, charge_category: 'usage', confidence: 'billing_export', data_freshness: NOW },
     ], win, NOW)
     expect(r.operational_spend).toBe(7)
   })

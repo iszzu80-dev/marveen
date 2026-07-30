@@ -157,10 +157,17 @@ export function getWarnings(
   if (summary.render_plan) {
     const base = summary.render_plan.manual_estimate || summary.render_plan.plan_estimate_total || 1
     if (Math.abs(summary.render_plan.variance) / base >= MATERIAL_FRACTION) {
+      // Card dec9ae64: don't call it a "manual estimate" when it isn't one --
+      // an actual_invoice/provider_api figure is a real measured number, not a guess.
+      const label = summary.render_plan.manual_estimate_actual_source === 'manual_entry'
+        ? 'manual estimate' : 'current figure'
       warnings.push({
         code: 'plan_estimate_variance', severity: 'low', provider: 'render',
-        message: `Render plan-based estimate (${summary.render_plan.plan_estimate_total}) significantly diverges from manual estimate (${summary.render_plan.manual_estimate}).`,
-        detail: { plan_estimate_total: summary.render_plan.plan_estimate_total, manual_estimate: summary.render_plan.manual_estimate, variance: summary.render_plan.variance },
+        message: `Render plan-based estimate (${summary.render_plan.plan_estimate_total}) significantly diverges from the ${label} (${summary.render_plan.manual_estimate}).`,
+        detail: {
+          plan_estimate_total: summary.render_plan.plan_estimate_total, manual_estimate: summary.render_plan.manual_estimate,
+          manual_estimate_actual_source: summary.render_plan.manual_estimate_actual_source, variance: summary.render_plan.variance,
+        },
         warning_type: 'cost', category: 'hosting', source: 'ledger', confidence: 'estimated',
         current_value: summary.render_plan.plan_estimate_total, unit: summary.render_plan.currency,
       })
