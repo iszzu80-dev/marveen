@@ -359,6 +359,21 @@ function epochToMilliseconds(value: number): number {
   return Math.abs(value) >= 1_000_000_000_000 ? value : value * 1000
 }
 
+// Card 1732a148: a unix-seconds `created_at` this small (2001-09-09 and
+// earlier) cannot be a real APG kernel activity timestamp -- this store
+// (and the whole APG pilot) did not exist before 2026. A handful of real
+// sidecar rows carry a literal `created_at=1` (an early-pilot placeholder/
+// sentinel, not a crafted value) instead of a real timestamp; treating "1"
+// as a genuine 1970-01-01T00:00:01Z epoch turned an age computation into an
+// absolute-epoch-sized number. 1_000_000_000 is a generic, well-known
+// unix-seconds sanity floor (not project-specific), matching the existing
+// `<= 0` guard's spirit rather than hardcoding this pilot's actual start date.
+const MIN_PLAUSIBLE_EPOCH_SECONDS = 1_000_000_000
+
+function isPlausibleEpochSeconds(value: number): boolean {
+  return Number.isFinite(value) && value >= MIN_PLAUSIBLE_EPOCH_SECONDS
+}
+
 function toIso(value: number): string {
   if (!Number.isFinite(value)) return new Date(0).toISOString()
   return new Date(epochToMilliseconds(value)).toISOString()
@@ -415,17 +430,24 @@ function buildCandidateProjection(
   const latestCheckpoint = newest(checkpoints)
   const receiptIds = new Set(receipts.map((row) => row.id))
   const evidence = data.evidence.filter((row) => receiptIds.has(row.receipt_id))
+  // Card 1732a148: filter out implausible `created_at` values (e.g. the
+  // real sidecar's `created_at=1` sentinel rows) BEFORE they can ever reach
+  // Math.min/Math.max below -- one poisoned row must not corrupt
+  // updatedAt/earliestActivityAt for an otherwise-healthy candidate. This is
+  // the data-layer half of the fix; ageSeconds() below carries a matching
+  // defensive floor so a value from any future/other call site still can't
+  // render as an absolute epoch.
   const activityTimes = [
     canonical?.created_at,
     ...candidateRecommendations.map((row) => row.created_at),
     ...transitions.map((row) => row.created_at),
     ...checkpoints.map((row) => row.created_at),
     ...receipts.map((row) => row.created_at),
-  ].filter((value): value is number => value !== undefined && Number.isFinite(value))
+  ].filter((value): value is number => value !== undefined && isPlausibleEpochSeconds(value))
   const stateActivityTimes = [
     ...transitions.map((row) => row.created_at),
     ...checkpoints.map((row) => row.created_at),
-  ]
+  ].filter(isPlausibleEpochSeconds)
   const displayState = deriveDisplayState({
     latestTransitionState: transition?.to_state ?? null,
     latestCheckpointResult: latestCheckpoint?.result ?? null,
@@ -639,9 +661,19 @@ function attentionPriority(candidate: CandidateProjection): number {
   return 1
 }
 
-function ageSeconds(nowIso: string, createdAt: number): number {
+// Card 1732a148: `createdAt <= 0` alone does not reject an implausibly
+// small POSITIVE epoch (e.g. a sentinel `created_at=1`) -- treated as unix
+// seconds, epochToMilliseconds(1) resolves to 1970-01-01T00:00:01Z, and the
+// "age" then computed is essentially the current unix timestamp itself.
+// This is defense-in-depth: buildCandidateProjection now filters implausible
+// timestamps out before they can become earliestActivityAt in the first
+// place (see isPlausibleEpochSeconds above), but ageSeconds keeps its own
+// floor so a value from any other/future call site still can't render as an
+// absolute epoch. Same "unknown timestamp" convention as the existing
+// `createdAt <= 0` branch: returns 0, not a fabricated age.
+export function ageSeconds(nowIso: string, createdAt: number): number {
   const now = Date.parse(nowIso)
-  if (!Number.isFinite(now) || createdAt <= 0) return 0
+  if (!Number.isFinite(now) || !isPlausibleEpochSeconds(createdAt)) return 0
   return Math.max(0, Math.floor((now - epochToMilliseconds(createdAt)) / 1000))
 }
 
