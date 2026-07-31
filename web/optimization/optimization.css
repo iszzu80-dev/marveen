@@ -40,7 +40,17 @@
 }
 #optimizationPage .opt-kpi-card {
   padding: 18px 20px; border: 1px solid var(--border); border-radius: var(--radius);
-  background: var(--bg-card);
+  background: var(--bg-card); min-width: 0;
+}
+/* The big metric font is a shared global (.overview-stat-value, 32px bold). A KPI
+   whose figure is unavailable puts a disabled-reason SENTENCE in that slot, which
+   in the giant font wraps to 4 lines and blows the card height out, colliding with
+   neighbours. Page-scoped only: render those muted+small (a caption, not a number),
+   and keep the numeric variant from ever overflowing its card. */
+#optimizationPage .overview-stat-value { overflow-wrap: anywhere; }
+#optimizationPage .overview-stat-value.is-muted {
+  font-size: 14px; font-weight: 500; line-height: 1.4; color: var(--text-muted);
+  letter-spacing: 0; margin-top: 2px;
 }
 
 #optimizationPage .opt-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }

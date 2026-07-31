@@ -76,6 +76,7 @@ window.Optimization = window.Optimization || {}
         value: esc(summary.capacity?.blocker || t('optimization.no_data')),
         badge: confidenceBadge('unknown'),
         detail: '',
+        blocked: true,
       }
     }
 
@@ -100,6 +101,7 @@ window.Optimization = window.Optimization || {}
         value: esc(blocker || t('optimization.no_data')),
         badge: confidenceBadge('unknown'),
         detail: '',
+        blocked: true,
       }
     }
 
@@ -115,6 +117,7 @@ window.Optimization = window.Optimization || {}
       return {
         value: esc(summary.benchmark?.blocker || t('optimization.no_data')),
         detail: '',
+        blocked: true,
       }
     }
     const group = (summary.benchmark.pack.groups || [])
@@ -258,12 +261,12 @@ window.Optimization = window.Optimization || {}
           </div>
           <div class="opt-kpi-card">
             <div class="overview-stat-label">${esc(t('optimization.overview.capacity_risk'))}</div>
-            <div class="overview-stat-value">${risk.value}</div>
+            <div class="overview-stat-value${risk.blocked ? ' is-muted' : ''}">${risk.value}</div>
             <div class="overview-stat-sub">${risk.badge} ${risk.detail}</div>
           </div>
           <div class="opt-kpi-card">
             <div class="overview-stat-label">${esc(t('optimization.overview.cost_per_accepted_task'))}</div>
-            <div class="overview-stat-value">${benchmark.value}</div>
+            <div class="overview-stat-value${benchmark.blocked ? ' is-muted' : ''}">${benchmark.value}</div>
             <div class="overview-stat-sub">${benchmark.detail}</div>
           </div>
         </div>
