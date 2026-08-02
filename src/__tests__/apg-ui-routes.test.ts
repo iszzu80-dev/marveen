@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { existsSync, rmSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { initDatabase, createApproval } from '../db.js'
 import { PROJECT_ROOT } from '../config.js'
+import { SETTINGS_REGISTRY } from '../config-registry.js'
 import { tryHandleApg } from '../web/routes/apg.js'
 import { reloadOverridesForTest, setOverride, OVERRIDES_PATH } from '../settings-store.js'
 import type { RouteContext } from '../web/routes/types.js'
@@ -274,4 +275,39 @@ describe('APG UI API (route smoke)', () => {
       expect(out.body[toggle.field]).toBe(true)
     })
   }
+})
+
+describe('APG settings i18n completeness', () => {
+  // Verify every APG registry entry has a settings.desc.<KEY> in both
+  // hu.js and en.js. This prevents the exact gap that this fix closes:
+  // a registry entry added without its matching i18n key causes the
+  // Settings page to show a raw untranslated token.
+  it('every module=apg registry entry has settings.desc.<key> in hu.js and en.js', () => {
+    const webDir = join(PROJECT_ROOT, 'web', 'lang')
+
+    const loadKeys = (filename: string): Set<string> => {
+      const raw = readFileSync(join(webDir, filename), 'utf-8')
+      const keys = new Set<string>()
+      const re = /'settings\.desc\.([^']+)'/g
+      let match
+      while ((match = re.exec(raw)) !== null) {
+        keys.add(`settings.desc.${match[1]}`)
+      }
+      return keys
+    }
+
+    const huKeys = loadKeys('hu.js')
+    const enKeys = loadKeys('en.js')
+    const apgEntries = SETTINGS_REGISTRY.filter((e) => e.module === 'apg')
+
+    expect(apgEntries.length).toBeGreaterThanOrEqual(11)
+
+    for (const entry of apgEntries) {
+      const descKey = `settings.desc.${entry.key}`
+      expect(huKeys.has(descKey),
+        `Missing hu.js key: ${descKey}`).toBe(true)
+      expect(enKeys.has(descKey),
+        `Missing en.js key: ${descKey}`).toBe(true)
+    }
+  })
 })

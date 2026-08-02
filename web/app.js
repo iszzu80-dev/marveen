@@ -13538,7 +13538,9 @@ function buildSettingRow(def) {
 
   const desc = document.createElement('div')
   desc.className = 'settings-row-desc'
-  desc.textContent = t('settings.desc.' + def.key) || def.description
+  const descKey = 'settings.desc.' + def.key
+  const translated = t(descKey)
+  desc.textContent = translated !== descKey ? translated : def.description || descKey
   info.appendChild(desc)
 
   const meta = document.createElement('div')
