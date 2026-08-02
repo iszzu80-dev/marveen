@@ -1972,6 +1972,8 @@ window._i18n.hu = {
   'apg.detail.source_ids':            'Forrás-azonosítók',
   'apg.detail.no_source_ids':         'Nincs forrás-azonosító.',
   'apg.detail.technical_details':     'Technikai részletek megjelenítése',
+  'apg.detail.request_decision':      'Tulajdonosi döntés kérése',
+  'apg.detail.decision_created':      'A döntési kérelem létrejött. A Jóváhagyások oldalon látható.',
 
   'apg.approvals.title':                        'APG döntések',
   'apg.approvals.empty':                        'Nincs függő APG-döntés.',

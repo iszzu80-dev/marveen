@@ -1970,6 +1970,8 @@ window._i18n.en = {
   'apg.detail.source_ids':            'Source IDs',
   'apg.detail.no_source_ids':         'No source IDs.',
   'apg.detail.technical_details':     'Show technical details',
+  'apg.detail.request_decision':      'Request Owner Decision',
+  'apg.detail.decision_created':      'Decision request created. Visible on the Approvals page.',
 
   'apg.approvals.title':                        'APG decisions',
   'apg.approvals.empty':                        'No pending APG decisions.',

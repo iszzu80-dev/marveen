@@ -273,6 +273,14 @@ window.Apg = window.Apg || {}
           <dt>${translated('apg.detail.goal')}</dt><dd>${html(detail.goal || '—')}</dd>
           <dt>${translated('apg.detail.scope')}</dt><dd>${html(detail.scope || kanbanCardId || '—')}</dd>
         </dl>
+        <div class="apg-detail-actions">
+          <button type="button" class="btn-primary btn-compact apg-request-decision-btn"
+                  data-work-item-id="${attr(workItemId)}"
+                  data-kanban-card-id="${attr(kanbanCardId || '')}">
+            ${translated('apg.detail.request_decision')}
+          </button>
+          <span class="apg-decision-message" id="apgWorkItemDecisionMsg" hidden></span>
+        </div>
         <div class="apg-detail-columns">
           <section>
             <h3>${translated('apg.detail.claims')}</h3>
@@ -293,6 +301,50 @@ window.Apg = window.Apg || {}
               </li>`, 'apg.detail.no_events')}
           </section>
         </div>`
+
+    // Wire the "Request Owner Decision" button (item 4: Approvals linkage).
+    body.querySelector('.apg-request-decision-btn')?.addEventListener('click', async function () {
+      const btn = this
+      const msgEl = body.querySelector('#apgWorkItemDecisionMsg')
+      btn.disabled = true
+      if (msgEl) { msgEl.hidden = true }
+      try {
+        const desc = `${detail.title || workItemId}: ${detail.next_action || 'owner decision required'}`
+        const res = await fetchJson('/api/approvals', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            agent_id: 'dashboard',
+            category: 'apg_decision',
+            action_description: desc,
+            action_payload: JSON.stringify({
+              work_item_id: workItemId,
+              kanban_card_id: kanbanCardId || null,
+              display_state: detail.display_state,
+              risk: detail.risk,
+            }),
+          }),
+        })
+        if (msgEl) {
+          msgEl.hidden = false
+          msgEl.className = 'apg-decision-message apg-severity-success'
+          msgEl.textContent = t('apg.detail.decision_created')
+        }
+        // Refresh the Approvals page if it's visible so the new card appears.
+        if (typeof loadApprovalsPage === 'function' && !document.getElementById('approvalsPage')?.hidden) {
+          await loadApprovalsPage()
+          await Apg.onApprovalsRendered()
+        }
+      } catch (error) {
+        if (msgEl) {
+          msgEl.hidden = false
+          msgEl.className = 'apg-decision-message apg-severity-danger'
+          msgEl.textContent = error.message
+        }
+      } finally {
+        btn.disabled = false
+      }
+    })
     } catch (error) {
       body.innerHTML = `
         <div class="apg-degraded apg-severity-danger">
