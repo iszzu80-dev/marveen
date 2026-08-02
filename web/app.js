@@ -2251,6 +2251,16 @@ async function showCardDetail(card) {
 
   // Archive
   document.getElementById('cardArchiveBtn').onclick = async () => {
+    // APG enforcement gate (APG_BLOCK_UNACCEPTED_ARCHIVE): a cancelable
+    // CustomEvent lets apg.js block archiving without scraping DOM or
+    // importing APG-specific logic into the generic kanban flow.
+    const gateEvent = new CustomEvent('marveen:kanban-archive-attempt', {
+      cancelable: true,
+      detail: { cardId: card.id },
+    })
+    document.dispatchEvent(gateEvent)
+    if (gateEvent.defaultPrevented) return
+
     try {
       await fetch(`/api/kanban/${encodeURIComponent(card.id)}/archive`, { method: 'POST' })
       closeModal(cardDetailOverlay)

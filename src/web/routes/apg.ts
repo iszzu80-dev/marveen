@@ -149,6 +149,14 @@ export async function tryHandleApg(ctx: RouteContext): Promise<boolean> {
         String(getEffectiveSettingValue('APG_UI_EVIDENCE')) === '1',
       apg_ui_approval_enhancements_enabled:
         String(getEffectiveSettingValue('APG_UI_APPROVAL_ENHANCEMENTS')) === '1',
+      apg_require_claim_receipt:
+        String(getEffectiveSettingValue('APG_REQUIRE_CLAIM_RECEIPT')) === '1',
+      apg_require_independent_acceptance:
+        String(getEffectiveSettingValue('APG_REQUIRE_INDEPENDENT_ACCEPTANCE')) === '1',
+      apg_require_owner_decision:
+        String(getEffectiveSettingValue('APG_REQUIRE_OWNER_DECISION')) === '1',
+      apg_block_unaccepted_archive:
+        String(getEffectiveSettingValue('APG_BLOCK_UNACCEPTED_ARCHIVE')) === '1',
     })
     return true
   }
