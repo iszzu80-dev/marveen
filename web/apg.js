@@ -101,6 +101,28 @@ window.Apg = window.Apg || {}
     return data
   }
 
+  // Enforcement toggle cache, refreshed from /api/apg/summary.
+  let enforcementState = {
+    mode: 'off',
+    require_claim_receipt: false,
+    require_independent_acceptance: false,
+    require_owner_decision: false,
+    block_unaccepted_archive: false,
+  }
+
+  Apg.refreshEnforcement = async function refreshEnforcement() {
+    try {
+      const summary = await fetchJson('/api/apg/summary')
+      enforcementState = {
+        mode: summary.mode || 'off',
+        require_claim_receipt: summary.apg_require_claim_receipt === true,
+        require_independent_acceptance: summary.apg_require_independent_acceptance === true,
+        require_owner_decision: summary.apg_require_owner_decision === true,
+        block_unaccepted_archive: summary.apg_block_unaccepted_archive === true,
+      }
+    } catch { /* keep last-known state on fetch failure */ }
+  }
+
   function retryBanner() {
     return `
       <div class="apg-degraded apg-severity-danger">
@@ -747,6 +769,38 @@ window.Apg = window.Apg || {}
     document.addEventListener('marveen:activity-rendered', Apg.onActivityRendered)
     document.addEventListener('marveen:kanban-card-opened', (event) => {
       Apg.onKanbanCardOpened(event.detail?.cardId)
+    })
+    // Enforcement: APG_BLOCK_UNACCEPTED_ARCHIVE archive gate (spec 9.5).
+    // app.js dispatches a cancelable CustomEvent before every archive attempt;
+    // we preventDefault() when the gate blocks (enforced) or the user cancels
+    // the warning (assisted).
+    document.addEventListener('marveen:kanban-archive-attempt', async (event) => {
+      const cardId = event.detail?.cardId
+      if (!cardId) return
+      await Apg.refreshEnforcement()
+      const state = enforcementState
+      if (state.mode !== 'assisted' && state.mode !== 'enforced') return
+      if (!state.block_unaccepted_archive) return
+      let items
+      try {
+        const result = await fetchJson(
+          `/api/apg/work-items?kanban_card_id=${encodeURIComponent(cardId)}&limit=1`
+        )
+        items = Array.isArray(result.items) ? result.items : []
+      } catch { return /* fail-open */ }
+      const unaccepted = items.find(
+        (item) =>
+          item.effective_mode !== 'off'
+          && item.acceptance_status !== 'accepted'
+          && item.acceptance_status !== 'not_started'
+      )
+      if (!unaccepted) return
+      if (state.mode === 'enforced') {
+        window.alert(t('apg.archive.blocked_unaccepted'))
+        event.preventDefault()
+      } else {
+        if (!window.confirm(t('apg.archive.warn_unaccepted'))) event.preventDefault()
+      }
     })
     document.addEventListener('keydown', (event) => {
       if (event.key !== 'Escape') return

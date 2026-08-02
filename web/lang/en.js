@@ -1995,6 +1995,9 @@ window._i18n.en = {
   'apg.common.unavailable':           'APG state unavailable: {msg}',
   'apg.common.unavailable_short':     'APG state unavailable.',
 
+  'apg.archive.blocked_unaccepted':  'Archive blocked: this card has an unaccepted APG work item. You can disable the archive gate in Settings (APG_BLOCK_UNACCEPTED_ARCHIVE).',
+  'apg.archive.warn_unaccepted':     'This card has an unaccepted APG work item. Archive anyway?',
+
   'settings.module.apg':              'APG 0.4 Lean',
 
 }

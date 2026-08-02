@@ -1997,6 +1997,9 @@ window._i18n.hu = {
   'apg.common.unavailable':           'Az APG állapota nem érhető el: {msg}',
   'apg.common.unavailable_short':     'Az APG állapota nem érhető el.',
 
+  'apg.archive.blocked_unaccepted':  'Archiválás blokkolva: a kártyához elfogadás nélküli APG-munkaelem tartozik. A beállításoknál kikapcsolhatod az archiválási kaput (APG_BLOCK_UNACCEPTED_ARCHIVE).',
+  'apg.archive.warn_unaccepted':     'A kártyához elfogadás nélküli APG-munkaelem tartozik. Biztosan archiválod?',
+
   'settings.module.apg':              'APG 0.4 Lean',
 
 }
