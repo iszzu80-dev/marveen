@@ -419,7 +419,7 @@ window.Apg = window.Apg || {}
     try {
       const summary = await fetchJson('/api/apg/summary')
       if (requestSequence !== kanbanRequestSequence) return
-      if (summary.mode === 'off' || summary.enabled === false) {
+      if (summary.mode === 'off' || summary.enabled === false || summary.apg_ui_kanban_enabled === false) {
         latestKanbanItems = []
         activeKanbanFilters.clear()
         clearApgKanbanUi()
@@ -484,6 +484,15 @@ window.Apg = window.Apg || {}
         container.hidden = true
         return
       }
+      // Evidence toggle (APG_UI_EVIDENCE): when off, hide claims/events/source-ids
+      // but still show APG state header (mode, risk, next action).
+      let evidenceEnabled = true
+      try {
+        const summary = await fetchJson('/api/apg/summary')
+        if (requestSequence !== cardDetailRequestSequence) return
+        evidenceEnabled = summary.apg_ui_evidence_enabled !== false
+      } catch { /* keep default true on fetch failure */ }
+
       const claims = Array.isArray(detail.claims) ? detail.claims : []
       const events = Array.isArray(detail.events)
         ? [...detail.events].sort((a, b) => new Date(a.at) - new Date(b.at))
@@ -498,7 +507,7 @@ window.Apg = window.Apg || {}
             <span class="apg-risk">${translated('apg.detail.risk')}: ${html(detail.risk)}</span>
           </div>
           <p class="apg-next-action">${html(detail.next_action)}</p>
-          <details>
+          ${evidenceEnabled ? `<details>
             <summary>${translated('apg.detail.technical_details')}</summary>
             <div class="apg-technical-grid">
               <section>
@@ -522,7 +531,7 @@ window.Apg = window.Apg || {}
                 ${sourceIds.length ? `<ul class="apg-source-ids">${sourceIds.map((id) => `<li>${html(id)}</li>`).join('')}</ul>` : `<p class="apg-empty">${translated('apg.detail.no_source_ids')}</p>`}
               </section>
             </div>
-          </details>
+          </details>` : ''}
         </section>`
     } catch (error) {
       if (requestSequence !== cardDetailRequestSequence) return
@@ -631,7 +640,7 @@ window.Apg = window.Apg || {}
       container.hidden = true
       return
     }
-    if (mode === 'off') {
+    if (mode === 'off' || summary.apg_ui_approval_enhancements_enabled === false) {
       container.innerHTML = ''
       container.hidden = true
       return
@@ -690,7 +699,7 @@ window.Apg = window.Apg || {}
     try {
       const summary = await fetchJson('/api/apg/summary')
       if (requestSequence !== activityRequestSequence) return
-      if (summary.mode === 'off' || summary.enabled === false) {
+      if (summary.mode === 'off' || summary.enabled === false || summary.apg_ui_activity_enabled === false) {
         container.innerHTML = ''
         container.hidden = true
         return

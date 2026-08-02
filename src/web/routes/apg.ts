@@ -141,6 +141,14 @@ export async function tryHandleApg(ctx: RouteContext): Promise<boolean> {
       mode_source: effectiveMode.source,
       apg_ui_overview_enabled:
         String(getEffectiveSettingValue('APG_UI_OVERVIEW')) === '1',
+      apg_ui_kanban_enabled:
+        String(getEffectiveSettingValue('APG_UI_KANBAN')) === '1',
+      apg_ui_activity_enabled:
+        String(getEffectiveSettingValue('APG_UI_ACTIVITY')) === '1',
+      apg_ui_evidence_enabled:
+        String(getEffectiveSettingValue('APG_UI_EVIDENCE')) === '1',
+      apg_ui_approval_enhancements_enabled:
+        String(getEffectiveSettingValue('APG_UI_APPROVAL_ENHANCEMENTS')) === '1',
     })
     return true
   }

@@ -230,4 +230,48 @@ describe('APG UI API (route smoke)', () => {
     expect(await tryHandleApg(badScope.ctx)).toBe(true)
     expect(badScope.out.status).toBe(400)
   })
+
+  // ── Surface toggle RED-able tests (item #1) ──
+  // Each toggle OFF must return false in the summary response; ON must return true.
+  // These prove the toggle actually gates its surface (not just a no-op default).
+
+  const SURFACE_TOGGLES = [
+    { key: 'APG_UI_OVERVIEW', field: 'apg_ui_overview_enabled' },
+    { key: 'APG_UI_KANBAN', field: 'apg_ui_kanban_enabled' },
+    { key: 'APG_UI_ACTIVITY', field: 'apg_ui_activity_enabled' },
+    { key: 'APG_UI_EVIDENCE', field: 'apg_ui_evidence_enabled' },
+    { key: 'APG_UI_APPROVAL_ENHANCEMENTS', field: 'apg_ui_approval_enhancements_enabled' },
+  ]
+
+  for (const toggle of SURFACE_TOGGLES) {
+    it(`summary.${toggle.field} is true by default (${toggle.key})`, async () => {
+      // Ensure APG_MODE is not off so the summary endpoint responds.
+      setOverride('APG_MODE', 'observe')
+      reloadOverridesForTest()
+      const { ctx, out } = fakeCtx('/api/apg/summary')
+      expect(await tryHandleApg(ctx)).toBe(true)
+      expect(out.status).toBe(200)
+      expect(out.body[toggle.field]).toBe(true)
+    })
+
+    it(`summary.${toggle.field} turns false when ${toggle.key}=0 (RED-able)`, async () => {
+      setOverride('APG_MODE', 'observe')
+      setOverride(toggle.key, '0')
+      reloadOverridesForTest()
+      const { ctx, out } = fakeCtx('/api/apg/summary')
+      expect(await tryHandleApg(ctx)).toBe(true)
+      expect(out.status).toBe(200)
+      expect(out.body[toggle.field]).toBe(false)
+    })
+
+    it(`summary.${toggle.field} turns true again when ${toggle.key}=1`, async () => {
+      setOverride('APG_MODE', 'observe')
+      setOverride(toggle.key, '1')
+      reloadOverridesForTest()
+      const { ctx, out } = fakeCtx('/api/apg/summary')
+      expect(await tryHandleApg(ctx)).toBe(true)
+      expect(out.status).toBe(200)
+      expect(out.body[toggle.field]).toBe(true)
+    })
+  }
 })
