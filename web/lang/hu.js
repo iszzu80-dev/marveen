@@ -1991,6 +1991,8 @@ window._i18n.hu = {
   'apg.activity.title':               'APG események',
   'apg.activity.off':                 'Az APG ki van kapcsolva.',
   'apg.activity.note':                'Figyelmet igénylő APG-elemekből készült összegzés, nem teljes eseménynapló.',
+  'apg.activity.more':                'Több esemény is létezik. A teljes előzmények a munkaelem részleteinél láthatók.',
+  'apg.activity.no_events':           'Nincsenek APG-események.',
 
   'apg.common.loading':               'Betöltés...',
   'apg.common.retry':                 'Újrapróbálás',

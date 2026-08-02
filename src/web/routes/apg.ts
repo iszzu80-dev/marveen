@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PROJECT_ROOT } from '../../config.js'
 import {
+  buildApgEvents,
   buildApgWorkItemDetail,
   buildApgWorkItemSummaries,
   getCachedApgSummary,
@@ -451,6 +452,33 @@ export async function tryHandleApg(ctx: RouteContext): Promise<boolean> {
     const responseBody = { ...updatedApproval, apg_action: action }
     recordIdempotentResponse(approvalId, idempotencyKeyValue, 200, responseBody)
     json(res, responseBody)
+    return true
+  }
+
+  // GET /api/apg/events -- consolidated event feed for the Activity page (spec 13, item 5/5).
+  if (path === '/api/apg/events' && method === 'GET') {
+    const limitRaw = url.searchParams.get('limit')
+    const parsedLimit = limitRaw === null ? 50 : parseInt(limitRaw, 10)
+    if (limitRaw !== null && Number.isNaN(parsedLimit)) {
+      json(res, { error: 'limit must be numeric' }, 400)
+      return true
+    }
+    const limit = Math.min(500, Math.max(1, parsedLimit))
+
+    const offsetRaw = url.searchParams.get('offset')
+    const parsedOffset = offsetRaw === null ? 0 : parseInt(offsetRaw, 10)
+    if (offsetRaw !== null && Number.isNaN(parsedOffset)) {
+      json(res, { error: 'offset must be numeric' }, 400)
+      return true
+    }
+    const offset = Math.max(0, parsedOffset)
+
+    const result = buildApgEvents(limit, offset)
+    if ('error' in result) {
+      json(res, { events: [], total: 0, limit, offset, error: result.error })
+      return true
+    }
+    json(res, result)
     return true
   }
 

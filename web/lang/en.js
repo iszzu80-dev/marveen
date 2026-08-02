@@ -1989,6 +1989,8 @@ window._i18n.en = {
   'apg.activity.title':               'APG events',
   'apg.activity.off':                 'APG is disabled.',
   'apg.activity.note':                'Summary derived from attention items, not a full event log.',
+  'apg.activity.more':                'More events exist. Full history is available in the work-item detail.',
+  'apg.activity.no_events':           'No APG events.',
 
   'apg.common.loading':               'Loading...',
   'apg.common.retry':                 'Retry',

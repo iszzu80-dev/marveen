@@ -58,4 +58,6 @@ export function invalidateApgCache(): void {
 export {
   buildApgWorkItemSummaries,
   buildApgWorkItemDetail,
+  buildApgEvents,
 } from './ui-projection.js'
+export type { ApgEventsResult } from './ui-projection.js'

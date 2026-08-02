@@ -788,19 +788,63 @@ window.Apg = window.Apg || {}
         bindRetry(container, Apg.onActivityRendered)
         return
       }
-      const items = Array.isArray(summary.attention_items) ? summary.attention_items : []
-      container.innerHTML = `
-        <details class="apg-activity-block">
-          <summary>${translated('apg.activity.title')}</summary>
-          <p class="apg-activity-note">${translated('apg.activity.note')}</p>
-          ${items.length ? `<ul class="apg-activity-list">${items.slice(0, 5).map((item) => `
-            <li>
-              <span class="apg-state-pill apg-severity-${severityForState(item.display_state)}">${html(stateLabel(item.display_state))}</span>
-              <strong>${html(item.title)}</strong>
-              <span>${html(item.reason)}</span>
-              <time>${html(formatAge(item.age_seconds))}</time>
-            </li>`).join('')}</ul>` : `<p class="apg-empty">${translated('apg.overview.empty')}</p>`}
-        </details>`
+      // Fetch the real events feed (item 5/5: genuine event-log, not just
+      // attention_items). Fall back to attention_items if the events endpoint
+      // is unavailable (backward compat with older sidecar).
+      let events = []
+      let eventsFallback = false
+      try {
+        const eventsResult = await fetchJson('/api/apg/events?limit=20')
+        if (requestSequence !== activityRequestSequence) return
+        events = Array.isArray(eventsResult.events) ? eventsResult.events : []
+      } catch {
+        eventsFallback = true
+      }
+      const attentionItems = Array.isArray(summary.attention_items) ? summary.attention_items : []
+
+      if (events.length) {
+        container.innerHTML = `
+          <details class="apg-activity-block">
+            <summary>${translated('apg.activity.title')}</summary>
+            <ul class="apg-activity-list">${events.slice(0, 20).map((event) => {
+              const icon = event.error ? '⚠️' : '→'
+              return `
+              <li class="${event.error ? 'apg-event-error' : ''}">
+                <span class="apg-event-icon">${icon}</span>
+                <span class="apg-event-summary">${html(event.summary)}</span>
+                ${event.work_item_id ? `<a class="apg-event-link" data-work-item-id="${attr(event.work_item_id)}">${html(truncate(event.work_item_id, 12))}</a>` : ''}
+                <time>${html(formatDate(event.at))}</time>
+              </li>`
+            }).join('')}</ul>
+            ${events.length >= 20 ? `<p class="apg-activity-note">${translated('apg.activity.more')}</p>` : ''}
+          </details>`
+        // Click-to-open work-item from event link
+        container.querySelectorAll('.apg-event-link').forEach((link) => {
+          link.addEventListener('click', () => {
+            Apg.openWorkItemDetail(link.dataset.workItemId, null)
+          })
+        })
+      } else if (!eventsFallback && attentionItems.length) {
+        // No events yet but attention items exist: show fallback.
+        container.innerHTML = `
+          <details class="apg-activity-block">
+            <summary>${translated('apg.activity.title')}</summary>
+            <p class="apg-activity-note">${translated('apg.activity.note')}</p>
+            <ul class="apg-activity-list">${attentionItems.slice(0, 5).map((item) => `
+              <li>
+                <span class="apg-state-pill apg-severity-${severityForState(item.display_state)}">${html(stateLabel(item.display_state))}</span>
+                <strong>${html(item.title)}</strong>
+                <span>${html(item.reason)}</span>
+                <time>${html(formatAge(item.age_seconds))}</time>
+              </li>`).join('')}</ul>
+          </details>`
+      } else {
+        container.innerHTML = `
+          <details class="apg-activity-block">
+            <summary>${translated('apg.activity.title')}</summary>
+            <p class="apg-empty">${eventsFallback ? translated('apg.common.unavailable_short') : translated('apg.activity.no_events')}</p>
+          </details>`
+      }
     } catch {
       if (requestSequence !== activityRequestSequence) return
       container.innerHTML = `

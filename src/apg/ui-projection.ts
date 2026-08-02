@@ -880,3 +880,65 @@ export function buildApgWorkItemDetail(
     }
   }
 }
+
+export interface ApgEventsResult {
+  events: ApgEvent[]
+  total: number
+  limit: number
+  offset: number
+}
+
+/**
+ * Build a consolidated, paginated event feed across all APG work items.
+ * Used by GET /api/apg/events for the Activity page event-log (item 5/5).
+ */
+export function buildApgEvents(
+  limit: number,
+  offset: number,
+): ApgEventsResult | { error: string } {
+  const dbPath = resolveApgKernelDbPath()
+  let db: Database.Database
+  try {
+    /* eslint-disable-next-line @typescript-eslint/no-var-requires */
+    const BetterSqlite3 = (globalThis as Record<string, unknown>).BetterSqlite3 as
+      | (new (path: string, opts?: Record<string, unknown>) => Database.Database)
+      | undefined
+    if (!BetterSqlite3) {
+      return { error: 'BetterSqlite3 binding not available' }
+    }
+    db = new BetterSqlite3(dbPath, { readonly: true, fileMustExist: true })
+  } catch {
+    return { error: 'APG sidecar not available' }
+  }
+
+  try {
+    const rows = rowsOrEmpty<TransitionRow>(db, `
+      SELECT id, change_logical_id, from_state, to_state,
+             checkpoint, checkpoint_result, replay_run_id, created_at
+      FROM change_delivery_transitions
+      ORDER BY created_at DESC
+    `)
+    const allEvents: ApgEvent[] = rows.map((row) => ({
+      id: row.id,
+      type: 'change_delivery_transition',
+      at: toIso(row.created_at),
+      agent: null,
+      work_item_id: row.change_logical_id,
+      receipt_id: null,
+      summary: `${row.from_state} → ${row.to_state}`
+        + (row.checkpoint ? ` (${row.checkpoint}: ${row.checkpoint_result ?? 'UNKNOWN'})` : ''),
+      error: row.checkpoint_result === 'FAIL' || row.to_state === 'blocked',
+    }))
+    const total = allEvents.length
+    const page = allEvents.slice(offset, offset + limit)
+    return { events: page, total, limit, offset }
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) }
+  } finally {
+    try {
+      db.close()
+    } catch {
+      // A failed/closed reader must not escape the read-model boundary.
+    }
+  }
+}
