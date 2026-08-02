@@ -13403,8 +13403,19 @@ async function loadSettings() {
         group.appendChild(buildSettingRow(def))
       }
       panel.appendChild(group)
+
+      // APG scope-override widget container (spec 14.5). The table + add-form
+      // is rendered by apg.js, not the generic toggle renderer.
+      if (mod === 'apg') {
+        const scopeContainer = document.createElement('div')
+        scopeContainer.id = 'apgScopeOverrideWidget'
+        panel.appendChild(scopeContainer)
+      }
+
       tabPanels.appendChild(panel)
     }
+    // Dispatch after all panels are built so apg.js can populate its widget.
+    document.dispatchEvent(new CustomEvent('marveen:settings-rendered'))
 
     // Security tab (synthetic, like autonomy: exists even with zero registry
     // entries). Hosts the auth card -- browser login, password change, device

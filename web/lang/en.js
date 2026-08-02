@@ -1998,6 +1998,34 @@ window._i18n.en = {
   'apg.archive.blocked_unaccepted':  'Archive blocked: this card has an unaccepted APG work item. You can disable the archive gate in Settings (APG_BLOCK_UNACCEPTED_ARCHIVE).',
   'apg.archive.warn_unaccepted':     'This card has an unaccepted APG work item. Archive anyway?',
 
+  'apg.scope_overrides.title':       'Scope Overrides',
+  'apg.scope_overrides.desc':        'Project or kanban-card level APG mode overrides. Card overrides project, project overrides global. When global mode is off, no override takes effect.',
+  'apg.scope_overrides.empty':       'No overrides.',
+  'apg.scope_overrides.scope':       'Scope',
+  'apg.scope_overrides.scope_id':    'Identifier',
+  'apg.scope_overrides.mode':        'Mode',
+  'apg.scope_overrides.updated':     'Updated',
+  'apg.scope_overrides.by':          'By',
+  'apg.scope_overrides.add_title':   'Add Override',
+  'apg.scope_overrides.add':         'Add',
+  'apg.scope_overrides.delete':      'Delete',
+  'apg.scope_overrides.scope_id_placeholder': 'Project or card ID',
+  'apg.scope_overrides.reason':      'Reason',
+  'apg.scope_overrides.reason_placeholder': 'Reason for override',
+  'apg.scope_overrides.delete_reason': 'Reason for deletion:',
+  'apg.scope_overrides.reason_required': 'A reason is required.',
+  'apg.scope_overrides.all_fields_required': 'All fields are required.',
+  'apg.scope_overrides.saved':       'Override saved.',
+
+  'apg.scope_type.project':          'Project',
+  'apg.scope_type.kanban_card':      'Kanban Card',
+
+  'apg.scope_mode.inherit':          'Inherit',
+  'apg.scope_mode.off':              'Off',
+  'apg.scope_mode.observe':          'Observe',
+  'apg.scope_mode.assisted':         'Assisted',
+  'apg.scope_mode.enforced':         'Enforced',
+
   'settings.module.apg':              'APG 0.4 Lean',
 
 }

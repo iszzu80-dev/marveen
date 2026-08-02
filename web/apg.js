@@ -760,6 +760,196 @@ window.Apg = window.Apg || {}
     }
   }
 
+  // --- Scope-override Settings UI (spec 14.5) ---
+
+  const SCOPE_MODES = [
+    { value: 'inherit', labelKey: 'apg.scope_mode.inherit' },
+    { value: 'off', labelKey: 'apg.scope_mode.off' },
+    { value: 'observe', labelKey: 'apg.scope_mode.observe' },
+    { value: 'assisted', labelKey: 'apg.scope_mode.assisted' },
+    { value: 'enforced', labelKey: 'apg.scope_mode.enforced' },
+  ]
+
+  const SCOPE_TYPES = [
+    { value: 'project', labelKey: 'apg.scope_type.project' },
+    { value: 'kanban_card', labelKey: 'apg.scope_type.kanban_card' },
+  ]
+
+  function scopeOverrideModeLabel(mode) {
+    const entry = SCOPE_MODES.find((m) => m.value === mode)
+    return entry ? t(entry.labelKey) : mode
+  }
+
+  function scopeOverrideTypeLabel(type) {
+    const entry = SCOPE_TYPES.find((m) => m.value === type)
+    return entry ? t(entry.labelKey) : type
+  }
+
+  async function loadScopeOverrides(container) {
+    container.innerHTML = `<p class="apg-loading">${translated('apg.common.loading')}</p>`
+    let overrides
+    try {
+      const result = await fetchJson('/api/apg/scope-overrides')
+      overrides = Array.isArray(result.overrides) ? result.overrides : []
+    } catch {
+      container.innerHTML = `
+        <div class="apg-degraded apg-severity-danger">
+          <span>${translated('apg.common.unavailable', { msg: '' })}</span>
+          <button type="button" class="apg-retry-btn">${translated('apg.common.retry')}</button>
+        </div>`
+      container.querySelector('.apg-retry-btn')?.addEventListener('click', () => loadScopeOverrides(container))
+      return
+    }
+    renderScopeOverrideTable(container, overrides)
+  }
+
+  function renderScopeOverrideTable(container, overrides) {
+    const rows = overrides.length
+      ? overrides.map((o) => `
+          <tr>
+            <td>${html(scopeOverrideTypeLabel(o.scope_type))}</td>
+            <td><code>${html(o.scope_id)}</code></td>
+            <td><span class="apg-mode-chip">${html(scopeOverrideModeLabel(o.mode))}</span></td>
+            <td>${html(formatDate(o.updated_at))}</td>
+            <td>${html(o.updated_by)}</td>
+            <td>
+              <button type="button" class="btn-danger btn-compact apg-scope-delete-btn"
+                      data-scope-type="${attr(o.scope_type)}"
+                      data-scope-id="${attr(o.scope_id)}">
+                ${translated('apg.scope_overrides.delete')}
+              </button>
+            </td>
+          </tr>`).join('')
+      : `<tr><td colspan="6" class="apg-empty">${translated('apg.scope_overrides.empty')}</td></tr>`
+
+    container.innerHTML = `
+      <section class="apg-scope-overrides">
+        <h2>${translated('apg.scope_overrides.title')}</h2>
+        <p class="apg-scope-desc">${translated('apg.scope_overrides.desc')}</p>
+        <div class="apg-scope-table-wrap">
+          <table class="apg-scope-table">
+            <thead><tr>
+              <th>${translated('apg.scope_overrides.scope')}</th>
+              <th>${translated('apg.scope_overrides.scope_id')}</th>
+              <th>${translated('apg.scope_overrides.mode')}</th>
+              <th>${translated('apg.scope_overrides.updated')}</th>
+              <th>${translated('apg.scope_overrides.by')}</th>
+              <th></th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+        <h3>${translated('apg.scope_overrides.add_title')}</h3>
+        <form class="apg-scope-add-form" id="apgScopeAddForm">
+          <div class="apg-scope-form-row">
+            <label>
+              ${translated('apg.scope_overrides.scope')}
+              <select name="scope_type" required>
+                ${SCOPE_TYPES.map((s) => `<option value="${attr(s.value)}">${html(scopeOverrideTypeLabel(s.value))}</option>`).join('')}
+              </select>
+            </label>
+            <label>
+              ${translated('apg.scope_overrides.scope_id')}
+              <input type="text" name="scope_id" required
+                     placeholder="${translated('apg.scope_overrides.scope_id_placeholder')}">
+            </label>
+            <label>
+              ${translated('apg.scope_overrides.mode')}
+              <select name="mode" required>
+                ${SCOPE_MODES.map((m) => `<option value="${attr(m.value)}">${html(scopeOverrideModeLabel(m.value))}</option>`).join('')}
+              </select>
+            </label>
+          </div>
+          <div class="apg-scope-form-row">
+            <label>
+              ${translated('apg.scope_overrides.reason')}
+              <input type="text" name="reason" required
+                     placeholder="${translated('apg.scope_overrides.reason_placeholder')}">
+            </label>
+            <button type="submit" class="btn-primary btn-compact">${translated('apg.scope_overrides.add')}</button>
+          </div>
+        </form>
+        <p class="apg-scope-add-message" id="apgScopeAddMessage" hidden></p>
+      </section>`
+
+    // Delete buttons
+    container.querySelectorAll('.apg-scope-delete-btn').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const scopeType = btn.dataset.scopeType
+        const scopeId = btn.dataset.scopeId
+        if (!scopeType || !scopeId) return
+        const reason = window.prompt(t('apg.scope_overrides.delete_reason'))
+        if (reason == null) return
+        if (!reason.trim()) {
+          window.alert(t('apg.scope_overrides.reason_required'))
+          return
+        }
+        try {
+          await fetchJson(
+            `/api/apg/scope-overrides/${encodeURIComponent(scopeType)}/${encodeURIComponent(scopeId)}`,
+            {
+              method: 'DELETE',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ actor: 'dashboard', reason: reason.trim() }),
+            }
+          )
+          await loadScopeOverrides(container)
+        } catch (error) {
+          window.alert(t('apg.common.unavailable', { msg: error.message }))
+        }
+      })
+    })
+
+    // Add form
+    const form = container.querySelector('#apgScopeAddForm')
+    const messageEl = container.querySelector('#apgScopeAddMessage')
+    form?.addEventListener('submit', async (event) => {
+      event.preventDefault()
+      const fd = new FormData(form)
+      const payload = {
+        scope_type: fd.get('scope_type'),
+        scope_id: fd.get('scope_id'),
+        mode: fd.get('mode'),
+        reason: fd.get('reason'),
+        actor: 'dashboard',
+      }
+      if (!payload.scope_id || !payload.reason) {
+        if (messageEl) {
+          messageEl.hidden = false
+          messageEl.className = 'apg-scope-add-message apg-severity-danger'
+          messageEl.textContent = t('apg.scope_overrides.all_fields_required')
+        }
+        return
+      }
+      try {
+        await fetchJson('/api/apg/scope-overrides', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+        form.reset()
+        if (messageEl) {
+          messageEl.hidden = false
+          messageEl.className = 'apg-scope-add-message apg-severity-success'
+          messageEl.textContent = t('apg.scope_overrides.saved')
+        }
+        await loadScopeOverrides(container)
+      } catch (error) {
+        if (messageEl) {
+          messageEl.hidden = false
+          messageEl.className = 'apg-scope-add-message apg-severity-danger'
+          messageEl.textContent = error.message
+        }
+      }
+    })
+  }
+
+  Apg.onSettingsRendered = function onSettingsRendered() {
+    const container = document.getElementById('apgScopeOverrideWidget')
+    if (!container) return
+    loadScopeOverrides(container)
+  }
+
   Apg.mount = function mount() {
     if (mounted) return
     mounted = true
@@ -767,6 +957,7 @@ window.Apg = window.Apg || {}
     document.addEventListener('marveen:kanban-rendered', Apg.onKanbanRendered)
     document.addEventListener('marveen:approvals-rendered', Apg.onApprovalsRendered)
     document.addEventListener('marveen:activity-rendered', Apg.onActivityRendered)
+    document.addEventListener('marveen:settings-rendered', Apg.onSettingsRendered)
     document.addEventListener('marveen:kanban-card-opened', (event) => {
       Apg.onKanbanCardOpened(event.detail?.cardId)
     })

@@ -2000,6 +2000,34 @@ window._i18n.hu = {
   'apg.archive.blocked_unaccepted':  'Archiválás blokkolva: a kártyához elfogadás nélküli APG-munkaelem tartozik. A beállításoknál kikapcsolhatod az archiválási kaput (APG_BLOCK_UNACCEPTED_ARCHIVE).',
   'apg.archive.warn_unaccepted':     'A kártyához elfogadás nélküli APG-munkaelem tartozik. Biztosan archiválod?',
 
+  'apg.scope_overrides.title':       'Hatókör-felülírások',
+  'apg.scope_overrides.desc':        'Projekt vagy kanban-kártya szintű APG-mód felülírások. A kártya felülbírálja a projektet, a projekt a globális beállítást. Globális off esetén egyik felülírás sem aktív.',
+  'apg.scope_overrides.empty':       'Nincs felülírás.',
+  'apg.scope_overrides.scope':       'Hatókör',
+  'apg.scope_overrides.scope_id':    'Azonosító',
+  'apg.scope_overrides.mode':        'Mód',
+  'apg.scope_overrides.updated':     'Módosítva',
+  'apg.scope_overrides.by':          'Módosító',
+  'apg.scope_overrides.add_title':   'Új felülírás',
+  'apg.scope_overrides.add':         'Hozzáadás',
+  'apg.scope_overrides.delete':      'Törlés',
+  'apg.scope_overrides.scope_id_placeholder': 'Projekt vagy kártya ID',
+  'apg.scope_overrides.reason':      'Indok',
+  'apg.scope_overrides.reason_placeholder': 'A felülírás oka',
+  'apg.scope_overrides.delete_reason': 'Törlés indoka:',
+  'apg.scope_overrides.reason_required': 'Az indok megadása kötelező.',
+  'apg.scope_overrides.all_fields_required': 'Minden mező kötelező.',
+  'apg.scope_overrides.saved':       'Felülírás mentve.',
+
+  'apg.scope_type.project':          'Projekt',
+  'apg.scope_type.kanban_card':      'Kanban-kártya',
+
+  'apg.scope_mode.inherit':          'Öröklés',
+  'apg.scope_mode.off':              'Kikapcsolva',
+  'apg.scope_mode.observe':          'Megfigyelés',
+  'apg.scope_mode.assisted':         'Segített',
+  'apg.scope_mode.enforced':         'Kötelező kapuk',
+
   'settings.module.apg':              'APG 0.4 Lean',
 
 }
