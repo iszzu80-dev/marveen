@@ -214,3 +214,48 @@ acceptance gate against section 24 + stop-conditions section 27; this producer d
 The gaps in section 5 are real and itemized above for that decision — none of them are section-27
 stop conditions, and the core architecture (sidecar-as-authority, no second Kanban/approval system,
 off-by-default, additive-only diff) is intact and tested.
+
+---
+
+## 9. Followup: 5 deferred increments (card `1d68316d`)
+
+Branch `feat/apg-0.4-lean-ui-followup`, 5 commits on top of the base merge (`76f1e27`).
+
+### 9.1 Item 1: Surface toggles (commit `af3cf4e`)
+`APG_UI_KANBAN`, `APG_UI_ACTIVITY`, `APG_UI_EVIDENCE`, `APG_UI_APPROVAL_ENHANCEMENTS`
+now gate their respective surfaces. Backend exposes all 5 toggle values in the summary
+response; frontend hides each surface when its toggle is off. 15 route-smoke tests
+(3 per toggle: default-on, toggle-off→false, toggle-on→true).
+
+### 9.2 Item 2: Enforcement toggles (commits `fb2bb5e`, `90f5494`)
+- Summary response exposes `apg_require_claim_receipt`, `apg_require_independent_acceptance`,
+  `apg_require_owner_decision`, `apg_block_unaccepted_archive`.
+- `web/app.js`: cancelable `marveen:kanban-archive-attempt` CustomEvent dispatched before
+  every archive attempt.
+- `web/apg.js`: listener enforces `APG_BLOCK_UNACCEPTED_ARCHIVE` — in enforced mode hard-blocks
+  with alert + preventDefault; in assisted mode shows confirm prompt, user can override.
+  Fail-open on network error. The other three enforcement toggles are consumed by the sidecar
+  gate authority (the UI caches and exposes them via `Apg.refreshEnforcement()`).
+
+### 9.3 Item 3: Scope-override Settings UI (commit `18cf824`)
+- `web/app.js`: `marveen:settings-rendered` dispatched after settings panels built;
+  `#apgScopeOverrideWidget` container injected into the APG settings tab.
+- `web/apg.js`: Table listing all scope overrides (GET /api/apg/scope-overrides) with
+  per-row delete (prompt for reason). Add form: scope_type (project/kanban_card), scope_id,
+  mode (inherit/off/observe/assisted/enforced), reason. PUT on submit, DELETE with audit.
+- ~20 i18n keys in hu.js + en.js.
+
+### 9.4 Item 4: Approvals linkage (commit `6176f95`)
+- APG work-item detail overlay now has "Request Owner Decision" button.
+- Creates approval via `POST /api/approvals` with `category: 'apg_decision'`,
+  `agent_id: 'dashboard'`, `action_payload` containing work_item_id, kanban_card_id,
+  display_state, risk. The approval renders on the Approvals page with the existing
+  APG decision-card treatment.
+
+### 9.5 Item 5: Activity event-log (commit `ffdb452`)
+- Backend: `buildApgEvents()` (ui-projection.ts) reads all transitions from the
+  sidecar, returns ApgEvent[] sorted by created_at DESC, paginated.
+- `GET /api/apg/events?limit=50&offset=0` route added.
+- Frontend: `Apg.onActivityRendered()` fetches the real events feed for a genuine
+  timeline (state transitions with timestamps, error markers, clickable work-item links).
+  Falls back to attention_items if the events endpoint is unavailable.
