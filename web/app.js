@@ -765,6 +765,16 @@ function renderActivity(entries) {
     const meta = { ...metaRaw, label: typeof metaRaw.label === 'function' ? metaRaw.label() : metaRaw.label }
     const tail = (a.tail || []).map((l) => escapeHtml(l)).join('\n')
     const mainBadge = a.isMain ? '<span class="act-main-badge">' + t('activity.badge.main') + '</span>' : ''
+    // Permission-mode chip. Shown for every mode EXCEPT the ones that let the
+    // agent work on its own -- inverted on purpose: an unfamiliar mode is
+    // exactly the one worth surfacing, so a future Claude Code mode shows up
+    // here instead of hiding behind a list nobody remembered to extend.
+    // Without this an agent parked in an ask-first mode renders as plain
+    // 'idle', which is how one sat unusable for hours on 2026-07-27.
+    const AUTONOMOUS_MODES = ['bypass permissions', 'accept edits', 'auto mode']
+    const modeChip = a.mode && !AUTONOMOUS_MODES.includes(a.mode)
+      ? '<span class="act-mode-badge" title="' + escapeHtml(t('activity.tooltip.mode', { mode: a.mode })) + '">' + escapeHtml(a.mode) + '</span>'
+      : ''
     const canOpen = !!a.running
     const termIcon = canOpen
       ? '<svg class="act-term-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" title="' + t('activity.tooltip.terminal') + '"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>'
@@ -774,6 +784,7 @@ function renderActivity(entries) {
         '<div class="activity-card-head">' +
           '<span class="activity-name">' + escapeHtml(a.name) + mainBadge + '</span>' +
           '<span style="display:flex;align-items:center;gap:8px">' +
+            modeChip +
             termIcon +
             '<span class="activity-badge ' + meta.cls + '" title="' + escapeHtml(meta.tip || '') + '">' + meta.label + '</span>' +
           '</span>' +
@@ -2510,6 +2521,11 @@ let wizardStep = 1
 let generatedClaudeMd = ''
 let generatedSoulMd = ''
 let wizardCreatedName = ''
+// Set from the POST /api/agents response when the backend fell back to a template
+// because personality generation failed. It answers 200 in that case (the agent
+// EXISTS and works), so `res.ok` alone cannot tell the operator anything -- without
+// reading this field the wizard would look exactly like a full success.
+let wizardPersonalityPending = null
 
 // === Modal helpers ===
 function openModal(overlay) {
@@ -2647,6 +2663,32 @@ function populatePlanSelect(selectEl, descEl, selected) {
     })
 }
 
+// Paints (or clears) the step-3 notice from wizardPersonalityPending. Called from
+// resetWizard() too, so a later successful run can never inherit a stale banner.
+function renderWizardPendingBanner() {
+  const banner = document.getElementById('wizardPendingBanner')
+  if (!banner) return
+  if (!wizardPersonalityPending) {
+    banner.hidden = true
+    return
+  }
+  document.getElementById('wizardPendingTitle').textContent = t('agents.wizard.pending_title')
+  document.getElementById('wizardPendingBody').textContent = t('agents.wizard.pending_body')
+  const detailEl = document.getElementById('wizardPendingDetail')
+  const detail = wizardPersonalityPending.detail
+  // The cause is shown, but only when the server actually sent one: an empty
+  // string here would render "A hiba oka: " with nothing after it, which reads
+  // like the UI lost something.
+  if (detail) {
+    detailEl.textContent = t('agents.wizard.pending_detail', { detail })
+    detailEl.hidden = false
+  } else {
+    detailEl.textContent = ''
+    detailEl.hidden = true
+  }
+  banner.hidden = false
+}
+
 function resetWizard() {
   wizardStep = 1
   agentName.value = ''
@@ -2660,6 +2702,8 @@ function resetWizard() {
   generatedClaudeMd = ''
   generatedSoulMd = ''
   wizardCreatedName = ''
+  wizardPersonalityPending = null
+  renderWizardPendingBanner()
   document.getElementById('wizardClaudeMd').value = ''
   document.getElementById('wizardSoulMd').value = ''
   populateProfileSelect(
@@ -2720,6 +2764,12 @@ document.getElementById('wizardNextBtn').addEventListener('click', async () => {
     // like "étrendíró" still resolves to the real agent dir "etrendiro".
     const createdName = result.name || name
     wizardCreatedName = createdName
+    // 200 + personalityPending means the agent was created but its personality
+    // came from a template. Captured here and painted when step 3 opens, where
+    // the operator both sees the placeholder text and can rewrite it.
+    wizardPersonalityPending = result.personalityPending
+      ? { detail: result.detail || '', warning: result.warning || '' }
+      : null
     statusEl.textContent = t('agents.soul_md_generating')
 
     // Fetch full agent details to get generated content
@@ -2754,6 +2804,7 @@ document.getElementById('wizardNextBtn').addEventListener('click', async () => {
       wizardStep = 3
       document.getElementById('wizardClaudeMd').value = generatedClaudeMd
       document.getElementById('wizardSoulMd').value = generatedSoulMd
+      renderWizardPendingBanner()
       updateWizardUI()
     }, 600)
   } catch (err) {
@@ -2989,7 +3040,24 @@ async function openMarveenDetail() {
   openModal(agentDetailOverlay)
 }
 
+// `readOnly` is really "this modal is showing the MAIN agent" -- it is called
+// with true from openMarveenDetail and false from openAgentDetail, which makes
+// it the one hook both open-paths share. Anything that must differ for the main
+// agent belongs here; putting it in openAgentDetail alone silently no-ops for
+// the main agent, whose panel never runs that function.
 function applyMarveenReadonlyMode(readOnly) {
+  // The Team tab describes a SUB-agent's place in the hierarchy: role
+  // (leader | member), who it reports to, who it delegates to. None of it
+  // applies to the main agent, which has no team record and cannot have one.
+  // Its role is 'main', a tier ABOVE leader, and it is an implicit trusted peer
+  // of every agent (see isTrustedPeer), so there is nothing to configure. Shown
+  // anyway, the tab printed the literal fallback "member" and invited the
+  // operator to promote the main agent to 'leader' -- a demotion, and one that
+  // cannot be saved either way: the PUT targets /api/agents/<main>/team, which
+  // 404s because no agents/<main>/ directory exists. Hide the whole tab, same
+  // reasoning as claudePlanGroup.
+  const teamTabBtn = document.querySelector('#agentTabNav .tab-btn[data-tab="team"]')
+  if (teamTabBtn) teamTabBtn.hidden = readOnly
   const textareaIds = ['editClaudeMd', 'editSoulMd', 'editMcpJson']
   // saveModelBtn stays VISIBLE but disabled for Marveen, so the settings tab
   // doesn't look like the row is missing -- the other save buttons (tied to
@@ -10942,10 +11010,11 @@ function chatAvatarHtml(agentName, size = 32) {
 
 // Guard against the boot race: the Messages page can be opened before the
 // initial /api/marveen fetch resolves window._marveen. Until it does,
-// mainAgentId() returns the literal 'marveen' FALLBACK, which is a real agent
-// id on no install here -- composing to it creates a phantom "marveen" thread
-// that sits pending forever and shows up as a duplicate of the true main agent
-// (torpapa). Resolve _marveen before rendering any chat target.
+// mainAgentId() returns the literal 'marveen' FALLBACK, which IS a real agent
+// id on a default install but is NOT one wherever the main agent was renamed
+// -- composing to it creates a phantom "marveen" thread that sits pending
+// forever and shows up as a duplicate of the true main agent (whatever id this
+// install actually uses). Resolve _marveen before rendering any chat target.
 async function ensureMarveenLoaded() {
   if (window._marveen?.agentId) return
   try {
@@ -11999,7 +12068,23 @@ function wireOnboarding(step) {
         const d = await res.json().catch(() => ({}))
         if (!res.ok) { launchBtn.disabled = false; onbMsg(d.error || t('onboarding.error'), true); return }
         onbMsg(t('onboarding.step1.launched'))
-        setTimeout(refreshOnboarding, 2500)
+        // On a fresh install the session is CREATED here (ONBTMUX1) and takes a
+        // ~minute cold start via channels.sh. Poll until it is up so the wizard
+        // advances on its own instead of stranding the user on step 2 after a
+        // single 2.5s re-check. Bounded so a genuinely failed start still hands
+        // control back rather than spinning forever.
+        let up = false
+        for (let i = 0; i < 40 && !up; i++) {  // ~40 x 3s = 2 min
+          await new Promise((r) => setTimeout(r, 3000))
+          const st = await fetchOnboardingStatus()
+          if (st && st.agentsRunning) { up = true; break }
+        }
+        if (up) { await refreshOnboarding() }
+        // Timeout is NOT success: on a slow machine the cold start can outlast
+        // the 2-min bound while still being healthy, so the message must say
+        // "still starting, check back / refresh" -- repeating the launched
+        // message here would also mask a genuinely dead start (PR #779 review).
+        else { launchBtn.disabled = false; onbMsg(t('onboarding.step1.launch_slow'), true) }
       } catch (e) { launchBtn.disabled = false; onbMsg((e && e.message) || t('onboarding.error'), true) }
     })
   } else if (step === 3) {
@@ -12021,9 +12106,39 @@ function wireOnboarding(step) {
     })
   } else if (step === 4) {
     const refreshBtn = document.getElementById('onbRefreshBtn')
+    // One sink for both failure paths. The box alone was not enough: it renders
+    // in the same muted onb-hint slot as "no pending", so the very distinction
+    // this fix is about -- "nobody is waiting" vs "I could not ask" -- stayed
+    // invisible. onbMsg is the error channel this function already uses for the
+    // approve step a few lines below.
+    const showPendingError = (msg) => {
+      const box = document.getElementById('onbPending')
+      if (box) box.innerHTML = `<span class="onb-hint">${escapeHtml(msg)}</span>`
+      onbMsg(msg, true)
+    }
     const loadPending = async () => {
       try {
-        const p = await (await fetch(`/api/agents/${encodeURIComponent(mainAgentId())}/channels/telegram/pending`)).json()
+        // Same boot race the Messages page already guards against (see
+        // ensureMarveenLoaded): until /api/marveen resolves window._marveen,
+        // mainAgentId() returns the literal 'marveen' fallback. On a renamed
+        // install that is not the main agent, so the backend takes the
+        // sub-agent branch, finds no such agent dir and answers 404 -- and the
+        // wizard rendered that as "no pending pairing" while the Channel view,
+        // which uses the selected agent, listed the very same request.
+        await ensureMarveenLoaded()
+        const res = await fetch(`/api/agents/${encodeURIComponent(mainAgentId())}/channels/telegram/pending`)
+        // Surface the failure instead of rendering it as an empty list. This is
+        // a separate defect from the id race: without it a 404 or an auth error
+        // reads as "nobody is waiting for approval", which is the one answer the
+        // user cannot act on. A NETWORK failure does not land here at all -- the
+        // fetch rejects -- so the outer catch carries the same message; see the
+        // end of this function. The two together are what make the comment true.
+        if (!res.ok) {
+          const d = await res.json().catch(() => ({}))
+          showPendingError(d.error || t('onboarding.error'))
+          return
+        }
+        const p = await res.json()
         // Backend contract: [{code, senderId, chatId, createdAt, expiresAt}].
         // `code` is the approve key (the same code the bot sent the user) --
         // POSTing anything else gets a 400 and the pairing never completes.
@@ -12047,7 +12162,12 @@ function wireOnboarding(step) {
             setTimeout(refreshOnboarding, 1500)
           } catch (e) { b.disabled = false; onbMsg((e && e.message) || t('onboarding.error'), true) }
         }))
-      } catch { /* ignore */ }
+      } catch (e) {
+        // Network-level failure: the fetch rejected, so the !res.ok branch never
+        // ran. Without this the box stays empty and the user reads it as "nobody
+        // is waiting" -- the exact defect this change is about.
+        showPendingError((e && e.message) || t('onboarding.error'))
+      }
     }
     if (refreshBtn) refreshBtn.addEventListener('click', () => { refreshOnboarding() })
     loadPending()
@@ -13645,21 +13765,48 @@ let tuChartState = null
 
 // Model pricing in USD per million tokens (input / output / cache-write / cache-read).
 // Fallback row is used when model is unknown or not yet captured.
+// cache-write is 1.25x input, cache-read is 0.1x input -- keep the derived
+// columns consistent with `in` when editing a row.
+// Sonnet 5 launched on introductory pricing (2 / 10) that ends 2026-08-31;
+// the standard rate (3 / 15) applies from 2026-09-01. Resolved by date at load
+// time instead of pinned to one of the two, so the table neither understates
+// spend today nor silently overstates it the morning the intro rate expires.
+const TU_SONNET5_INTRO_END = Date.parse('2026-09-01T00:00:00Z')
+const TU_SONNET5_PRICE = Date.now() < TU_SONNET5_INTRO_END
+  ? { in: 2.0, out: 10.0, cw: 2.50, cr: 0.20 }
+  : { in: 3.0, out: 15.0, cw: 3.75, cr: 0.30 }
+
 const TU_MODEL_PRICING = {
+  // INFERRED, not from the published catalogue: Opus 5 is not listed in the
+  // model reference this table was checked against. The value follows the rest
+  // of the current Opus tier (4.6/4.7/4.8 at 5 / 25); treat it as an estimate
+  // until a published rate confirms it.
+  'claude-opus-5':       { in: 5.0,   out: 25.0,  cw: 6.25,  cr: 0.50 },
+  'claude-opus-4-8':     { in: 5.0,   out: 25.0,  cw: 6.25,  cr: 0.50 },
+  'claude-opus-4-7':     { in: 5.0,   out: 25.0,  cw: 6.25,  cr: 0.50 },
+  'claude-opus-4-6':     { in: 5.0,   out: 25.0,  cw: 6.25,  cr: 0.50 },
+  // Opus 4.0 / 4.1 -- the last generation still on the old Opus pricing.
+  'claude-opus-4':       { in: 15.0,  out: 75.0,  cw: 18.75, cr: 1.50 },
+  'claude-sonnet-5':     TU_SONNET5_PRICE,
   'claude-sonnet-4-6':   { in: 3.0,   out: 15.0,  cw: 3.75,  cr: 0.30 },
   'claude-sonnet-4-5':   { in: 3.0,   out: 15.0,  cw: 3.75,  cr: 0.30 },
-  'claude-sonnet-5':     { in: 3.0,   out: 15.0,  cw: 3.75,  cr: 0.30 },
-  'claude-opus-4':       { in: 15.0,  out: 75.0,  cw: 18.75, cr: 1.50 },
-  'claude-opus-4-8':     { in: 15.0,  out: 75.0,  cw: 18.75, cr: 1.50 },
-  'claude-haiku-4-5':    { in: 0.80,  out: 4.0,   cw: 1.00,  cr: 0.08 },
-  'claude-fable-5':      { in: 3.0,   out: 15.0,  cw: 3.75,  cr: 0.30 },
+  'claude-fable-5':      { in: 10.0,  out: 50.0,  cw: 12.50, cr: 1.00 },
+  'claude-mythos-5':     { in: 10.0,  out: 50.0,  cw: 12.50, cr: 1.00 },
+  'claude-haiku-4-5':    { in: 1.0,   out: 5.0,   cw: 1.25,  cr: 0.10 },
   default:               { in: 3.0,   out: 15.0,  cw: 3.75,  cr: 0.30 },
 }
 
+// Longest-prefix wins. A plain first-match loop is order-dependent and silently
+// wrong here: 'claude-opus-4-8' also startsWith 'claude-opus-4', so whichever
+// key the object happens to list first decides the price -- that is how Opus 4.8
+// was billed at the Opus 4.1 rate even once it had its own row.
 function tuPriceForModel(model) {
   if (!model) return TU_MODEL_PRICING.default
-  for (const key of Object.keys(TU_MODEL_PRICING)) {
-    if (key !== 'default' && model.startsWith(key)) return TU_MODEL_PRICING[key]
+  const keys = Object.keys(TU_MODEL_PRICING)
+    .filter((k) => k !== 'default')
+    .sort((a, b) => b.length - a.length)
+  for (const key of keys) {
+    if (model.startsWith(key)) return TU_MODEL_PRICING[key]
   }
   return TU_MODEL_PRICING.default
 }
