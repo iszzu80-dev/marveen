@@ -129,51 +129,45 @@ function contextNearMatch(
   return contextRe.test(window);
 }
 
-export function classifyContent(
+// Return the names of every pattern in `patterns` that matches `content`
+// (context-window rule applied, one hit per pattern). This is the single
+// matching engine shared by the fleet-dispatch classifier below and by the
+// COS personal-sensitivity classifier (src/cos/sensitivity.ts), so both use
+// the same regex + context-near-match semantics rather than forking it.
+export function matchSensitivityPatterns(
   content: string,
-  config: GateConfig,
-): { category: SensitivityCategory; matchedPatterns: string[] } {
-  const restrictedCompiled = compilePatterns(config.restricted);
-  const internalCompiled = compilePatterns(config.internal);
-
-  const matchedRestricted: string[] = [];
-  const matchedInternal: string[] = [];
-
-  // Check restricted patterns first (higher severity).
-  for (const { name, re, contextRe } of restrictedCompiled) {
+  patterns: SensitivityPattern[],
+): string[] {
+  const compiled = compilePatterns(patterns);
+  const matched: string[] = [];
+  for (const { name, re, contextRe } of compiled) {
     re.lastIndex = 0; // reset global regex state
     let m: RegExpExecArray | null;
     while ((m = re.exec(content)) !== null) {
       if (contextRe && !contextNearMatch(content, m.index, contextRe)) {
         continue; // context keyword not nearby — skip this match
       }
-      if (!matchedRestricted.includes(name)) {
-        matchedRestricted.push(name);
+      if (!matched.includes(name)) {
+        matched.push(name);
       }
       // One match per pattern is enough for classification.
       break;
     }
   }
+  return matched;
+}
 
+export function classifyContent(
+  content: string,
+  config: GateConfig,
+): { category: SensitivityCategory; matchedPatterns: string[] } {
+  // Check restricted patterns first (higher severity), then internal.
+  const matchedRestricted = matchSensitivityPatterns(content, config.restricted);
   if (matchedRestricted.length > 0) {
     return { category: 'restricted', matchedPatterns: matchedRestricted };
   }
 
-  // Check internal patterns.
-  for (const { name, re, contextRe } of internalCompiled) {
-    re.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(content)) !== null) {
-      if (contextRe && !contextNearMatch(content, m.index, contextRe)) {
-        continue;
-      }
-      if (!matchedInternal.includes(name)) {
-        matchedInternal.push(name);
-      }
-      break;
-    }
-  }
-
+  const matchedInternal = matchSensitivityPatterns(content, config.internal);
   if (matchedInternal.length > 0) {
     return { category: 'internal', matchedPatterns: matchedInternal };
   }
