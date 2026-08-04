@@ -6,6 +6,7 @@ import { getEffectiveSettingValue } from './settings-store.js'
 import { logger } from './logger.js'
 import { TOOL_TIMEOUTS } from './tool-timeouts.js'
 import { initCostOpsSchema } from './costops/schema.js'
+import { initCosSchema } from './cos/schema.js'
 
 let db: Database.Database
 
@@ -825,6 +826,12 @@ export function initDatabase(dbPathOverride?: string): void {
   // in src/costops/schema.ts. The base tables (cost_sources, cost_line_items)
   // are in the upstream now — initCostOpsSchema() adds the extended schema on top.
   initCostOpsSchema(db)
+
+  // LOCAL-FORK: cos seam (keep on rebase). The Personal Chief of Staff (COS)
+  // case store -- personal_cases (+version), personal_case_events (append-only),
+  // case_claims (fencing token) -- lives in src/cos/schema.ts. Greenfield: no
+  // upstream table is touched. See docs/cos-slice0-schema.sql for the design.
+  initCosSchema(db)
 
   // --- Vault SSH Keys (shared pool) ---
   db.exec(`
