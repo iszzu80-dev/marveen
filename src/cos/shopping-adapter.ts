@@ -85,10 +85,12 @@ export function isForbiddenMethodName(name: string): boolean {
   // Verb + "order" pairs: placeOrder, submit_order, makeOrder, confirmOrder.
   // (Bare "order" is allowed — getOrderHistory/orderDetail are read-only.)
   if (/(?:place|submit|make|confirm)[_\s]?order/i.test(name)) return true
-  // Ambiguous short roots pay/buy only at a word/camelCase boundary (start or
-  // after a non-letter) and followed by end / uppercase / underscore / digit.
-  // Case-sensitive on purpose: "payNow" matches, "payload"/"display" do not.
-  if (/(?:^|[^a-zA-Z])(?:pay|buy)(?=[A-Z_\d]|$)/.test(name)) return true
+  // Ambiguous short roots pay/buy/book/reserve only at a word/camelCase boundary
+  // (start or after a non-letter) and followed by end / uppercase / underscore /
+  // digit. Case-sensitive on purpose: "payNow"/"bookRental"/"reserve" match,
+  // "payload"/"display"/"bookmark" do not. book/reserve are the booking verbs a
+  // rental adapter must not expose (payment/booking is always manual).
+  if (/(?:^|[^a-zA-Z])(?:pay|buy|book|reserve)(?=[A-Z_\d]|$)/.test(name)) return true
   return false
 }
 
