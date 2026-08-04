@@ -393,6 +393,7 @@ function switchPage(pageId) {
   if (pageId === 'tokenUsage') loadTokenUsage()
   if (pageId === 'costs') loadCosts()
   if (pageId === 'costs-cc') window.Costops.mount()
+  if (pageId === 'cos' && window.CosControl) window.CosControl.mount()  // LOCAL-FORK: cos seam (keep on rebase)
   if (pageId === 'optimization') window.Optimization.mount()
   if (pageId === 'ideas') loadIdeasPage()
   if (pageId === 'archived') loadArchivedPage()

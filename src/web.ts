@@ -66,6 +66,7 @@ import { tryHandleAutonomy } from './web/routes/autonomy.js'
 import { tryHandleApprovals, startApprovalTimeoutSweeper } from './web/routes/approvals.js'
 import { tryHandleTokenUsage } from './web/routes/token-usage.js'
 import { tryHandleCostOps } from './web/routes/costs.js'  // LOCAL-FORK: costops seam (keep on rebase)
+import { tryHandleCos } from './web/routes/cos.js'  // LOCAL-FORK: cos seam (keep on rebase)
 import { tryHandleOptimization } from './web/routes/optimization.js'
 import { tryHandleApg } from './web/routes/apg.js'
 import { tryHandleIdeas } from './web/routes/ideas.js'
@@ -204,6 +205,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleApprovals(routeCtx)) return
       if (await tryHandleTokenUsage(routeCtx)) return
       if (await tryHandleCostOps(routeCtx)) return  // LOCAL-FORK: costops seam (keep on rebase)
+      if (await tryHandleCos(routeCtx)) return  // LOCAL-FORK: cos seam (keep on rebase)
       if (await tryHandleOptimization(routeCtx)) return
       if (await tryHandleApg(routeCtx)) return
       if (await tryHandleIdeas(routeCtx)) return

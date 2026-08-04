@@ -128,6 +128,7 @@ export async function tryHandleStatic(ctx: RouteContext, webDir: string): Promis
   // APG Lean UI page assets (top-level, same shape as /app.js). The page's
   // shell references these directly; without them the APG view hangs on
   // "Betoltes..." forever.
+  if (path === '/coscontrol.js') { serveFile(req, res, join(webDir, 'coscontrol.js'), { cacheSeconds: 86400 }); return true }  // LOCAL-FORK: cos seam (keep on rebase)
   if (path === '/apg.js') { serveFile(req, res, join(webDir, 'apg.js'), { cacheSeconds: 86400 }); return true }
   if (path === '/apg.css') { serveFile(req, res, join(webDir, 'apg.css'), { cacheSeconds: 86400 }); return true }
 

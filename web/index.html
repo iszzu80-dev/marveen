@@ -80,6 +80,11 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="5" height="16" rx="1"/><rect x="10" y="4" width="5" height="10" rx="1"/><rect x="17" y="4" width="4" height="13" rx="1"/></svg>
         <span class="sb-label">Kanban</span>
       </a>
+      <!-- LOCAL-FORK: cos seam (keep on rebase). Personal Chief of Staff Mission Control (Ma / Ügyek). -->
+      <a href="#" class="sb-link" data-page="cos">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg>
+        <span class="sb-label">Mission Control</span>
+      </a>
       <!-- LOCAL-FORK: keep on merge. Upstream ships #archivedPage but no nav link
            to it, so on upstream the page is unreachable from the sidebar. This
            fork links it next to Kanban, where it belongs (archived cards). -->
@@ -313,6 +318,14 @@
           </div>
           <div class="overview-activity" id="overviewActivity"></div>
         </div>
+      </div>
+    </div>
+
+    <!-- LOCAL-FORK: cos seam (keep on rebase). === Mission Control Page === -->
+    <div class="page" id="cosPage" hidden>
+      <div class="page-header"><h1>Mission Control</h1></div>
+      <div id="cosBody" style="padding:16px 0;">
+        <p style="color:var(--text-muted,#888);">Betöltés...</p>
       </div>
     </div>
 
@@ -3328,6 +3341,7 @@
   <script src="/optimization/optimization-controls.js"></script>
   <script src="/optimization/optimization-shell.js"></script>
   <script src="/apg.js"></script>
+  <script src="/coscontrol.js"></script><!-- LOCAL-FORK: cos seam (keep on rebase) -->
   <script src="/app.js"></script>
 </body>
 </html>

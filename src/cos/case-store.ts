@@ -144,6 +144,67 @@ export function getCase(db: Database.Database, caseId: string): CaseRow | undefi
   return db.prepare(`SELECT * FROM personal_cases WHERE case_id = ?`).get(caseId) as CaseRow | undefined
 }
 
+// Terminal states — a case here is closed, not "active work".
+const TERMINAL_STATUSES = ['COMPLETED', 'CANCELLED', 'ARCHIVED'] as const
+
+// Statuses that always warrant owner attention "today", regardless of dates.
+const ATTENTION_STATUSES = [
+  'INFO_REQUIRED', 'FOLLOW_UP_DUE', 'CALL_REQUIRED', 'AWAITING_SELECTION', 'RECOVERY_REQUIRED',
+] as const
+
+// Priority sort rank (urgent-first) for the read views.
+const PRIORITY_ORDER = `CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 WHEN 'P3' THEN 3 ELSE 4 END`
+
+export interface CaseListItem {
+  case_id: string
+  title: string
+  case_type: string
+  status: string
+  priority: string
+  sensitivity: string
+  next_action: string | null
+  next_action_owner: string | null
+  waiting_on: string | null
+  due_at: number | null
+  follow_up_at: number | null
+  updated_at: number
+}
+
+const LIST_COLUMNS = `case_id, title, case_type, status, priority, sensitivity,
+  next_action, next_action_owner, waiting_on, due_at, follow_up_at, updated_at`
+
+// "Ügyek" — all active (non-archived, non-terminal) cases, urgent-first.
+export function listActiveCases(db: Database.Database): CaseListItem[] {
+  const placeholders = TERMINAL_STATUSES.map(() => '?').join(',')
+  return db.prepare(
+    `SELECT ${LIST_COLUMNS} FROM personal_cases
+     WHERE archived_at IS NULL AND status NOT IN (${placeholders})
+     ORDER BY ${PRIORITY_ORDER}, updated_at DESC`
+  ).all(...TERMINAL_STATUSES) as CaseListItem[]
+}
+
+// "Ma" — active cases that need attention by `horizonSec` (end of today):
+// a due/follow-up/wake timestamp at or before the horizon, OR an
+// attention-warranting status. `horizonSec` is passed in (end-of-today in the
+// app timezone) so this stays pure and testable.
+export function listTodayCases(db: Database.Database, horizonSec: number): CaseListItem[] {
+  const termPh = TERMINAL_STATUSES.map(() => '?').join(',')
+  const attnPh = ATTENTION_STATUSES.map(() => '?').join(',')
+  // All-positional binds (better-sqlite3 forbids mixing named + positional):
+  // [...terminal, dueHorizon, followHorizon, wakeHorizon, ...attention].
+  return db.prepare(
+    `SELECT ${LIST_COLUMNS} FROM personal_cases
+     WHERE archived_at IS NULL AND status NOT IN (${termPh})
+       AND (
+         (due_at IS NOT NULL AND due_at <= ?)
+         OR (follow_up_at IS NOT NULL AND follow_up_at <= ?)
+         OR (next_wake_at IS NOT NULL AND next_wake_at <= ?)
+         OR status IN (${attnPh})
+       )
+     ORDER BY ${PRIORITY_ORDER}, COALESCE(due_at, follow_up_at, next_wake_at, updated_at) ASC`
+  ).all(...TERMINAL_STATUSES, horizonSec, horizonSec, horizonSec, ...ATTENTION_STATUSES) as CaseListItem[]
+}
+
 export interface TransitionInput {
   caseId: string
   seenVersion: number
