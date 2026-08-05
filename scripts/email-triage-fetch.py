@@ -147,30 +147,50 @@ def main():
             out["errors"].append({"account": name, "problem": "server_missing",
                                   "meaning": "A fiok NEM lett ellenorizve."})
             continue
-        msgs, err = call_mcp(path, f"in:inbox newer_than:{window}")
-        if err:
-            out["accounts"][name] = err
-            hint = ("A refresh_token valoszinuleg lejart/visszavonva -> Istvan bongeszos "
-                    "consentje kell (lasd google-workspace-readonly-mcp-wire skill re-auth szekcio)."
-                    if err == "server_error" else "")
-            out["errors"].append({"account": name, "problem": err,
-                                  "meaning": "A fiok NEM lett ellenorizve -- a 0 jelolt NEM jelenti azt hogy nincs teendo.",
-                                  "hint": hint})
-            continue
+        # Query BOTH the inbox (INBOUND) and the Sent folder (OUTBOUND). His own
+        # sent mail becomes OUTBOUND candidates -> COS makes WAITING_EXTERNAL cases
+        # with a follow-up (watching whether a reply comes). The COS intake still
+        # filters our OWN automated sends via the X-Marveen idempotency marker, so
+        # surfacing Sent here cannot create a self-reply loop.
         kept = 0
-        for m in msgs:
-            mid = m.get("id")
-            if not mid or mid in seen:
-                continue
-            if is_noise(m):
-                continue
-            kept += 1
-            out["candidates"].append({
-                "account": name, "id": mid,
-                "from": m.get("from"), "subject": m.get("subject"),
-                "date": m.get("date"), "snippet": (m.get("snippet") or "")[:300],
-            })
-        out["accounts"][name] = f"ok:{len(msgs)}_fetched:{kept}_candidates"
+        total = 0
+        errored = False
+        for direction, q in (("INBOUND", f"in:inbox newer_than:{window}"),
+                             ("OUTBOUND", f"in:sent newer_than:{window}")):
+            msgs, err = call_mcp(path, q)
+            if err:
+                out["accounts"][name] = err
+                hint = ("A refresh_token valoszinuleg lejart/visszavonva -> Istvan bongeszos "
+                        "consentje kell (lasd google-workspace-readonly-mcp-wire skill re-auth szekcio)."
+                        if err == "server_error" else "")
+                out["errors"].append({"account": name, "problem": err,
+                                      "meaning": "A fiok NEM lett ellenorizve -- a 0 jelolt NEM jelenti azt hogy nincs teendo.",
+                                      "hint": hint, "query": direction})
+                errored = True
+                break
+            total += len(msgs)
+            for m in msgs:
+                mid = m.get("id")
+                if not mid or mid in seen:
+                    continue
+                # Noise-filter only INBOUND (newsletters/promos/dmarc). Sent mail is
+                # from Istvan himself, so the sender-based noise filter never applies;
+                # actionability of his own sends is judged in the triage step.
+                if direction == "INBOUND" and is_noise(m):
+                    continue
+                kept += 1
+                cand = {
+                    "account": name, "id": mid, "direction": direction,
+                    "from": m.get("from"), "subject": m.get("subject"),
+                    "date": m.get("date"), "snippet": (m.get("snippet") or "")[:300],
+                }
+                if direction == "OUTBOUND":
+                    # recipient of his sent mail (may be absent if the MCP omits it;
+                    # then the triage fills it after gmail_read)
+                    cand["to"] = m.get("to")
+                out["candidates"].append(cand)
+        if not errored:
+            out["accounts"][name] = f"ok:{total}_fetched:{kept}_candidates"
 
     print(json.dumps(out, ensure_ascii=False, indent=1))
 
