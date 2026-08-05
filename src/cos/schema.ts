@@ -277,4 +277,26 @@ export function initCosSchema(db: Database.Database): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_capprovals_campaign ON campaign_approvals(campaign_id, status)`)
+
+  // ── connector_health (Slice 1 reliability; §20 connector matrix) ──────
+  // One row per connector (gmail/calendar/shopping/rental/...). The preCheck
+  // gates actions on isUsable(); repeated failures degrade OK → DEGRADED → DOWN,
+  // a success resets to OK. `mode` records the current capability
+  // (READ_ONLY/READ_WRITE/DISABLED) so e.g. Gmail stays READ_ONLY until the
+  // write-scope consent lands.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS connector_health (
+      connector_id         TEXT PRIMARY KEY,
+      kind                 TEXT NOT NULL,
+      mode                 TEXT NOT NULL DEFAULT 'READ_ONLY',
+      status               TEXT NOT NULL DEFAULT 'UNKNOWN',
+      consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      last_ok_at           INTEGER,
+      last_error_at        INTEGER,
+      last_error           TEXT,
+      updated_at           INTEGER NOT NULL,
+      CHECK (mode IN ('READ_ONLY','READ_WRITE','DISABLED')),
+      CHECK (status IN ('OK','DEGRADED','DOWN','UNKNOWN'))
+    )
+  `)
 }
