@@ -234,4 +234,47 @@ export function initCosSchema(db: Database.Database): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_eproc_batch ON email_processing(batch_id, status)`)
+
+  // ── campaigns + approvals (Slice 1 governance; P0.4 template+rendered, P0.5 revoke) ──
+  // The authorization layer over the Action Executor. Two P0 rules:
+  //   P0.4: approving a TEMPLATE does not authorize an arbitrary sent message —
+  //         the actual RENDERED payload (name, place, LLM sentence) must ALSO be
+  //         approved. So an approval binds BOTH template_hash AND
+  //         rendered_payload_hash; autonomous send is allowed ONLY from a typed,
+  //         slotted template (allows_free_text = 0). Free-text → PREPARE (human).
+  //   P0.5: an approval is bound to the campaign VERSION it was granted at; a
+  //         revoke/pause bumps the version, so a stale approval no longer
+  //         authorizes (an in-flight SENDING action is still handled by the
+  //         executor's readback — revoke cannot guarantee a stop mid-send).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS campaigns (
+      campaign_id            TEXT PRIMARY KEY,
+      case_id                TEXT REFERENCES personal_cases(case_id),
+      campaign_type          TEXT NOT NULL,
+      template_id            TEXT,
+      template_hash          TEXT,
+      status                 TEXT NOT NULL DEFAULT 'DRAFT',
+      version                INTEGER NOT NULL DEFAULT 1,
+      allows_free_text       INTEGER NOT NULL DEFAULT 0,   -- 1 → no autonomous send
+      autonomous_spend_limit INTEGER NOT NULL DEFAULT 0,   -- always 0 for now
+      created_at             INTEGER NOT NULL,
+      updated_at             INTEGER NOT NULL,
+      CHECK (status IN ('DRAFT','APPROVED','PAUSED','REVOKED','COMPLETED'))
+    )
+  `)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS campaign_approvals (
+      approval_id           TEXT PRIMARY KEY,
+      campaign_id           TEXT NOT NULL REFERENCES campaigns(campaign_id),
+      campaign_version      INTEGER NOT NULL,               -- the version this approval binds to
+      approved_by           TEXT,
+      template_hash         TEXT NOT NULL,                  -- P0.4 approved template
+      rendered_payload_hash TEXT NOT NULL,                  -- P0.4 approved SPECIFIC content
+      status                TEXT NOT NULL DEFAULT 'PENDING',
+      created_at            INTEGER NOT NULL,
+      updated_at            INTEGER NOT NULL,
+      CHECK (status IN ('PENDING','APPROVED','REJECTED','REVOKED'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_capprovals_campaign ON campaign_approvals(campaign_id, status)`)
 }
