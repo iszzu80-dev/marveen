@@ -46,5 +46,52 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
+  if (path === '/api/cos/outbound' && method === 'GET') {
+    const outbound = listOutbound(getDb())
+    json(res, { outbound, count: outbound.length })
+    return true
+  }
+
+  if (path === '/api/cos/campaigns' && method === 'GET') {
+    const campaigns = listCampaignsSummary(getDb())
+    json(res, { campaigns, count: campaigns.length })
+    return true
+  }
+
+  if (path === '/api/cos/radar' && method === 'GET') {
+    const radar = listRadarSummary(getDb())
+    json(res, { radar, count: radar.length })
+    return true
+  }
+
   return false
+}
+
+// Read-only summaries for the Mission Control views. Exported so they are unit-
+// testable against a seeded DB (the route wrapper is not).
+
+export function listOutbound(db: ReturnType<typeof getDb>): unknown[] {
+  return db.prepare(
+    `SELECT ledger_id, case_id, action_type, sequence_number, status, external_ref, attempt, updated_at
+     FROM outbound_ledger ORDER BY created_at DESC LIMIT 50`
+  ).all()
+}
+
+export function listCampaignsSummary(db: ReturnType<typeof getDb>): unknown[] {
+  return db.prepare(
+    `SELECT c.campaign_id, c.case_id, c.campaign_type, c.status, c.version, c.allows_free_text,
+        (SELECT COUNT(*) FROM campaign_approvals a WHERE a.campaign_id=c.campaign_id AND a.status='APPROVED'
+           AND a.campaign_version=c.version) AS approved_current
+     FROM campaigns c ORDER BY c.updated_at DESC LIMIT 50`
+  ).all()
+}
+
+export function listRadarSummary(db: ReturnType<typeof getDb>): unknown[] {
+  return db.prepare(
+    `SELECT r.radar_id, r.case_id, r.kind, r.label, r.target_price, r.currency, r.status,
+        r.best_seen_price, r.next_check_at,
+        (SELECT best_price FROM radar_observations o WHERE o.radar_id=r.radar_id ORDER BY o.observed_at DESC LIMIT 1) AS latest_price,
+        (SELECT observed_at FROM radar_observations o WHERE o.radar_id=r.radar_id ORDER BY o.observed_at DESC LIMIT 1) AS latest_at
+     FROM radar_items r ORDER BY r.updated_at DESC LIMIT 50`
+  ).all()
 }

@@ -67,18 +67,67 @@
       inner + '</section>'
   }
 
+  // ---- Slice 1+ read-only views: outbound / campaigns / radar ----
+  var OUT_COLOR = {
+    PLANNED: '#9ca3af', SENDING: '#f59e0b', APPLIED: '#60a5fa', VERIFIED: '#22c55e',
+    OUTCOME_UNKNOWN: '#f59e0b', RECOVERY_REQUIRED: '#ef4444', FAILED: '#ef4444',
+  }
+  var CAMP_COLOR = { DRAFT: '#9ca3af', APPROVED: '#22c55e', PAUSED: '#f59e0b', REVOKED: '#ef4444', COMPLETED: '#60a5fa' }
+  var RADAR_COLOR = { ACTIVE: '#60a5fa', PAUSED: '#9ca3af', HIT: '#22c55e', CLOSED: '#9ca3af' }
+
+  function row(left, right, color) {
+    return '<div style="border:1px solid var(--border,#2a2a2a);border-radius:8px;padding:8px 12px;margin-bottom:6px;' +
+      'border-left:3px solid ' + (color || '#9ca3af') + ';display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
+      left + '<span style="margin-left:auto;">' + right + '</span></div>'
+  }
+  function genericSection(title, items, emptyMsg, renderItem) {
+    var inner = (!items || !items.length)
+      ? '<p style="color:var(--text-muted,#888);font-size:13px;">' + esc(emptyMsg) + '</p>'
+      : items.map(renderItem).join('')
+    return '<section style="margin-bottom:24px;"><h2 style="font-size:16px;margin:0 0 10px;">' + esc(title) +
+      ' <span style="color:var(--text-muted,#888);font-weight:normal;font-size:13px;">(' + (items ? items.length : 0) + ')</span></h2>' + inner + '</section>'
+  }
+  function outboundItem(o) {
+    var c = OUT_COLOR[o.status] || '#9ca3af'
+    return row(
+      '<strong style="font-size:13px;">' + esc(o.action_type) + '</strong>' + pill(o.status, c) +
+        '<span style="font-size:11px;color:var(--text-muted,#888);">' + esc(o.case_id || '') + ' #' + esc(o.sequence_number) + '</span>',
+      (o.external_ref ? '<span style="font-size:11px;color:var(--text-muted,#888);">' + esc(o.external_ref) + '</span>' : '') +
+        (o.attempt > 1 ? ' <span style="font-size:11px;color:#f59e0b;">×' + esc(o.attempt) + '</span>' : ''), c)
+  }
+  function campaignItem(c) {
+    var col = CAMP_COLOR[c.status] || '#9ca3af'
+    return row(
+      '<strong style="font-size:13px;">' + esc(c.campaign_type) + '</strong>' + pill(c.status, col) +
+        (c.allows_free_text ? pill('free-text', '#f59e0b') : '') +
+        '<span style="font-size:11px;color:var(--text-muted,#888);">' + esc(c.case_id || '') + ' v' + esc(c.version) + '</span>',
+      '<span style="font-size:11px;color:var(--text-muted,#888);">' + esc(c.approved_current) + ' jóváhagyva</span>', col)
+  }
+  function radarItem(r) {
+    var col = RADAR_COLOR[r.status] || '#9ca3af'
+    var price = (r.latest_price != null ? Number(r.latest_price).toLocaleString() + ' ' + esc(r.currency || '') : '—')
+    var target = (r.target_price != null ? 'cél ' + Number(r.target_price).toLocaleString() : '')
+    return row(
+      '<strong style="font-size:13px;">' + esc(r.label) + '</strong>' + pill(r.status, col) +
+        '<span style="font-size:11px;color:var(--text-muted,#888);">' + esc(r.kind) + '</span>',
+      '<span style="font-size:12px;">' + price + '</span> <span style="font-size:11px;color:var(--text-muted,#888);">' + esc(target) + '</span>', col)
+  }
+
   function mount() {
     var body = document.getElementById('cosBody')
     if (!body) return
     body.innerHTML = '<p style="color:var(--text-muted,#888);">Betöltés...</p>'
+    function j(u) { return fetch(u).then(function (r) { return r.json() }).catch(function () { return {} }) }
     Promise.all([
-      fetch('/api/cos/today').then(function (r) { return r.json() }),
-      fetch('/api/cos/cases').then(function (r) { return r.json() }),
+      j('/api/cos/today'), j('/api/cos/cases'), j('/api/cos/outbound'), j('/api/cos/campaigns'), j('/api/cos/radar'),
     ]).then(function (res) {
-      var today = res[0] || {}, all = res[1] || {}
+      var today = res[0] || {}, all = res[1] || {}, out = res[2] || {}, camp = res[3] || {}, rad = res[4] || {}
       body.innerHTML =
         section('📌 Ma', today.cases || [], 'Ma nincs esedékes ügy.') +
-        section('🗂 Ügyek', all.cases || [], 'Nincs aktív ügy. A COS case-store üres vagy minden ügy lezárt.')
+        section('🗂 Ügyek', all.cases || [], 'Nincs aktív ügy. A COS case-store üres vagy minden ügy lezárt.') +
+        genericSection('📤 Kimenő', out.outbound || [], 'Nincs kimenő művelet.', outboundItem) +
+        genericSection('📣 Kampányok', camp.campaigns || [], 'Nincs kampány.', campaignItem) +
+        genericSection('🎯 Radar', rad.radar || [], 'Nincs figyelt ár-radar.', radarItem)
     }).catch(function (e) {
       body.innerHTML = '<p style="color:#ef4444;">Hiba a betöltéskor: ' + esc(e && e.message) + '</p>'
     })
