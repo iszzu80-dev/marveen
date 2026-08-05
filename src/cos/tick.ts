@@ -15,7 +15,7 @@
 // (calling cosTick every N seconds) is the separate, owner-gated go-live step.
 
 import type Database from 'better-sqlite3'
-import { reconcileOutbound, dueCases, dueFollowUps } from './scheduler.js'
+import { reconcileOutbound, outboundNeedingHuman, dueCases, dueFollowUps } from './scheduler.js'
 import { executeAction, type OutboundAdapter } from './executor.js'
 import { dueRadarChecks, markNotified } from './radar.js'
 import { runRentalRadarCheck } from './radar-runner.js'
@@ -32,6 +32,9 @@ export interface CosTickResult {
   outboundSkippedNoAdapter: number
   radarChecked: number
   radarHits: string[]
+  /** Outbound rows in RECOVERY_REQUIRED — provider claimed success but the marker
+   *  is provably absent; a human must resolve them (never auto-resent). */
+  recoveryRequired: string[]
   dueCases: number
   dueFollowUps: number
   errors: Array<{ where: string; id: string; error: string }>
@@ -77,6 +80,7 @@ export async function cosTick(db: Database.Database, deps: CosTickDeps, now: num
     outboundSkippedNoAdapter,
     radarChecked,
     radarHits,
+    recoveryRequired: outboundNeedingHuman(db).map(w => w.ledger_id),
     dueCases: dueCases(db, now).length,
     dueFollowUps: dueFollowUps(db, now).length,
     errors,

@@ -78,6 +78,18 @@ describe('cosTick (one full cycle)', () => {
     expect(getRadarItem(db, 'r1')!.status).toBe('HIT') // still a hit, just not re-announced
   })
 
+  it('surfaces RECOVERY_REQUIRED outbound rows for a human (never auto-driven)', async () => {
+    const db = getDb()
+    const p = planAction(db, { caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 9, payload: {} }, NOW)
+    db.prepare(`UPDATE outbound_ledger SET status='RECOVERY_REQUIRED' WHERE ledger_id=?`).run(p.ledgerId)
+    const res = await cosTick(db, { outboundAdapters: { EMAIL_SEND: new GmailSendAdapter(new DryRunTransport()) } }, NOW)
+    expect(res.recoveryRequired).toEqual([p.ledgerId])
+    // it is NOT auto-driven: the reconcile loop excludes RECOVERY_REQUIRED
+    expect(res.outboundProcessed).toBe(0)
+    // and it stays put
+    expect((db.prepare(`SELECT status FROM outbound_ledger WHERE ledger_id=?`).get(p.ledgerId) as any).status).toBe('RECOVERY_REQUIRED')
+  })
+
   it('skips outbound rows with no registered adapter, and does not throw', async () => {
     const db = getDb()
     planAction(db, { caseId: 'c1', actionType: 'CALENDAR_CREATE', sequenceNumber: 1, payload: {} }, NOW)

@@ -10,6 +10,7 @@
 import { cosTick, type CosTickDeps, type CosTickResult } from './tick.js'
 import { DiscoverCarsAdapter } from './adapters/discovercars.js'
 import { alertRadarHit } from './radar-alert.js'
+import { alertOutboundRecovery } from './outbound-alert.js'
 import { getDb } from '../db.js'
 import { logger } from '../logger.js'
 
@@ -39,7 +40,7 @@ export function startCosBackgroundTasks(): ReturnType<typeof setInterval> {
   timer = setInterval(() => {
     runCosTickOnce()
       .then((res) => {
-        if (res.radarChecked || res.radarHits.length || res.errors.length) {
+        if (res.radarChecked || res.radarHits.length || res.recoveryRequired.length || res.errors.length) {
           logger.info({ cos: res }, 'cosTick (autonomous)')
         }
         // A radar HIT is a real deal — post it to the bus (marveen relays it to
@@ -47,6 +48,12 @@ export function startCosBackgroundTasks(): ReturnType<typeof setInterval> {
         for (const hit of res.radarHits) {
           logger.warn({ radarId: hit }, 'COS radar HIT — target price met')
           try { alertRadarHit(getDb(), hit) } catch (err) { logger.error({ err, radarId: hit }, 'radar HIT alert failed') }
+        }
+        // Outbound rows stuck in RECOVERY_REQUIRED need a human — surface them
+        // (the executor will never auto-resend a provider-claimed success).
+        if (res.recoveryRequired.length) {
+          logger.warn({ ledgerIds: res.recoveryRequired }, 'COS outbound RECOVERY_REQUIRED — human resolution needed')
+          try { alertOutboundRecovery(getDb()) } catch (err) { logger.error({ err }, 'outbound recovery alert failed') }
         }
       })
       .catch((err) => logger.error({ err }, 'cosTick failed'))
