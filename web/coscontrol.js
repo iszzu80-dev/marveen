@@ -69,8 +69,9 @@
 
   // ---- Slice 1+ read-only views: outbound / campaigns / radar ----
   var OUT_COLOR = {
-    PLANNED: '#9ca3af', SENDING: '#f59e0b', APPLIED: '#60a5fa', VERIFIED: '#22c55e',
-    OUTCOME_UNKNOWN: '#f59e0b', RECOVERY_REQUIRED: '#ef4444', FAILED: '#ef4444',
+    PLANNED: '#9ca3af', SENDING: '#f59e0b', APPLIED_UNVERIFIED: '#60a5fa', VERIFIED: '#22c55e',
+    OUTCOME_UNKNOWN: '#f59e0b', RECOVERY_REQUIRED: '#ef4444',
+    FAILED_RETRYABLE: '#f59e0b', FAILED_TERMINAL: '#ef4444', CANCELLED: '#9ca3af',
   }
   var CAMP_COLOR = { DRAFT: '#9ca3af', APPROVED: '#22c55e', PAUSED: '#f59e0b', REVOKED: '#ef4444', COMPLETED: '#60a5fa' }
   var RADAR_COLOR = { ACTIVE: '#60a5fa', PAUSED: '#9ca3af', HIT: '#22c55e', CLOSED: '#9ca3af' }

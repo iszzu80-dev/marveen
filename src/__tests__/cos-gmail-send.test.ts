@@ -29,7 +29,7 @@ describe('GmailSendAdapter + executor', () => {
     expect(r.status).toBe('VERIFIED')
     expect(t.sent.size).toBe(1)
     const sent = [...t.sent.values()][0]
-    expect(sent.headers[IDEMPOTENCY_HEADER]).toBe(p.internalIdempotencyKey) // marker embedded
+    expect(sent.headers[IDEMPOTENCY_HEADER]).toBe(p.externalIdempotencyMarker) // marker embedded
     expect(sent.to).toBe('vendor@example.com')
     expect(r.externalRef).toBe(sent.messageId)
   })
@@ -64,6 +64,26 @@ describe('GmailSendAdapter + executor', () => {
     expect(['PLANNED', 'VERIFIED']).toContain(rec.status)
     const done = await executeAction(db, ad, p.ledgerId, 1003)
     expect(done.status).toBe('VERIFIED')
+    expect(t.sent.size).toBe(1)
+  })
+
+  it('P1.1 sent to Gmail but Sent search unreachable → APPLIED_UNVERIFIED, never resent', async () => {
+    const db = getDb()
+    const t = new DryRunTransport()
+    const ad = new GmailSendAdapter(t)
+    const p = planAction(db, PLAN, 1000)
+    t.readbackUnavailable = true // the message is delivered, but readback can't confirm
+    let r = await executeAction(db, ad, p.ledgerId, 1001)
+    expect(r.status).toBe('APPLIED_UNVERIFIED')
+    expect(t.sent.size).toBe(1)
+    // reconcile drives it again: still can't confirm → stays, NO second delivery
+    r = await executeAction(db, ad, p.ledgerId, 1002)
+    expect(r.status).toBe('APPLIED_UNVERIFIED')
+    expect(t.sent.size).toBe(1)
+    // Sent becomes reachable and the marker is there → VERIFIED
+    t.readbackUnavailable = false
+    r = await executeAction(db, ad, p.ledgerId, 1003)
+    expect(r.status).toBe('VERIFIED')
     expect(t.sent.size).toBe(1)
   })
 

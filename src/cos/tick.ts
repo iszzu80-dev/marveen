@@ -2,8 +2,10 @@
 //
 // Composes the scheduler queries, the executor, and the radar runner into ONE
 // idempotent-per-item cycle the runtime calls each period:
-//   1. reconcile outbound_ledger — drive executeAction on every non-terminal
-//      row (PLANNED→send, SENDING/OUTCOME_UNKNOWN→recover, APPLIED→verify).
+//   1. reconcile outbound_ledger — drive executeAction on every row needing
+//      automated work (PLANNED/FAILED_RETRYABLE→send, SENDING/OUTCOME_UNKNOWN→
+//      recover, APPLIED_UNVERIFIED→re-attempt readback). RECOVERY_REQUIRED is
+//      surfaced for a human, not auto-driven.
 //   2. run due radar checks through the rental adapter, collecting HITs.
 //   3. surface how many cases are due to wake / have due follow-ups (the caller
 //      / LLM decides what to do with those).

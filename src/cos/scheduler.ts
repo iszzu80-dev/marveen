@@ -49,7 +49,12 @@ export function setNextWake(db: Database.Database, caseId: string, wakeAt: numbe
 
 // ---- outbound reconcile queue -------------------------------------------------
 
-const OUTBOUND_TERMINAL = ['VERIFIED', 'FAILED'] as const
+const OUTBOUND_TERMINAL = ['VERIFIED', 'FAILED_TERMINAL', 'CANCELLED'] as const
+// Rows the auto-reconcile loop must NOT drive: the terminal states, plus
+// RECOVERY_REQUIRED (provider claimed success but the marker is provably absent
+// — a HUMAN resolves it, never the loop). RECOVERY_REQUIRED is surfaced via
+// outboundNeedingHuman() for alerting instead.
+const OUTBOUND_NO_AUTO_WORK = [...OUTBOUND_TERMINAL, 'RECOVERY_REQUIRED'] as const
 
 export interface OutboundWorkItem {
   ledger_id: string
@@ -60,17 +65,31 @@ export interface OutboundWorkItem {
 }
 
 /**
- * Outbound_ledger rows that still need work: PLANNED (send), SENDING/
- * OUTCOME_UNKNOWN (recover via readback), APPLIED (verify), RECOVERY_REQUIRED.
- * The runtime drives executeAction/recoverAction on each. VERIFIED/FAILED are
- * excluded (terminal). Oldest first so a backlog drains in order.
+ * Outbound_ledger rows that still need automated work: PLANNED / FAILED_RETRYABLE
+ * (send), SENDING / OUTCOME_UNKNOWN (recover via readback), APPLIED_UNVERIFIED
+ * (re-attempt readback → VERIFIED). The runtime drives executeAction on each.
+ * Terminal rows and RECOVERY_REQUIRED are excluded. Oldest first so a backlog
+ * drains in order.
  */
 export function reconcileOutbound(db: Database.Database, limit = 100): OutboundWorkItem[] {
-  const ph = OUTBOUND_TERMINAL.map(() => '?').join(',')
+  const ph = OUTBOUND_NO_AUTO_WORK.map(() => '?').join(',')
   return db.prepare(
     `SELECT ledger_id, case_id, action_type, status, attempt FROM outbound_ledger
      WHERE status NOT IN (${ph}) ORDER BY created_at ASC LIMIT ?`
-  ).all(...OUTBOUND_TERMINAL, limit) as OutboundWorkItem[]
+  ).all(...OUTBOUND_NO_AUTO_WORK, limit) as OutboundWorkItem[]
+}
+
+/**
+ * RECOVERY_REQUIRED rows: the provider reported success but the idempotency
+ * marker is provably absent on readback. These are NEVER auto-resent (the
+ * provider claimed success); a human must reconcile them. Surfaced separately
+ * so the tick loop can alert on them rather than silently spinning.
+ */
+export function outboundNeedingHuman(db: Database.Database, limit = 100): OutboundWorkItem[] {
+  return db.prepare(
+    `SELECT ledger_id, case_id, action_type, status, attempt FROM outbound_ledger
+     WHERE status = 'RECOVERY_REQUIRED' ORDER BY created_at ASC LIMIT ?`
+  ).all(limit) as OutboundWorkItem[]
 }
 
 /** Non-terminal email batches (still have messages in flight) — the reconcile

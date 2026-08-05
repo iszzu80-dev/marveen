@@ -143,24 +143,43 @@ export function initCosSchema(db: Database.Database): void {
 
   // ── outbound_ledger (Slice 1 core — the single external writer; §7/§8) ──
   // Every outbound side effect (email send, calendar create) is recorded here
-  // BEFORE it happens, with a crash-safe state machine the spec's P0 rounds
-  // hardened:
+  // BEFORE it happens, with a crash-safe state machine the spec's P0/P1 rounds
+  // hardened (state model = executor.ts, spec P1.1):
   //   PLANNED  → SENDING (persisted BEFORE the external call, P0.3 crash window)
-  //            → APPLIED (call returned + external_ref) → VERIFIED (readback)
-  //   SENDING/APPLIED on error → OUTCOME_UNKNOWN → recovery readback → VERIFIED
-  //            or (proven absent) back to PLANNED for a safe resend.
-  // Double-send is prevented three ways: (1) SENDING is durable before the call
-  // so a crash leaves a trail; (2) recovery reads back the searchable
-  // idempotency marker instead of blindly resending; (3) DB UNIQUE on the
-  // internal idempotency key AND on (case, action_type, sequence) is the last
-  // line even if the app logic is bypassed (P0.3/P0.4).
+  //            → APPLIED_UNVERIFIED (provider accepted; readback not yet proven)
+  //            → VERIFIED (readback found the marker).
+  //   send exception, outcome UNKNOWN → OUTCOME_UNKNOWN → recovery readback →
+  //            VERIFIED, or (proven absent) back to PLANNED for a safe resend.
+  //   send provably never reached provider → FAILED_RETRYABLE / FAILED_TERMINAL.
+  //   deliberate abort of a not-yet-sent row → CANCELLED.
+  //   provider claimed success but marker provably absent → RECOVERY_REQUIRED.
+  // Double-send is prevented four ways: (1) SENDING is durable before the call
+  // so a crash leaves a trail; (2) APPLIED_UNVERIFIED is durable the moment the
+  // provider accepts, and a resend is forbidden from it; (3) recovery reads back
+  // the searchable idempotency marker instead of blindly resending; (4) DB
+  // UNIQUE on the internal idempotency key AND on (case, action_type, sequence)
+  // is the last line even if the app logic is bypassed (P0.3/P0.4).
+
+  // P1.1 migration: pre-P1.1 dbs carry the old CHECK (APPLIED/FAILED) and no
+  // external_idempotency_marker column. SQLite cannot ALTER a CHECK, so rename
+  // the old table aside BEFORE the (new) CREATE, then copy rows over mapping the
+  // legacy states. FK (outbound→cases) holds throughout; nothing references
+  // outbound_ledger, so the rename is safe with foreign_keys ON.
+  const _obExists = db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='outbound_ledger'`).get()
+  if (_obExists) {
+    const _cols = db.prepare(`PRAGMA table_info(outbound_ledger)`).all() as Array<{ name: string }>
+    if (!_cols.some(c => c.name === 'external_idempotency_marker')) {
+      db.exec(`ALTER TABLE outbound_ledger RENAME TO outbound_ledger_pre_p11`)
+    }
+  }
   db.exec(`
     CREATE TABLE IF NOT EXISTS outbound_ledger (
       ledger_id                TEXT PRIMARY KEY,
       case_id                  TEXT REFERENCES personal_cases(case_id),
       action_type             TEXT NOT NULL,          -- EMAIL_SEND, CALENDAR_CREATE, ...
       sequence_number         INTEGER NOT NULL,        -- P0.4 per-(case,action) ordinal
-      internal_idempotency_key TEXT NOT NULL,          -- P0.3 searchable marker (X-Marveen-Idempotency-Key)
+      internal_idempotency_key TEXT NOT NULL,          -- P0.3 internal dedup key
+      external_idempotency_marker TEXT,                -- D.1: marker embedded in the message + searched on readback
       status                  TEXT NOT NULL DEFAULT 'PLANNED',
       payload                 TEXT,                    -- JSON (rendered outbound content)
       external_ref            TEXT,                    -- provider message/event id after send
@@ -174,12 +193,32 @@ export function initCosSchema(db: Database.Database): void {
       verified_at             INTEGER,
       UNIQUE(internal_idempotency_key),
       UNIQUE(case_id, action_type, sequence_number),
-      CHECK (status IN ('PLANNED','SENDING','APPLIED','OUTCOME_UNKNOWN',
-        'VERIFIED','FAILED','RECOVERY_REQUIRED'))
+      CHECK (status IN ('PLANNED','SENDING','APPLIED_UNVERIFIED','OUTCOME_UNKNOWN',
+        'VERIFIED','FAILED_RETRYABLE','FAILED_TERMINAL','CANCELLED','RECOVERY_REQUIRED'))
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_outbound_status ON outbound_ledger(status)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_outbound_case ON outbound_ledger(case_id)`)
+  const _obOld = db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='outbound_ledger_pre_p11'`).get()
+  if (_obOld) {
+    db.transaction(() => {
+      db.exec(`
+        INSERT INTO outbound_ledger
+          (ledger_id, case_id, action_type, sequence_number, internal_idempotency_key,
+           external_idempotency_marker, status, payload, external_ref, claim_fence,
+           attempt, last_error, created_at, updated_at, sending_at, applied_at, verified_at)
+        SELECT ledger_id, case_id, action_type, sequence_number, internal_idempotency_key,
+           internal_idempotency_key,
+           CASE status
+             WHEN 'APPLIED' THEN 'APPLIED_UNVERIFIED'
+             WHEN 'FAILED'  THEN 'FAILED_TERMINAL'
+             ELSE status END,
+           payload, external_ref, claim_fence, attempt, last_error, created_at, updated_at,
+           sending_at, applied_at, verified_at
+        FROM outbound_ledger_pre_p11`)
+      db.exec(`DROP TABLE outbound_ledger_pre_p11`)
+    })()
+  }
 
   // ── email ingestion (Slice 1 inbound safety; P0.1 poison / P0.2 checkpoint) ──
   // The inbound counterpart of outbound_ledger. Three tables enforce the rule

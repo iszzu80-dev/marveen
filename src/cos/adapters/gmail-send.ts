@@ -13,7 +13,7 @@
 // DryRunTransport sends nothing (records in memory) so this builds and runs
 // before the write-scope consent + a live Gmail connector exist.
 
-import type { OutboundAdapter, OutboundAction } from '../executor.js'
+import type { OutboundAdapter, OutboundAction, ReadbackResult } from '../executor.js'
 
 export const IDEMPOTENCY_HEADER = 'X-Marveen-Idempotency-Key'
 
@@ -29,8 +29,11 @@ export interface OutboundEmail {
  *  sent message by it. */
 export interface MailTransport {
   send(email: OutboundEmail): Promise<{ messageId: string }>
-  /** Find a message in Sent carrying header `name: value`. */
-  findSentByHeader(name: string, value: string): Promise<{ found: boolean; messageId?: string }>
+  /** Find a message in Sent carrying header `name: value`. `available:false`
+   *  means the search itself could not run (e.g. Sent unreachable) and must NOT
+   *  be read as "absent" — the executor keeps the action unverified rather than
+   *  resending. */
+  findSentByHeader(name: string, value: string): Promise<{ found: boolean; messageId?: string; available?: boolean }>
 }
 
 interface EmailPayload { to: string; subject: string; body: string }
@@ -44,15 +47,16 @@ export class GmailSendAdapter implements OutboundAdapter {
     if (!p?.to || !p.subject) throw new Error(`EMAIL_SEND payload missing to/subject (ledger ${action.ledgerId})`)
     const email: OutboundEmail = {
       to: p.to, subject: p.subject, body: p.body ?? '',
-      headers: { [IDEMPOTENCY_HEADER]: action.internalIdempotencyKey },
+      // The searchable marker embedded in the message = the external marker.
+      headers: { [IDEMPOTENCY_HEADER]: action.externalIdempotencyMarker },
     }
     const { messageId } = await this.transport.send(email)
     return { externalRef: messageId }
   }
 
-  async readback(internalIdempotencyKey: string): Promise<{ found: boolean; externalRef?: string }> {
-    const r = await this.transport.findSentByHeader(IDEMPOTENCY_HEADER, internalIdempotencyKey)
-    return { found: r.found, externalRef: r.messageId }
+  async readback(externalIdempotencyMarker: string): Promise<ReadbackResult> {
+    const r = await this.transport.findSentByHeader(IDEMPOTENCY_HEADER, externalIdempotencyMarker)
+    return { found: r.found, available: r.available, externalRef: r.messageId }
   }
 }
 
@@ -69,6 +73,9 @@ export class DryRunTransport implements MailTransport {
   /** If true, send() delivers to the provider (records) THEN throws — models
    *  "it reached Gmail but we got a timeout". */
   reachThenThrow = false
+  /** If true, findSentByHeader reports the search could not run (available:false)
+   *  — models the Sent mailbox being unreachable during readback. */
+  readbackUnavailable = false
 
   async send(email: OutboundEmail): Promise<{ messageId: string }> {
     const key = email.headers[IDEMPOTENCY_HEADER]
@@ -83,7 +90,8 @@ export class DryRunTransport implements MailTransport {
     return { messageId }
   }
 
-  async findSentByHeader(name: string, value: string): Promise<{ found: boolean; messageId?: string }> {
+  async findSentByHeader(name: string, value: string): Promise<{ found: boolean; messageId?: string; available?: boolean }> {
+    if (this.readbackUnavailable) return { found: false, available: false }
     if (name !== IDEMPOTENCY_HEADER) return { found: false }
     const m = this.sent.get(value)
     return m ? { found: true, messageId: m.messageId } : { found: false }
