@@ -9,6 +9,7 @@
 
 import { cosTick, type CosTickDeps, type CosTickResult } from './tick.js'
 import { DiscoverCarsAdapter } from './adapters/discovercars.js'
+import { alertRadarHit } from './radar-alert.js'
 import { getDb } from '../db.js'
 import { logger } from '../logger.js'
 
@@ -41,8 +42,12 @@ export function startCosBackgroundTasks(): ReturnType<typeof setInterval> {
         if (res.radarChecked || res.radarHits.length || res.errors.length) {
           logger.info({ cos: res }, 'cosTick (autonomous)')
         }
-        // A radar HIT is a real deal — surfaced loudly. (Telegram alert = follow-up.)
-        for (const hit of res.radarHits) logger.warn({ radarId: hit }, 'COS radar HIT — target price met')
+        // A radar HIT is a real deal — post it to the bus (marveen relays it to
+        // Telegram) + the daily log.
+        for (const hit of res.radarHits) {
+          logger.warn({ radarId: hit }, 'COS radar HIT — target price met')
+          try { alertRadarHit(getDb(), hit) } catch (err) { logger.error({ err, radarId: hit }, 'radar HIT alert failed') }
+        }
       })
       .catch((err) => logger.error({ err }, 'cosTick failed'))
   }, COS_TICK_INTERVAL_MS)
