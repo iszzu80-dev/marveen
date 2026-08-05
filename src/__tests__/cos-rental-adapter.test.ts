@@ -1,108 +1,129 @@
 import { describe, it, expect } from 'vitest'
 import {
-  parseDiscoverCarsOfferCard, parseDiscoverCarsOffers,
-  encodeDiscoverCarsSq, decodeDiscoverCarsSq, sqDatesMatch,
-  filterByCategory, cheapestFirst, assertRentalAdapterSafe, rentalDayCount,
-  type DiscoverCarsSq,
+  parseApiOffer, parseApiOffers, isDebitFriendly, filterByCategory,
+  underFullPrice, cheapestByFullPrice, rentalDayCount, assertRentalAdapterSafe,
+  type LocationRef,
 } from '../cos/rental-adapter.js'
 import { isForbiddenMethodName } from '../cos/shopping-adapter.js'
+import { DiscoverCarsAdapter } from '../cos/adapters/discovercars.js'
 
-// COS car-rental adapter. The browser driver isn't unit-tested (it drives a live
-// site); the PURE heart is: the sq codec + date-verification, the offer parser
-// (real DiscoverCars card text from the 2026-08-04 recon), and the no-booking
-// safety guard.
+// COS car-rental adapter (DiscoverCars JSON API). The pure heart — the offer
+// parser (over the real 2026-08-05 API shape), filters, day-count — plus a
+// mocked-fetch search() that proves the create-search → poll → parse flow and
+// the fail-loud date verification. No network in tests.
 
-const AYGO = [
-  'Toyota Aygo', 'or similar Mini', 'Manual', '4 seats', '3 doors', 'Air Conditioning',
-  'Fair offer', 'Compare', 'Outside of terminal pick-up — Valencia Airport (VLC)',
-  'Low deposit', 'Instant confirmation!', 'Unlimited mileage', '8.1', 'Good', '1,641 ratings',
-  'Total for 8 days', 'HUF 152,246', 'Free cancellation', 'View deal',
-].join('\n')
+// Real API offer shape (Jeep Avenger, Centauro, Aug 18-23).
+const AVENGER = {
+  vehicle: { carName: 'Jeep Avenger', sippGroup: 'Compact SUV', specifications: { isAutomaticTransmission: 0, seats: { number: 5 }, bags: { number: 2 } } },
+  price: { raw: 73904.72, currency: 'HUF' },
+  coverage: { total: 17884.31, currency: 'HUF' },
+  depositType: { title: 'Average deposit', value: 'HUF 541,325' },
+  badges: { zero_excess: false, zero_deposit: false },
+  supplier: { name: 'Centauro', key: 'centauro', rating: { score: '8.6' }, loc: { label: 'Free shuttle service' } },
+  location: { name: 'Valencia Airport (VLC)' },
+  mileage: { label: 'Unlimited' },
+  bookUrl: '/book/abc',
+}
+const AYGO = {
+  vehicle: { carName: 'Toyota Aygo', sippGroup: 'Mini', specifications: { isAutomaticTransmission: 1, seats: { number: 4 }, bags: { number: 1 } } },
+  price: { raw: 55317.29, currency: 'HUF' }, coverage: { total: 23473.15, currency: 'HUF' },
+  depositType: { title: 'Low deposit', value: 'HUF 72,180' }, badges: {},
+  supplier: { name: 'Alamo', key: 'alamo', rating: { score: '8.2' }, loc: { label: 'In terminal' } },
+  location: { name: 'Valencia Airport (VLC)' }, mileage: { label: 'Unlimited' },
+}
 
-const PEUGEOT = [
-  'Peugeot 2008', 'or similar Compact SUV', 'Manual', '5 seats', '5 doors', 'Air Conditioning',
-  'Fair offer', 'Compare', 'In terminal pick-up — Valencia Airport (VLC)',
-  'Average deposit', 'Instant confirmation!', '150 km/day included mileage', '7.9', 'Good', '900 ratings',
-  'Total for 5 days', 'HUF 98,500', 'Free cancellation', 'View deal',
-].join('\n')
-
-describe('parseDiscoverCarsOfferCard (real card text)', () => {
-  it('parses the Toyota Aygo (Mini) card', () => {
-    const o = parseDiscoverCarsOfferCard(AYGO)!
+describe('parseApiOffer', () => {
+  it('parses the real API offer shape', () => {
+    const o = parseApiOffer(AVENGER)!
     expect(o).toMatchObject({
-      car: 'Toyota Aygo', category: 'Mini', transmission: 'Manual', seats: 4,
-      pickupType: 'Outside of terminal', pickupLocation: 'Valencia Airport (VLC)',
-      deposit: 'Low', rating: '8.1', days: 8, totalPrice: 152246, currency: 'HUF',
+      car: 'Jeep Avenger', category: 'Compact SUV', transmission: 'Manual', seats: 5, bags: 2,
+      supplier: 'Centauro', supplierKey: 'centauro', rating: 8.6, pickupType: 'Free shuttle service',
+      pickupPlace: 'Valencia Airport (VLC)', basePrice: 73904.72, coveragePrice: 17884.31,
+      deposit: 'Average deposit', depositValue: 'HUF 541,325', zeroExcessBadge: false, mileage: 'Unlimited',
     })
+    expect(o.fullPrice).toBeCloseTo(91789.03, 1)
+    expect(parseApiOffer(AYGO)!.transmission).toBe('Automatic')
   })
-
-  it('parses the Peugeot 2008 (Compact SUV) card', () => {
-    const o = parseDiscoverCarsOfferCard(PEUGEOT)!
-    expect(o).toMatchObject({
-      car: 'Peugeot 2008', category: 'Compact SUV', transmission: 'Manual', seats: 5,
-      pickupType: 'In terminal', deposit: 'Average', days: 5, totalPrice: 98500, currency: 'HUF',
-    })
-  })
-
-  it('returns null for a card without a car line', () => {
-    expect(parseDiscoverCarsOfferCard('Some ad\nHUF 100\nView deal')).toBeNull()
+  it('returns null when there is no vehicle', () => {
+    expect(parseApiOffer({ price: { raw: 1 } })).toBeNull()
   })
 })
 
-describe('parseDiscoverCarsOffers + filters', () => {
-  it('dedupes and filters by category / sorts by price', () => {
-    const offers = parseDiscoverCarsOffers([AYGO, PEUGEOT, AYGO]) // dup Aygo
-    expect(offers).toHaveLength(2)
-    const compact = filterByCategory(offers, /compact/i)
-    expect(compact.map((o) => o.car)).toEqual(['Peugeot 2008'])
-    expect(cheapestFirst(offers).map((o) => o.totalPrice)).toEqual([98500, 152246])
-  })
-})
-
-describe('DiscoverCars sq codec + date verification', () => {
-  const q: DiscoverCarsSq = {
-    PickupLocationId: 462, DropOffLocationId: 1848,
-    PickupDateTime: '2026-08-18T10:00:00', DropOffDateTime: '2026-08-23T08:00:00',
-    ResidenceCountry: 'HU', DriverAge: 35, Hash: '',
-  }
-
-  it('round-trips through base64', () => {
-    expect(decodeDiscoverCarsSq(encodeDiscoverCarsSq(q))).toEqual(q)
-  })
-
-  it('sqDatesMatch is true only for the exact requested window', () => {
-    const sq = encodeDiscoverCarsSq(q)
-    expect(sqDatesMatch(sq, '2026-08-18T10:00:00', '2026-08-23T08:00:00')).toBe(true)
-    expect(sqDatesMatch(sq, '2026-08-07T11:00:00', '2026-08-15T11:00:00')).toBe(false) // the cached default window
-    expect(sqDatesMatch('not-base64', '2026-08-18T10:00:00', '2026-08-23T08:00:00')).toBe(false)
+describe('filters', () => {
+  const offers = parseApiOffers([AVENGER, AYGO])
+  it('debit-friendly, category, under-price, cheapest', () => {
+    expect(isDebitFriendly(offers[0])).toBe(true)  // Centauro
+    expect(isDebitFriendly(offers[1])).toBe(false) // Alamo
+    expect(filterByCategory(offers, /compact/i).map((o) => o.car)).toEqual(['Jeep Avenger'])
+    expect(underFullPrice(offers, 100000)).toHaveLength(2)
+    expect(underFullPrice(offers, 80000).map((o) => o.car)).toEqual(['Toyota Aygo']) // Aygo full ~78,790
+    expect(cheapestByFullPrice(offers).map((o) => o.car)).toEqual(['Toyota Aygo', 'Jeep Avenger'])
   })
 })
 
 describe('rentalDayCount', () => {
-  it('counts whole days, correct across month boundaries', () => {
-    expect(rentalDayCount('2026-08-18T10:00:00', '2026-08-23T08:00:00')).toBe(5)
-    expect(rentalDayCount('2026-08-07T11:00:00', '2026-08-15T11:00:00')).toBe(8)
-    expect(rentalDayCount('2026-08-30T10:00:00', '2026-09-02T10:00:00')).toBe(3) // Aug has 31 days
+  it('counts whole days (API "YYYY-MM-DD HH:mm" format), month-boundary correct', () => {
+    expect(rentalDayCount('2026-08-18 10:00', '2026-08-23 08:00')).toBe(5)
+    expect(rentalDayCount('2026-08-30 10:00', '2026-09-02 10:00')).toBe(3)
+  })
+})
+
+// ---- mocked-fetch search() ----------------------------------------------------
+
+function sqFor(pickup: string, dropoff: string): string {
+  return Buffer.from(JSON.stringify({ PickupDateTime: pickup, DropOffDateTime: dropoff })).toString('base64')
+}
+function jsonResp(body: any) { return { json: async () => body } as any }
+
+const VLC: LocationRef = { countryId: 26, cityId: 462, placeId: 462, label: 'Valencia (all locations)' }
+const AGP: LocationRef = { countryId: 26, cityId: 455, placeId: 1848, label: 'Malaga Airport (AGP)' }
+const PARAMS = { pickup: VLC, dropoff: AGP, pickupFrom: '2026-08-18 10:00', pickupTo: '2026-08-23 08:00', residenceCountry: 'HU', driverAge: 35 }
+
+describe('DiscoverCarsAdapter.search (mocked fetch)', () => {
+  it('creates the search, polls, and returns parsed offers', async () => {
+    const calls: string[] = []
+    const fetchImpl = (async (url: string, opts?: any) => {
+      calls.push((opts?.method ?? 'GET') + ' ' + String(url).replace(/^https:\/\/[^/]+/, ''))
+      if (String(url).includes('create-search')) {
+        return jsonResp({ success: true, data: { guid: 'g1', sq: sqFor('2026-08-18T10:00:00', '2026-08-23T08:00:00') } })
+      }
+      return jsonResp({ success: true, data: { offers: [AVENGER, AYGO] } })
+    }) as unknown as typeof fetch
+
+    const a = new DiscoverCarsAdapter({ fetchImpl, pollAttempts: 3, pollDelayMs: 0 })
+    const offers = await a.search(PARAMS)
+    expect(offers.map((o) => o.car)).toEqual(['Jeep Avenger', 'Toyota Aygo'])
+    expect(calls[0]).toContain('POST /api/v2/search/create-search')
+    expect(calls[1]).toContain('GET /api/v2/search/g1')
+  })
+
+  it('fails loud when the committed window differs from the request', async () => {
+    const fetchImpl = (async (url: string) => {
+      if (String(url).includes('create-search')) {
+        return jsonResp({ data: { guid: 'g1', sq: sqFor('2026-08-07T11:00:00', '2026-08-15T11:00:00') } }) // wrong window
+      }
+      return jsonResp({ data: { offers: [AVENGER] } })
+    }) as unknown as typeof fetch
+    const a = new DiscoverCarsAdapter({ fetchImpl, pollAttempts: 1, pollDelayMs: 0 })
+    await expect(a.search(PARAMS)).rejects.toThrow(/wrong window/i)
+  })
+
+  it('resolveLocation maps an autocomplete result to ids', async () => {
+    const fetchImpl = (async () => jsonResp({ success: true, result: [{ place: 'Malaga Airport (AGP)', countryID: 26, cityID: 455, placeID: 1848 }] })) as unknown as typeof fetch
+    const a = new DiscoverCarsAdapter({ fetchImpl })
+    expect(await a.resolveLocation('Malaga', 'Airport (AGP)')).toEqual({ countryId: 26, cityId: 455, placeId: 1848, label: 'Malaga Airport (AGP)' })
   })
 })
 
 describe('no-booking safety guard', () => {
-  it('book/reserve method names are forbidden (rental booking verbs)', () => {
-    for (const n of ['bookRental', 'book', 'reserve', 'reserveCar', 'checkout', 'payNow']) {
-      expect(isForbiddenMethodName(n)).toBe(true)
-    }
+  it('rejects book/reserve/checkout/pay method names', () => {
+    for (const n of ['bookRental', 'book', 'reserve', 'checkout', 'payNow']) expect(isForbiddenMethodName(n)).toBe(true)
   })
-
-  it('legit search/read method names are allowed', () => {
-    for (const n of ['search', 'searchProducts', 'getProduct', 'parseOffers', 'bookmark', 'display']) {
-      expect(isForbiddenMethodName(n)).toBe(false)
-    }
+  it('allows search/read names', () => {
+    for (const n of ['search', 'resolveLocation', 'parseApiOffer', 'bookmark']) expect(isForbiddenMethodName(n)).toBe(false)
   })
-
-  it('a compliant rental-adapter-shaped object passes assertRentalAdapterSafe', () => {
-    const ok = { id: 'x', displayName: 'X', async search() { return [] } }
-    expect(() => assertRentalAdapterSafe(ok)).not.toThrow()
-    const rogue = { id: 'y', displayName: 'Y', async search() { return [] }, async bookRental() { return {} } }
-    expect(() => assertRentalAdapterSafe(rogue)).toThrow(/forbidden purchase method/i)
+  it('a compliant adapter passes the guard; a rogue booking method throws', () => {
+    expect(() => assertRentalAdapterSafe(new DiscoverCarsAdapter())).not.toThrow()
+    expect(() => assertRentalAdapterSafe({ id: 'x', displayName: 'X', async search() { return [] }, async bookRental() {} })).toThrow(/forbidden purchase method/i)
   })
 })
