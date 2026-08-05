@@ -18,6 +18,7 @@ import type Database from 'better-sqlite3'
 import { createCase } from './case-store.js'
 import { claimMessage, localApply, excludeMessage, markDuplicate } from './email-ingest.js'
 import { effectiveSensitivity } from './sensitivity.js'
+import { IDEMPOTENCY_HEADER } from './adapters/gmail-send.js'
 import type { CaseSensitivity } from './schema.js'
 
 export interface EmailIntakeInput {
@@ -36,9 +37,21 @@ export interface EmailIntakeInput {
   /** Owner-declared floor; the content can only escalate it. */
   declaredSensitivity?: CaseSensitivity
   priority?: string
+  /** INBOUND (received) or OUTBOUND (a message Istvan sent). Default INBOUND.
+   *  An OUTBOUND actionable email opens a case in WAITING_EXTERNAL — the ball is
+   *  with the recipient — with a follow-up to watch for the reply. */
+  direction?: 'INBOUND' | 'OUTBOUND'
+  /** Message headers. If they carry the COS's own X-Marveen-Idempotency-Key, the
+   *  message is our OWN automated send and is skipped (self-event filtering) so
+   *  the executor's sends are never re-ingested as new inbound work. */
+  headers?: Record<string, string>
+  /** Recipient (for an OUTBOUND email). */
+  to?: string
+  /** When to check for a reply (OUTBOUND) / next wake. */
+  followUpAt?: number
 }
 
-export type IntakeOutcome = 'CASE_CREATED' | 'LINKED_DUPLICATE' | 'EXCLUDED'
+export type IntakeOutcome = 'CASE_CREATED' | 'LINKED_DUPLICATE' | 'EXCLUDED' | 'EXCLUDED_SELF_SEND'
 
 export interface IntakeResult {
   outcome: IntakeOutcome
@@ -56,11 +69,19 @@ function findActiveCaseByThread(db: Database.Database, threadId: string): { case
 }
 
 export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now: number): IntakeResult {
+  // Self-event filter: a message carrying our own idempotency marker is a send
+  // the COS executor made — never re-ingest it as new work.
+  if (input.headers && input.headers[IDEMPOTENCY_HEADER]) {
+    excludeMessage(db, input.accountId, input.messageId, now)
+    return { outcome: 'EXCLUDED_SELF_SEND', messageStatus: 'EXCLUDED' }
+  }
+
   if (!input.actionable) {
     excludeMessage(db, input.accountId, input.messageId, now)
     return { outcome: 'EXCLUDED', messageStatus: 'EXCLUDED' }
   }
 
+  const outbound = input.direction === 'OUTBOUND'
   const tx = db.transaction((): IntakeResult => {
     claimMessage(db, input.accountId, input.messageId, now)
 
@@ -81,15 +102,22 @@ export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now:
       caseId,
       title: input.title ?? input.subject,
       caseType: input.caseType ?? 'EMAIL',
-      description: `From: ${input.from}`,
+      // OUTBOUND: Istvan sent this → the ball is with the recipient (waiting).
+      status: outbound ? 'WAITING_EXTERNAL' : 'NEW',
+      description: outbound ? `Sent to: ${input.to ?? '?'}` : `From: ${input.from}`,
       sensitivity: tier,
       priority: input.priority ?? 'P2',
       sourceSystem: 'gmail',
       sourceReference: input.messageId,
     }, now)
-    if (input.threadId) {
-      db.prepare(`UPDATE personal_cases SET gmail_thread_ids=@t WHERE case_id=@id`)
-        .run({ t: JSON.stringify([input.threadId]), id: caseId })
+    const patch: Record<string, unknown> = {}
+    if (input.threadId) patch.gmail_thread_ids = JSON.stringify([input.threadId])
+    // An outgoing email should be watched for a reply; default a follow-up.
+    if (outbound) { patch.waiting_on = `reply from ${input.to ?? 'recipient'}`; patch.follow_up_at = input.followUpAt ?? now + 3 * 86400 }
+    const keys = Object.keys(patch)
+    if (keys.length) {
+      db.prepare(`UPDATE personal_cases SET ${keys.map((k) => `${k}=@${k}`).join(', ')} WHERE case_id=@id`)
+        .run({ ...patch, id: caseId })
     }
     localApply(db, input.accountId, input.messageId, caseId, now)
     return { outcome: 'CASE_CREATED', caseId, messageStatus: 'LOCAL_APPLIED', sensitivity: tier }

@@ -3,6 +3,7 @@ import { initDatabase, getDb } from '../db.js'
 import { getCase } from '../cos/case-store.js'
 import { openBatch } from '../cos/email-ingest.js'
 import { ingestEmail } from '../cos/intake.js'
+import { IDEMPOTENCY_HEADER } from '../cos/adapters/gmail-send.js'
 
 // COS email → case intake. Proves the inbound behavior: noise is excluded, an
 // actionable email becomes a case with the escalated sensitivity, a message
@@ -58,5 +59,30 @@ describe('COS email intake', () => {
     expect(second.caseId).toBe(first.caseId)
     expect(msgStatus('m5').status).toBe('DUPLICATE')
     expect(msgStatus('m5').case_id).toBe(first.caseId)
+  })
+
+  it("self-event filter: the COS's own automated send (idempotency marker) is EXCLUDED, no case", () => {
+    discover('m6')
+    const r = ingestEmail(getDb(), {
+      accountId: ACC, messageId: 'm6', subject: 'Quote request', from: 'me', snippet: 'x', actionable: true,
+      headers: { [IDEMPOTENCY_HEADER]: 'mv-c1-EMAIL_SEND-1' }, // our own send
+    }, NOW)
+    expect(r.outcome).toBe('EXCLUDED_SELF_SEND')
+    expect(msgStatus('m6').status).toBe('EXCLUDED')
+    expect(msgStatus('m6').case_id ?? null).toBeNull()
+  })
+
+  it('OUTBOUND (email Istvan sent) → case in WAITING_EXTERNAL with a follow-up', () => {
+    discover('m7', 't7')
+    const r = ingestEmail(getDb(), {
+      accountId: ACC, messageId: 'm7', threadId: 't7', subject: 'Ajánlatkérés a peremelemre', from: 'iszzu80@gmail.com',
+      to: 'vendor@example.com', snippet: 'kérem az árat', actionable: true, direction: 'OUTBOUND', followUpAt: NOW + 259200,
+    }, NOW)
+    expect(r.outcome).toBe('CASE_CREATED')
+    const c = getCase(getDb(), r.caseId!)!
+    expect(c.status).toBe('WAITING_EXTERNAL')       // ball is with the recipient
+    expect(c.description).toMatch(/Sent to: vendor@example.com/)
+    expect(c.waiting_on).toMatch(/reply from vendor@example.com/)
+    expect(c.follow_up_at).toBe(NOW + 259200)
   })
 })
