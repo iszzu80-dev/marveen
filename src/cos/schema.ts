@@ -338,4 +338,21 @@ export function initCosSchema(db: Database.Database): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_radarobs_item ON radar_observations(radar_id, observed_at)`)
+
+  // ── send_quotas (P0.4 atomic quota reservation; §9) ───────────────────
+  // A rolling-window counter per quota key (e.g. 'EMAIL_SEND:daily'). The
+  // executor/dispatch reserves a slot ATOMICALLY (check-and-increment in one
+  // transaction) before an outbound action, so two workers can never both send
+  // when only one slot remains. window_start + window_sec define the current
+  // window; it resets lazily on the first reservation after it expires.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS send_quotas (
+      quota_key    TEXT PRIMARY KEY,
+      window_start INTEGER NOT NULL,
+      window_sec   INTEGER NOT NULL,
+      max_count    INTEGER NOT NULL,
+      used_count   INTEGER NOT NULL DEFAULT 0,
+      updated_at   INTEGER NOT NULL
+    )
+  `)
 }
