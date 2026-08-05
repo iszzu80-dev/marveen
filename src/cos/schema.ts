@@ -275,6 +275,9 @@ export function initCosSchema(db: Database.Database): void {
       attempt          INTEGER NOT NULL DEFAULT 0,
       last_error       TEXT,
       quarantine_reason TEXT,
+      content_hash     TEXT,                  -- P1.2 content fingerprint (resend/self-event dedup)
+      self_event_count INTEGER NOT NULL DEFAULT 0,  -- P1.2 count of our own label-echo history events seen
+      last_self_event_at INTEGER,             -- P1.2 origin log: when we last recognised a self-generated echo
       created_at       INTEGER NOT NULL,
       updated_at       INTEGER NOT NULL,
       UNIQUE(gmail_account_id, message_id),
@@ -283,6 +286,11 @@ export function initCosSchema(db: Database.Database): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_eproc_batch ON email_processing(batch_id, status)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_eproc_chash ON email_processing(gmail_account_id, content_hash)`)
+  // Existing dbs (email_processing predates P1.2): add the new columns in place.
+  ensureColumns(db, 'email_processing', {
+    content_hash: 'TEXT', self_event_count: 'INTEGER NOT NULL DEFAULT 0', last_self_event_at: 'INTEGER',
+  })
 
   // ── campaigns + approvals (Slice 1 governance; P0.4 template+rendered, P0.5 revoke) ──
   // The authorization layer over the Action Executor. Two P0 rules:
