@@ -41,6 +41,16 @@ export const CASE_SENSITIVITIES = [
 ] as const
 export type CaseSensitivity = (typeof CASE_SENSITIVITIES)[number]
 
+/** Add any missing columns to an existing table (nullable ADD COLUMN is safe and
+ *  cheap). Used to evolve tables that predate a field without a table rebuild.
+ *  `defs` maps column name → its SQL type/definition. */
+function ensureColumns(db: Database.Database, table: string, defs: Record<string, string>): void {
+  const have = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(c => c.name))
+  for (const [name, def] of Object.entries(defs)) {
+    if (!have.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${def}`)
+  }
+}
+
 export function initCosSchema(db: Database.Database): void {
   // ── personal_cases (P0.5 version; §6.1) ──────────────────────────────
   // version: optimistic concurrency. Every domain command reads the version it
@@ -359,6 +369,13 @@ export function initCosSchema(db: Database.Database): void {
       check_interval_sec INTEGER NOT NULL DEFAULT 86400,
       next_check_at     INTEGER,
       best_seen_price   INTEGER,                       -- lowest observed so far
+      -- P1.6 notification dedup: the last thing we alerted about, so an unchanged
+      -- offer never re-notifies. A new alert fires only on a new/different offer,
+      -- a significant further drop, or (via a changed offer id) an expiry.
+      last_notified_offer_id TEXT,
+      last_notified_price    INTEGER,
+      last_notified_at       INTEGER,
+      notification_reason    TEXT,                     -- NEW_HIT | NEW_OFFER | PRICE_DROP
       created_at        INTEGER NOT NULL,
       updated_at        INTEGER NOT NULL,
       CHECK (status IN ('ACTIVE','PAUSED','HIT','CLOSED'))
@@ -370,13 +387,35 @@ export function initCosSchema(db: Database.Database): void {
       obs_id       INTEGER PRIMARY KEY AUTOINCREMENT,
       radar_id     TEXT NOT NULL REFERENCES radar_items(radar_id),
       observed_at  INTEGER NOT NULL,
-      best_price   INTEGER,
-      currency     TEXT,
+      best_price   INTEGER,                            -- comparison-currency price used for HIT (= converted_final_price)
+      currency     TEXT,                               -- comparison currency
       offer_count  INTEGER,
-      offer_ref    TEXT                                -- JSON snapshot of the best offer
+      offer_ref    TEXT,                               -- JSON snapshot of the best offer
+      offer_id     TEXT,                               -- stable id of the best offer (for dedup)
+      -- P1.5 FX: EU merchants may quote a different currency than the target. We
+      -- record the merchant-currency price AND the converted comparison-currency
+      -- price with the rate + its provenance, so the estimate is auditable. When
+      -- the merchant already quotes the comparison currency, fx is identity.
+      original_currency     TEXT,
+      original_final_price  INTEGER,
+      comparison_currency   TEXT,
+      fx_rate               REAL,
+      fx_rate_source        TEXT,
+      fx_rate_timestamp     INTEGER,
+      converted_final_price INTEGER
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_radarobs_item ON radar_observations(radar_id, observed_at)`)
+  // Existing dbs (radar tables predate P1.5/P1.6): add the new columns in place.
+  ensureColumns(db, 'radar_items', {
+    last_notified_offer_id: 'TEXT', last_notified_price: 'INTEGER',
+    last_notified_at: 'INTEGER', notification_reason: 'TEXT',
+  })
+  ensureColumns(db, 'radar_observations', {
+    offer_id: 'TEXT', original_currency: 'TEXT', original_final_price: 'INTEGER',
+    comparison_currency: 'TEXT', fx_rate: 'REAL', fx_rate_source: 'TEXT',
+    fx_rate_timestamp: 'INTEGER', converted_final_price: 'INTEGER',
+  })
 
   // ── send_quotas (P0.4 atomic quota reservation; §9) ───────────────────
   // A rolling-window counter per quota key (e.g. 'EMAIL_SEND:daily'). The

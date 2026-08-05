@@ -64,6 +64,20 @@ describe('cosTick (one full cycle)', () => {
     expect(getRadarItem(db, 'r1')!.status).toBe('HIT')
   })
 
+  it('AC-29: a second cycle on the same unchanged HIT offer does NOT re-alert', async () => {
+    const db = getDb()
+    createRadarItem(db, { radarId: 'r1', caseId: 'c1', kind: 'RENTAL', label: 'VLC→AGP', query: RENTAL_QUERY, targetPrice: 90000, currency: 'HUF', checkIntervalSec: 3600 }, NOW - 7200)
+    const deps = { rentalAdapter: new MockRental() }
+    const first = await cosTick(db, deps, NOW)
+    expect(first.radarHits).toEqual(['r1']) // first HIT → alert
+    // make it due again without changing the offer, run another cycle
+    db.prepare(`UPDATE radar_items SET next_check_at=? WHERE radar_id='r1'`).run(NOW + 10)
+    const second = await cosTick(db, deps, NOW + 20)
+    expect(second.radarChecked).toBe(1)
+    expect(second.radarHits).toEqual([]) // <-- deduped: same offer, no repeat alert
+    expect(getRadarItem(db, 'r1')!.status).toBe('HIT') // still a hit, just not re-announced
+  })
+
   it('skips outbound rows with no registered adapter, and does not throw', async () => {
     const db = getDb()
     planAction(db, { caseId: 'c1', actionType: 'CALENDAR_CREATE', sequenceNumber: 1, payload: {} }, NOW)

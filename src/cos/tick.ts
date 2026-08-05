@@ -17,7 +17,7 @@
 import type Database from 'better-sqlite3'
 import { reconcileOutbound, dueCases, dueFollowUps } from './scheduler.js'
 import { executeAction, type OutboundAdapter } from './executor.js'
-import { dueRadarChecks } from './radar.js'
+import { dueRadarChecks, markNotified } from './radar.js'
 import { runRentalRadarCheck } from './radar-runner.js'
 import type { RentalAdapter } from './rental-adapter.js'
 
@@ -61,7 +61,13 @@ export async function cosTick(db: Database.Database, deps: CosTickDeps, now: num
     radarChecked++
     try {
       const res = await runRentalRadarCheck(db, item, deps.rentalAdapter, now)
-      if (res.hit) radarHits.push(item.radar_id)
+      // P1.6: only surface a HIT the owner has not already heard about (new/
+      // different offer, or a significant further drop). markNotified records
+      // what we alerted so an unchanged offer never re-pings next cycle.
+      if (res.notify.should) {
+        radarHits.push(item.radar_id)
+        markNotified(db, item.radar_id, { offerId: res.offerId, price: res.bestPrice, reason: res.notify.reason }, now)
+      }
     } catch (e) { errors.push({ where: 'radar', id: item.radar_id, error: String((e as Error)?.message ?? e) }) }
   }
 

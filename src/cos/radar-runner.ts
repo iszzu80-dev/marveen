@@ -39,6 +39,9 @@ export async function runRentalRadarCheck(
     bestPrice: best?.fullPrice != null ? Math.round(best.fullPrice) : null,
     currency: best?.currency,
     offerCount: offers.length,
+    // Stable id of the best offer so P1.6 dedup can tell "same deal" from "new
+    // deal" — supplier + vehicle identifies the offer across checks.
+    offerId: best ? `${best.supplier}|${best.car}` : null,
     offerRef: best
       ? { car: best.car, category: best.category, transmission: best.transmission, supplier: best.supplier, fullPrice: best.fullPrice, deposit: best.deposit }
       : null,
