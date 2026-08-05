@@ -99,6 +99,24 @@ describe('COS Action Executor', () => {
     expect(ad.sendCalls).toBe(2) // first failed, second sent — exactly one real delivery
   })
 
+  it('P0.4 quota: a full window blocks the send (stays PLANNED, not sent) and frees next window', async () => {
+    const db = getDb(), ad = new MockAdapter()
+    const q = { key: 'EMAIL_SEND:test', maxCount: 1, windowSec: 3600 }
+    const p1 = planAction(db, { caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 1, payload: {} }, 1000)
+    const p2 = planAction(db, { caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 2, payload: {} }, 1000)
+    // first consumes the only slot → sent
+    expect((await executeAction(db, ad, p1.ledgerId, 1001, { quota: q })).status).toBe('VERIFIED')
+    expect(ad.sendCalls).toBe(1)
+    // second is over quota → NOT sent, stays PLANNED
+    const r2 = await executeAction(db, ad, p2.ledgerId, 1002, { quota: q })
+    expect(r2.status).toBe('PLANNED')
+    expect(ad.sendCalls).toBe(1) // <-- send NOT called for the blocked action
+    // once the window rolls over, it goes through
+    const r3 = await executeAction(db, ad, p2.ledgerId, 1002 + 3601, { quota: q })
+    expect(r3.status).toBe('VERIFIED')
+    expect(ad.sendCalls).toBe(2)
+  })
+
   it('APPLIED but readback cannot find it → OUTCOME_UNKNOWN, not a false VERIFIED', async () => {
     const db = getDb(), ad = new MockAdapter()
     const p = planAction(db, PLAN, 1000)

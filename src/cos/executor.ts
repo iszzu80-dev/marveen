@@ -16,6 +16,7 @@
 // adapter) before any real connector (Gmail write) is wired.
 
 import type Database from 'better-sqlite3'
+import { reserveQuota } from './quota.js'
 
 export type OutboundStatus =
   | 'PLANNED' | 'SENDING' | 'APPLIED' | 'OUTCOME_UNKNOWN'
@@ -126,13 +127,31 @@ export function planAction(db: Database.Database, input: PlanInput, now: number)
  * and it persists SENDING BEFORE the external call so a crash leaves a durable
  * trail. After a successful send it VERIFIES via readback rather than assuming.
  */
+/** Optional per-send controls. `quota` gates the send behind an atomic
+ *  rolling-window reservation (P0.4): if the window is full the action stays
+ *  PLANNED and is NOT sent (it retries in a later window). */
+export interface ExecuteOpts {
+  quota?: { key: string; maxCount: number; windowSec: number }
+}
+
 export async function executeAction(
-  db: Database.Database, adapter: OutboundAdapter, ledgerId: string, now: number,
+  db: Database.Database, adapter: OutboundAdapter, ledgerId: string, now: number, opts: ExecuteOpts = {},
 ): Promise<OutboundAction> {
   const a = loadOrThrow(db, ledgerId)
   if (a.status === 'VERIFIED' || a.status === 'FAILED') return a
   if (a.status === 'SENDING' || a.status === 'OUTCOME_UNKNOWN') {
     return recoverAction(db, adapter, ledgerId, now)
+  }
+  // P0.4: atomically reserve a send slot BEFORE anything else. If the window is
+  // full, do not send — leave PLANNED to retry once the window frees. A reserved
+  // slot is consumed by the attempt (not refunded on OUTCOME_UNKNOWN — it may
+  // have reached the provider).
+  if (opts.quota) {
+    const rr = reserveQuota(db, opts.quota.key, opts.quota.maxCount, opts.quota.windowSec, now)
+    if (!rr.reserved) {
+      setStatus(db, ledgerId, 'PLANNED', { last_error: `send quota exceeded for ${opts.quota.key}` }, now)
+      return loadOrThrow(db, ledgerId)
+    }
   }
   // PLANNED: persist SENDING BEFORE the call (P0.3 crash window).
   setStatus(db, ledgerId, 'SENDING', { sending_at: now, attempt: a.attempt + 1 }, now)
