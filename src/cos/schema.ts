@@ -299,4 +299,43 @@ export function initCosSchema(db: Database.Database): void {
       CHECK (status IN ('OK','DEGRADED','DOWN','UNKNOWN'))
     )
   `)
+
+  // ── shopping / price radar (Slice 4; §15) ─────────────────────────────
+  // A watched item (a rental search, a grocery product, a product to buy). The
+  // scheduler runs due checks through the matching adapter, records each
+  // observation, and flips the item to HIT when the best price meets the
+  // target. Purchase is NEVER autonomous (the adapters have no checkout) — a HIT
+  // just surfaces the deal for the owner.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS radar_items (
+      radar_id          TEXT PRIMARY KEY,
+      case_id           TEXT REFERENCES personal_cases(case_id),
+      kind              TEXT NOT NULL,                 -- RENTAL, GROCERY, PRODUCT
+      label             TEXT NOT NULL,
+      query             TEXT,                          -- JSON: adapter search params
+      target_price      INTEGER,                       -- minor units; HIT when best <= this
+      max_price         INTEGER,
+      currency          TEXT,
+      status            TEXT NOT NULL DEFAULT 'ACTIVE',
+      check_interval_sec INTEGER NOT NULL DEFAULT 86400,
+      next_check_at     INTEGER,
+      best_seen_price   INTEGER,                       -- lowest observed so far
+      created_at        INTEGER NOT NULL,
+      updated_at        INTEGER NOT NULL,
+      CHECK (status IN ('ACTIVE','PAUSED','HIT','CLOSED'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_radar_due ON radar_items(status, next_check_at)`)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS radar_observations (
+      obs_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+      radar_id     TEXT NOT NULL REFERENCES radar_items(radar_id),
+      observed_at  INTEGER NOT NULL,
+      best_price   INTEGER,
+      currency     TEXT,
+      offer_count  INTEGER,
+      offer_ref    TEXT                                -- JSON snapshot of the best offer
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_radarobs_item ON radar_observations(radar_id, observed_at)`)
 }
