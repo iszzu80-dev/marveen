@@ -140,4 +140,44 @@ export function initCosSchema(db: Database.Database): void {
       UNIQUE(claim_key)
     )
   `)
+
+  // ── outbound_ledger (Slice 1 core — the single external writer; §7/§8) ──
+  // Every outbound side effect (email send, calendar create) is recorded here
+  // BEFORE it happens, with a crash-safe state machine the spec's P0 rounds
+  // hardened:
+  //   PLANNED  → SENDING (persisted BEFORE the external call, P0.3 crash window)
+  //            → APPLIED (call returned + external_ref) → VERIFIED (readback)
+  //   SENDING/APPLIED on error → OUTCOME_UNKNOWN → recovery readback → VERIFIED
+  //            or (proven absent) back to PLANNED for a safe resend.
+  // Double-send is prevented three ways: (1) SENDING is durable before the call
+  // so a crash leaves a trail; (2) recovery reads back the searchable
+  // idempotency marker instead of blindly resending; (3) DB UNIQUE on the
+  // internal idempotency key AND on (case, action_type, sequence) is the last
+  // line even if the app logic is bypassed (P0.3/P0.4).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS outbound_ledger (
+      ledger_id                TEXT PRIMARY KEY,
+      case_id                  TEXT REFERENCES personal_cases(case_id),
+      action_type             TEXT NOT NULL,          -- EMAIL_SEND, CALENDAR_CREATE, ...
+      sequence_number         INTEGER NOT NULL,        -- P0.4 per-(case,action) ordinal
+      internal_idempotency_key TEXT NOT NULL,          -- P0.3 searchable marker (X-Marveen-Idempotency-Key)
+      status                  TEXT NOT NULL DEFAULT 'PLANNED',
+      payload                 TEXT,                    -- JSON (rendered outbound content)
+      external_ref            TEXT,                    -- provider message/event id after send
+      claim_fence             INTEGER,                 -- P0.2 fence of the worker that sent
+      attempt                 INTEGER NOT NULL DEFAULT 0,
+      last_error              TEXT,
+      created_at              INTEGER NOT NULL,
+      updated_at              INTEGER NOT NULL,
+      sending_at              INTEGER,
+      applied_at              INTEGER,
+      verified_at             INTEGER,
+      UNIQUE(internal_idempotency_key),
+      UNIQUE(case_id, action_type, sequence_number),
+      CHECK (status IN ('PLANNED','SENDING','APPLIED','OUTCOME_UNKNOWN',
+        'VERIFIED','FAILED','RECOVERY_REQUIRED'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_outbound_status ON outbound_ledger(status)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_outbound_case ON outbound_ledger(case_id)`)
 }
