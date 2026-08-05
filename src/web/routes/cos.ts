@@ -7,9 +7,10 @@
 // Auth is centralized in src/web.ts (requiresAuth gates all /api/*), so every
 // /api/cos/* path here is already Bearer-protected; no auth code needed.
 
-import { json } from '../http-helpers.js'
+import { json, readBody } from '../http-helpers.js'
 import { getDb } from '../../db.js'
 import { listActiveCases, listTodayCases } from '../../cos/case-store.js'
+import { ingestTriagedEmail, type TriagedEmail } from '../../cos/triage-bridge.js'
 import { APP_TZ } from '../../config.js'
 import type { RouteContext } from './types.js'
 
@@ -31,7 +32,23 @@ export function endOfTodaySec(now: Date): number {
 }
 
 export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
-  const { res, path, method } = ctx
+  const { req, res, path, method } = ctx
+
+  // The email-triage → COS intake bridge. The triage heartbeat POSTs a real
+  // candidate here (with its verdict) to open/update a case. Idempotent per
+  // (account, message). This is the ONLY /api/cos/* write path — the mutation
+  // is confined to the intake domain logic.
+  if (path === '/api/cos/intake' && method === 'POST') {
+    let input: TriagedEmail
+    try { input = JSON.parse((await readBody(req)).toString()) as TriagedEmail }
+    catch { json(res, { error: 'invalid JSON' }, 400); return true }
+    if (!input?.accountId || !input?.messageId || !input?.subject) {
+      json(res, { error: 'accountId, messageId, subject required' }, 400); return true
+    }
+    const result = ingestTriagedEmail(getDb(), input, Math.floor(Date.now() / 1000))
+    json(res, result)
+    return true
+  }
 
   if (path === '/api/cos/cases' && method === 'GET') {
     const cases = listActiveCases(getDb())
