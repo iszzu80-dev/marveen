@@ -441,4 +441,31 @@ export function initCosSchema(db: Database.Database): void {
       updated_at   INTEGER NOT NULL
     )
   `)
+
+  // ── case_attachments (§12 checksum/readback + §C retention) ───────────
+  // An email attachment linked to a case. `checksum` (sha256 of the bytes) is the
+  // integrity anchor: a readback recomputes it to prove the stored content was
+  // not silently corrupted (P1 item 19). `sensitivity` tags the content so it is
+  // never logged raw. §C retention: after the retention window the CONTENT is
+  // purged (content NULLed, content_purged_at set) while the row + checksum stay
+  // as an audit tombstone — sensitive bytes do not live forever, the record does.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS case_attachments (
+      attachment_id     TEXT PRIMARY KEY,
+      case_id           TEXT REFERENCES personal_cases(case_id),
+      message_id        TEXT,
+      filename          TEXT,
+      mime_type         TEXT,
+      byte_size         INTEGER,
+      checksum          TEXT NOT NULL,               -- sha256 hex of the content
+      sensitivity       TEXT NOT NULL DEFAULT 'SENSITIVE_PERSONAL',
+      content           BLOB,                        -- NULLed on retention purge
+      content_purged_at INTEGER,
+      created_at        INTEGER NOT NULL,
+      updated_at        INTEGER NOT NULL,
+      CHECK (sensitivity IN ('PUBLIC','PERSONAL','SENSITIVE_PERSONAL','HIGHLY_SENSITIVE'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_attach_case ON case_attachments(case_id)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_attach_age ON case_attachments(created_at) WHERE content IS NOT NULL`)
 }
