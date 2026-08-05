@@ -30,6 +30,7 @@ import { startCapacityRoutingRunner } from './web/capacity-routing-runner.js'
 import { startContextGuardRunner } from './web/context-guard-runner.js'
 import { collectTokenUsage } from './web/token-usage.js'
 import { startCostOpsBackgroundTasks } from './costops/reliability-observation.js'  // LOCAL-FORK: costops seam (keep on rebase)
+import { startCosBackgroundTasks } from './cos/runtime.js'  // LOCAL-FORK: cos seam (keep on rebase)
 import { logger } from './logger.js'
 import { tryHandleAuth } from './web/routes/auth.js'
 import { tryHandleSecurity } from './web/routes/security.js'
@@ -462,6 +463,12 @@ export function startWebServer(port = 3420): http.Server {
   // dashboard read cannot distinguish from a working measurement path.
   const costOpsBackgroundIntervals = webOnly ? [] : startCostOpsBackgroundTasks()
   if (!webOnly) logger.info('CostOps background tasks started (reliability-snapshot: 24h poll + startup; collector sync: 15min due-check + startup)')
+
+  // LOCAL-FORK: cos seam (keep on rebase). The autonomous COS loop (cosTick every
+  // 6h). safeCosDeps() wires ONLY the rental adapter — radar price checks — and
+  // NO outbound adapter, so nothing sends/buys autonomously until a real Gmail
+  // connector + write-scope consent are added. See src/cos/runtime.ts.
+  if (!webOnly) { startCosBackgroundTasks(); logger.info('COS autonomous loop started (radar checks every 6h; no outbound adapter → no autonomous send)') }
 
   // NOTE: startMcpListChecker() is intentionally NOT called here.
   //
