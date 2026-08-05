@@ -180,4 +180,58 @@ export function initCosSchema(db: Database.Database): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_outbound_status ON outbound_ledger(status)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_outbound_case ON outbound_ledger(case_id)`)
+
+  // ── email ingestion (Slice 1 inbound safety; P0.1 poison / P0.2 checkpoint) ──
+  // The inbound counterpart of outbound_ledger. Three tables enforce the rule
+  // the spec's P0.2 round set: the account's Gmail history cursor advances ONLY
+  // when a whole BATCH is terminal, so no message is ever skipped and none is
+  // reprocessed. P0.1: a poison message goes QUARANTINED (terminal) so one bad
+  // message cannot pin the cursor forever.
+
+  // account-level cursor: the single source of truth for "how far we've read".
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS email_source_checkpoints (
+      gmail_account_id TEXT PRIMARY KEY,
+      history_cursor   TEXT,                 -- Gmail historyId we've committed through
+      updated_at       INTEGER NOT NULL
+    )
+  `)
+
+  // a batch = the messages fetched between cursor_before and cursor_after. The
+  // account cursor only moves to cursor_after when the batch is TERMINAL.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS email_processing_batches (
+      batch_id         TEXT PRIMARY KEY,
+      gmail_account_id TEXT NOT NULL,
+      cursor_before    TEXT,
+      cursor_after     TEXT NOT NULL,
+      status           TEXT NOT NULL DEFAULT 'OPEN',
+      created_at       INTEGER NOT NULL,
+      updated_at       INTEGER NOT NULL,
+      CHECK (status IN ('OPEN','PROCESSING','TERMINAL','QUARANTINED'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_ebatch_acct ON email_processing_batches(gmail_account_id, status)`)
+
+  // per-message processing state (the 7+ status model). UNIQUE(account,message)
+  // makes re-discovery a no-op instead of a second processing row.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS email_processing (
+      gmail_account_id TEXT NOT NULL,
+      message_id       TEXT NOT NULL,
+      thread_id        TEXT,
+      batch_id         TEXT NOT NULL REFERENCES email_processing_batches(batch_id),
+      status           TEXT NOT NULL DEFAULT 'DISCOVERED',
+      case_id          TEXT REFERENCES personal_cases(case_id),
+      attempt          INTEGER NOT NULL DEFAULT 0,
+      last_error       TEXT,
+      quarantine_reason TEXT,
+      created_at       INTEGER NOT NULL,
+      updated_at       INTEGER NOT NULL,
+      UNIQUE(gmail_account_id, message_id),
+      CHECK (status IN ('DISCOVERED','CLAIMED','LOCAL_APPLIED','SOURCE_COMMITTED',
+        'RECOVERY_REQUIRED','EXCLUDED','DUPLICATE','QUARANTINED'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_eproc_batch ON email_processing(batch_id, status)`)
 }
