@@ -34,11 +34,19 @@ export function base64url(buf: Buffer): string {
 
 /** Build the base64url RFC822 message: To/Subject + the X-Marveen provenance
  *  header + the message body with the searchable COS-Ref footer. Pure/testable. */
+/** RFC2047-encode a header value if it contains non-ASCII (e.g. a Hungarian
+ *  subject). ASCII values pass through unchanged. Without this a non-ASCII
+ *  Subject reaches the recipient as mojibake. */
+export function encodeHeaderValue(v: string): string {
+  // eslint-disable-next-line no-control-regex
+  return /[^\x00-\x7F]/.test(v) ? `=?UTF-8?B?${Buffer.from(v, 'utf8').toString('base64')}?=` : v
+}
+
 export function buildRawMessage(email: OutboundEmail, marker: string, from?: string, embedMarker = true): string {
   const headers = [
     from ? `From: ${from}` : null,
     `To: ${email.to}`,
-    `Subject: ${email.subject}`,
+    `Subject: ${encodeHeaderValue(email.subject)}`,
     `${IDEMPOTENCY_HEADER}: ${marker}`,
     'MIME-Version: 1.0',
     'Content-Type: text/plain; charset="UTF-8"',

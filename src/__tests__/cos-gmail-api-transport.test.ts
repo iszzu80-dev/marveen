@@ -34,6 +34,14 @@ describe('GmailApiTransport message construction', () => {
     expect(bodyRefLine('mv-x-1')).toBe('COS-Ref: mv-x-1')
   })
 
+  it('RFC2047-encodes a non-ASCII subject (no mojibake); ASCII passes through', () => {
+    const raw = decode(buildRawMessage({ ...EMAIL, subject: 'RE: törött WPC – árajánlat' }, 'mv-x-1', 'me@gmail.com'))
+    expect(raw).toContain('Subject: =?UTF-8?B?')       // encoded
+    expect(raw).not.toContain('Subject: RE: törött')   // not raw non-ASCII
+    const ascii = decode(buildRawMessage(EMAIL, 'mv-x-1', 'me@gmail.com'))
+    expect(ascii).toContain('Subject: Quote request')  // ASCII unchanged
+  })
+
   it('embedMarker=false sends the EXACT body (no COS-Ref footer) — for owner-approved customer mail', () => {
     const raw = decode(buildRawMessage(EMAIL, 'mv-c1-EMAIL_SEND-1', 'me@gmail.com', false))
     expect(raw).not.toContain('COS-Ref')                 // nothing appended
