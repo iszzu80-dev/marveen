@@ -11,6 +11,7 @@ import { json, readBody } from '../http-helpers.js'
 import { getDb } from '../../db.js'
 import { listActiveCases, listTodayCases } from '../../cos/case-store.js'
 import { listActiveZstCases, listTodayZstCases } from '../../cos/zst-case-store.js'
+import { dueZstItems } from '../../cos/zst-watch.js'
 import { ingestTriagedEmail, type TriagedEmail } from '../../cos/triage-bridge.js'
 import { ingestTriagedZstEmail, type ZstTriagedEmail } from '../../cos/zst-intake.js'
 import { validateSkillMd, validateSkillPermissions } from '../../cos/skill-permission-validator.js'
@@ -98,6 +99,27 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     const horizon = endOfTodaySec(new Date())
     const cases = listTodayZstCases(getDb(), horizon)
     json(res, { cases, count: cases.length, horizon })
+    return true
+  }
+
+  // ZST proactive due-item runner (contracts/licenses/obligations/opportunities).
+  if (path === '/api/cos/zst-due' && method === 'GET') {
+    json(res, dueZstItems(getDb()))
+    return true
+  }
+
+  // ZST business-surface counts (invoices, contracts, vendors, licenses, etc.).
+  if (path === '/api/cos/zst-business' && method === 'GET') {
+    const db = getDb()
+    const c = (t: string) => scalar(db, `SELECT COUNT(*) n FROM ${t}`)
+    json(res, {
+      invoices: c('zst_invoices'), accounting_packages: c('zst_accounting_packages'),
+      bank_transactions: c('zst_bank_transactions'), contracts: c('zst_contracts'),
+      obligations: c('zst_obligations'), vendors: c('zst_vendors'), licenses: c('zst_licenses'),
+      partners: c('zst_partners'), opportunities: c('zst_opportunities'), products: c('zst_products'),
+      procurement_radar: c('zst_procurement_radar_items'), escalations: c('zst_product_escalations'),
+      outbound: c('zst_outbound_ledger'),
+    })
     return true
   }
 
