@@ -700,10 +700,79 @@ export function initZstSchema(db: Database.Database): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_zeproc_case ON zst_email_processing(case_id)`)
 
+  initZstSendSchema(db)         // Slice 1 write-half
   initZstFinanceSchema(db)      // Slice 2
   initZstContractsSchema(db)    // Slice 3
   initZstCommercialSchema(db)   // Slice 4
   initZstProductLabSchema(db)   // Slice 5
+}
+
+// ── ZST Slice 1 write-half — outbound ledger + campaign/approval (spec §10-11) ──
+// The single-external-writer state store for ZST. Mirrors the personal
+// outbound_ledger/campaigns/campaign_approvals but case_id → zst_cases. Nothing
+// here sends autonomously: campaigns are typed (allows_free_text=0), every send
+// needs a per-payload approval bound to the exact rendered_payload_hash AND the
+// recipient allowlist. The state machine (executor-core) prevents double-send.
+export function initZstSendSchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_outbound_ledger (
+      ledger_id                TEXT PRIMARY KEY,
+      case_id                  TEXT REFERENCES zst_cases(case_id),
+      action_type             TEXT NOT NULL,
+      sequence_number         INTEGER NOT NULL,
+      internal_idempotency_key TEXT NOT NULL,
+      external_idempotency_marker TEXT,
+      status                  TEXT NOT NULL DEFAULT 'PLANNED',
+      payload                 TEXT,
+      external_ref            TEXT,
+      campaign_id             TEXT,
+      campaign_version        INTEGER,
+      approval_version        INTEGER,
+      claim_fence             INTEGER,
+      attempt                 INTEGER NOT NULL DEFAULT 0,
+      last_error              TEXT,
+      created_at              INTEGER NOT NULL,
+      updated_at              INTEGER NOT NULL,
+      sending_at              INTEGER,
+      applied_at              INTEGER,
+      verified_at             INTEGER,
+      UNIQUE(internal_idempotency_key),
+      UNIQUE(case_id, action_type, sequence_number),
+      CHECK (status IN ('PLANNED','SENDING','APPLIED_UNVERIFIED','OUTCOME_UNKNOWN',
+        'VERIFIED','FAILED_RETRYABLE','FAILED_TERMINAL','CANCELLED','RECOVERY_REQUIRED'))
+    )
+  `)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_campaigns (
+      campaign_id            TEXT PRIMARY KEY,
+      case_id                TEXT REFERENCES zst_cases(case_id),
+      campaign_type          TEXT NOT NULL,
+      template_id            TEXT,
+      template_hash          TEXT,
+      status                 TEXT NOT NULL DEFAULT 'DRAFT',
+      version                INTEGER NOT NULL DEFAULT 1,
+      allows_free_text       INTEGER NOT NULL DEFAULT 0,
+      autonomous_spend_limit INTEGER NOT NULL DEFAULT 0,
+      created_at             INTEGER NOT NULL,
+      updated_at             INTEGER NOT NULL,
+      CHECK (status IN ('DRAFT','APPROVED','PAUSED','REVOKED','COMPLETED'))
+    )
+  `)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_campaign_approvals (
+      approval_id           TEXT PRIMARY KEY,
+      campaign_id           TEXT NOT NULL REFERENCES zst_campaigns(campaign_id),
+      campaign_version      INTEGER NOT NULL,
+      approved_by           TEXT,
+      template_hash         TEXT NOT NULL,
+      rendered_payload_hash TEXT NOT NULL,
+      allowed_recipients    TEXT NOT NULL,
+      status                TEXT NOT NULL DEFAULT 'APPROVED',
+      created_at            INTEGER NOT NULL,
+      updated_at            INTEGER NOT NULL,
+      CHECK (status IN ('PENDING','APPROVED','REJECTED','REVOKED'))
+    )
+  `)
 }
 
 // ── ZST Slice 2 — Finance (invoices, accounting packages, bank reconciliation) ──
