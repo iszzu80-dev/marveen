@@ -154,22 +154,45 @@
       '</section>'
   }
 
+  // ---- Analytics view (#5d): aggregate roll-ups over the COS domain ----
+  function countPills(obj, colorMap) {
+    var keys = Object.keys(obj || {})
+    if (!keys.length) return '<span style="color:var(--text-muted,#888);font-size:12px;">—</span>'
+    return keys.map(function (k) { return pill(k + ': ' + obj[k], (colorMap && colorMap[k]) || '#60a5fa') }).join(' ')
+  }
+  function analyticsSection(an) {
+    an = an || {}
+    var c = an.cases || {}, r = an.radar || {}, camp = an.campaigns || {}, o = an.outbound || {}
+    function line(label, html) {
+      return '<div style="margin:6px 0;"><span style="font-size:12px;color:var(--text-muted,#888);">' + label +
+        '</span><div style="margin-top:2px;">' + html + '</div></div>'
+    }
+    return '<section style="margin-bottom:24px;"><h2 style="font-size:16px;margin:0 0 10px;">📊 Analitika</h2>' +
+      line('Ügyek (' + (c.total || 0) + ') állapot', countPills(c.byStatus)) +
+      line('Ügyek érzékenység', countPills(c.bySensitivity, SENS_COLOR)) +
+      line('Radar (' + (r.total || 0) + '): ' + (r.hits || 0) + ' találat, ' + (r.observations || 0) + ' megfigyelés, ' + (r.notifications || 0) + ' értesítés', countPills(r.byStatus, RADAR_COLOR)) +
+      line('Kampányok (' + (camp.total || 0) + ')', countPills(camp.byStatus, CAMP_COLOR)) +
+      line('Kimenő (' + (o.total || 0) + ')', countPills(o.byStatus, OUT_COLOR)) +
+      '</section>'
+  }
+
   function mount() {
     var body = document.getElementById('cosBody')
     if (!body) return
     body.innerHTML = '<p style="color:var(--text-muted,#888);">Betöltés...</p>'
     function j(u) { return fetch(u).then(function (r) { return r.json() }).catch(function () { return {} }) }
     Promise.all([
-      j('/api/cos/today'), j('/api/cos/cases'), j('/api/cos/outbound'), j('/api/cos/campaigns'), j('/api/cos/radar'), j('/api/cos/monitoring'),
+      j('/api/cos/today'), j('/api/cos/cases'), j('/api/cos/outbound'), j('/api/cos/campaigns'), j('/api/cos/radar'), j('/api/cos/monitoring'), j('/api/cos/analytics'),
     ]).then(function (res) {
-      var today = res[0] || {}, all = res[1] || {}, out = res[2] || {}, camp = res[3] || {}, rad = res[4] || {}, mon = res[5] || {}
+      var today = res[0] || {}, all = res[1] || {}, out = res[2] || {}, camp = res[3] || {}, rad = res[4] || {}, mon = res[5] || {}, an = res[6] || {}
       body.innerHTML =
         section('📌 Ma', today.cases || [], 'Ma nincs esedékes ügy.') +
         section('🗂 Ügyek', all.cases || [], 'Nincs aktív ügy. A COS case-store üres vagy minden ügy lezárt.') +
         genericSection('📤 Kimenő', out.outbound || [], 'Nincs kimenő művelet.', outboundItem) +
         genericSection('📣 Kampányok', camp.campaigns || [], 'Nincs kampány.', campaignItem) +
         genericSection('🎯 Radar', rad.radar || [], 'Nincs figyelt ár-radar.', radarItem) +
-        monitoringSection(mon)
+        monitoringSection(mon) +
+        analyticsSection(an)
     }).catch(function (e) {
       body.innerHTML = '<p style="color:#ef4444;">Hiba a betöltéskor: ' + esc(e && e.message) + '</p>'
     })

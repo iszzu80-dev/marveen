@@ -86,7 +86,57 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
+  if (path === '/api/cos/analytics' && method === 'GET') {
+    json(res, listAnalytics(getDb()))
+    return true
+  }
+
   return false
+}
+
+/** GROUP BY helper → {value: count}. */
+function countBy(db: ReturnType<typeof getDb>, sql: string): Record<string, number> {
+  const out: Record<string, number> = {}
+  for (const r of db.prepare(sql).all() as Array<{ k: string; n: number }>) out[r.k] = r.n
+  return out
+}
+function scalar(db: ReturnType<typeof getDb>, sql: string): number {
+  return (db.prepare(sql).get() as { n: number } | undefined)?.n ?? 0
+}
+
+/**
+ * COS analytics roll-up (#5d): aggregate counts over cases, the price radar, and
+ * campaigns/outbound. Read-only, cheap GROUP BYs — the "campaign/radar analytics"
+ * the spec §F names, plus a case overview.
+ */
+export function listAnalytics(db: ReturnType<typeof getDb>): {
+  cases: { total: number; byStatus: Record<string, number>; bySensitivity: Record<string, number> }
+  radar: { total: number; byStatus: Record<string, number>; observations: number; hits: number; notifications: number }
+  campaigns: { total: number; byStatus: Record<string, number> }
+  outbound: { total: number; byStatus: Record<string, number> }
+} {
+  return {
+    cases: {
+      total: scalar(db, `SELECT COUNT(*) n FROM personal_cases WHERE archived_at IS NULL`),
+      byStatus: countBy(db, `SELECT status k, COUNT(*) n FROM personal_cases WHERE archived_at IS NULL GROUP BY status`),
+      bySensitivity: countBy(db, `SELECT sensitivity k, COUNT(*) n FROM personal_cases WHERE archived_at IS NULL GROUP BY sensitivity`),
+    },
+    radar: {
+      total: scalar(db, `SELECT COUNT(*) n FROM radar_items`),
+      byStatus: countBy(db, `SELECT status k, COUNT(*) n FROM radar_items GROUP BY status`),
+      observations: scalar(db, `SELECT COUNT(*) n FROM radar_observations`),
+      hits: scalar(db, `SELECT COUNT(*) n FROM radar_items WHERE status='HIT'`),
+      notifications: scalar(db, `SELECT COUNT(*) n FROM radar_items WHERE last_notified_at IS NOT NULL`),
+    },
+    campaigns: {
+      total: scalar(db, `SELECT COUNT(*) n FROM campaigns`),
+      byStatus: countBy(db, `SELECT status k, COUNT(*) n FROM campaigns GROUP BY status`),
+    },
+    outbound: {
+      total: scalar(db, `SELECT COUNT(*) n FROM outbound_ledger`),
+      byStatus: countBy(db, `SELECT status k, COUNT(*) n FROM outbound_ledger GROUP BY status`),
+    },
+  }
 }
 
 // Read-only summaries for the Mission Control views. Exported so they are unit-
