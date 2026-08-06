@@ -19,6 +19,7 @@
 import { readFileSync } from 'node:fs'
 import type { MailTransport, OutboundEmail } from './gmail-send.js'
 import { IDEMPOTENCY_HEADER } from './gmail-send.js'
+import { TOOL_TIMEOUTS } from '../../tool-timeouts.js'
 
 interface Creds { client_id: string; client_secret: string; refresh_token: string; token_uri: string }
 
@@ -53,18 +54,28 @@ export interface GmailApiTransportOptions {
   /** Max ms to keep polling readback for a just-sent message (Gmail indexes the
    *  Message-ID with a short lag). 0 = single shot. */
   readbackWaitMs?: number
+  /** Per-call HTTP deadline for send + token refresh (ms). Defaults to the
+   *  registered gmail-send tool timeout. An abort surfaces as a send error the
+   *  executor recovers from, rather than hanging the tick (gap-matrix #8). */
+  sendTimeoutMs?: number
+  /** Per-call HTTP deadline for the readback search (ms). */
+  readbackTimeoutMs?: number
 }
 
 export class GmailApiTransport implements MailTransport {
   private readonly credsPath: string
   private readonly from?: string
   private readonly readbackWaitMs: number
+  private readonly sendTimeoutMs: number
+  private readonly readbackTimeoutMs: number
   private token?: { value: string; expiresAt: number }
 
   constructor(opts: GmailApiTransportOptions = {}) {
     this.credsPath = opts.credsPath ?? 'store/.google-private-creds.json'
     this.from = opts.from
     this.readbackWaitMs = opts.readbackWaitMs ?? 0
+    this.sendTimeoutMs = opts.sendTimeoutMs ?? TOOL_TIMEOUTS['gmail-send']
+    this.readbackTimeoutMs = opts.readbackTimeoutMs ?? TOOL_TIMEOUTS['gmail-readback']
   }
 
   private creds(): Creds { return JSON.parse(readFileSync(this.credsPath, 'utf8')) as Creds }
@@ -77,7 +88,7 @@ export class GmailApiTransport implements MailTransport {
       client_id: c.client_id, client_secret: c.client_secret,
       refresh_token: c.refresh_token, grant_type: 'refresh_token',
     })
-    const r = await fetch(c.token_uri, { method: 'POST', body })
+    const r = await fetch(c.token_uri, { method: 'POST', body, signal: AbortSignal.timeout(this.sendTimeoutMs) })
     if (!r.ok) throw new Error(`token refresh failed: ${r.status} ${await r.text()}`)
     const j = await r.json() as { access_token: string; expires_in: number }
     this.token = { value: j.access_token, expiresAt: nowMs + (j.expires_in ?? 3600) * 1000 }
@@ -93,6 +104,7 @@ export class GmailApiTransport implements MailTransport {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ raw }),
+      signal: AbortSignal.timeout(this.sendTimeoutMs),
     })
     if (!r.ok) throw new Error(`gmail send failed: ${r.status} ${await r.text()}`)
     const j = await r.json() as { id: string }
@@ -110,7 +122,7 @@ export class GmailApiTransport implements MailTransport {
       try {
         const token = await this.accessToken(Date.now())
         const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(q)}&maxResults=1`
-        const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+        const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(this.readbackTimeoutMs) })
         if (!r.ok) return { found: false, available: false }
         const j = await r.json() as { messages?: Array<{ id: string }> }
         const hit = j.messages?.[0]
