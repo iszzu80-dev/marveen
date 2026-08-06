@@ -560,4 +560,119 @@ export function initCosSchema(db: Database.Database): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_invoice_case ON personal_invoices(case_id)`)
+
+  initZstSchema(db)
+}
+
+// ── ZST Radio Kft. Chief of Staff — Slice 0 (arch option A) ──────────────────
+// Separate table namespace (zst_*), SAME engine (case-engine-core.ts). ZST runs
+// on a separate Google account (google-zst connector) whose mailbox is purely
+// ZST, so connector identity — not a runtime classifier — is the scope boundary
+// (AT-ZS01): personal data never reaches these tables because the personal
+// ingest never writes them. `workspace` is the thin Operations/Product-Lab
+// routing tag that replaced the heavyweight Scope Gate (it routes, it does not
+// isolate). Slice 0 is the case engine only: no external writers, no send.
+export function initZstSchema(db: Database.Database): void {
+  // ── zst_cases (spec §8.1; version = optimistic concurrency) ──────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_cases (
+      case_id            TEXT PRIMARY KEY,
+      version            INTEGER NOT NULL DEFAULT 1,
+      title              TEXT NOT NULL,
+      description        TEXT,
+      case_type          TEXT NOT NULL,
+      category           TEXT,
+      workspace          TEXT NOT NULL DEFAULT 'OPERATIONS',
+      product_id         TEXT,
+      scope              TEXT NOT NULL DEFAULT 'ZST_OPERATIONS_CONFIRMED',
+      status             TEXT NOT NULL DEFAULT 'NEW',
+      priority           TEXT NOT NULL DEFAULT 'P2',
+      owner              TEXT NOT NULL DEFAULT 'marveen',
+      next_action        TEXT,
+      next_action_owner  TEXT,
+      due_at             INTEGER,
+      follow_up_at       INTEGER,
+      next_wake_at       INTEGER,
+      waiting_on         TEXT,
+      blocked_reason     TEXT,
+      approval_required  INTEGER NOT NULL DEFAULT 0,
+      financial_exposure INTEGER,
+      currency           TEXT,
+      legal_exposure     TEXT,
+      sensitivity        TEXT NOT NULL DEFAULT 'ZST_INTERNAL',
+      source_system      TEXT,
+      source_references  TEXT,
+      parent_case_id     TEXT REFERENCES zst_cases(case_id),
+      related_case_ids   TEXT,
+      related_contact_ids   TEXT,
+      related_vendor_ids    TEXT,
+      related_partner_ids   TEXT,
+      related_document_ids  TEXT,
+      related_invoice_ids   TEXT,
+      related_contract_ids  TEXT,
+      calendar_event_ids TEXT,
+      gmail_thread_ids   TEXT,
+      github_references  TEXT,
+      kanban_card_ids    TEXT,
+      workflow_name      TEXT,
+      workflow_version   INTEGER,
+      last_event_id      INTEGER,
+      closure_reason     TEXT,
+      created_at         INTEGER NOT NULL,
+      updated_at         INTEGER NOT NULL,
+      completed_at       INTEGER,
+      archived_at        INTEGER,
+      CHECK (workspace IN ('OPERATIONS','PRODUCT_LAB')),
+      CHECK (status IN ('NEW','TRIAGE_REQUIRED','INFORMATION_REQUIRED','READY','PLANNING',
+        'AWAITING_INTERNAL_INPUT','AWAITING_APPROVAL','EXECUTING','WAITING_EXTERNAL','FOLLOW_UP_DUE',
+        'CALL_REQUIRED','REVIEW_REQUIRED','AWAITING_SELECTION','SCHEDULED','BLOCKED','RECOVERY_REQUIRED',
+        'FAILED_RECOVERABLE','FAILED_TERMINAL','COMPLETED','CANCELLED','ARCHIVED')),
+      CHECK (sensitivity IN ('PUBLIC','ZST_INTERNAL','ZST_CONFIDENTIAL','ZST_FINANCIAL','ZST_LEGAL',
+        'ZST_PERSONAL_DATA','ZST_HIGHLY_SENSITIVE','UNKNOWN'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_zcases_status ON zst_cases(status, archived_at)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_zcases_wake   ON zst_cases(next_wake_at) WHERE next_wake_at IS NOT NULL`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_zcases_workspace ON zst_cases(workspace, status)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_zcases_product ON zst_cases(product_id)`)
+
+  // ── zst_case_events (append-only audit log; same shape as personal) ──
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_case_events (
+      event_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+      case_id         TEXT NOT NULL REFERENCES zst_cases(case_id),
+      case_version    INTEGER NOT NULL,
+      actor           TEXT NOT NULL,
+      source_system   TEXT,
+      source_reference TEXT,
+      event_type      TEXT NOT NULL,
+      previous_status TEXT,
+      new_status      TEXT,
+      reason          TEXT,
+      payload         TEXT,
+      correlation_id  TEXT,
+      created_at      INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_zevents_case ON zst_case_events(case_id, created_at)`)
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS zevents_no_update BEFORE UPDATE ON zst_case_events
+      BEGIN SELECT RAISE(ABORT,'zst_case_events is append-only'); END
+  `)
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS zevents_no_delete BEFORE DELETE ON zst_case_events
+      BEGIN SELECT RAISE(ABORT,'zst_case_events is append-only'); END
+  `)
+
+  // ── zst_case_claims (fencing token; UNIQUE atomic claim) ─────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_case_claims (
+      claim_key        TEXT NOT NULL,
+      owner_run_id     TEXT NOT NULL,
+      claim_fence      INTEGER NOT NULL DEFAULT 1,
+      claimed_at       INTEGER NOT NULL,
+      claim_expires_at INTEGER NOT NULL,
+      UNIQUE(claim_key)
+    )
+  `)
 }
