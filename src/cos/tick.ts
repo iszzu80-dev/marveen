@@ -18,13 +18,16 @@ import type Database from 'better-sqlite3'
 import { reconcileOutbound, outboundNeedingHuman, dueCases, dueFollowUps } from './scheduler.js'
 import { executeAction, type OutboundAdapter } from './executor.js'
 import { dueRadarChecks, markNotified } from './radar.js'
-import { runRentalRadarCheck } from './radar-runner.js'
+import { runRentalRadarCheck, runProductRadarCheck } from './radar-runner.js'
+import type { ShoppingAdapter } from './shopping-adapter.js'
 import type { RentalAdapter } from './rental-adapter.js'
 
 export interface CosTickDeps {
   /** Outbound adapters keyed by action_type (e.g. { EMAIL_SEND: gmailAdapter }). */
   outboundAdapters?: Record<string, OutboundAdapter>
   rentalAdapter?: RentalAdapter
+  /** Price source for PRODUCT radar items (personal BUY-*, ZST procurement). */
+  shoppingAdapter?: ShoppingAdapter
 }
 
 export interface CosTickResult {
@@ -60,10 +63,15 @@ export async function cosTick(db: Database.Database, deps: CosTickDeps, now: num
   const radarHits: string[] = []
   let radarChecked = 0
   for (const item of dueRadarChecks(db, now)) {
-    if (item.kind !== 'RENTAL' || !deps.rentalAdapter) continue
+    // Dispatch by kind to the matching adapter; skip if no adapter for this kind.
+    const canRental = item.kind === 'RENTAL' && deps.rentalAdapter
+    const canProduct = item.kind === 'PRODUCT' && deps.shoppingAdapter
+    if (!canRental && !canProduct) continue
     radarChecked++
     try {
-      const res = await runRentalRadarCheck(db, item, deps.rentalAdapter, now)
+      const res = canRental
+        ? await runRentalRadarCheck(db, item, deps.rentalAdapter!, now)
+        : await runProductRadarCheck(db, item, deps.shoppingAdapter!, now)
       // P1.6: only surface a HIT the owner has not already heard about (new/
       // different offer, or a significant further drop). markNotified records
       // what we alerted so an unchanged offer never re-pings next cycle.
