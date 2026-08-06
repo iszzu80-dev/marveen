@@ -14,6 +14,7 @@ import {
   hasFleetOauthToken,
   FLEET_OAUTH_TOKEN_PATH,
 } from './agent-process.js'
+import { withSessionSendLock } from './session-send-lock.js'
 import { readClaudeCodeOauthJson } from './claude-credentials.js'
 import { getDb } from '../db.js'
 import { createDispatchSafe, recordOutcomeSafe } from '../costops/dispatch.js'
@@ -666,7 +667,6 @@ async function runWorkerAttempt(ctx: WorkerCtx, message: string, timeoutMs: numb
   const donePath = join(ctx.scratchDir, `${reqId}.done`)
   for (const p of [outPath, donePath]) { try { rmSync(p, { force: true }) } catch { /* none */ } }
 
-  clearWorkerContext(ctx)
   // P2-A: mint a worker-source dispatch_id and thread it to the funnel.
   // Best-effort: a measurement failure never blocks the worker send.
   //
@@ -691,7 +691,20 @@ async function runWorkerAttempt(ctx: WorkerCtx, message: string, timeoutMs: numb
       configDir: ctx.configDir,
     }),
   })
-  await sendPromptToSession(ctx.session, buildWorkerPrompt(message, outPath, donePath), null, { dispatchId })
+  // PANEWRITERS805: /clear + prompt-send is ONE atomic delivery. Unlocked, the
+  // /clear could eat another writer's in-flight text, and a writer slipping in
+  // between the clear and our send would land its text into the freshly
+  // cleared context ahead of ours. Deliver mode (not recover): a dispatch must
+  // deliver; on a wedged holder we fail open past the budget, logged. The
+  // dispatchId (P2-A) rides through so the worker delivery still gets its
+  // measurement receipt inside the lane.
+  const sendRes = await withSessionSendLock(ctx.session, null, 'deliver', async () => {
+    clearWorkerContext(ctx)
+    await sendPromptToSession(ctx.session, buildWorkerPrompt(message, outPath, donePath), null, { lockMode: 'held', dispatchId })
+  })
+  if (sendRes.failedOpen) {
+    logger.warn({ session: ctx.session, reqId }, 'agent-worker: dispatch ran without the send lane (fail-open past wait budget)')
+  }
 
   const start = Date.now()
   try {
