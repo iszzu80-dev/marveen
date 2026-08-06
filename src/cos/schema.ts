@@ -699,4 +699,391 @@ export function initZstSchema(db: Database.Database): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_zeproc_case ON zst_email_processing(case_id)`)
+
+  initZstFinanceSchema(db)      // Slice 2
+  initZstContractsSchema(db)    // Slice 3
+  initZstCommercialSchema(db)   // Slice 4
+  initZstProductLabSchema(db)   // Slice 5
+}
+
+// ── ZST Slice 2 — Finance (invoices, accounting packages, bank reconciliation) ──
+// All read-only / local: the data model + duplicate detection + read-only bank
+// match suggestions. NO payment initiation, NO bank write (spec §16.4/§18.1);
+// the accounting-package SEND is the write-executor half (write-scope gated).
+export function initZstFinanceSchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_invoices (
+      invoice_id           TEXT PRIMARY KEY,
+      case_id              TEXT REFERENCES zst_cases(case_id),
+      invoice_type         TEXT NOT NULL DEFAULT 'INCOMING',
+      supplier_id          TEXT,
+      customer_id          TEXT,
+      invoice_number       TEXT,
+      issue_date           TEXT,
+      performance_date     TEXT,
+      due_date             TEXT,
+      currency             TEXT NOT NULL DEFAULT 'HUF',
+      net_amount           INTEGER,
+      vat_amount           INTEGER,
+      gross_amount         INTEGER,
+      payment_method       TEXT,
+      payment_status       TEXT NOT NULL DEFAULT 'UNPAID',
+      bank_transaction_id  TEXT,
+      document_id          TEXT,
+      product_id           TEXT,
+      cost_category        TEXT,
+      contract_id          TEXT,
+      accounting_period    TEXT,
+      accounting_package_id TEXT,
+      validation_status    TEXT NOT NULL DEFAULT 'UNVALIDATED',
+      duplicate_hash       TEXT NOT NULL,
+      version              INTEGER NOT NULL DEFAULT 1,
+      notes                TEXT,
+      created_at           INTEGER NOT NULL,
+      updated_at           INTEGER NOT NULL,
+      -- AT-ZF02: a paid status must carry evidence (a bank_transaction_id).
+      CHECK (payment_status IN ('UNPAID','PARTIAL','PAID','DISPUTED','CANCELLED')),
+      CHECK (payment_status <> 'PAID' OR bank_transaction_id IS NOT NULL),
+      UNIQUE(supplier_id, invoice_number, duplicate_hash)
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_zinv_case ON zst_invoices(case_id)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_zinv_period ON zst_invoices(accounting_period)`)
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_accounting_packages (
+      package_id                TEXT PRIMARY KEY,
+      period                    TEXT NOT NULL,
+      status                    TEXT NOT NULL DEFAULT 'OPEN',
+      version                   INTEGER NOT NULL DEFAULT 1,
+      incoming_invoice_count    INTEGER NOT NULL DEFAULT 0,
+      outgoing_invoice_count    INTEGER NOT NULL DEFAULT 0,
+      bank_statement_count      INTEGER NOT NULL DEFAULT 0,
+      missing_document_count    INTEGER NOT NULL DEFAULT 0,
+      unmatched_transaction_count INTEGER NOT NULL DEFAULT 0,
+      validation_error_count    INTEGER NOT NULL DEFAULT 0,
+      drive_folder_id           TEXT,
+      accountant_contact_id     TEXT,
+      draft_id                  TEXT,
+      sent_message_id           TEXT,
+      questions_open            INTEGER NOT NULL DEFAULT 0,
+      created_at                INTEGER NOT NULL,
+      completed_at              INTEGER,
+      UNIQUE(period),
+      CHECK (status IN ('OPEN','COLLECTING','VALIDATING','REVIEW','DRAFTED','SENT','WAITING_ACCOUNTANT','COMPLETED','CANCELLED'))
+    )
+  `)
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_bank_transactions (
+      bank_transaction_id  TEXT PRIMARY KEY,
+      account_id           TEXT,
+      statement_id         TEXT,
+      booking_date         TEXT,
+      value_date           TEXT,
+      counterparty         TEXT,
+      description          TEXT,
+      reference            TEXT,
+      amount               INTEGER,
+      currency             TEXT NOT NULL DEFAULT 'HUF',
+      direction            TEXT,
+      matched_invoice_id   TEXT,
+      matched_case_id      TEXT REFERENCES zst_cases(case_id),
+      matched_product_id   TEXT,
+      match_confidence     REAL,
+      reconciliation_status TEXT NOT NULL DEFAULT 'UNMATCHED',
+      category             TEXT,
+      version              INTEGER NOT NULL DEFAULT 1,
+      notes                TEXT,
+      created_at           INTEGER NOT NULL,
+      updated_at           INTEGER NOT NULL,
+      CHECK (reconciliation_status IN ('UNMATCHED','MATCH_SUGGESTED','MATCHED_VERIFIED','PARTIAL_MATCH','DUPLICATE_SUSPECTED','MISSING_INVOICE','NON_INVOICE_TRANSACTION','REVIEW_REQUIRED'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_zbank_recon ON zst_bank_transactions(reconciliation_status)`)
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_reconciliation_items (
+      recon_id            TEXT PRIMARY KEY,
+      period              TEXT,
+      bank_transaction_id TEXT REFERENCES zst_bank_transactions(bank_transaction_id),
+      invoice_id          TEXT REFERENCES zst_invoices(invoice_id),
+      status              TEXT NOT NULL DEFAULT 'SUGGESTED',
+      confidence          REAL,
+      note                TEXT,
+      created_at          INTEGER NOT NULL,
+      CHECK (status IN ('SUGGESTED','CONFIRMED','REJECTED'))
+    )
+  `)
+}
+
+// ── ZST Slice 3 — Contracts, vendors, licenses, procurement radar ─────────────
+export function initZstContractsSchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_contracts (
+      contract_id            TEXT PRIMARY KEY,
+      case_id                TEXT REFERENCES zst_cases(case_id),
+      title                  TEXT NOT NULL,
+      contract_type          TEXT,
+      counterparty_id        TEXT,
+      status                 TEXT NOT NULL DEFAULT 'DRAFT',
+      version                INTEGER NOT NULL DEFAULT 1,
+      effective_date         TEXT,
+      expiry_date            TEXT,
+      renewal_type           TEXT,
+      notice_period_days     INTEGER,
+      termination_deadline   TEXT,
+      financial_commitment   INTEGER,
+      currency               TEXT,
+      payment_frequency      TEXT,
+      product_id             TEXT,
+      vendor_id              TEXT,
+      document_id            TEXT,
+      document_hash          TEXT,
+      legal_review_status    TEXT,
+      data_processing_relevance TEXT,
+      owner                  TEXT,
+      next_action            TEXT,
+      created_at             INTEGER NOT NULL,
+      updated_at             INTEGER NOT NULL,
+      CHECK (status IN ('DRAFT','UNDER_REVIEW','AWAITING_COUNTERPARTY','AWAITING_APPROVAL','SIGNED','ACTIVE','RENEWAL_DUE','TERMINATION_WINDOW','EXPIRED','TERMINATED','ARCHIVED'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_zcontract_status ON zst_contracts(status)`)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_obligations (
+      obligation_id     TEXT PRIMARY KEY,
+      contract_id       TEXT REFERENCES zst_contracts(contract_id),
+      description       TEXT,
+      obligation_type   TEXT,
+      responsible_party TEXT,
+      due_date          TEXT,
+      recurrence        TEXT,
+      financial_amount  INTEGER,
+      evidence_required INTEGER NOT NULL DEFAULT 0,
+      status            TEXT NOT NULL DEFAULT 'OPEN',
+      follow_up_at      INTEGER,
+      created_at        INTEGER NOT NULL
+    )
+  `)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_vendors (
+      vendor_id           TEXT PRIMARY KEY,
+      name                TEXT NOT NULL,
+      category            TEXT,
+      contact_ids         TEXT,
+      status              TEXT NOT NULL DEFAULT 'ACTIVE',
+      products_supported  TEXT,
+      monthly_cost        INTEGER,
+      annual_cost         INTEGER,
+      currency            TEXT,
+      service_criticality TEXT,
+      data_access_level   TEXT,
+      security_review     TEXT,
+      main_risk           TEXT,
+      alternative_vendor  TEXT,
+      version             INTEGER NOT NULL DEFAULT 1,
+      notes               TEXT,
+      created_at          INTEGER NOT NULL,
+      updated_at          INTEGER NOT NULL
+    )
+  `)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_licenses (
+      license_id            TEXT PRIMARY KEY,
+      vendor_id             TEXT REFERENCES zst_vendors(vendor_id),
+      product_name          TEXT,
+      plan                  TEXT,
+      quantity              INTEGER,
+      users                 INTEGER,
+      product_id            TEXT,
+      start_date            TEXT,
+      renewal_date          TEXT,
+      billing_cycle         TEXT,
+      price                 INTEGER,
+      currency              TEXT,
+      auto_renew            INTEGER NOT NULL DEFAULT 0,
+      notice_period         TEXT,
+      owner                 TEXT,
+      usage_status          TEXT,
+      business_value        TEXT,
+      cancellation_candidate INTEGER NOT NULL DEFAULT 0,
+      contract_id           TEXT REFERENCES zst_contracts(contract_id),
+      version               INTEGER NOT NULL DEFAULT 1,
+      created_at            INTEGER NOT NULL,
+      updated_at            INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_zlic_renewal ON zst_licenses(renewal_date)`)
+  // Procurement radar (spec §21) — data model. The offer-fetching adapter is
+  // deferred (same as the personal product radar): items land ELHALASZTVA/AKTIV
+  // and the offers table is populated when a real procurement adapter is wired.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_procurement_radar_items (
+      radar_id               TEXT PRIMARY KEY,
+      title                  TEXT NOT NULL,
+      category               TEXT,
+      product_id             TEXT,
+      requirements_text      TEXT,
+      target_price           INTEGER,
+      hard_price_cap         INTEGER,
+      currency               TEXT,
+      quantity               INTEGER,
+      license_or_service_model TEXT,
+      acceptable_vendor_scope TEXT,
+      preferred_vendors      TEXT,
+      excluded_vendors       TEXT,
+      vendor_country         TEXT,
+      contract_term_limit    TEXT,
+      auto_renew_allowed     INTEGER NOT NULL DEFAULT 0,
+      resume_at              INTEGER,
+      status                 TEXT NOT NULL DEFAULT 'ELHALASZTVA',
+      best_offer_id          TEXT,
+      linked_procurement_case_id TEXT REFERENCES zst_cases(case_id),
+      selected_vendor        TEXT,
+      last_notified_offer_id TEXT,
+      last_notified_price    INTEGER,
+      last_notified_at       INTEGER,
+      created_at             INTEGER NOT NULL,
+      updated_at             INTEGER NOT NULL,
+      CHECK (status IN ('AKTIV_KERESES','ELHALASZTVA','MEGRENDELVE_VAGY_LESZERZODVE','LEZARVA'))
+    )
+  `)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_procurement_radar_offers (
+      offer_id              TEXT PRIMARY KEY,
+      radar_id              TEXT NOT NULL REFERENCES zst_procurement_radar_items(radar_id),
+      offer_idempotency_key TEXT NOT NULL,
+      vendor                TEXT,
+      source_url            TEXT,
+      original_currency     TEXT,
+      original_final_price  INTEGER,
+      comparison_currency   TEXT,
+      fx_rate               REAL,
+      fx_rate_source        TEXT,
+      fx_rate_timestamp     INTEGER,
+      converted_final_price INTEGER,
+      delivery_time         TEXT,
+      warranty              TEXT,
+      sla                   TEXT,
+      contract_term         TEXT,
+      auto_renew            INTEGER,
+      captured_at           INTEGER NOT NULL,
+      meets_requirements    INTEGER,
+      score                 REAL,
+      rejection_reason      TEXT,
+      UNIQUE(radar_id, offer_idempotency_key)
+    )
+  `)
+}
+
+// ── ZST Slice 4 — Partners and commercial opportunities ───────────────────────
+export function initZstCommercialSchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_partners (
+      partner_id         TEXT PRIMARY KEY,
+      name               TEXT NOT NULL,
+      organization       TEXT,
+      contact_ids        TEXT,
+      relationship_type  TEXT,
+      products           TEXT,
+      status             TEXT NOT NULL DEFAULT 'ACTIVE',
+      last_contact_at    INTEGER,
+      next_follow_up_at  INTEGER,
+      commercial_relevance TEXT,
+      contract_ids       TEXT,
+      opportunity_ids    TEXT,
+      version            INTEGER NOT NULL DEFAULT 1,
+      notes              TEXT,
+      created_at         INTEGER NOT NULL,
+      updated_at         INTEGER NOT NULL
+    )
+  `)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_opportunities (
+      opportunity_id     TEXT PRIMARY KEY,
+      case_id            TEXT REFERENCES zst_cases(case_id),
+      product_id         TEXT,
+      partner_id         TEXT REFERENCES zst_partners(partner_id),
+      title              TEXT NOT NULL,
+      opportunity_type   TEXT,
+      status             TEXT NOT NULL DEFAULT 'NEW_INQUIRY',
+      version            INTEGER NOT NULL DEFAULT 1,
+      estimated_value    INTEGER,
+      currency           TEXT,
+      probability        REAL,
+      next_action        TEXT,
+      next_action_owner  TEXT,
+      decision_needed    INTEGER NOT NULL DEFAULT 0,
+      commercial_terms   TEXT,
+      data_sensitivity   TEXT,
+      created_at         INTEGER NOT NULL,
+      updated_at         INTEGER NOT NULL,
+      CHECK (status IN ('NEW_INQUIRY','QUALIFICATION_REQUIRED','QUALIFIED','RESPONSE_DRAFT','MEETING_PROPOSED','DISCOVERY','PILOT_DISCUSSION','OFFER_REQUIRED','AWAITING_ZST_APPROVAL','OFFER_SENT','NEGOTIATION','WON','LOST','ON_HOLD','CLOSED'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_zopp_status ON zst_opportunities(status)`)
+}
+
+// ── ZST Slice 5 — Product Lab gateway + product portfolio ─────────────────────
+export function initZstProductLabSchema(db: Database.Database): void {
+  // Data-driven product portfolio (NOT a hardcoded enum — the list grows; add a
+  // product = one INSERT). Seed rows MARV/QQ/ZSIB/WEB/SHARED are inserted by the
+  // domain layer, not baked into the schema.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_products (
+      product_id          TEXT PRIMARY KEY,
+      product_name        TEXT NOT NULL,
+      business_owner      TEXT,
+      development_status  TEXT,
+      strategic_goal      TEXT,
+      target_market       TEXT,
+      current_release     TEXT,
+      next_milestone      TEXT,
+      milestone_date      TEXT,
+      monthly_cost        INTEGER,
+      annual_cost         INTEGER,
+      external_suppliers  TEXT,
+      main_risk           TEXT,
+      decision_needed     INTEGER NOT NULL DEFAULT 0,
+      product_lab_url     TEXT,
+      github_url          TEXT,
+      drive_folder_id     TEXT,
+      version             INTEGER NOT NULL DEFAULT 1,
+      updated_at          INTEGER NOT NULL
+    )
+  `)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_product_milestones (
+      milestone_id   TEXT PRIMARY KEY,
+      product_id     TEXT NOT NULL REFERENCES zst_products(product_id),
+      title          TEXT NOT NULL,
+      status         TEXT,
+      due_date       TEXT,
+      blocker        TEXT,
+      created_at     INTEGER NOT NULL,
+      updated_at     INTEGER NOT NULL
+    )
+  `)
+  // Product Lab <-> ZST escalation bridge (spec §23).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_product_escalations (
+      escalation_id     TEXT PRIMARY KEY,
+      source_workspace  TEXT NOT NULL,
+      target_workspace  TEXT NOT NULL,
+      zst_case_id       TEXT REFERENCES zst_cases(case_id),
+      product_id        TEXT,
+      request_type      TEXT,
+      summary           TEXT,
+      required_decision TEXT,
+      required_output   TEXT,
+      due_at            INTEGER,
+      status            TEXT NOT NULL DEFAULT 'OPEN',
+      source_references TEXT,
+      result_reference  TEXT,
+      created_at        INTEGER NOT NULL,
+      completed_at      INTEGER,
+      CHECK (status IN ('OPEN','ACKNOWLEDGED','IN_PROGRESS','WAITING_SOURCE','RESULT_READY','ACCEPTED','REJECTED','CANCELLED'))
+    )
+  `)
 }
