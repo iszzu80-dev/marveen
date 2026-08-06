@@ -94,3 +94,79 @@ describe('outbound_ledger P1.1 migration', () => {
     expect(db.prepare('SELECT count(*) c FROM outbound_ledger').get()).toEqual({ c: 1 })
   })
 })
+
+// P1.2 / P1.5 / P1.6 existing-db column migrations. REGRESSION for the go-live
+// crash "no such column: content_hash": the content_hash index was created
+// before ensureColumns added the column, which only fails on a PRE-existing
+// table (a fresh CREATE TABLE already has the column). Every :memory: test uses a
+// fresh db, so none caught it — this one recreates the OLD tables first.
+
+const OLD_EMAIL_PROCESSING = `
+  CREATE TABLE email_processing (
+    gmail_account_id TEXT NOT NULL, message_id TEXT NOT NULL, thread_id TEXT,
+    batch_id TEXT NOT NULL REFERENCES email_processing_batches(batch_id),
+    status TEXT NOT NULL DEFAULT 'DISCOVERED', case_id TEXT REFERENCES personal_cases(case_id),
+    attempt INTEGER NOT NULL DEFAULT 0, last_error TEXT, quarantine_reason TEXT,
+    created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+    UNIQUE(gmail_account_id, message_id),
+    CHECK (status IN ('DISCOVERED','CLAIMED','LOCAL_APPLIED','SOURCE_COMMITTED',
+      'RECOVERY_REQUIRED','EXCLUDED','DUPLICATE','QUARANTINED'))
+  )`
+const OLD_RADAR_ITEMS = `
+  CREATE TABLE radar_items (
+    radar_id TEXT PRIMARY KEY, case_id TEXT REFERENCES personal_cases(case_id),
+    kind TEXT NOT NULL, label TEXT NOT NULL, query TEXT, target_price INTEGER,
+    max_price INTEGER, currency TEXT, status TEXT NOT NULL DEFAULT 'ACTIVE',
+    check_interval_sec INTEGER NOT NULL DEFAULT 86400, next_check_at INTEGER,
+    best_seen_price INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+    CHECK (status IN ('ACTIVE','PAUSED','HIT','CLOSED'))
+  )`
+const OLD_RADAR_OBS = `
+  CREATE TABLE radar_observations (
+    obs_id INTEGER PRIMARY KEY AUTOINCREMENT, radar_id TEXT NOT NULL REFERENCES radar_items(radar_id),
+    observed_at INTEGER NOT NULL, best_price INTEGER, currency TEXT, offer_count INTEGER, offer_ref TEXT
+  )`
+
+describe('existing-db column migrations (P1.2/P1.5/P1.6 regression)', () => {
+  function withOldTables(): Database.Database {
+    const db = new Database(':memory:')
+    db.pragma('foreign_keys = ON')
+    initCosSchema(db) // full current schema (gives us the batches table etc.)
+    createCase(db, { caseId: 'c1', title: 'T', caseType: 'X' }, 900)
+    // replace the P1-era tables with their PRE-migration shapes + seed rows
+    db.exec('DROP TABLE radar_observations')
+    db.exec('DROP TABLE radar_items')
+    db.exec('DROP TABLE email_processing')
+    db.exec(OLD_EMAIL_PROCESSING)
+    db.exec(OLD_RADAR_ITEMS)
+    db.exec(OLD_RADAR_OBS)
+    db.prepare(`INSERT INTO email_processing_batches (batch_id, gmail_account_id, cursor_after, status, created_at, updated_at) VALUES ('b1','acct','c','OPEN',900,900)`).run()
+    db.prepare(`INSERT INTO email_processing (gmail_account_id, message_id, batch_id, status, created_at, updated_at) VALUES ('acct','m1','b1','DISCOVERED',900,900)`).run()
+    db.prepare(`INSERT INTO radar_items (radar_id, kind, label, status, check_interval_sec, created_at, updated_at) VALUES ('r1','RENTAL','x','ACTIVE',3600,900,900)`).run()
+    db.prepare(`INSERT INTO radar_observations (radar_id, observed_at, best_price) VALUES ('r1',900,50000)`).run()
+    return db
+  }
+
+  it('re-running initCosSchema on the OLD tables does NOT throw and adds the columns + index', () => {
+    const db = withOldTables()
+    expect(() => initCosSchema(db)).not.toThrow() // <-- reproduced the go-live crash before the fix
+    const cols = (t: string) => new Set((db.prepare(`PRAGMA table_info(${t})`).all() as Array<{ name: string }>).map(c => c.name))
+    // P1.2 email_processing columns + the index that referenced content_hash
+    expect(cols('email_processing').has('content_hash')).toBe(true)
+    expect(cols('email_processing').has('self_event_count')).toBe(true)
+    expect(db.prepare(`SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_eproc_chash'`).get()).toBeTruthy()
+    // P1.5/P1.6 radar columns
+    expect(cols('radar_items').has('last_notified_offer_id')).toBe(true)
+    expect(cols('radar_observations').has('fx_rate')).toBe(true)
+    expect(cols('radar_observations').has('offer_id')).toBe(true)
+    // seeded rows preserved
+    expect((db.prepare(`SELECT COUNT(*) c FROM email_processing`).get() as any).c).toBe(1)
+    expect((db.prepare(`SELECT COUNT(*) c FROM radar_observations`).get() as any).c).toBe(1)
+  })
+
+  it('is idempotent on a second run (columns already present)', () => {
+    const db = withOldTables()
+    initCosSchema(db)
+    expect(() => initCosSchema(db)).not.toThrow()
+  })
+})
