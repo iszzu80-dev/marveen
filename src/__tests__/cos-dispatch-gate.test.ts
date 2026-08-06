@@ -38,6 +38,16 @@ describe('COS dispatch gate', () => {
     expect(d.sensitivityTier).toBe('PERSONAL')
   })
 
+  it('#5a: recommends the sensitivity-appropriate profile (capability strategy default)', () => {
+    seedGreen()
+    // PERSONAL content, most-capable allowed profile
+    expect(evaluateDispatch(getDb(), REQ).recommendedProfile).toBe('premium_reasoning')
+    // HIGHLY_SENSITIVE content → only premium is allowed → that is the recommendation
+    const hs = evaluateDispatch(getDb(), { ...REQ, content: 'a kártyaszám 4111 1111 1111 1111', targetProfile: 'routine_lowcost' })
+    expect(hs.recommendedProfile).toBe('premium_reasoning') // even though the request is vetoed, it tells you what to use
+    expect(hs.allowed).toBe(false)
+  })
+
   it('connector layer vetoes: READ_ONLY connector blocks a write', () => {
     const db = seedGreen()
     setMode(db, 'gmail', 'READ_ONLY', 1100)

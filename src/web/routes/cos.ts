@@ -11,6 +11,7 @@ import { json, readBody } from '../http-helpers.js'
 import { getDb } from '../../db.js'
 import { listActiveCases, listTodayCases } from '../../cos/case-store.js'
 import { ingestTriagedEmail, type TriagedEmail } from '../../cos/triage-bridge.js'
+import { validateSkillMd, validateSkillPermissions } from '../../cos/skill-permission-validator.js'
 import { APP_TZ } from '../../config.js'
 import type { RouteContext } from './types.js'
 
@@ -46,6 +47,19 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'accountId, messageId, subject required' }, 400); return true
     }
     const result = ingestTriagedEmail(getDb(), input, Math.floor(Date.now() / 1000))
+    json(res, result)
+    return true
+  }
+
+  // #5c: validate a skill's declared permissions before it is written/run. Accepts
+  // either a raw SKILL.md (`{skillMd}`) or a parsed decl (`{permissions, sensitiveApproved}`).
+  if (path === '/api/cos/skill-validate' && method === 'POST') {
+    let input: { skillMd?: string; permissions?: string[]; sensitiveApproved?: boolean }
+    try { input = JSON.parse((await readBody(req)).toString()) }
+    catch { json(res, { error: 'invalid JSON' }, 400); return true }
+    const result = typeof input?.skillMd === 'string'
+      ? validateSkillMd(input.skillMd)
+      : validateSkillPermissions({ permissions: input?.permissions, sensitiveApproved: input?.sensitiveApproved })
     json(res, result)
     return true
   }

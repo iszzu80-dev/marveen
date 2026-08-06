@@ -17,6 +17,7 @@ import type Database from 'better-sqlite3'
 import { isUsable } from './connector-health.js'
 import { effectiveSensitivity, isProfileAllowedForSensitivity } from './sensitivity.js'
 import { authorizeSend } from './campaigns.js'
+import { routeModelForSensitivity, type RoutingStrategy } from './model-routing.js'
 import type { CaseSensitivity } from './schema.js'
 
 export interface DispatchRequest {
@@ -29,6 +30,8 @@ export interface DispatchRequest {
   content: string
   /** The model profile that would process/produce this send. */
   targetProfile: string
+  /** How to pick the recommended profile for the tier (default 'capability'). */
+  routingStrategy?: RoutingStrategy
   campaignId: string
   templateHash: string
   renderedPayloadHash: string
@@ -40,6 +43,11 @@ export interface DispatchDecision {
   reasons: string[]
   /** The effective sensitivity tier the gate computed. */
   sensitivityTier: CaseSensitivity
+  /** The sensitivity-appropriate model profile for this tier (#5a dynamic
+   *  routing), null if none is allowed. When the target profile is vetoed, this
+   *  is the profile the caller SHOULD use instead. Scoped to the COS gate — it
+   *  does not change fleet-wide model resolution. */
+  recommendedProfile: string | null
 }
 
 /** Evaluate the full send gate. Fail-closed: every layer must pass. */
@@ -60,5 +68,6 @@ export function evaluateDispatch(db: Database.Database, req: DispatchRequest): D
   })
   if (!auth.authorized) reasons.push(`campaign not authorized: ${auth.reason}`)
 
-  return { allowed: reasons.length === 0, reasons, sensitivityTier: tier }
+  const routed = routeModelForSensitivity(tier, { strategy: req.routingStrategy ?? 'capability' })
+  return { allowed: reasons.length === 0, reasons, sensitivityTier: tier, recommendedProfile: routed.profile }
 }
