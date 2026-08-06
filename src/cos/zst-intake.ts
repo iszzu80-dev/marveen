@@ -14,6 +14,9 @@ import type Database from 'better-sqlite3'
 import { createZstCase, type ZstWorkspace } from './zst-case-store.js'
 import { effectiveZstSensitivity, coerceZstSensitivity } from './zst-sensitivity.js'
 import { IDEMPOTENCY_HEADER } from './adapters/gmail-send.js'
+import { ingestZstInvoiceEmail } from './zst-invoice-extract.js'
+
+const INVOICE_CASE_TYPES = new Set(['INVOICE_INCOMING', 'INVOICE_OUTGOING'])
 
 export interface ZstTriagedEmail {
   accountId: string
@@ -120,6 +123,14 @@ export function ingestTriagedZstEmail(db: Database.Database, input: ZstTriagedEm
     if (keys.length) {
       db.prepare(`UPDATE zst_cases SET ${keys.map((k) => `${k}=@${k}`).join(', ')} WHERE case_id=@id`)
         .run({ ...patch, id: caseId })
+    }
+    // If this is an invoice, run the extractor so the case is backed by a real
+    // zst_invoices row (Slice 2). Best-effort: extraction failure never blocks
+    // the case creation (the invoice can be re-extracted later).
+    if (INVOICE_CASE_TYPES.has(input.caseType ?? '')) {
+      try {
+        ingestZstInvoiceEmail(db, { caseId, from: input.from, subject: input.subject, body: input.snippet }, now)
+      } catch { /* extraction is best-effort; the case still stands */ }
     }
     recordLedger(db, input, 'LOCAL_APPLIED', caseId, now)
     return { outcome: 'CASE_CREATED', caseId, messageStatus: 'LOCAL_APPLIED', sensitivity: tier }
