@@ -470,4 +470,94 @@ export function initCosSchema(db: Database.Database): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_attach_case ON case_attachments(case_id)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_attach_age ON case_attachments(created_at) WHERE content IS NOT NULL`)
+
+  // ── personal_contacts (migration import target) ──────────────────────
+  // People/vendors/partners referenced by cases. PII (email/phone) -> defaults
+  // to SENSITIVE_PERSONAL. Optional case_id links a contact to the case it was
+  // discovered on; a contact may serve several cases so this is a soft link.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS personal_contacts (
+      contact_id    TEXT PRIMARY KEY,
+      case_id       TEXT REFERENCES personal_cases(case_id),
+      name          TEXT NOT NULL,
+      company       TEXT,
+      role          TEXT,
+      email         TEXT,
+      phone         TEXT,
+      domain        TEXT,
+      reliability   TEXT,
+      last_contact  TEXT,
+      last_work     TEXT,
+      last_price    TEXT,
+      notes         TEXT,
+      sensitivity   TEXT NOT NULL DEFAULT 'SENSITIVE_PERSONAL',
+      source_system TEXT,
+      created_at    INTEGER NOT NULL,
+      updated_at    INTEGER NOT NULL,
+      CHECK (sensitivity IN ('PUBLIC','PERSONAL','SENSITIVE_PERSONAL','HIGHLY_SENSITIVE'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_contact_case ON personal_contacts(case_id)`)
+
+  // ── case_documents (migration import target: Drive POINTERS, no bytes) ─
+  // A reference to a document/attachment that physically lives in Google Drive
+  // or a Gmail message. Deliberately holds NO content bytes and NO checksum
+  // (unlike case_attachments, which stores downloaded email bytes): importing
+  // pointers must not copy the files. `doc_kind` = 'DOCUMENT' | 'ATTACHMENT'.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS case_documents (
+      document_id           TEXT PRIMARY KEY,
+      case_id               TEXT REFERENCES personal_cases(case_id),
+      doc_kind              TEXT NOT NULL DEFAULT 'DOCUMENT',
+      document_type         TEXT,
+      title                 TEXT,
+      filename              TEXT,
+      mime_type             TEXT,
+      drive_url             TEXT,
+      drive_file_id         TEXT,
+      email_message_id      TEXT,
+      issuer                TEXT,
+      amount                TEXT,
+      due_date              TEXT,
+      received_at           TEXT,
+      is_current            INTEGER,
+      external_share_allowed INTEGER,
+      sensitivity           TEXT NOT NULL DEFAULT 'SENSITIVE_PERSONAL',
+      source_system         TEXT,
+      created_at            INTEGER NOT NULL,
+      updated_at            INTEGER NOT NULL,
+      CHECK (sensitivity IN ('PUBLIC','PERSONAL','SENSITIVE_PERSONAL','HIGHLY_SENSITIVE'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_doc_case ON case_documents(case_id)`)
+
+  // ── personal_invoices (migration import target) ──────────────────────
+  // Household/personal invoices (e.g. utility bills). Distinct from the
+  // CostOps business-invoice tracking (costops_invoices) — different domain.
+  // Amounts are stored as-shown minor-unit integers where parseable, else the
+  // raw text is preserved in *_shown for honesty.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS personal_invoices (
+      invoice_id       TEXT PRIMARY KEY,
+      case_id          TEXT REFERENCES personal_cases(case_id),
+      supplier         TEXT,
+      invoice_no       TEXT,
+      issue_date       TEXT,
+      due_date         TEXT,
+      current_charge   INTEGER,
+      late_fee         INTEGER,
+      total_shown      INTEGER,
+      overdue_shown    TEXT,
+      currency         TEXT,
+      status           TEXT,
+      service_address  TEXT,
+      payment_reference TEXT,
+      sensitivity      TEXT NOT NULL DEFAULT 'SENSITIVE_PERSONAL',
+      source_system    TEXT,
+      created_at       INTEGER NOT NULL,
+      updated_at       INTEGER NOT NULL,
+      CHECK (sensitivity IN ('PUBLIC','PERSONAL','SENSITIVE_PERSONAL','HIGHLY_SENSITIVE'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_invoice_case ON personal_invoices(case_id)`)
 }
