@@ -10,6 +10,7 @@
 import { json, readBody } from '../http-helpers.js'
 import { getDb } from '../../db.js'
 import { listActiveCases, listTodayCases } from '../../cos/case-store.js'
+import { listActiveZstCases, listTodayZstCases } from '../../cos/zst-case-store.js'
 import { ingestTriagedEmail, type TriagedEmail } from '../../cos/triage-bridge.js'
 import { validateSkillMd, validateSkillPermissions } from '../../cos/skill-permission-validator.js'
 import { APP_TZ } from '../../config.js'
@@ -73,6 +74,22 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
   if (path === '/api/cos/today' && method === 'GET') {
     const horizon = endOfTodaySec(new Date())
     const cases = listTodayCases(getDb(), horizon)
+    json(res, { cases, count: cases.length, horizon })
+    return true
+  }
+
+  // ZST Corporate Case Engine read views (Slice 0). Read-only, separate
+  // namespace (zst_cases) — mirrors the personal cases/today endpoints. Writes
+  // go through src/cos/zst-case-store.ts, never the dashboard.
+  if (path === '/api/cos/zst-cases' && method === 'GET') {
+    const cases = listActiveZstCases(getDb())
+    json(res, { cases, count: cases.length })
+    return true
+  }
+
+  if (path === '/api/cos/zst-today' && method === 'GET') {
+    const horizon = endOfTodaySec(new Date())
+    const cases = listTodayZstCases(getDb(), horizon)
     json(res, { cases, count: cases.length, horizon })
     return true
   }
