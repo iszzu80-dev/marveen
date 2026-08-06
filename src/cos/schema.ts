@@ -675,4 +675,28 @@ export function initZstSchema(db: Database.Database): void {
       UNIQUE(claim_key)
     )
   `)
+
+  // ── zst_email_processing (Slice 1 read-only ingest ledger) ───────────
+  // The per-(account,message) dedup ledger for turning ZST-mailbox emails into
+  // zst_cases. Deliberately MINIMAL and read-only: the terminal states here are
+  // LOCAL_APPLIED / EXCLUDED / DUPLICATE — there is NO SOURCE_COMMITTED, because
+  // that is the Gmail-label WRITE step which needs a write scope (deferred). The
+  // authoritative history-sync batch/checkpoint model (spec §12) lands with the
+  // write-capable Action Executor; here the heartbeat's own --mark file is the
+  // poll-level dedup and UNIQUE(account,message) is the case-level dedup. case_id
+  // FKs to zst_cases (NOT personal_cases — the reason this is a separate table).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS zst_email_processing (
+      gmail_account_id TEXT NOT NULL,
+      message_id       TEXT NOT NULL,
+      thread_id        TEXT,
+      case_id          TEXT REFERENCES zst_cases(case_id),
+      status           TEXT NOT NULL,
+      content_hash     TEXT,
+      created_at       INTEGER NOT NULL,
+      UNIQUE(gmail_account_id, message_id),
+      CHECK (status IN ('LOCAL_APPLIED','EXCLUDED','DUPLICATE','EXCLUDED_SELF_SEND'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_zeproc_case ON zst_email_processing(case_id)`)
 }

@@ -12,6 +12,7 @@ import { getDb } from '../../db.js'
 import { listActiveCases, listTodayCases } from '../../cos/case-store.js'
 import { listActiveZstCases, listTodayZstCases } from '../../cos/zst-case-store.js'
 import { ingestTriagedEmail, type TriagedEmail } from '../../cos/triage-bridge.js'
+import { ingestTriagedZstEmail, type ZstTriagedEmail } from '../../cos/zst-intake.js'
 import { validateSkillMd, validateSkillPermissions } from '../../cos/skill-permission-validator.js'
 import { APP_TZ } from '../../config.js'
 import type { RouteContext } from './types.js'
@@ -47,7 +48,13 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     if (!input?.accountId || !input?.messageId || !input?.subject) {
       json(res, { error: 'accountId, messageId, subject required' }, 400); return true
     }
-    const result = ingestTriagedEmail(getDb(), input, Math.floor(Date.now() / 1000))
+    // Route by account (connector identity = scope boundary): the ZST company
+    // mailbox becomes a zst_case; everything else a personal_case. The two
+    // namespaces never mix, at the source.
+    const now = Math.floor(Date.now() / 1000)
+    const result = input.accountId === 'zst'
+      ? ingestTriagedZstEmail(getDb(), input as unknown as ZstTriagedEmail, now)
+      : ingestTriagedEmail(getDb(), input, now)
     json(res, result)
     return true
   }
