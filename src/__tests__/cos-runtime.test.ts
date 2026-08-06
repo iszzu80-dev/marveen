@@ -3,7 +3,8 @@ import { initDatabase, getDb } from '../db.js'
 import { createCase } from '../cos/case-store.js'
 import { planAction } from '../cos/executor.js'
 import { createRadarItem } from '../cos/radar.js'
-import { runCosTickOnce, safeCosDeps } from '../cos/runtime.js'
+import { runCosTickOnce, safeCosDeps, registerCosConnectors } from '../cos/runtime.js'
+import { getHealth, setMode } from '../cos/connector-health.js'
 import type { RentalAdapter, RentalOffer, RentalSearchParams } from '../cos/rental-adapter.js'
 
 // COS autonomous runtime. Proves the SAFETY posture: safeCosDeps wires no
@@ -49,5 +50,17 @@ describe('COS autonomous runtime', () => {
     const deps = safeCosDeps()
     expect(deps.rentalAdapter).toBeTruthy()
     expect(deps.outboundAdapters).toBeUndefined() // no send capability
+  })
+
+  it('registerCosConnectors registers gmail READ_ONLY (send inert) + rental, idempotently', () => {
+    const db = getDb()
+    registerCosConnectors(db, NOW)
+    expect(getHealth(db, 'gmail')?.mode).toBe('READ_ONLY') // send stays inert by default
+    expect(getHealth(db, 'rental')?.mode).toBe('READ_ONLY')
+    expect(getHealth(db, 'rental')?.status).toBe('OK')
+    // a later READ_WRITE flip is NOT clobbered by re-registration (ON CONFLICT DO NOTHING)
+    setMode(db, 'gmail', 'READ_WRITE', NOW + 1)
+    registerCosConnectors(db, NOW + 2)
+    expect(getHealth(db, 'gmail')?.mode).toBe('READ_WRITE')
   })
 })

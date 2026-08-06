@@ -11,8 +11,21 @@ import { cosTick, type CosTickDeps, type CosTickResult } from './tick.js'
 import { DiscoverCarsAdapter } from './adapters/discovercars.js'
 import { alertRadarHit } from './radar-alert.js'
 import { alertOutboundRecovery } from './outbound-alert.js'
+import { registerConnector, recordSuccess } from './connector-health.js'
 import { getDb } from '../db.js'
 import { logger } from '../logger.js'
+
+/** Register the COS connectors in connector_health at boot so the Monitoring view
+ *  reflects them and the dispatch gate has a row to check. SAFE default: gmail is
+ *  READ_ONLY (send stays inert until deliberately flipped READ_WRITE); the rental
+ *  adapter is a working read-only price source. registerConnector is ON CONFLICT
+ *  DO NOTHING, so a later READ_WRITE flip is never clobbered by a restart. */
+export function registerCosConnectors(db = getDb(), now = Math.floor(Date.now() / 1000)): void {
+  registerConnector(db, 'gmail', 'email', 'READ_ONLY', now)
+  registerConnector(db, 'rental', 'shopping', 'READ_ONLY', now)
+  // the rental price source is live/working
+  try { recordSuccess(db, 'rental', now) } catch { /* row may not exist on a read-only db */ }
+}
 
 /** Interval between autonomous ticks (radar re-checks). */
 export const COS_TICK_INTERVAL_MS = 6 * 60 * 60 * 1000 // 6h
@@ -37,6 +50,7 @@ let timer: ReturnType<typeof setInterval> | undefined
  *  (avoids slowing startup); first tick after the interval. */
 export function startCosBackgroundTasks(): ReturnType<typeof setInterval> {
   if (timer) return timer
+  try { registerCosConnectors() } catch (err) { logger.error({ err }, 'COS connector registration failed') }
   timer = setInterval(() => {
     runCosTickOnce()
       .then((res) => {
