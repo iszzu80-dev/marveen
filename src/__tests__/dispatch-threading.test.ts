@@ -66,14 +66,14 @@ describe('P2-A origin (c) scheduler + (e) reinject', () => {
     expect(SCHEDULE).toMatch(/sendPromptToSession\(session, fullPrompt, host, \{ waitForIdle: !task\.forceSend, dispatchId \}\)/)
   })
   it('reuses the SAME dispatchId on a swallowed-Enter reinjection (not a new work-package)', () => {
-    expect(SCHEDULE).toMatch(/sendPromptToSession\(session, fullPrompt, host, \{ waitForIdle: false, dispatchId \}\)/)
+    expect(SCHEDULE).toMatch(/sendPromptToSession\(session, fullPrompt, host, \{ waitForIdle: false, lockMode: 'held', dispatchId \}\)/)
   })
 })
 
 describe('P2-A origin (d) worker', () => {
   it('creates a worker-source dispatch and threads it to the funnel', () => {
     expect(WORKER).toMatch(/createDispatchSafe\(getDb\(\), \{\s*source: 'worker', agent: MAIN_AGENT_ID, taskType: 'worker',/)
-    expect(WORKER).toMatch(/sendPromptToSession\(ctx\.session, buildWorkerPrompt\(message, outPath, donePath\), null, \{ dispatchId \}\)/)
+    expect(WORKER).toMatch(/sendPromptToSession\(ctx\.session, buildWorkerPrompt\(message, outPath, donePath\), null, \{ lockMode: 'held', dispatchId \}\)/)
   })
 })
 

@@ -91,7 +91,7 @@ describe('P2-C: every dispatch origin stamps the identity columns', () => {
     // dispatchId through. A second createDispatchSafe here would mean the
     // swallowed-Enter retry is being counted as a new work package.
     expect(SCHEDULE.match(/createDispatchSafe\(/g)?.length).toBe(1)
-    expect(SCHEDULE).toMatch(/sendPromptToSession\(session, fullPrompt, host, \{ waitForIdle: false, dispatchId \}\)/)
+    expect(SCHEDULE).toMatch(/sendPromptToSession\(session, fullPrompt, host, \{ waitForIdle: false, lockMode: 'held', dispatchId \}\)/)
   })
 
   it('the worker stamps its OWN launched model + config dir, not the main agent id alone', () => {
