@@ -81,6 +81,11 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     return true
   }
 
+  if (path === '/api/cos/monitoring' && method === 'GET') {
+    json(res, listMonitoring(getDb()))
+    return true
+  }
+
   return false
 }
 
@@ -111,4 +116,33 @@ export function listRadarSummary(db: ReturnType<typeof getDb>): unknown[] {
         (SELECT observed_at FROM radar_observations o WHERE o.radar_id=r.radar_id ORDER BY o.observed_at DESC LIMIT 1) AS latest_at
      FROM radar_items r ORDER BY r.updated_at DESC LIMIT 50`
   ).all()
+}
+
+/**
+ * Operational monitoring for the Mission Control "Monitoring" view (#5b): the
+ * connector-health matrix, an outbound-status roll-up with the rows that need a
+ * HUMAN (RECOVERY_REQUIRED / FAILED_TERMINAL — the executor never auto-resolves
+ * these), and send-quota usage. All read-only.
+ */
+export function listMonitoring(db: ReturnType<typeof getDb>): {
+  connectors: unknown[]; outboundHealth: { byStatus: Record<string, number>; needsAttention: unknown[] }; quotas: unknown[]
+} {
+  const connectors = db.prepare(
+    `SELECT connector_id, kind, mode, status, consecutive_failures, last_ok_at, last_error_at, last_error
+     FROM connector_health ORDER BY connector_id`
+  ).all()
+  const statusRows = db.prepare(
+    `SELECT status, COUNT(*) AS n FROM outbound_ledger GROUP BY status`
+  ).all() as Array<{ status: string; n: number }>
+  const byStatus: Record<string, number> = {}
+  for (const r of statusRows) byStatus[r.status] = r.n
+  const needsAttention = db.prepare(
+    `SELECT ledger_id, case_id, action_type, status, last_error, updated_at
+     FROM outbound_ledger WHERE status IN ('RECOVERY_REQUIRED','FAILED_TERMINAL')
+     ORDER BY updated_at DESC LIMIT 50`
+  ).all()
+  const quotas = db.prepare(
+    `SELECT quota_key, used_count, max_count, window_sec, window_start FROM send_quotas ORDER BY quota_key`
+  ).all()
+  return { connectors, outboundHealth: { byStatus, needsAttention }, quotas }
 }
