@@ -286,11 +286,13 @@ export function initCosSchema(db: Database.Database): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_eproc_batch ON email_processing(batch_id, status)`)
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_eproc_chash ON email_processing(gmail_account_id, content_hash)`)
-  // Existing dbs (email_processing predates P1.2): add the new columns in place.
+  // Existing dbs (email_processing predates P1.2): add the new columns in place
+  // BEFORE the index that references content_hash — on a live db the table
+  // pre-exists without these columns, so the index must come after ensureColumns.
   ensureColumns(db, 'email_processing', {
     content_hash: 'TEXT', self_event_count: 'INTEGER NOT NULL DEFAULT 0', last_self_event_at: 'INTEGER',
   })
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_eproc_chash ON email_processing(gmail_account_id, content_hash)`)
 
   // ── campaigns + approvals (Slice 1 governance; P0.4 template+rendered, P0.5 revoke) ──
   // The authorization layer over the Action Executor. Two P0 rules:
