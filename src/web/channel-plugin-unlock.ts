@@ -37,6 +37,7 @@ import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import type { ChannelProviderType } from '../channel-provider.js'
 import { tryAcquireSessionSendLane } from './session-send-lock.js'
+import { delay } from './delay.js'
 
 const TMUX = resolveFromPath('tmux')
 
