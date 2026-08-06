@@ -34,6 +34,13 @@ describe('GmailApiTransport message construction', () => {
     expect(bodyRefLine('mv-x-1')).toBe('COS-Ref: mv-x-1')
   })
 
+  it('embedMarker=false sends the EXACT body (no COS-Ref footer) — for owner-approved customer mail', () => {
+    const raw = decode(buildRawMessage(EMAIL, 'mv-c1-EMAIL_SEND-1', 'me@gmail.com', false))
+    expect(raw).not.toContain('COS-Ref')                 // nothing appended
+    expect(raw).toContain('Please send a quote.')        // exactly the approved body
+    expect(raw.trimEnd().endsWith('Please send a quote.')).toBe(true)
+  })
+
   it('From is omitted when not provided (Gmail fills the account address)', () => {
     const raw = decode(buildRawMessage(EMAIL, 'mv-x-1'))
     expect(raw).not.toContain('From:')

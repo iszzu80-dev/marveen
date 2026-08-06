@@ -34,7 +34,7 @@ export function base64url(buf: Buffer): string {
 
 /** Build the base64url RFC822 message: To/Subject + the X-Marveen provenance
  *  header + the message body with the searchable COS-Ref footer. Pure/testable. */
-export function buildRawMessage(email: OutboundEmail, marker: string, from?: string): string {
+export function buildRawMessage(email: OutboundEmail, marker: string, from?: string, embedMarker = true): string {
   const headers = [
     from ? `From: ${from}` : null,
     `To: ${email.to}`,
@@ -43,7 +43,11 @@ export function buildRawMessage(email: OutboundEmail, marker: string, from?: str
     'MIME-Version: 1.0',
     'Content-Type: text/plain; charset="UTF-8"',
   ].filter(Boolean).join('\r\n')
-  const body = `${email.body}\r\n\r\n${bodyRefLine(marker)}`
+  // The searchable marker footer is embedded only when embedMarker is true. For
+  // a customer-facing send where the owner approved the EXACT body, omit it so
+  // what is sent equals what was approved (readback then reports unavailable →
+  // the send rests at APPLIED_UNVERIFIED, confirmed instead by the returned id).
+  const body = embedMarker ? `${email.body}\r\n\r\n${bodyRefLine(marker)}` : email.body
   return base64url(Buffer.from(`${headers}\r\n\r\n${body}`, 'utf8'))
 }
 
@@ -60,6 +64,11 @@ export interface GmailApiTransportOptions {
   sendTimeoutMs?: number
   /** Per-call HTTP deadline for the readback search (ms). */
   readbackTimeoutMs?: number
+  /** Embed the searchable COS-Ref marker in the body (default true → crash-safe
+   *  search readback). Set false for a customer email approved by the owner
+   *  verbatim: the exact approved body is sent, and readback reports unavailable
+   *  (the send rests at APPLIED_UNVERIFIED, confirmed by the returned message id). */
+  embedBodyMarker?: boolean
 }
 
 export class GmailApiTransport implements MailTransport {
@@ -68,6 +77,7 @@ export class GmailApiTransport implements MailTransport {
   private readonly readbackWaitMs: number
   private readonly sendTimeoutMs: number
   private readonly readbackTimeoutMs: number
+  private readonly embedBodyMarker: boolean
   private token?: { value: string; expiresAt: number }
 
   constructor(opts: GmailApiTransportOptions = {}) {
@@ -76,6 +86,7 @@ export class GmailApiTransport implements MailTransport {
     this.readbackWaitMs = opts.readbackWaitMs ?? 0
     this.sendTimeoutMs = opts.sendTimeoutMs ?? TOOL_TIMEOUTS['gmail-send']
     this.readbackTimeoutMs = opts.readbackTimeoutMs ?? TOOL_TIMEOUTS['gmail-readback']
+    this.embedBodyMarker = opts.embedBodyMarker ?? true
   }
 
   private creds(): Creds { return JSON.parse(readFileSync(this.credsPath, 'utf8')) as Creds }
@@ -99,7 +110,7 @@ export class GmailApiTransport implements MailTransport {
     const marker = email.headers[IDEMPOTENCY_HEADER]
     if (!marker) throw new Error('outbound email missing idempotency marker header')
     const token = await this.accessToken(Date.now())
-    const raw = buildRawMessage(email, marker, this.from)
+    const raw = buildRawMessage(email, marker, this.from, this.embedBodyMarker)
     const r = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -116,6 +127,10 @@ export class GmailApiTransport implements MailTransport {
    *  auth), so a transient failure is never misread as "the message is absent". */
   async findSentByHeader(name: string, value: string): Promise<{ found: boolean; messageId?: string; available?: boolean }> {
     if (name !== IDEMPOTENCY_HEADER) return { found: false }
+    // No searchable marker was embedded → we cannot search-confirm. Report
+    // UNAVAILABLE (never "absent") so the executor keeps the send at
+    // APPLIED_UNVERIFIED instead of false-alarming RECOVERY_REQUIRED.
+    if (!this.embedBodyMarker) return { found: false, available: false }
     const q = `in:sent "${bodyRefLine(value)}"`
     const deadline = Date.now() + this.readbackWaitMs
     for (;;) {
