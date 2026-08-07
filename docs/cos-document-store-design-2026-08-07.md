@@ -17,6 +17,11 @@ to someone. Design well first, then build.
    from the PDF — this is also what fills the empty invoice amounts). Personal + ZST.
 2. **Istvan sends a Telegram image/doc + a task** ("intézd el ezt") → store it, RECOGNIZE
    it (vision/OCR), then act (create/attach a case, answer, or prepare an outbound send).
+2b. **Istvan MANUALLY sends an email** (from his own client, not via me) that I SEE in the
+   mailbox (Sent) → open/track a case from it (OUTBOUND, WAITING_EXTERNAL — already live,
+   e.g. the CV→Rudolf case) AND store the attachments FROM that sent email (e.g. an invoice
+   PDF he mailed a partner). Both personal AND company side. So the email-attachment ingestion
+   (P2) must cover BOTH inbound AND outbound (Sent) messages, both namespaces.
 3. **Recognition**: PDF text extraction + image OCR/vision → `extracted_text` + classify
    `doc_kind` + pull financial fields (issuer/amount/due_date) where present.
 4. **Outbound**: attach a stored document to an email via the send executor — sensitivity
