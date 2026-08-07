@@ -174,6 +174,63 @@ export function documentsForCase(db: Database.Database, namespace: DocNamespace,
   ).all(namespace, caseId) as DocumentRow[]
 }
 
+export interface ResolvedAttachment {
+  documentId: string
+  filename: string
+  mimeType: string
+  contentBase64: string
+}
+
+/**
+ * P4 send gate: resolve document ids to attachable content, enforcing the
+ * share gate. A document is attachable to an OUTBOUND email ONLY if it is
+ * explicitly marked shareable (external_share_allowed=1) and its content is
+ * present (not purged). ANY id that is missing, not shareable, or purged makes
+ * this THROW — so a send carrying an un-cleared document is blocked, never sent.
+ * (The document ids live in the approved payload, so approval already covers
+ * exactly which documents may go out — they cannot be swapped after approval.)
+ */
+export function resolveShareableAttachments(db: Database.Database, documentIds: string[]): ResolvedAttachment[] {
+  const out: ResolvedAttachment[] = []
+  for (const id of documentIds) {
+    const row = db.prepare(
+      `SELECT filename, mime_type, sha256, stored_path, external_share_allowed, content_purged_at, sensitivity
+       FROM cos_documents WHERE document_id = ?`
+    ).get(id) as {
+      filename: string | null; mime_type: string | null; sha256: string; stored_path: string | null
+      external_share_allowed: number; content_purged_at: number | null; sensitivity: string
+    } | undefined
+    if (!row) throw new Error(`attachment blocked: no document ${id}`)
+    if (row.external_share_allowed !== 1) {
+      throw new Error(`attachment blocked: document ${id} is not marked shareable (external_share_allowed=0, sensitivity=${row.sensitivity}) — clear it for sharing first`)
+    }
+    if (row.content_purged_at) throw new Error(`attachment blocked: document ${id} content was purged`)
+    if (!row.stored_path || !existsSync(row.stored_path)) throw new Error(`attachment blocked: document ${id} content missing on disk`)
+    const buf = readFileSync(row.stored_path)
+    if (sha256Of(buf) !== row.sha256) throw new Error(`attachment blocked: document ${id} integrity check failed`)
+    out.push({
+      documentId: id, filename: row.filename ?? `${id}.bin`,
+      mimeType: row.mime_type ?? 'application/octet-stream', contentBase64: buf.toString('base64'),
+    })
+  }
+  return out
+}
+
+/** Mark a document shareable for outbound send (the explicit clearance the P4
+ *  gate requires). Deliberately a separate, auditable action — a document is
+ *  never shareable by default. */
+export function setDocumentShareable(
+  db: Database.Database, documentId: string, allowed: boolean, sensitivity?: string,
+  now = Math.floor(Date.now() / 1000),
+): void {
+  const sets = ['external_share_allowed = ?', 'updated_at = ?']
+  const args: unknown[] = [allowed ? 1 : 0, now]
+  if (sensitivity) { sets.splice(1, 0, 'sensitivity = ?'); args.splice(1, 0, sensitivity) }
+  args.push(documentId)
+  const info = db.prepare(`UPDATE cos_documents SET ${sets.join(', ')} WHERE document_id = ?`).run(...args as [])
+  if (info.changes === 0) throw new Error(`no document ${documentId}`)
+}
+
 /** Read a stored document's bytes back (integrity-checked against its sha256).
  *  Throws if the content was purged or the on-disk bytes no longer match. */
 export function readDocumentBytes(db: Database.Database, documentId: string): Buffer {

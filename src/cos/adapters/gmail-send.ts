@@ -17,11 +17,20 @@ import type { OutboundAdapter, OutboundAction, ReadbackResult } from '../executo
 
 export const IDEMPOTENCY_HEADER = 'X-Marveen-Idempotency-Key'
 
+export interface OutboundAttachment {
+  filename: string
+  mimeType: string
+  contentBase64: string
+}
+
 export interface OutboundEmail {
   to: string
   subject: string
   body: string
   headers: Record<string, string>
+  /** Optional file attachments (P4). Populated only from documents that passed the
+   *  share gate (resolveShareableAttachments) — the adapter never attaches raw. */
+  attachments?: OutboundAttachment[]
 }
 
 /** The Gmail-write boundary. A real implementation calls the Gmail API; it MUST
@@ -36,19 +45,37 @@ export interface MailTransport {
   findSentByHeader(name: string, value: string): Promise<{ found: boolean; messageId?: string; available?: boolean }>
 }
 
-interface EmailPayload { to: string; subject: string; body: string }
+interface EmailPayload { to: string; subject: string; body: string; attachmentDocumentIds?: string[] }
+
+/** Resolve document ids to gated attachments. Throws if any document is not
+ *  cleared for sharing (blocking the send). Injected so the adapter stays
+ *  DB-agnostic; without it, a payload that requests attachments is refused. */
+export type AttachmentResolver = (documentIds: string[]) => OutboundAttachment[]
 
 export class GmailSendAdapter implements OutboundAdapter {
   readonly actionType = 'EMAIL_SEND'
-  constructor(private readonly transport: MailTransport) {}
+  constructor(
+    private readonly transport: MailTransport,
+    private readonly attachmentResolver?: AttachmentResolver,
+  ) {}
 
   async send(action: OutboundAction): Promise<{ externalRef: string }> {
     const p = action.payload as EmailPayload | null
     if (!p?.to || !p.subject) throw new Error(`EMAIL_SEND payload missing to/subject (ledger ${action.ledgerId})`)
+    // P4: attachments only via the share gate. The document ids are part of the
+    // approved payload, so approval already fixed exactly which documents go out.
+    let attachments: OutboundAttachment[] | undefined
+    if (p.attachmentDocumentIds && p.attachmentDocumentIds.length) {
+      if (!this.attachmentResolver) {
+        throw new Error(`EMAIL_SEND requests attachments but no share-gated resolver is wired (ledger ${action.ledgerId})`)
+      }
+      attachments = this.attachmentResolver(p.attachmentDocumentIds) // throws if any doc is not shareable
+    }
     const email: OutboundEmail = {
       to: p.to, subject: p.subject, body: p.body ?? '',
       // The searchable marker embedded in the message = the external marker.
       headers: { [IDEMPOTENCY_HEADER]: action.externalIdempotencyMarker },
+      ...(attachments ? { attachments } : {}),
     }
     const { messageId } = await this.transport.send(email)
     return { externalRef: messageId }

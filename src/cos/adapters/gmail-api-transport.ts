@@ -43,19 +43,48 @@ export function encodeHeaderValue(v: string): string {
 }
 
 export function buildRawMessage(email: OutboundEmail, marker: string, from?: string, embedMarker = true): string {
-  const headers = [
-    from ? `From: ${from}` : null,
-    `To: ${email.to}`,
-    `Subject: ${encodeHeaderValue(email.subject)}`,
-    `${IDEMPOTENCY_HEADER}: ${marker}`,
-    'MIME-Version: 1.0',
-    'Content-Type: text/plain; charset="UTF-8"',
-  ].filter(Boolean).join('\r\n')
   // The searchable marker footer is embedded only when embedMarker is true. For
   // a customer-facing send where the owner approved the EXACT body, omit it so
   // what is sent equals what was approved (readback then reports unavailable →
   // the send rests at APPLIED_UNVERIFIED, confirmed instead by the returned id).
   const body = embedMarker ? `${email.body}\r\n\r\n${bodyRefLine(marker)}` : email.body
+  const baseHeaders = [
+    from ? `From: ${from}` : null,
+    `To: ${email.to}`,
+    `Subject: ${encodeHeaderValue(email.subject)}`,
+    `${IDEMPOTENCY_HEADER}: ${marker}`,
+    'MIME-Version: 1.0',
+  ]
+
+  if (email.attachments && email.attachments.length) {
+    // multipart/mixed: text body part + one part per attachment (base64). Boundary
+    // is deterministic from the marker (no RNG) so the build stays pure/testable.
+    const boundary = `marveen_${marker.replace(/[^A-Za-z0-9]/g, '').slice(0, 24) || 'part'}`
+    const headers = [...baseHeaders, `Content-Type: multipart/mixed; boundary="${boundary}"`].filter(Boolean).join('\r\n')
+    const parts: string[] = [
+      `--${boundary}`,
+      'Content-Type: text/plain; charset="UTF-8"',
+      'Content-Transfer-Encoding: 8bit',
+      '',
+      body,
+    ]
+    for (const a of email.attachments) {
+      // Re-wrap the base64 at 76 cols (RFC 2045) and use the standard alphabet.
+      const b64 = a.contentBase64.replace(/\s+/g, '').replace(/(.{76})/g, '$1\r\n')
+      parts.push(
+        `--${boundary}`,
+        `Content-Type: ${a.mimeType}; name="${a.filename.replace(/"/g, '')}"`,
+        'Content-Transfer-Encoding: base64',
+        `Content-Disposition: attachment; filename="${a.filename.replace(/"/g, '')}"`,
+        '',
+        b64,
+      )
+    }
+    parts.push(`--${boundary}--`, '')
+    return base64url(Buffer.from(`${headers}\r\n\r\n${parts.join('\r\n')}`, 'utf8'))
+  }
+
+  const headers = [...baseHeaders, 'Content-Type: text/plain; charset="UTF-8"'].filter(Boolean).join('\r\n')
   return base64url(Buffer.from(`${headers}\r\n\r\n${body}`, 'utf8'))
 }
 
