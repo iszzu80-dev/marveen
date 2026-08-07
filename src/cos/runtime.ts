@@ -9,6 +9,7 @@
 
 import { cosTick, type CosTickDeps, type CosTickResult } from './tick.js'
 import { DiscoverCarsAdapter } from './adapters/discovercars.js'
+import { EmagAdapter } from './adapters/emag.js'
 import { alertRadarHit } from './radar-alert.js'
 import { alertOutboundRecovery } from './outbound-alert.js'
 import { registerConnector, recordSuccess } from './connector-health.js'
@@ -23,17 +24,20 @@ import { logger } from '../logger.js'
 export function registerCosConnectors(db = getDb(), now = Math.floor(Date.now() / 1000)): void {
   registerConnector(db, 'gmail', 'email', 'READ_ONLY', now)
   registerConnector(db, 'rental', 'shopping', 'READ_ONLY', now)
-  // the rental price source is live/working
+  registerConnector(db, 'emag', 'shopping', 'READ_ONLY', now)
+  // the rental + eMAG price sources are live/working read-only
   try { recordSuccess(db, 'rental', now) } catch { /* row may not exist on a read-only db */ }
+  try { recordSuccess(db, 'emag', now) } catch { /* row may not exist on a read-only db */ }
 }
 
 /** Interval between autonomous ticks (radar re-checks). */
 export const COS_TICK_INTERVAL_MS = 6 * 60 * 60 * 1000 // 6h
 
-/** The SAFE autonomous deps: radar price checks via the DiscoverCars API only —
- *  no outbound adapter, so no send/buy can happen autonomously. */
+/** The SAFE autonomous deps: radar price checks via the DiscoverCars API (RENTAL)
+ *  and the eMAG webshop (PRODUCT) — both read-only price sources with NO checkout
+ *  surface (assertNoCheckoutSurface), so no send/buy can happen autonomously. */
 export function safeCosDeps(): CosTickDeps {
-  return { rentalAdapter: new DiscoverCarsAdapter() }
+  return { rentalAdapter: new DiscoverCarsAdapter(), shoppingAdapter: new EmagAdapter() }
 }
 
 /** Run one tick. Extracted so tests inject deps + clock; the loop below uses the
