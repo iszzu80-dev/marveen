@@ -15,8 +15,10 @@ import { createZstCase, type ZstWorkspace } from './zst-case-store.js'
 import { effectiveZstSensitivity, coerceZstSensitivity } from './zst-sensitivity.js'
 import { IDEMPOTENCY_HEADER } from './adapters/gmail-send.js'
 import { ingestZstInvoiceEmail } from './zst-invoice-extract.js'
+import { ingestZstContractEmail } from './zst-contract-extract.js'
 
 const INVOICE_CASE_TYPES = new Set(['INVOICE_INCOMING', 'INVOICE_OUTGOING'])
+const CONTRACT_CASE_TYPES = new Set(['CONTRACT', 'LICENSE_SUBSCRIPTION'])
 
 export interface ZstTriagedEmail {
   accountId: string
@@ -130,6 +132,16 @@ export function ingestTriagedZstEmail(db: Database.Database, input: ZstTriagedEm
     if (INVOICE_CASE_TYPES.has(input.caseType ?? '')) {
       try {
         ingestZstInvoiceEmail(db, { caseId, from: input.from, subject: input.subject, body: input.snippet }, now)
+      } catch { /* extraction is best-effort; the case still stands */ }
+    }
+    // If this is a contract/subscription-renewal case, run the contract extractor
+    // so the case is backed by a real zst_contracts row (Slice 3) — this is what
+    // makes a renewal notice surface on the due-item runner. Best-effort: the
+    // case stands even if extraction fails, and the contract stays UNDER_REVIEW
+    // (never auto-signed).
+    if (CONTRACT_CASE_TYPES.has(input.caseType ?? '')) {
+      try {
+        ingestZstContractEmail(db, { caseId, from: input.from, subject: input.subject, body: input.snippet }, now)
       } catch { /* extraction is best-effort; the case still stands */ }
     }
     recordLedger(db, input, 'LOCAL_APPLIED', caseId, now)
