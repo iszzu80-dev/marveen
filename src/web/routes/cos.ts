@@ -15,6 +15,7 @@ import { dueZstItems } from '../../cos/zst-watch.js'
 import { ingestTriagedEmail, type TriagedEmail } from '../../cos/triage-bridge.js'
 import { ingestTriagedZstEmail, type ZstTriagedEmail } from '../../cos/zst-intake.js'
 import { validateSkillMd, validateSkillPermissions } from '../../cos/skill-permission-validator.js'
+import { storeDocument } from '../../cos/cos-documents.js'
 import { APP_TZ } from '../../config.js'
 import type { RouteContext } from './types.js'
 
@@ -57,6 +58,44 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
       ? ingestTriagedZstEmail(getDb(), input as unknown as ZstTriagedEmail, now)
       : ingestTriagedEmail(getDb(), input, now)
     json(res, result)
+    return true
+  }
+
+  // Document inlet (P2): the single HTTP door into the unified document store, used
+  // by the email-triage heartbeat (Python) and later the Telegram flow to hand a
+  // downloaded attachment/image to storeDocument. Accepts base64 content + metadata;
+  // the store content-addresses it locally and links it to the case. Read/store only
+  // — never sends. Sensitivity-first: absent sensitivity stays UNKNOWN (not shareable).
+  if (path === '/api/cos/documents' && method === 'POST') {
+    let b: {
+      namespace?: string; caseId?: string; source?: string; sourceRef?: string
+      filename?: string; mimeType?: string; contentBase64?: string; sensitivity?: string
+      docKind?: string; externalShareAllowed?: boolean
+    }
+    try { b = JSON.parse((await readBody(req)).toString()) }
+    catch { json(res, { error: 'invalid JSON' }, 400); return true }
+    if (b.namespace !== 'personal' && b.namespace !== 'zst') {
+      json(res, { error: "namespace must be 'personal' or 'zst'" }, 400); return true
+    }
+    if (!b.source || !b.contentBase64) {
+      json(res, { error: 'source and contentBase64 required' }, 400); return true
+    }
+    let bytes: Buffer
+    try { bytes = Buffer.from(b.contentBase64, 'base64') }
+    catch { json(res, { error: 'contentBase64 not decodable' }, 400); return true }
+    if (bytes.length === 0 || bytes.length > 25 * 1024 * 1024) {
+      json(res, { error: 'content empty or over 25MB' }, 400); return true
+    }
+    try {
+      const r = storeDocument(getDb(), {
+        namespace: b.namespace, caseId: b.caseId ?? null, source: b.source as never,
+        sourceRef: b.sourceRef, filename: b.filename, mimeType: b.mimeType, bytes,
+        sensitivity: b.sensitivity, docKind: b.docKind, externalShareAllowed: b.externalShareAllowed,
+      })
+      json(res, r)
+    } catch (e) {
+      json(res, { error: String((e as Error).message) }, 400)
+    }
     return true
   }
 
