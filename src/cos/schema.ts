@@ -561,7 +561,50 @@ export function initCosSchema(db: Database.Database): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_invoice_case ON personal_invoices(case_id)`)
 
+  initCosDocumentsSchema(db)
   initZstSchema(db)
+}
+
+// ── Unified COS document/attachment store (personal + ZST) ───────────────────
+// Namespace-agnostic on purpose: case_attachments/case_documents are FK-bound to
+// personal_cases (personal-only) and case_documents holds no content (drive-ref).
+// This ONE table serves both CoS with LOCAL content-addressed storage (no Drive
+// dependency): the file bytes live under store/cos-documents/<sha[:2]>/<sha> and
+// this row is the index. `namespace` is the scope boundary (personal vs zst never
+// mix, same as the case engine); `case_id` is a plain ref (nullable — a document
+// can arrive before its case, e.g. a Telegram photo). Content can be purged after
+// retention (content_purged_at) while the metadata row stays.
+export function initCosDocumentsSchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cos_documents (
+      document_id            TEXT PRIMARY KEY,
+      namespace              TEXT NOT NULL,
+      case_id                TEXT,
+      source                 TEXT NOT NULL,
+      source_ref             TEXT,
+      filename               TEXT,
+      mime_type              TEXT,
+      byte_size              INTEGER,
+      sha256                 TEXT NOT NULL,
+      stored_path            TEXT,
+      doc_kind               TEXT,
+      issuer                 TEXT,
+      amount                 INTEGER,
+      due_date               TEXT,
+      extracted_text         TEXT,
+      sensitivity            TEXT NOT NULL DEFAULT 'UNKNOWN',
+      external_share_allowed INTEGER NOT NULL DEFAULT 0,
+      received_at            INTEGER,
+      content_purged_at      INTEGER,
+      created_at             INTEGER NOT NULL,
+      updated_at             INTEGER NOT NULL,
+      CHECK (namespace IN ('personal','zst')),
+      CHECK (source IN ('email','telegram','drive','manual','web'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_cosdoc_case ON cos_documents(namespace, case_id)`)
+  // Same bytes + same case + same namespace = one logical document (dedup anchor).
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cosdoc_dedup ON cos_documents(namespace, sha256, IFNULL(case_id,''))`)
 }
 
 // ── ZST Radio Kft. Chief of Staff — Slice 0 (arch option A) ──────────────────
