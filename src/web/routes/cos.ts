@@ -15,7 +15,7 @@ import { dueZstItems } from '../../cos/zst-watch.js'
 import { ingestTriagedEmail, type TriagedEmail } from '../../cos/triage-bridge.js'
 import { ingestTriagedZstEmail, type ZstTriagedEmail } from '../../cos/zst-intake.js'
 import { validateSkillMd, validateSkillPermissions } from '../../cos/skill-permission-validator.js'
-import { storeDocument } from '../../cos/cos-documents.js'
+import { storeDocument, documentsForCase, readDocumentBytes } from '../../cos/cos-documents.js'
 import { APP_TZ } from '../../config.js'
 import type { RouteContext } from './types.js'
 
@@ -187,6 +187,64 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
 
   if (path === '/api/cos/analytics' && method === 'GET') {
     json(res, listAnalytics(getDb()))
+    return true
+  }
+
+  // Card 3d9d62b1: per-case events (timeline). Read-only — the events table is
+  // append-only by trigger, so this can never mutate. Query param: case_id + namespace.
+  if (path === '/api/cos/events' && method === 'GET') {
+    const q = new URLSearchParams(req.url?.split('?')[1] ?? '')
+    const caseId = q.get('case_id')
+    const ns = q.get('namespace') || 'personal'
+    if (!caseId) { json(res, { error: 'case_id required' }, 400); return true }
+    const table = ns === 'zst' ? 'zst_case_events' : 'personal_case_events'
+    const events = getDb().prepare(
+      `SELECT event_id, case_version, actor, event_type, previous_status, new_status,
+              reason, payload, correlation_id, created_at
+       FROM ${table} WHERE case_id = ? ORDER BY created_at DESC LIMIT 20`
+    ).all(caseId)
+    json(res, { events, count: events.length })
+    return true
+  }
+
+  // Card 3d9d62b1: per-case documents (attached files). Read-only.
+  // Query param: case_id + namespace.
+  if (path === '/api/cos/documents' && method === 'GET') {
+    const q = new URLSearchParams(req.url?.split('?')[1] ?? '')
+    const caseId = q.get('case_id')
+    const ns = (q.get('namespace') || 'personal') as 'personal' | 'zst'
+    if (!caseId) { json(res, { error: 'case_id required' }, 400); return true }
+    if (ns !== 'personal' && ns !== 'zst') { json(res, { error: 'namespace must be personal or zst' }, 400); return true }
+    const docs = documentsForCase(getDb(), ns, caseId)
+    json(res, { documents: docs, count: docs.length })
+    return true
+  }
+
+  // Card 3d9d62b1: download a stored document file by id. Read-only — serves
+  // the raw bytes from the content-addressed store with the correct MIME type.
+  // The document id is the only required param; the server resolves namespace +
+  // stored_path from the DB row and integrity-checks the bytes.
+  if (path === '/api/cos/document-file' && method === 'GET') {
+    const q = new URLSearchParams(req.url?.split('?')[1] ?? '')
+    const docId = q.get('doc_id')
+    if (!docId) { json(res, { error: 'doc_id required' }, 400); return true }
+    try {
+      const buf = readDocumentBytes(getDb(), docId)
+      const row = getDb().prepare(
+        `SELECT filename, mime_type FROM cos_documents WHERE document_id = ?`
+      ).get(docId) as { filename: string | null; mime_type: string | null } | undefined
+      const mime = row?.mime_type || 'application/octet-stream'
+      const fname = row?.filename || docId
+      res.writeHead(200, {
+        'Content-Type': mime,
+        'Content-Disposition': 'inline; filename="' + encodeURIComponent(fname) + '"',
+        'Content-Length': buf.length,
+        'Cache-Control': 'private, max-age=3600',
+      })
+      res.end(buf)
+    } catch (e) {
+      json(res, { error: (e as Error).message }, 404)
+    }
     return true
   }
 

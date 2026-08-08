@@ -122,6 +122,7 @@ export interface CaseListItem {
   case_id: string
   title: string
   case_type: string
+  category: string | null
   status: string
   priority: string
   sensitivity: string
@@ -130,6 +131,7 @@ export interface CaseListItem {
   waiting_on: string | null
   due_at: number | null
   follow_up_at: number | null
+  source_system: string | null
   updated_at: number
 }
 
@@ -141,8 +143,8 @@ export interface ClaimResult {
 
 // Priority sort rank (urgent-first) for the read views.
 const PRIORITY_ORDER = `CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 WHEN 'P3' THEN 3 ELSE 4 END`
-const LIST_COLUMNS = `case_id, title, case_type, status, priority, sensitivity,
-  next_action, next_action_owner, waiting_on, due_at, follow_up_at, updated_at`
+const LIST_COLUMNS = `case_id, title, case_type, category, status, priority, sensitivity,
+  next_action, next_action_owner, waiting_on, due_at, follow_up_at, source_system, updated_at`
 const PATCHABLE_COLUMNS: readonly TransitionPatchKey[] = [
   'next_action', 'next_action_owner', 'waiting_on', 'blocked_reason',
   'due_at', 'follow_up_at', 'next_wake_at', 'closure_reason',

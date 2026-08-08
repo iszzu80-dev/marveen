@@ -2,6 +2,14 @@
 // Personal Chief of Staff case store. Read-only: renders "Ma" (today) and
 // "Ügyek" (all active) from /api/cos/*. Vanilla JS; the global fetch wrapper in
 // app.js attaches the Bearer token, so bare fetch() is authenticated.
+//
+// Card 3d9d62b1 (2026-08-08): expandable accordion case tiles + denser closed
+// tile. Closed tile clamps title to 2 lines with ellipsis, adds one derived
+// ball-holder status line (from next_action_owner/waiting_on/status/due_at).
+// Expanded panel (~320-400px): next action + owner, deadline/waiting-on with
+// elapsed days, timeline (last 3-4 events), attached documents, footer.
+// Single-open accordion — opening one closes the previous. Events + documents
+// are fetched lazily on first expand from /api/cos/events and /api/cos/documents.
 (function () {
   'use strict'
 
@@ -10,6 +18,16 @@
     SENSITIVE_PERSONAL: '#f59e0b', HIGHLY_SENSITIVE: '#ef4444',
   }
   var PRIO_COLOR = { P0: '#ef4444', P1: '#f59e0b', P2: '#60a5fa', P3: '#9ca3af' }
+
+  // Human-readable status labels for the ball-holder line.
+  var STATUS_LABEL = {
+    NEW: 'Új', TRIAGE: 'Triage', INFO_REQUIRED: 'Infó kell', READY: 'Kész',
+    PLANNING: 'Tervezés', AWAITING_APPROVAL: 'Jóváhagyásra vár',
+    EXECUTING: 'Folyamatban', WAITING_EXTERNAL: 'Külső félre vár',
+    FOLLOW_UP_DUE: 'Követés esedékes', CALL_REQUIRED: 'Hívni kell',
+    AWAITING_SELECTION: 'Választásra vár', SCHEDULED: 'Ütemezve',
+    BLOCKED: 'Blokkolva', RECOVERY_REQUIRED: 'Helyreállítás kell',
+  }
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -26,40 +44,264 @@
     } catch (e) { return '' }
   }
 
-  function pill(text, color) {
-    return '<span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;' +
-      'background:' + color + '22;color:' + color + ';border:1px solid ' + color + '55;">' + esc(text) + '</span>'
+  // Short date for the closed-tile status line: "aug 10."
+  function fmtDateShort(sec) {
+    if (!sec) return ''
+    try {
+      var d = new Date(sec * 1000)
+      return d.toLocaleString('hu-HU', { month: 'short' }) + ' ' + d.getDate() + '.'
+    } catch (e) { return '' }
   }
 
-  function card(c) {
+  function pill(text, color) {
+    return '<span class="cos-pill" style="background:' + color + '22;color:' + color +
+      ';border:1px solid ' + color + '55;">' + esc(text) + '</span>'
+  }
+
+  // ---- Ball-holder derivation (card 3d9d62b1) ----
+  // Derives who holds the ball + when it's due from existing fields.
+  // Returns {who, when, days, sub} where one of when/days carries the time signal.
+  function ballHolder(c, nowSec) {
+    var since = c.follow_up_at || c.updated_at
+
+    // Waiting on an external party — the ball is NOT with the owner.
+    if (c.waiting_on) {
+      var days = since ? Math.floor((nowSec - since) / 86400) : null
+      return { who: 'Külső félre vár', sub: c.waiting_on, days: days }
+    }
+    if (c.status === 'WAITING_EXTERNAL') {
+      var days = since ? Math.floor((nowSec - since) / 86400) : null
+      return { who: 'Külső félre vár', days: days }
+    }
+    if (c.status === 'BLOCKED') {
+      var days = since ? Math.floor((nowSec - since) / 86400) : null
+      return { who: 'Blokkolva', days: days }
+    }
+
+    // Ball is with a person — next_action_owner, or fall back to status label.
+    var who = c.next_action_owner || STATUS_LABEL[c.status] || c.status || '—'
+    // Humanize: when Istvan is the owner, the dashboard says "Nálad".
+    if (who === 'István' || who === 'Istvan') who = 'Nálad'
+
+    var due = c.due_at || c.follow_up_at
+    if (due) return { who: who, when: fmtDateShort(due) }
+    return { who: who }
+  }
+
+  function ballHolderHtml(c, nowSec) {
+    var bh = ballHolder(c, nowSec)
+    var parts = ['<span class="cos-ball-who">' + esc(bh.who) + '</span>']
+    if (bh.days != null && bh.days >= 0) {
+      parts.push('<span class="cos-ball-when"> · ' + bh.days + ' napja</span>')
+    } else if (bh.when) {
+      parts.push('<span class="cos-ball-when"> · ' + esc(bh.when) + '</span>')
+    }
+    if (bh.sub) {
+      parts.push(' <span class="cos-ball-sub">(' + esc(bh.sub) + ')</span>')
+    }
+    return parts.join('')
+  }
+
+  // ---- Case tile (closed) + expand handler (card 3d9d62b1) ----
+  function caseTile(c, namespace, nowSec) {
     var prio = PRIO_COLOR[c.priority] || '#9ca3af'
     var sens = SENS_COLOR[c.sensitivity] || '#9ca3af'
-    var meta = []
-    if (c.next_action) {
-      meta.push('<div style="font-size:13px;margin-top:4px;">→ ' + esc(c.next_action) +
-        (c.next_action_owner ? ' <span style="color:var(--text-muted,#888);">(' + esc(c.next_action_owner) + ')</span>' : '') + '</div>')
-    }
-    if (c.waiting_on) {
-      meta.push('<div style="font-size:12px;color:var(--text-muted,#888);margin-top:2px;">⏳ ' + esc(c.waiting_on) + '</div>')
-    }
-    var due = c.due_at ? fmtDate(c.due_at) : (c.follow_up_at ? fmtDate(c.follow_up_at) : '')
-    var dueLabel = due ? '<span style="font-size:12px;color:var(--text-muted,#888);">🗓 ' + esc(due) + '</span>' : ''
-    return '<div style="border:1px solid var(--border,#2a2a2a);border-radius:8px;padding:10px 12px;margin-bottom:8px;' +
-      'border-left:3px solid ' + prio + ';">' +
-      '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">' +
-        '<strong style="font-size:14px;">' + esc(c.title) + '</strong>' +
-        pill(c.status, prio) + pill(c.sensitivity, sens) +
-        '<span style="font-size:11px;color:var(--text-muted,#888);">' + esc(c.case_type) + '</span>' +
-        '<span style="margin-left:auto;">' + dueLabel + '</span>' +
-      '</div>' + meta.join('') + '</div>'
+    var caseId = esc(c.case_id)
+    var ns = esc(namespace)
+
+    return '<div class="cos-case-tile" data-case-id="' + caseId + '" data-ns="' + ns + '"' +
+      ' style="border-left:3px solid ' + prio + ';">' +
+      '<div class="cos-tile-top">' +
+        '<strong class="cos-tile-title" title="' + esc(c.title) + '">' + esc(c.title) + '</strong>' +
+        '<span class="cos-tile-pills">' +
+          pill(c.status, prio) + pill(c.sensitivity, sens) +
+          '<span class="cos-tile-type">' + esc(c.case_type) + '</span>' +
+        '</span>' +
+      '</div>' +
+      '<div class="cos-tile-status">' + ballHolderHtml(c, nowSec) + '</div>' +
+      // Expanded detail placeholder — populated on first expand.
+      '<div class="cos-case-detail" hidden></div>' +
+    '</div>'
   }
 
-  function section(title, cases, emptyMsg) {
+  // ---- Expanded detail panel (populated lazily on first expand) ----
+  function renderDetailLoading() {
+    return '<div class="cos-detail-loading">Betöltés...</div>'
+  }
+
+  function renderDetail(c, events, docs, nowSec) {
+    var parts = []
+
+    // 1) Next action + owner (largest, top).
+    if (c.next_action) {
+      parts.push('<div class="cos-detail-action">' +
+        '<div class="cos-detail-label">Következő lépés' +
+          (c.next_action_owner ? ' &mdash; ' + esc(c.next_action_owner) : '') + '</div>' +
+        '<div class="cos-detail-action-text">' + esc(c.next_action) + '</div>' +
+      '</div>')
+    }
+
+    // 2) Deadline / waiting-on with elapsed days.
+    var deadlineParts = []
+    if (c.due_at) {
+      deadlineParts.push('<span>Határidő: <strong>' + fmtDate(c.due_at) + '</strong></span>')
+      var daysLeft = Math.ceil((c.due_at - nowSec) / 86400)
+      if (daysLeft <= 3 && daysLeft >= 0) {
+        deadlineParts.push(' <span style="color:#f59e0b;font-size:12px;">(' + daysLeft + ' nap múlva)</span>')
+      } else if (daysLeft < 0) {
+        deadlineParts.push(' <span style="color:#ef4444;font-size:12px;">(' + Math.abs(daysLeft) + ' napja lejárt)</span>')
+      }
+    }
+    if (c.waiting_on) {
+      var since = c.follow_up_at || c.updated_at
+      var elapsed = since ? Math.floor((nowSec - since) / 86400) : 0
+      deadlineParts.push('<span>⏳ ' + esc(c.waiting_on) + ' <span style="color:var(--text-muted,#888);font-size:12px;">(' + elapsed + ' napja)</span></span>')
+    } else if (c.follow_up_at && !c.due_at) {
+      deadlineParts.push('<span>Követés: <strong>' + fmtDate(c.follow_up_at) + '</strong></span>')
+    }
+    if (deadlineParts.length) {
+      parts.push('<div class="cos-detail-deadline">' + deadlineParts.join('<br>') + '</div>')
+    }
+
+    // 3) Timeline: last 3-4 events.
+    if (events && events.length) {
+      var timelineHtml = events.slice(0, 4).map(function (ev) {
+        var actor = esc(ev.actor || '?')
+        var typeLabel = ev.event_type === 'CREATED' ? 'Létrehozva' :
+          (ev.event_type === 'STATUS_CHANGED' ? 'Státuszváltás' : esc(ev.event_type))
+        var detail = ''
+        if (ev.event_type === 'STATUS_CHANGED' && ev.previous_status && ev.new_status) {
+          detail = esc(ev.previous_status) + ' → ' + esc(ev.new_status)
+        } else if (ev.reason) {
+          detail = esc(ev.reason)
+        }
+        return '<div class="cos-timeline-event">' +
+          '<span class="cos-timeline-dot"></span>' +
+          '<span class="cos-timeline-date">' + fmtDate(ev.created_at) + '</span>' +
+          '<span class="cos-timeline-type">' + typeLabel + '</span>' +
+          '<span class="cos-timeline-actor">' + actor + '</span>' +
+          (detail ? '<span class="cos-timeline-detail">' + detail + '</span>' : '') +
+        '</div>'
+      }).join('')
+      parts.push('<div class="cos-detail-timeline">' +
+        '<div class="cos-detail-label">Idővonal (' + events.length + ' esemény)</div>' +
+        timelineHtml + '</div>')
+    } else if (events !== null) {
+      // events is [] — no events yet (shouldn't happen for real cases but handle gracefully)
+      parts.push('<div class="cos-detail-timeline"><div class="cos-detail-label">Idővonal</div>' +
+        '<span style="color:var(--text-muted,#888);font-size:12px;">Nincs esemény.</span></div>')
+    }
+
+    // 4) Attached documents (clickable).
+    if (docs && docs.length) {
+      var docsHtml = docs.map(function (d) {
+        var fname = esc(d.filename || d.document_id)
+        var src = esc(d.source)
+        return '<a class="cos-doc-link" href="/api/cos/document-file?doc_id=' + esc(d.document_id) +
+          '" target="_blank" rel="noopener" title="' + esc(d.mime_type || '') + ' · forrás: ' + src + '">' +
+          '📎 ' + fname + '</a>'
+      }).join('')
+      parts.push('<div class="cos-detail-documents">' +
+        '<div class="cos-detail-label">Dokumentumok (' + docs.length + ')</div>' +
+        docsHtml + '</div>')
+    } else if (docs !== null) {
+      parts.push('<div class="cos-detail-documents"><div class="cos-detail-label">Dokumentumok</div>' +
+        '<span style="color:var(--text-muted,#888);font-size:12px;">Nincs csatolt dokumentum.</span></div>')
+    }
+
+    // 5) Footer: case_id, source, category.
+    var footerItems = []
+    footerItems.push('<span class="cos-footer-id">' + esc(c.case_id) + '</span>')
+    if (c.source_system) footerItems.push('<span>Forrás: ' + esc(c.source_system) + '</span>')
+    if (c.category) footerItems.push('<span>' + esc(c.category) + '</span>')
+    parts.push('<div class="cos-detail-footer">' + footerItems.join(' · ') + '</div>')
+
+    return parts.join('')
+  }
+
+  // ---- Fetch events + documents for a case, then render detail. ----
+  function loadDetail(tile, c, namespace, nowSec) {
+    var detailEl = tile.querySelector('.cos-case-detail')
+    if (!detailEl) return
+
+    // Already loaded — the caller toggled visibility, nothing more to do.
+    if (detailEl.dataset.loaded === '1') return
+
+    detailEl.innerHTML = renderDetailLoading()
+
+    var ns = namespace === 'zst' ? 'zst' : 'personal'
+    Promise.all([
+      fetch('/api/cos/events?case_id=' + encodeURIComponent(c.case_id) + '&namespace=' + ns)
+        .then(function (r) { return r.json() }).catch(function () { return { events: [] } }),
+      fetch('/api/cos/documents?case_id=' + encodeURIComponent(c.case_id) + '&namespace=' + ns)
+        .then(function (r) { return r.json() }).catch(function () { return { documents: [] } }),
+    ]).then(function (res) {
+      var events = (res[0] && res[0].events) || []
+      var docs = (res[1] && res[1].documents) || []
+      detailEl.innerHTML = renderDetail(c, events, docs, nowSec)
+      detailEl.dataset.loaded = '1'
+    }).catch(function () {
+      detailEl.innerHTML = '<div class="cos-detail-loading" style="color:#ef4444;">Hiba a betöltéskor.</div>'
+    })
+  }
+
+  // ---- Single-open accordion handler (card 3d9d62b1) ----
+  // Opening one tile closes the previously open one. Clicking an open tile closes it.
+  function installAccordion(container, cases, namespace) {
+    var nowSec = Math.floor(Date.now() / 1000)
+    var openTile = null
+
+    container.addEventListener('click', function (e) {
+      var tile = e.target.closest('.cos-case-tile')
+      if (!tile) return
+      var caseId = tile.dataset.caseId
+      var detailEl = tile.querySelector('.cos-case-detail')
+      if (!detailEl) return
+
+      // Find the case data by case_id.
+      var c = null
+      for (var i = 0; i < cases.length; i++) {
+        if (cases[i].case_id === caseId) { c = cases[i]; break }
+      }
+      if (!c) return
+
+      var isOpen = !detailEl.hidden
+
+      if (isOpen) {
+        // Close this tile.
+        detailEl.hidden = true
+        tile.classList.remove('expanded')
+        openTile = null
+        return
+      }
+
+      // Close previously open tile.
+      if (openTile && openTile !== tile) {
+        var prevDetail = openTile.querySelector('.cos-case-detail')
+        if (prevDetail) { prevDetail.hidden = true }
+        openTile.classList.remove('expanded')
+      }
+
+      // Open this tile — unhide the detail panel (loadDetail fills it if needed).
+      detailEl.hidden = false
+      tile.classList.add('expanded')
+      openTile = tile
+
+      // Lazy-load detail content (no-op if already loaded).
+      loadDetail(tile, c, namespace, nowSec)
+    })
+  }
+
+  // ---- Section builder ----
+  function caseSection(title, cases, namespace, emptyMsg) {
     var inner
     if (!cases || cases.length === 0) {
       inner = '<p style="color:var(--text-muted,#888);font-size:13px;">' + esc(emptyMsg) + '</p>'
     } else {
-      inner = cases.map(card).join('')
+      var nowSec = Math.floor(Date.now() / 1000)
+      inner = '<div class="cos-case-list" data-ns="' + esc(namespace) + '">' +
+        cases.map(function (c) { return caseTile(c, namespace, nowSec) }).join('') +
+      '</div>'
     }
     return '<section style="margin-bottom:24px;">' +
       '<h2 style="font-size:16px;margin:0 0 10px;">' + esc(title) +
@@ -176,7 +418,79 @@
       '</section>'
   }
 
+  // ---- Inject the COS tile CSS (card 3d9d62b1) ----
+  function injectStyles() {
+    if (document.getElementById('cos-tile-styles')) return
+    var style = document.createElement('style')
+    style.id = 'cos-tile-styles'
+    style.textContent = [
+      '.cos-case-tile {',
+      '  border:1px solid var(--border,#2a2a2a);border-radius:8px;padding:8px 12px;margin-bottom:8px;',
+      '  cursor:pointer;transition:box-shadow 0.15s,background 0.15s;position:relative;',
+      '}',
+      '.cos-case-tile:hover { background:var(--accent-soft,rgba(96,165,250,0.05)); }',
+      '.cos-case-tile.expanded { box-shadow:0 2px 12px rgba(0,0,0,0.15); }',
+      '.cos-tile-top { display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap; }',
+      '.cos-tile-title {',
+      '  font-size:14px;line-height:1.35;display:-webkit-box;-webkit-box-orient:vertical;',
+      '  -webkit-line-clamp:2;overflow:hidden;flex:1;min-width:0;',
+      '}',
+      '.cos-tile-pills { display:flex;align-items:center;gap:4px;flex-shrink:0;flex-wrap:wrap; }',
+      '.cos-tile-type { font-size:11px;color:var(--text-muted,#888); }',
+      '.cos-pill { display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;white-space:nowrap; }',
+      '.cos-tile-status {',
+      '  font-size:12px;margin-top:4px;color:var(--text-muted,#888);',
+      '  display:flex;align-items:center;gap:4px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;',
+      '}',
+      '.cos-ball-who { font-weight:500;color:var(--text,#ddd); }',
+      '.cos-ball-when { color:var(--text-muted,#888); }',
+      '.cos-ball-sub { color:var(--text-muted,#888);overflow:hidden;text-overflow:ellipsis; }',
+      // Expanded detail panel
+      '.cos-case-detail {',
+      '  margin-top:10px;padding-top:10px;border-top:1px solid var(--border,#2a2a2a);',
+      '  max-height:400px;overflow-y:auto;',
+      '}',
+      '.cos-case-detail[hidden] { display:none; }',
+      '.cos-detail-loading { color:var(--text-muted,#888);font-size:13px;padding:8px 0; }',
+      '.cos-detail-label { font-size:11px;color:var(--text-muted,#888);text-transform:uppercase;',
+      '  letter-spacing:0.5px;margin-bottom:4px; }',
+      '.cos-detail-action { margin-bottom:10px; }',
+      '.cos-detail-action-text { font-size:14px;line-height:1.45;color:var(--text,#ddd); }',
+      '.cos-detail-deadline { font-size:12px;color:var(--text-muted,#888);margin-bottom:10px;line-height:1.5; }',
+      // Timeline
+      '.cos-detail-timeline { margin-bottom:10px; }',
+      '.cos-timeline-event {',
+      '  display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;font-size:12px;',
+      '  padding:3px 0;padding-left:12px;border-left:2px solid var(--border,#2a2a2a);margin-left:4px;',
+      '}',
+      '.cos-timeline-dot {',
+      '  width:6px;height:6px;border-radius:50%;background:var(--accent,#60a5fa);',
+      '  flex-shrink:0;margin-left:-17px;margin-right:4px;',
+      '}',
+      '.cos-timeline-date { color:var(--text-muted,#888);font-size:11px;min-width:90px; }',
+      '.cos-timeline-type { font-weight:500; }',
+      '.cos-timeline-actor { color:var(--text-muted,#888);font-size:11px; }',
+      '.cos-timeline-detail { color:var(--text-muted,#888);font-size:11px;width:100%;margin-left:10px; }',
+      // Documents
+      '.cos-detail-documents { margin-bottom:10px; }',
+      '.cos-doc-link {',
+      '  display:block;font-size:12px;color:var(--accent,#60a5fa);text-decoration:none;',
+      '  padding:2px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;',
+      '}',
+      '.cos-doc-link:hover { text-decoration:underline; }',
+      // Footer
+      '.cos-detail-footer {',
+      '  font-size:11px;color:var(--text-muted,#888);padding-top:6px;',
+      '  border-top:1px solid var(--border,#2a2a2a);display:flex;gap:8px;flex-wrap:wrap;',
+      '}',
+      '.cos-footer-id { font-family:monospace; }',
+    ].join('\n')
+    document.head.appendChild(style)
+  }
+
   function mount() {
+    injectStyles()
+
     var body = document.getElementById('cosBody')
     if (!body) return
     body.innerHTML = '<p style="color:var(--text-muted,#888);">Betöltés...</p>'
@@ -188,10 +502,15 @@
       var today = res[0] || {}, all = res[1] || {}, out = res[2] || {}, camp = res[3] || {}, rad = res[4] || {}, mon = res[5] || {}, an = res[6] || {}
       var zstToday = res[7] || {}, zstAll = res[8] || {}
 
+      var personalTodayCases = today.cases || []
+      var personalAllCases = all.cases || []
+      var zstTodayCases = zstToday.cases || []
+      var zstAllCases = zstAll.cases || []
+
       // Personal namespace (személyes) — full panel including outbound etc.
       var personalHtml =
-        section('📌 Ma', today.cases || [], 'Ma nincs esedékes ügy.') +
-        section('🗂 Ügyek', all.cases || [], 'Nincs aktív ügy. A COS case-store üres vagy minden ügy lezárt.') +
+        caseSection('📌 Ma', personalTodayCases, 'personal', 'Ma nincs esedékes ügy.') +
+        caseSection('🗂 Ügyek', personalAllCases, 'personal', 'Nincs aktív ügy. A COS case-store üres vagy minden ügy lezárt.') +
         genericSection('📤 Kimenő', out.outbound || [], 'Nincs kimenő művelet.', outboundItem) +
         genericSection('📣 Kampányok', camp.campaigns || [], 'Nincs kampány.', campaignItem) +
         genericSection('🎯 Radar', rad.radar || [], 'Nincs figyelt ár-radar.', radarItem) +
@@ -205,8 +524,8 @@
       // enforces this at the UI layer: only one namespace is visible at
       // a time; the two lists are never shown together.
       var zstHtml =
-        section('📌 Ma — ZST', zstToday.cases || [], 'Ma nincs esedékes céges ügy.') +
-        section('🗂 Ügyek — ZST', zstAll.cases || [], 'Nincs aktív céges ügy.')
+        caseSection('📌 Ma — ZST', zstTodayCases, 'zst', 'Ma nincs esedékes céges ügy.') +
+        caseSection('🗂 Ügyek — ZST', zstAllCases, 'zst', 'Nincs aktív céges ügy.')
 
       body.innerHTML =
         '<nav class="tab-nav" id="cosTabNav" style="padding:0;margin-bottom:16px;">' +
@@ -215,6 +534,35 @@
         '</nav>' +
         '<div id="cosPanelPersonal">' + personalHtml + '</div>' +
         '<div id="cosPanelZst" hidden>' + zstHtml + '</div>'
+
+      // Merge today+all into a single lookup map per namespace so the accordion
+      // can find any case by case_id regardless of which section it appears in.
+      function mergeCases(base, extra) {
+        var map = {}
+        ;(base || []).forEach(function (c) { map[c.case_id] = c })
+        ;(extra || []).forEach(function (c) { map[c.case_id] = c })  // extra wins
+        return Object.values(map)
+      }
+      var personalMerged = mergeCases(personalAllCases, personalTodayCases)
+      var zstMerged = mergeCases(zstAllCases, zstTodayCases)
+
+      // Install accordion on Personal panel.
+      var personalPanel = document.getElementById('cosPanelPersonal')
+      if (personalPanel) {
+        var personalLists = personalPanel.querySelectorAll('.cos-case-list[data-ns="personal"]')
+        personalLists.forEach(function (list) {
+          installAccordion(list, personalMerged, 'personal')
+        })
+      }
+
+      // Install accordion on ZST panel.
+      var zstPanel = document.getElementById('cosPanelZst')
+      if (zstPanel) {
+        var zstLists = zstPanel.querySelectorAll('.cos-case-list[data-ns="zst"]')
+        zstLists.forEach(function (list) {
+          installAccordion(list, zstMerged, 'zst')
+        })
+      }
 
       // Toggle handler: clicking a tab shows the matching panel, hides the other.
       // Reuses .tab-btn styles from style.css — .active = accent underline.
@@ -225,10 +573,10 @@
         document.querySelectorAll('#cosTabNav .tab-btn').forEach(function (b) {
           b.classList.toggle('active', b.dataset.tab === tab)
         })
-        var personalPanel = document.getElementById('cosPanelPersonal')
-        var zstPanel = document.getElementById('cosPanelZst')
-        if (personalPanel) personalPanel.hidden = (tab !== 'personal')
-        if (zstPanel) zstPanel.hidden = (tab !== 'zst')
+        var pp = document.getElementById('cosPanelPersonal')
+        var zp = document.getElementById('cosPanelZst')
+        if (pp) pp.hidden = (tab !== 'personal')
+        if (zp) zp.hidden = (tab !== 'zst')
       })
     }).catch(function (e) {
       body.innerHTML = '<p style="color:#ef4444;">Hiba a betöltéskor: ' + esc(e && e.message) + '</p>'
