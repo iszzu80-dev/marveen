@@ -58,7 +58,7 @@ export class AnthropicLlmClient implements LlmClient {
   private async getClient(): Promise<any> {
     if (!this.clientPromise) {
       this.clientPromise = getAnthropicConstructor().then(Cls => {
-        return new Cls({ apiKey: this.apiKey || process.env.ANTHROPIC_API_KEY })
+        return new Cls({ apiKey: this.apiKey || process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN })
       })
     }
     return this.clientPromise

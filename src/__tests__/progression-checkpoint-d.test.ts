@@ -662,12 +662,101 @@ Due date: 2026-08-15.
   })
 
   // ── Stage 7: Live acceptance — 2 real cryptic-subject cases ─────────────
+  //
+  //  The NAMED acceptance criterion (Istvan's requirement): when given a case
+  //  with a cryptic original title, the interpreted title must be "meaningfully
+  //  better." "Better" is enforced by assertMeaningfulInterpretation() which
+  //  checks: non-trivial difference from original, minimum word count, minimum
+  //  substantive word count, and minimum field lengths.
+  //
+  //  Key-guard: uses ctx.skip() (vitest SKIPPED, never PASSED) when no
+  //  Anthropic API key is available. Previously used console.warn+return which
+  //  vitest counts as PASS — a false-green that hid the untested criterion.
+
+  /** Assert that an interpreted result is meaningfully better than the original
+   *  cryptic title/description. This is the code form of Istvan's named
+   *  acceptance criterion — it rejects trivial transforms (case-only changes,
+   *  prefix stripping), single-word titles, and placeholder-quality output. */
+  function assertMeaningfulInterpretation(
+    result: GoalInterpretation,
+    context: { originalTitle: string; originalDescription: string | null },
+  ): void {
+    const { originalTitle, originalDescription } = context
+
+    // ── Title quality ───────────────────────────────────────────────────
+
+    const normalizedOriginal = originalTitle
+      .toLowerCase()
+      .replace(/^(re|fw|aw|fwd|ref|reply|antwort|wg|vs|odp|sv|tr):\s*/i, '')
+      .replace(/[^a-záéíóöőúüű0-9]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+    const normalizedTitle = result.title
+      .toLowerCase()
+      .replace(/[^a-záéíóöőúüű0-9]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+    // 1. Interpreted title must differ from original in more than just case
+    //    or prefix stripping (e.g. "RE: szamla" → "szamla" is rejected).
+    expect(normalizedTitle).not.toBe(normalizedOriginal)
+
+    // 2. Title must have at least 2 distinct words (not just "aaaaa" or "dokumentum").
+    const titleWords = normalizedTitle.split(/\s+/).filter(w => w.length > 1)
+    expect(titleWords.length).toBeGreaterThanOrEqual(2)
+
+    // 3. Title must be at least 10 characters (rejects "ok", "igen", "x y").
+    expect(result.title.length).toBeGreaterThanOrEqual(10)
+
+    // 4. At least one substantive word (3+ chars) in the title — not just
+    //    "re szamla" normalised from the original.
+    const titleSubstantive = titleWords.filter(w => w.length >= 3)
+    const originalSubstantive = normalizedOriginal.split(/\s+/).filter(w => w.length >= 3)
+    // The interpreted title must contain at least one substantive word that
+    // is NOT present in the original — proving the LLM added new meaning.
+    const newSubstantive = titleSubstantive.filter(w => !originalSubstantive.includes(w))
+    expect(newSubstantive.length).toBeGreaterThanOrEqual(1)
+
+    // ── Goal quality ────────────────────────────────────────────────────
+
+    // 5. Goal must have at least 3 substantive words (3+ chars) — a goal
+    //    of "send email" or "pay invoice" is too vague.
+    const goalSubstantive = result.goal
+      .toLowerCase()
+      .replace(/[^a-záéíóöőúüű0-9]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .split(/\s+/)
+      .filter((w: string) => w.length >= 3)
+    expect(goalSubstantive.length).toBeGreaterThanOrEqual(3)
+    expect(result.goal.length).toBeGreaterThanOrEqual(15)
+
+    // ── Summary quality ──────────────────────────────────────────────────
+
+    // 6. Summary must have at least 5 substantive words.
+    const summarySubstantive = result.summary
+      .toLowerCase()
+      .replace(/[^a-záéíóöőúüű0-9]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .split(/\s+/)
+      .filter((w: string) => w.length >= 3)
+    expect(summarySubstantive.length).toBeGreaterThanOrEqual(5)
+    expect(result.summary.length).toBeGreaterThanOrEqual(30)
+
+    // 7. Goal and summary must NOT be identical (distinct fields).
+    const normalizedGoal = result.goal.toLowerCase().trim()
+    const normalizedSummary = result.summary.toLowerCase().trim()
+    expect(normalizedGoal).not.toBe(normalizedSummary)
+  }
 
   describe('Live acceptance — real cryptic-subject cases (one PRI, one ZST)', () => {
-    it('produces meaningfully better title for real PRI case with cryptic subject', async () => {
-      if (!process.env.ANTHROPIC_API_KEY) {
-        console.warn('SKIP: ANTHROPIC_API_KEY not set — skipping live acceptance test')
-        return
+    it('produces meaningfully better title for real PRI case with cryptic subject', async (ctx) => {
+      // ctx.skip() produces vitest SKIPPED status, NOT PASSED.
+      // Previously: console.warn + return = FALSE-GREEN (vitest counts as PASS).
+      if (!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
+        ctx.skip()
+        return // satisfy tsc — ctx.skip() throws at runtime but tsc doesn't see it
       }
 
       // Open the live DB (read-only to avoid corruption)
@@ -677,7 +766,7 @@ Due date: 2026-08-15.
       const liveDbPath = path.join('/home/iszzu/marveen', 'store', 'claudeclaw.db')
       const fs = require('node:fs')
       if (!fs.existsSync(liveDbPath)) {
-        console.warn(`SKIP: live DB not found at ${liveDbPath}`)
+        ctx.skip()
         return
       }
 
@@ -696,8 +785,8 @@ Due date: 2026-08-15.
       ).get() as { case_id: string; title: string; case_type: string; description: string | null } | undefined
 
       if (!crypticCase) {
-        console.warn('SKIP: no cryptic-subject PRI case found in live DB')
         liveDb.close()
+        ctx.skip()
         return
       }
 
@@ -729,32 +818,24 @@ Due date: 2026-08-15.
 
         console.log(`PRI case ${crypticCase.case_id}:`)
         console.log(`  Original title: "${crypticCase.title}"`)
+        console.log(`  Original desc:  "${(crypticCase.description ?? '').slice(0, 100)}"`)
         console.log(`  Interpreted title: "${result.title}"`)
+        console.log(`  Summary: "${result.summary.slice(0, 200)}"`)
         console.log(`  Goal: "${result.goal}"`)
 
-        // Named acceptance criterion: interpreted title must be meaningfully
-        // better than the original. "Better" means: different from original,
-        // reasonably descriptive (longer than a few chars), and the goal and
-        // summary are non-trivial.
-        expect(result.title).not.toBe(crypticCase.title)
-        expect(result.title.length).toBeGreaterThanOrEqual(5)
-        expect(result.goal.length).toBeGreaterThanOrEqual(5)
-        expect(result.summary.length).toBeGreaterThanOrEqual(10)
-        // If the original title was very short (cryptic), the interpreted
-        // title should be more descriptive.
-        if (crypticCase.title.length < 30) {
-          // Not strictly longer (LLM might produce concise title from cryptic
-          // original) but must be DIFFERENT — the core check is above.
-        }
+        assertMeaningfulInterpretation(result, {
+          originalTitle: crypticCase.title,
+          originalDescription: crypticCase.description,
+        })
       } catch (err) {
         console.error(`Live PRI test failed: ${(err as Error).message}`)
         throw err
       }
     }, 30000) // 30s timeout for LLM call
 
-    it('produces meaningfully better title for real ZST case with cryptic subject', async () => {
-      if (!process.env.ANTHROPIC_API_KEY) {
-        console.warn('SKIP: ANTHROPIC_API_KEY not set — skipping live acceptance test')
+    it('produces meaningfully better title for real ZST case with cryptic subject', async (ctx) => {
+      if (!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
+        ctx.skip()
         return
       }
 
@@ -762,7 +843,7 @@ Due date: 2026-08-15.
       const liveDbPath = path.join('/home/iszzu/marveen', 'store', 'claudeclaw.db')
       const fs = require('node:fs')
       if (!fs.existsSync(liveDbPath)) {
-        console.warn(`SKIP: live DB not found at ${liveDbPath}`)
+        ctx.skip()
         return
       }
 
@@ -778,8 +859,8 @@ Due date: 2026-08-15.
       ).get() as { case_id: string; title: string; case_type: string; description: string | null } | undefined
 
       if (!crypticCase) {
-        console.warn('SKIP: no cryptic-subject ZST case found in live DB')
         liveDb.close()
+        ctx.skip()
         return
       }
 
@@ -808,17 +889,148 @@ Due date: 2026-08-15.
 
         console.log(`ZST case ${crypticCase.case_id}:`)
         console.log(`  Original title: "${crypticCase.title}"`)
+        console.log(`  Original desc:  "${(crypticCase.description ?? '').slice(0, 100)}"`)
         console.log(`  Interpreted title: "${result.title}"`)
+        console.log(`  Summary: "${result.summary.slice(0, 200)}"`)
         console.log(`  Goal: "${result.goal}"`)
 
-        expect(result.title).not.toBe(crypticCase.title)
-        expect(result.title.length).toBeGreaterThanOrEqual(5)
-        expect(result.goal.length).toBeGreaterThanOrEqual(5)
-        expect(result.summary.length).toBeGreaterThanOrEqual(10)
+        assertMeaningfulInterpretation(result, {
+          originalTitle: crypticCase.title,
+          originalDescription: crypticCase.description,
+        })
       } catch (err) {
         console.error(`Live ZST test failed: ${(err as Error).message}`)
         throw err
       }
     }, 30000)
+  })
+
+  // ── Stage 8: Curated fixture — assertMeaningfulInterpretation quality gate ──
+  //
+  //  These tests verify the assertion function ITSELF (no LLM needed).
+  //  Good output passes; trivial/placeholder output is correctly rejected.
+  //  This gate stays green in keyless environments and catches regressions
+  //  in the quality-bar logic independently of LLM behavior.
+
+  describe('assertMeaningfulInterpretation — quality gate (fixture, no LLM)', () => {
+    const originalTitle = 'RE: EUR-váltás reggel'
+    const originalDesc = 'some email thread content here'
+
+    it('accepts a genuinely better title with new substantive content', () => {
+      const result: GoalInterpretation = {
+        title: 'Morning EUR/HUF Exchange Rate Check Request',
+        summary: 'The sender is requesting confirmation of the EUR/HUF exchange rate for a morning transaction. The finance team needs to provide the current rate and execute the conversion.',
+        goal: 'Confirm the EUR/HUF exchange rate and execute the morning currency conversion transaction.',
+      }
+      // Must not throw
+      expect(() => assertMeaningfulInterpretation(result, {
+        originalTitle, originalDescription: originalDesc,
+      })).not.toThrow()
+    })
+
+    it('rejects title that is identical to original', () => {
+      const result: GoalInterpretation = {
+        title: originalTitle,
+        summary: 'A summary with enough substantive words to describe the situation properly.',
+        goal: 'Execute the currency conversion as requested in the email thread.',
+      }
+      expect(() => assertMeaningfulInterpretation(result, {
+        originalTitle, originalDescription: originalDesc,
+      })).toThrow()
+    })
+
+    it('rejects title that is just a case-normalised version of original', () => {
+      // "RE: EUR-váltás reggel" → normalized = "eur váltás reggel"
+      // The interpreted title is identical after normalization — no new meaning.
+      const result: GoalInterpretation = {
+        title: 'eur váltás reggel',
+        summary: 'A summary with enough substantive words to describe the situation properly.',
+        goal: 'Execute the currency conversion as requested in the email thread.',
+      }
+      expect(() => assertMeaningfulInterpretation(result, {
+        originalTitle, originalDescription: originalDesc,
+      })).toThrow()
+    })
+
+    it('rejects title that only strips email prefix (RE:/FW:) from original', () => {
+      const result: GoalInterpretation = {
+        title: 'EUR váltás reggel',
+        summary: 'A summary with enough substantive words to describe the situation properly.',
+        goal: 'Execute the currency conversion as requested in the email thread.',
+      }
+      expect(() => assertMeaningfulInterpretation(result, {
+        originalTitle, originalDescription: originalDesc,
+      })).toThrow()
+    })
+
+    it('rejects single-word title ("aaaaa")', () => {
+      const result: GoalInterpretation = {
+        title: 'aaaaa',
+        summary: 'A summary with enough substantive words to describe the situation properly.',
+        goal: 'Execute the currency conversion as requested in the email thread.',
+      }
+      expect(() => assertMeaningfulInterpretation(result, {
+        originalTitle, originalDescription: originalDesc,
+      })).toThrow()
+    })
+
+    it('rejects title made only of words already present in original', () => {
+      // "EUR váltás" normalized = "eur valtas". Both words are already in
+      // the original ("RE: EUR-váltás reggel" → ["eur","valtas","reggel"]).
+      // No NEW substantive word → rejected.
+      const result: GoalInterpretation = {
+        title: 'EUR váltás',
+        summary: 'A summary with enough substantive words to describe the situation properly.',
+        goal: 'Execute the currency conversion as requested in the email thread.',
+      }
+      expect(() => assertMeaningfulInterpretation(result, {
+        originalTitle, originalDescription: originalDesc,
+      })).toThrow()
+    })
+
+    it('rejects too-short title (< 10 chars)', () => {
+      const result: GoalInterpretation = {
+        title: 'Pay now',
+        summary: 'A summary with enough substantive words to describe the situation properly.',
+        goal: 'Execute the currency conversion as requested in the email thread.',
+      }
+      expect(() => assertMeaningfulInterpretation(result, {
+        originalTitle, originalDescription: originalDesc,
+      })).toThrow()
+    })
+
+    it('rejects goal that is identical to summary (not distinct)', () => {
+      const same = 'Execute the currency conversion as requested in the email thread.'
+      const result: GoalInterpretation = {
+        title: 'EUR/HUF Currency Exchange Request',
+        summary: same,
+        goal: same,
+      }
+      expect(() => assertMeaningfulInterpretation(result, {
+        originalTitle, originalDescription: originalDesc,
+      })).toThrow()
+    })
+
+    it('rejects goal with fewer than 3 substantive words', () => {
+      const result: GoalInterpretation = {
+        title: 'EUR/HUF Currency Exchange Request',
+        summary: 'A summary with enough substantive words to properly describe the situation.',
+        goal: 'do it',
+      }
+      expect(() => assertMeaningfulInterpretation(result, {
+        originalTitle, originalDescription: originalDesc,
+      })).toThrow()
+    })
+
+    it('rejects summary with fewer than 5 substantive words', () => {
+      const result: GoalInterpretation = {
+        title: 'EUR/HUF Currency Exchange Request',
+        summary: 'Summary of request.',
+        goal: 'Execute the currency conversion as requested by the finance team in the morning email.',
+      }
+      expect(() => assertMeaningfulInterpretation(result, {
+        originalTitle, originalDescription: originalDesc,
+      })).toThrow()
+    })
   })
 })
