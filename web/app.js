@@ -393,6 +393,7 @@ function switchPage(pageId) {
   if (pageId === 'tokenUsage') loadTokenUsage()
   if (pageId === 'costs') loadCosts()
   if (pageId === 'costs-cc') window.Costops.mount()
+  if (pageId === 'autonomy') loadAutonomy()  // LOCAL-FORK: standalone autonomy page restored (2026-08-08)
   if (pageId === 'cos' && window.CosControl) window.CosControl.mount()  // LOCAL-FORK: cos seam (keep on rebase)
   if (pageId === 'optimization') window.Optimization.mount()
   if (pageId === 'ideas') loadIdeasPage()
@@ -446,7 +447,7 @@ const SIDEBAR_GROUPS = [
   { key: 'team',        labelKey: 'nav.group.team',        pages: ['agents', 'activity', 'team', 'messages', 'tasks', 'bgTasks'] },
   { key: 'knowledge',   labelKey: 'nav.group.knowledge',   pages: ['memories', 'skills', 'research', 'ideas'] },
   { key: 'stats',       labelKey: 'nav.group.stats',       pages: ['costs-cc', 'tokenUsage', 'optimization'] },
-  { key: 'system',      labelKey: 'nav.group.system',      pages: ['status', 'naplo', 'updates', 'settings', 'vault'] },
+  { key: 'system',      labelKey: 'nav.group.system',      pages: ['status', 'naplo', 'updates', 'settings', 'autonomy', 'vault'] },
   { key: 'connections', labelKey: 'nav.group.connections', pages: ['connectors', 'federation', 'migrate'] },
 ]
 const sidebarGroupEls = document.querySelectorAll('.sb-group[data-group]')
@@ -524,6 +525,7 @@ const NAV_I18N = {
   approvals: 'nav.approvals',
   docs: 'nav.docs', research: 'nav.research', status: 'nav.status',
   settings: 'nav.settings', vault: 'nav.vault', tokenUsage: 'nav.tokenUsage',
+  autonomy: 'nav.autonomy',
   ideas: 'nav.ideas', federation: 'nav.federation', updates: 'nav.updates', costs: 'nav.costs',
   // LOCAL-FORK: the Command Center reuses the same nav label as upstream's
   // 'costs' page. Without this entry renderNav() leaves the hardcoded Hungarian
@@ -12694,6 +12696,14 @@ async function cancelBgTask(id) {
 // === Autonomy ===
 // ============================================================
 
+// LOCAL-FORK: standalone autonomy page (restored 2026-08-08 after merge 14023f09
+// dropped the sidebar link + page div). Delegates to the shared renderAutonomyContent().
+async function loadAutonomy() {
+  const grid = document.getElementById('autonomyGrid')
+  const footer = document.getElementById('autonomyUpdatedAt')
+  if (grid) await renderAutonomyContent(grid, footer)
+}
+
 async function renderAutonomyContent(gridEl, footerEl) {
   gridEl.innerHTML = `<p style="color:var(--text-muted);font-size:13px">${t('autonomy.loading')}</p>`
 
@@ -12774,6 +12784,10 @@ async function setAutonomyLevel(key, level) {
     const tabGrid = document.getElementById('settingsAutonomyGrid')
     const tabFooter = document.getElementById('settingsAutonomyUpdatedAt')
     if (tabGrid) renderAutonomyContent(tabGrid, tabFooter)
+    // Refresh standalone page if visible (LOCAL-FORK: restored 2026-08-08)
+    const pageGrid = document.getElementById('autonomyGrid')
+    const pageFooter = document.getElementById('autonomyUpdatedAt')
+    if (pageGrid && !pageGrid.closest('.page[hidden]')) renderAutonomyContent(pageGrid, pageFooter)
   } catch {
     showToast(t('kanban.toast.save_error'))
   }
@@ -12993,6 +13007,9 @@ async function _resolveApproval(id, decision) {
 // ============================================================
 
 document.getElementById('refreshSettingsBtn').addEventListener('click', loadSettings)
+// LOCAL-FORK: standalone autonomy page refresh button (restored 2026-08-08)
+const _refreshAutonomyBtn = document.getElementById('refreshAutonomyBtn')
+if (_refreshAutonomyBtn) _refreshAutonomyBtn.addEventListener('click', loadAutonomy)
 window.addEventListener('beforeunload', (e) => {
   if (settingsDirty.size > 0) { e.preventDefault(); e.returnValue = '' }
 })

@@ -86,6 +86,7 @@ window._i18n.hu = {
   'nav.approvals':    'Jóváhagyások',
   'nav.settings':     'Beállítások',
   'nav.vault':        'Vault',
+  'nav.autonomy':     'Autonómia',
   'nav.tokenUsage':   'Token Monitor',
   'nav.ideas':        'Ötletláda',
   'nav.group.team':        'Csapat',
