@@ -144,11 +144,21 @@ export function deriveDisplayState(input: DeriveDisplayStateInput): ApgDisplaySt
     return input.latestTransitionState as ApgDisplayState
   }
   if (input.latestCheckpointResult === 'FAIL') return 'blocked'
-  if (
-    input.hasAssistedRecommendation
-    && input.recommendationEvidenceCompleteness !== 'COMPLETE'
-  ) {
-    return 'evidence_needed'
+  // Owner decision 2026-08-09 (Istvan, "legyen B"): only a candidate with NO
+  // evidence at all is an attention item. Previously ANY non-COMPLETE value --
+  // including PARTIAL -- landed here, so work that was fully gated but
+  // deliberately not deployed (e.g. the shadow-mode CoS slices) sat on the
+  // "evidence needed" list forever. A list whose entries are mostly non-actionable
+  // trains the reader to ignore it, which is worse than a shorter list.
+  // PARTIAL (evidence exists but the chain is incomplete) is reported as
+  // 'verifying': visible in the counts, but not competing for attention.
+  if (input.hasAssistedRecommendation) {
+    if (input.recommendationEvidenceCompleteness === 'MISSING') {
+      return 'evidence_needed'
+    }
+    if (input.recommendationEvidenceCompleteness !== 'COMPLETE') {
+      return 'verifying'
+    }
   }
   if (
     input.latestCheckpointResult === 'PASS'
@@ -453,11 +463,18 @@ function buildCandidateProjection(
     latestCheckpointResult: latestCheckpoint?.result ?? null,
     latestCheckpoint: latestCheckpoint?.checkpoint ?? null,
     hasAssistedRecommendation: recommendation !== null,
+    // Worst-wins across the candidate's recommendations, but preserve WHICH
+    // kind of incompleteness it is. The old code collapsed everything to a
+    // single 'INCOMPLETE' token, which made MISSING (no evidence at all) and
+    // PARTIAL (evidence exists, chain not finished) indistinguishable downstream
+    // -- the root cause of the noisy attention list.
     recommendationEvidenceCompleteness: candidateRecommendations.some(
-      (row) => row.evidence_completeness !== 'COMPLETE',
+      (row) => row.evidence_completeness === 'MISSING',
     )
-      ? 'INCOMPLETE'
-      : recommendation?.evidence_completeness ?? null,
+      ? 'MISSING'
+      : candidateRecommendations.some((row) => row.evidence_completeness !== 'COMPLETE')
+        ? 'PARTIAL'
+        : recommendation?.evidence_completeness ?? null,
   })
 
   return {

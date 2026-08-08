@@ -34,14 +34,37 @@ describe('deriveDisplayState precedence (spec 5)', () => {
     expect(deriveDisplayState({ ...base, latestCheckpointResult: 'FAIL' })).toBe('blocked')
   })
 
-  it('an incomplete assisted recommendation means evidence_needed, ranked above a PASS checkpoint that is not the acceptance gate', () => {
+  // Owner decision 2026-08-09 ("legyen B"): MISSING and PARTIAL are no longer
+  // the same thing. Only MISSING -- no evidence chain at all -- is an attention
+  // item. PARTIAL (evidence exists, chain unfinished, e.g. gated but deliberately
+  // not deployed) reports as 'verifying' so it stays visible in the counts
+  // without crowding the attention list.
+  it('a MISSING assisted recommendation means evidence_needed, ranked above a PASS checkpoint that is not the acceptance gate', () => {
+    expect(deriveDisplayState({
+      ...base,
+      latestCheckpointResult: 'PASS',
+      latestCheckpoint: 'spec_ready',
+      hasAssistedRecommendation: true,
+      recommendationEvidenceCompleteness: 'MISSING',
+    })).toBe('evidence_needed')
+  })
+
+  it('a PARTIAL assisted recommendation is verifying, NOT evidence_needed', () => {
     expect(deriveDisplayState({
       ...base,
       latestCheckpointResult: 'PASS',
       latestCheckpoint: 'spec_ready',
       hasAssistedRecommendation: true,
       recommendationEvidenceCompleteness: 'PARTIAL',
-    })).toBe('evidence_needed')
+    })).toBe('verifying')
+  })
+
+  it('PARTIAL does not become evidence_needed even with no checkpoint at all', () => {
+    expect(deriveDisplayState({
+      ...base,
+      hasAssistedRecommendation: true,
+      recommendationEvidenceCompleteness: 'PARTIAL',
+    })).toBe('verifying')
   })
 
   it('a COMPLETE assisted recommendation does not force evidence_needed', () => {
