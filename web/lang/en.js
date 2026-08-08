@@ -86,7 +86,6 @@ window._i18n.en = {
   'nav.approvals':    'Approvals',
   'nav.settings':     'Settings',
   'nav.vault':        'Vault',
-  'nav.autonomy':     'Autonomy',
   'nav.tokenUsage':   'Token Monitor',
   'nav.ideas':        'Ideas',
   'nav.group.team':        'Team',
