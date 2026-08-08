@@ -4,6 +4,7 @@
 // queries. Decommission is a STATE TRANSITION, not a delete.
 import { describe, it, expect, beforeAll } from "vitest";
 import Database from "better-sqlite3";
+import { initDatabase, getDb } from "../db.js";
 import { initCostOpsSchema } from "../costops/schema.js";
 
 function seedSourceAndLines(db: Database.Database, sourceId: string, provider: string) {
@@ -27,8 +28,13 @@ describe("cost_sources lifecycle_state (Card 484cad98)", () => {
   let db: Database.Database;
 
   beforeAll(() => {
-    db = new Database(":memory:");
-    initCostOpsSchema(db);
+    // Must use initDatabase (not bare initCostOpsSchema) — the latter calls
+    // initDispatchSchema which does CREATE INDEX IF NOT EXISTS on token_usage,
+    // and that throws if token_usage does not exist. initDatabase creates the
+    // full core schema first (including token_usage), then initCostOpsSchema
+    // on top. Without this, the suite is false-green in a clean :memory: DB.
+    initDatabase(":memory:");
+    db = getDb() as Database.Database;
   });
 
   it("schema migration adds lifecycle_state column with default 'active'", () => {
