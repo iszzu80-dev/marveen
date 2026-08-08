@@ -137,7 +137,12 @@ export function findSubscriptionFor(
 // margins elsewhere in this program. Not a per-agent/per-request budget --
 // a single account-wide floor, matching the single account-wide balance this
 // reads from.
-export const DEEPSEEK_BALANCE_FLOOR_USD = 1.0
+//
+// Updated to $0.50 (Istvan owner decision 2026-08-08, Telegram): he asked for
+// > $0 first, I flagged that removing the margin risks hitting zero mid-request,
+// and he chose $0.50 as the compromise -- a smaller but still non-zero safety
+// margin. Still an owner/devops-tunable single account-wide floor.
+export const DEEPSEEK_BALANCE_FLOOR_USD = 0.5
 
 function capacityStateForDeepSeekBalance(
   db: Database.Database,
