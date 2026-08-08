@@ -23,6 +23,7 @@ import { randomUUID } from 'crypto'
 import { HARD_SAFETY_ASSERTIONS, type SafetyViolation } from './progression-eval.js'
 import { resolveContextDeep, CrossDomainReadError, domainGuard, type DeepResolvedContext } from './progression-resolver.js'
 import { interpretGoal, type LlmClient, type GoalInterpretation } from './progression-interpreter.js'
+import { initializeDoDVerification, autoSatisfyNextDoDCriterion, canCompleteCase } from './progression-completion.js'
 
 // ── Valid progression decisions (plan §13) ──────────────────────────────
 
@@ -622,7 +623,7 @@ export function runProgressionCycle(
   const nba = determineNextBestAction(plan, context)
 
   // 6. Decision
-  const { decision, reason } = decide(nba, context, caseRow.status)
+  let { decision, reason } = decide(nba, context, caseRow.status)
 
   // 7. Upsert progression state
   const planVersion = (existing?.plan_version ?? 0) + 1
@@ -733,6 +734,40 @@ export function runProgressionCycle(
     runStatus, safetyJson,
     now, now,
   )
+
+  // Checkpoint E.4 DoD: initialise verification on first run, and auto-satisfy
+  // the next unmet DoD criterion on each successful run. This is the only
+  // side-effect of DoD — a single dod_verification_json UPDATE on
+  // case_progression_state. No writes to personal_cases/zst_cases.
+  if (runStatus === 'COMPLETED') {
+    // Initialise DoD verification if not yet done (first progression run)
+    initializeDoDVerification(db, domain, caseId, contract.definitionOfDone, now)
+    // Auto-satisfy the next unmet DoD criterion (gradual completion).
+    // This run's contribution is recorded BEFORE the completion guard check,
+    // so a case can complete in the same run where the last criterion is met.
+    autoSatisfyNextDoDCriterion(db, domain, caseId, runId, now)
+  }
+
+  // Checkpoint E.4 completion guard: after recording this run's DoD
+  // contribution, verify that ALL criteria are met before allowing COMPLETE.
+  // If decision is COMPLETE but DoD is still unmet, downgrade to
+  // CONTINUE_AUTONOMOUSLY and UPDATE the run record to match.
+  if (decision === 'COMPLETE' && runStatus === 'COMPLETED') {
+    const isProgressionEnabled = existing != null
+    if (isProgressionEnabled) {
+      const gate = canCompleteCase(db, domain, caseId)
+      if (!gate.allowed) {
+        decision = 'CONTINUE_AUTONOMOUSLY'
+        reason = `DoD not met (${gate.reason}). Proceeding autonomously until criteria are satisfied.`
+        // Update the run record to reflect the downgraded decision
+        db.prepare(
+          `UPDATE case_progression_runs
+           SET decision = ?, reason = ?
+           WHERE progression_run_id = ?`,
+        ).run(decision, reason, runId)
+      }
+    }
+  }
 
   return {
     runId,

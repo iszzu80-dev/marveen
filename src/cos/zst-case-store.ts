@@ -21,6 +21,7 @@ import {
   type NewCaseInput as CoreNewCaseInput,
   type TransitionInput,
 } from './case-engine-core.js'
+import { guardCaseCompletion } from './progression-completion.js'
 
 export type ZstWorkspace = 'OPERATIONS' | 'PRODUCT_LAB'
 
@@ -81,6 +82,11 @@ export function listTodayZstCases(db: Database.Database, horizonSec: number): Ca
   return engine.listTodayCases(db, horizonSec)
 }
 export function transitionZstCase(db: Database.Database, input: TransitionInput, now: number): number {
+  // Checkpoint E.4 completion guard: for progression-enabled ZST cases,
+  // DoD must be met before the case can transition to COMPLETED.
+  if (input.newStatus === 'COMPLETED') {
+    guardCaseCompletion(db, 'zst', input.caseId)
+  }
   return engine.transitionCase(db, input, now)
 }
 export function acquireZstClaim(
