@@ -100,7 +100,7 @@ describe('card 6976aaa2: DeepSeek balance wired into capacity-routing availabili
     })
 
     it('GUARD TEST 2 (full path): DeepSeek balance at the floor -> no_eligible_fallback, primary stays constrained', () => {
-      insertBalanceSnapshot(1.0, NOW_SEC - 60) // exactly at DEEPSEEK_BALANCE_FLOOR_USD
+      insertBalanceSnapshot(0.5, NOW_SEC - 60) // exactly at DEEPSEEK_BALANCE_FLOOR_USD (0.5, owner decision 2026-08-08)
       const deepseekState = capacityStateFor(getDb(), 'deepseek', 'configdir:.claude-deepseek', NOW_SEC, false)
       expect(deepseekState).toBe('blocked')
 
@@ -148,6 +148,6 @@ describe('card 6976aaa2: DeepSeek balance wired into capacity-routing availabili
   })
 
   it('the floor is a named, documented constant -- not a magic number buried in the branch', () => {
-    expect(DEEPSEEK_BALANCE_FLOOR_USD).toBe(1.0)
+    expect(DEEPSEEK_BALANCE_FLOOR_USD).toBe(0.5)
   })
 })
