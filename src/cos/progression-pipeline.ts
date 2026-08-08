@@ -1,16 +1,18 @@
 // Autonomous Case Progression Layer v1.1 — Thin shadow vertical slice.
 // Checkpoint B (card 4a809934): first checkpoint with actual progression LOGIC.
 // Checkpoint C (card 53f1fd06): resolver depth — email thread + memory lookup.
+// Checkpoint D (card 6b7e7e5e): outcome contract / goal interpretation (LLM-based).
 //
 // Pipeline stages (plan §10-14):
-//   1. Outcome Contract  — derive "what done means" for this case
+//   0. Goal Enrichment    — LLM-interpreted goal + summary (lazy, first-run only)
+//   1. Outcome Contract   — derive "what done means" for this case
 //   2. Resolver           — resolve-before-ask: DB + email thread + memory
 //   3. Rolling Plan       — ordered steps to reach the outcome
 //   4. Next Best Action   — the very next thing to do
 //   5. Decision           — one of 10 valid progression decisions (§13)
 //   6. Progression Run    — record in case_progression_runs (GATE 0 ledger)
 //
-// HARD INVARIANTS (Checkpoint B/C scope):
+// HARD INVARIANTS (Checkpoint B/C/D scope):
 //   - ZERO side effects: no email send, no status mutation on personal_cases/zst_cases
 //   - Write ONLY to case_progression_state + case_progression_runs
 //   - progression_enabled stays false, progression_mode stays 'shadow'
@@ -19,7 +21,8 @@
 import type Database from 'better-sqlite3'
 import { randomUUID } from 'crypto'
 import { HARD_SAFETY_ASSERTIONS, type SafetyViolation } from './progression-eval.js'
-import { resolveContextDeep, CrossDomainReadError, type DeepResolvedContext } from './progression-resolver.js'
+import { resolveContextDeep, CrossDomainReadError, domainGuard, type DeepResolvedContext } from './progression-resolver.js'
+import { interpretGoal, type LlmClient, type GoalInterpretation } from './progression-interpreter.js'
 
 // ── Valid progression decisions (plan §13) ──────────────────────────────
 
@@ -379,6 +382,87 @@ export interface ProgressionRunResult {
   goalVersion?: number
 }
 
+// ── Goal enrichment (Checkpoint D — lazy LLM interpretation) ───────────
+
+/** Enrich a case with LLM-interpreted goal and summary. Idempotent: if the
+ *  case_progression_state already has a non-empty goal, this is a no-op
+ *  (lazy enrichment — interpreted once at first progression run).
+ *
+ *  Domain-scoped: calls domainGuard() before interpretation. */
+export async function enrichCaseGoal(
+  db: Database.Database,
+  domain: 'personal' | 'zst',
+  caseId: string,
+  llmClient: LlmClient,
+  emailThreadContent?: string,
+): Promise<{ interpreted: boolean; goal: string; summary: string; title: string }> {
+  // Lazy: if already enriched, return existing
+  const existing = db.prepare(
+    'SELECT goal, summary FROM case_progression_state WHERE domain = ? AND case_id = ?',
+  ).get(domain, caseId) as { goal: string | null; summary: string | null } | undefined
+
+  if (existing?.goal && existing.goal.trim().length > 0) {
+    return {
+      interpreted: false,
+      goal: existing.goal,
+      summary: existing.summary ?? '',
+      title: '',
+    }
+  }
+
+  // Domain-scoped read guard
+  domainGuard(db, domain, caseId, 'enrichCaseGoal')
+
+  // Read case metadata
+  const tableName = domain === 'personal' ? 'personal_cases' : 'zst_cases'
+  const caseRow = db.prepare(
+    `SELECT title, case_type, description FROM ${tableName} WHERE case_id = ?`,
+  ).get(caseId) as { title: string; case_type: string; description: string | null } | undefined
+
+  if (!caseRow) {
+    throw new Error(`Case not found: ${domain}/${caseId}`)
+  }
+
+  // Interpret via LLM
+  const content = emailThreadContent ?? caseRow.description ?? ''
+  const interpretation = await interpretGoal(
+    llmClient,
+    caseRow.title,
+    caseRow.case_type,
+    caseRow.description,
+    content,
+  )
+
+  const now = Math.floor(Date.now() / 1000)
+
+  // Write to case_progression_state (lazy enrichment — writes only here)
+  const stateExists = db.prepare(
+    'SELECT 1 FROM case_progression_state WHERE domain = ? AND case_id = ?',
+  ).get(domain, caseId)
+
+  if (stateExists) {
+    db.prepare(
+      `UPDATE case_progression_state
+       SET goal = ?, summary = ?, goal_version = goal_version + 1, updated_at = ?
+       WHERE domain = ? AND case_id = ?`,
+    ).run(interpretation.goal, interpretation.summary, now, domain, caseId)
+  } else {
+    db.prepare(
+      `INSERT INTO case_progression_state
+       (domain, case_id, goal, summary, progression_enabled, progression_mode,
+        case_version, goal_version, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 0, 'shadow', 0, 1, ?, ?)`,
+    ).run(domain, caseId, interpretation.goal, interpretation.summary, now, now)
+  }
+
+  return {
+    interpreted: true,
+    goal: interpretation.goal,
+    summary: interpretation.summary,
+    title: interpretation.title,
+  }
+}
+
 // ── Main pipeline ───────────────────────────────────────────────────────
 
 export interface PipelineOptions {
@@ -491,8 +575,22 @@ export function runProgressionCycle(
     throw new Error(`Case not found: ${domain}/${caseId}`)
   }
 
-  // 2. Outcome contract
+  // 2. Outcome contract — lazy enrichment: if goal was already set by
+  //    enrichCaseGoal(), use it; otherwise fall back to heuristic.
+  const existing = db.prepare(
+    'SELECT case_version, plan_version, goal_version, goal, summary FROM case_progression_state WHERE domain = ? AND case_id = ?',
+  ).get(domain, caseId) as { case_version: number; plan_version: number; goal_version: number; goal: string | null; summary: string | null } | undefined
+
   const contract = deriveOutcomeContract(caseRow.title, caseRow.case_type, caseRow.status, caseRow.sensitivity)
+
+  // If an LLM-enriched goal already exists (lazy enrichment), use it.
+  // The enriched goal is more accurate than the heuristic — it was derived
+  // from the actual email thread content by enrichCaseGoal().
+  const enrichedGoal: string | null = existing?.goal && existing.goal.trim().length > 0 ? existing.goal : null
+  const enrichedSummary: string | null = existing?.summary ?? null
+  if (enrichedGoal) {
+    contract.goal = enrichedGoal
+  }
 
   // 3. Resolve context (deep: DB + email thread + memory — internal-shadow reads only)
   //    Domain-scoped read guard: CrossDomainReadError → FAILED run with CROSS_DOMAIN_LEAKAGE
@@ -527,10 +625,6 @@ export function runProgressionCycle(
   const { decision, reason } = decide(nba, context, caseRow.status)
 
   // 7. Upsert progression state
-  const existing = db.prepare(
-    'SELECT case_version, plan_version, goal_version FROM case_progression_state WHERE domain = ? AND case_id = ?',
-  ).get(domain, caseId) as { case_version: number; plan_version: number; goal_version: number } | undefined
-
   const planVersion = (existing?.plan_version ?? 0) + 1
   const goalVersion = existing?.goal_version ?? 0
   const caseVersion = existing?.case_version ?? 1
@@ -538,6 +632,9 @@ export function runProgressionCycle(
   const auditJson = JSON.stringify(deepCtx.audit)
 
   if (existing) {
+    // UPDATE: preserve enriched summary (set once by enrichCaseGoal, never
+    // overwritten by the pipeline). goal IS written — if lazy enrichment
+    // already set it, we write the same value back (idempotent).
     db.prepare(
       `UPDATE case_progression_state
        SET goal = ?, definition_of_done_json = ?, success_evidence_requirements_json = ?,
@@ -561,18 +658,18 @@ export function runProgressionCycle(
   } else {
     db.prepare(
       `INSERT INTO case_progression_state
-       (domain, case_id, goal, definition_of_done_json, success_evidence_requirements_json,
+       (domain, case_id, goal, summary, definition_of_done_json, success_evidence_requirements_json,
         semantic_completion_status, rolling_plan_json, plan_version, next_best_action_json,
         resolution_audit_json,
         progression_enabled, progression_mode, last_progressed_at,
         blocked_reason, waiting_on, case_version, goal_version, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?,
+       VALUES (?, ?, ?, ?, ?, ?,
                ?, ?, ?, ?,
                ?,
                0, 'shadow', ?,
                NULL, NULL, 1, 0, ?, ?)`,
     ).run(
-      domain, caseId, contract.goal,
+      domain, caseId, contract.goal, enrichedSummary,
       JSON.stringify(contract.definitionOfDone),
       JSON.stringify(contract.successEvidenceRequirements),
       caseRow.status === 'COMPLETED' ? 'PROPOSED' : 'IN_PROGRESS',
@@ -660,6 +757,7 @@ export interface MissionControlProgressionView {
   title: string
   status: string
   goal: string | null
+  summary: string | null
   semanticCompletionStatus: string
   lastDecision: string | null
   lastDecisionReason: string | null
@@ -686,6 +784,7 @@ export function getMissionControlProgressionView(
        c.title                AS "title",
        c.status               AS "status",
        s.goal                 AS "goal",
+       s.summary              AS "summary",
        s.semantic_completion_status AS "semanticCompletionStatus",
        r.decision             AS "lastDecision",
        r.reason               AS "lastDecisionReason",

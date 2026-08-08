@@ -1283,7 +1283,9 @@ export function initProgressionSchema(db: Database.Database): void {
 
   // Checkpoint C (card 53f1fd06): resolution audit trail (§10). Migrated in
   // place for existing dbs; the column defaults to NULL for pre-C rows.
+  // Checkpoint D (card 6b7e7e5e): LLM-interpreted case summary (§10.2).
   ensureColumns(db, 'case_progression_state', {
     resolution_audit_json: 'TEXT',
+    summary: 'TEXT',
   })
 }
