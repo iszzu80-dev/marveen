@@ -176,6 +176,14 @@
       '</section>'
   }
 
+  function zstSection(title, cases, emptyMsg) {
+    // Card e237797d: ZST corporate namespace — same rendering, visually
+    // separated. The company scope boundary (zst_cases vs personal_cases)
+    // is enforced at the connector/API layer; this UI just renders both
+    // namespaces side-by-side, never merged.
+    return section(title, cases, emptyMsg)
+  }
+
   function mount() {
     var body = document.getElementById('cosBody')
     if (!body) return
@@ -183,9 +191,13 @@
     function j(u) { return fetch(u).then(function (r) { return r.json() }).catch(function () { return {} }) }
     Promise.all([
       j('/api/cos/today'), j('/api/cos/cases'), j('/api/cos/outbound'), j('/api/cos/campaigns'), j('/api/cos/radar'), j('/api/cos/monitoring'), j('/api/cos/analytics'),
+      j('/api/cos/zst-today'), j('/api/cos/zst-cases'),
     ]).then(function (res) {
       var today = res[0] || {}, all = res[1] || {}, out = res[2] || {}, camp = res[3] || {}, rad = res[4] || {}, mon = res[5] || {}, an = res[6] || {}
-      body.innerHTML =
+      var zstToday = res[7] || {}, zstAll = res[8] || {}
+
+      // Personal namespace (személyes)
+      var personalHtml =
         section('📌 Ma', today.cases || [], 'Ma nincs esedékes ügy.') +
         section('🗂 Ügyek', all.cases || [], 'Nincs aktív ügy. A COS case-store üres vagy minden ügy lezárt.') +
         genericSection('📤 Kimenő', out.outbound || [], 'Nincs kimenő művelet.', outboundItem) +
@@ -193,6 +205,23 @@
         genericSection('🎯 Radar', rad.radar || [], 'Nincs figyelt ár-radar.', radarItem) +
         monitoringSection(mon) +
         analyticsSection(an)
+
+      // ZST Radio / Ceges namespace — card e237797d.
+      // Same priority colors (P0 red / P1 amber / P2 blue / P3 grey),
+      // visually separated with a clear company vs personal label.
+      // HARD RULE: personal_cases and zst_cases are NEVER merged into
+      // one list — connector identity is the scope boundary.
+      var zstHtml =
+        '<hr style="border:none;border-top:2px solid var(--border,#3a3a3a);margin:32px 0 24px;">' +
+        '<div style="display:flex;align-items:center;gap:10px;margin-bottom:20px;">' +
+          '<span style="font-size:20px;">🏢</span>' +
+          '<strong style="font-size:17px;color:var(--text,#e0e0e0);">ZST Radio / Céges</strong>' +
+          '<span style="font-size:11px;color:var(--text-muted,#888);padding:2px 8px;border:1px solid var(--border,#3a3a3a);border-radius:4px;">vállalati névtér</span>' +
+        '</div>' +
+        zstSection('📌 Ma — ZST', zstToday.cases || [], 'Ma nincs esedékes céges ügy.') +
+        zstSection('🗂 Ügyek — ZST', zstAll.cases || [], 'Nincs aktív céges ügy.')
+
+      body.innerHTML = personalHtml + zstHtml
     }).catch(function (e) {
       body.innerHTML = '<p style="color:#ef4444;">Hiba a betöltéskor: ' + esc(e && e.message) + '</p>'
     })
