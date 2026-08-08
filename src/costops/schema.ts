@@ -48,6 +48,17 @@ export function initCostOpsSchema(db: Database.Database): void {
       updated_at INTEGER NOT NULL
     )
   `)
+  // Card 484cad98: decommissioned lifecycle state. A cost source whose account
+  // has been deleted (e.g. Render account deleted 2026-07-30) is NOT deleted
+  // from the ledger -- that would silently drop historical costs. Instead it
+  // transitions to 'decommissioned': historical line items are preserved (the
+  // ledger total is invariant), but the source is excluded from active-
+  // collection queries (sync, forecast, reconciliation, inventory, alerts,
+  // optimization). 'decommissioned' is a terminal state; a source cannot be
+  // reactivated (the provider account no longer exists). For a source that is
+  // merely paused/disabled, use active=0 with lifecycle_state='active'.
+  try { db.exec(`ALTER TABLE cost_sources ADD COLUMN lifecycle_state TEXT NOT NULL DEFAULT 'active'`) } catch { /* already exists */ }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_cost_sources_lifecycle ON cost_sources(lifecycle_state, active)`)
   db.exec(`
     CREATE TABLE IF NOT EXISTS cost_line_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

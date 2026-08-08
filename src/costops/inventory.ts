@@ -122,7 +122,7 @@ export function buildSourceInventory(
 ): SourceInventoryEntry[] {
   const checkCredential = deps.credentialChecker ?? realCredentialChecker()
 
-  const sources = db.prepare(`SELECT id, name, provider, source_type FROM cost_sources WHERE active = 1 ORDER BY name`).all() as SourceRow[]
+  const sources = db.prepare(`SELECT id, name, provider, source_type FROM cost_sources WHERE active = 1 AND lifecycle_state != 'decommissioned' ORDER BY name`).all() as SourceRow[]
 
   // Latest run + last successful run + last failed run, per provider.
   const latestRows = db.prepare(`

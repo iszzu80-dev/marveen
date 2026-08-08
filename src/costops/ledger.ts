@@ -565,7 +565,9 @@ export function getCostSummary(
   forecast_month_end = round2(forecast_month_end)
 
   // resolve source metadata (name/provider/source_type) for every active source
-  const srcRows = db.prepare(`SELECT id, name, provider, source_type FROM cost_sources WHERE active = 1`).all() as Array<{ id: string; name: string; provider: string; source_type: string }>
+  // Includes decommissioned sources (card 484cad98) so historical cost_line_items
+  // from a decommissioned account still resolve to a human-readable name.
+  const srcRows = db.prepare(`SELECT id, name, provider, source_type FROM cost_sources WHERE active = 1 OR lifecycle_state = 'decommissioned'`).all() as Array<{ id: string; name: string; provider: string; source_type: string }>
   const nameMap = new Map(srcRows.map(r => [r.id, r.name]))
   const top_sources = [...perSource.entries()]
     .map(([source_id, spend]) => ({ source_id, name: nameMap.get(source_id) || source_id, spend: round2(spend) }))
@@ -776,7 +778,10 @@ export function getCostSummary(
 }
 
 export function getCostSources(db: Database.Database): unknown[] {
-  return db.prepare(`SELECT id, name, provider, source_type, currency, active, updated_at FROM cost_sources WHERE active = 1 ORDER BY name`).all()
+  // Card 484cad98: include decommissioned sources so the dashboard can still
+  // display them (with their lifecycle_state marker), but exclude soft-disabled
+  // sources (active=0) which were never meant to be shown.
+  return db.prepare(`SELECT id, name, provider, source_type, currency, active, lifecycle_state, updated_at FROM cost_sources WHERE active = 1 OR lifecycle_state = 'decommissioned' ORDER BY name`).all()
 }
 
 function round2(n: number): number { return Math.round(n * 100) / 100 }

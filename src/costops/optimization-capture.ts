@@ -128,7 +128,7 @@ function gatherDuplicateHostingSaasCandidates(db: Database.Database, now: number
 
 function gatherAutomateLongManualSourceCandidates(db: Database.Database): RecommendationCandidate[] {
   const out: RecommendationCandidate[] = []
-  const sources = db.prepare(`SELECT id, provider FROM cost_sources WHERE active = 1`).all() as Array<{ id: string; provider: string }>
+  const sources = db.prepare(`SELECT id, provider FROM cost_sources WHERE active = 1 AND lifecycle_state != 'decommissioned'`).all() as Array<{ id: string; provider: string }>
   for (const s of sources) {
     const periodRows = db.prepare(`
       SELECT DISTINCT charge_period_start FROM cost_line_items

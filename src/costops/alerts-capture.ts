@@ -258,7 +258,7 @@ function gatherUnusualSpendGrowthCandidates(db: Database.Database, config: CostO
 function gatherNewSourceAndEstimateOnlyCandidates(db: Database.Database, now: number): AlertCandidate[] {
   const out: AlertCandidate[] = []
   const win = monthWindow(now)
-  const sources = db.prepare(`SELECT id FROM cost_sources WHERE active = 1`).all() as Array<{ id: string }>
+  const sources = db.prepare(`SELECT id FROM cost_sources WHERE active = 1 AND lifecycle_state != 'decommissioned'`).all() as Array<{ id: string }>
 
   for (const s of sources) {
     const earliest = db.prepare(`SELECT MIN(charge_period_start) as t FROM cost_line_items WHERE source_id = ? AND voided_at IS NULL`).get(s.id) as { t: number | null }

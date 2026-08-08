@@ -60,7 +60,7 @@ function isWithinTolerance(a: number, b: number): boolean {
  */
 export function buildReconciliation(db: Database.Database, now: number, month?: string): SourceReconciliation[] {
   const win = monthWindow(now, month)
-  const sources = db.prepare(`SELECT id, name, provider FROM cost_sources WHERE active = 1`).all() as SourceRow[]
+  const sources = db.prepare(`SELECT id, name, provider FROM cost_sources WHERE active = 1 AND lifecycle_state != 'decommissioned'`).all() as SourceRow[]
   const lines = db.prepare(`
     SELECT source_id, billed_cost, confidence, actual_source
     FROM cost_line_items

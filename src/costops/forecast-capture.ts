@@ -83,7 +83,7 @@ function insertSnapshot(db: Database.Database, opts: { sourceId: string | null; 
  */
 export function captureForecastSnapshots(db: Database.Database, now: number): StoredForecast[] {
   const win = monthWindow(now)
-  const sources = db.prepare(`SELECT id, provider FROM cost_sources WHERE active = 1`).all() as SourceRow[]
+  const sources = db.prepare(`SELECT id, provider FROM cost_sources WHERE active = 1 AND lifecycle_state != 'decommissioned'`).all() as SourceRow[]
   const bestLine = resolveBestLinePerSource(db, win)
   const results: StoredForecast[] = []
   let total = 0
