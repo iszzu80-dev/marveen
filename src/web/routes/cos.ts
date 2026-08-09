@@ -37,6 +37,19 @@ export function endOfTodaySec(now: Date): number {
   }
 }
 
+// Deep-compare two JSON strings by parsing and re-serializing — normalizes
+// whitespace / key ordering so drift in serialization doesn't look like a
+// changed question.
+function deepJsonEqual(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (a === b) return true
+  if (a == null || b == null) return false
+  try {
+    return JSON.stringify(JSON.parse(a)) === JSON.stringify(JSON.parse(b))
+  } catch {
+    return a === b
+  }
+}
+
 export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method } = ctx
 
@@ -222,7 +235,7 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     let body: {
       eventType?: string; choice?: string; text?: string
       sourceReference?: string; caseVersion?: number; idempotencyKey?: string
-      externalEffectAck?: boolean
+      externalEffectAck?: boolean; decision?: string; nextBestAction?: string | null
     }
     try { body = JSON.parse((await readBody(req)).toString()) }
     catch { json(res, { error: 'invalid JSON' }, 400); return true }
@@ -254,12 +267,15 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
       return true
     }
 
-    // Question-staleness guard (card 9193eedd follow-up):
-    // case_version was the wrong staleness signal — it's bumped by every
-    // heartbeat, so answers expired 5 minutes after page load even when the
-    // question hadn't changed. The right check: is sourceReference still the
-    // latest question-asking run for this case? A question is "still current"
-    // when no newer run has asked a different question.
+    // Question-staleness guard (card 9193eedd follow-up #2):
+    // Every heartbeat writes a new run row with a new progression_run_id, even
+    // when the question hasn't changed — so comparing run IDs is the same bug
+    // as comparing case_version, wearing a different field name.
+    //
+    // A question is identified by its CONTENT: the decision type plus what is
+    // being asked (next_best_action_json). If both are unchanged, the answer
+    // is current no matter how many heartbeats fired. 409 only when the case
+    // genuinely moved on: a different decision, or a different step.
     const QUESTION_DECISIONS = ['REQUEST_DECISION', 'ASK_INFORMATION', 'RECOVERY_REQUIRED', 'WAIT_EXTERNAL']
     const latestQuestionRun = db.prepare(
       `SELECT r.progression_run_id, r.decision, s.next_best_action_json
@@ -276,7 +292,11 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'no active question for this case' }, 404); return true
     }
 
-    if (latestQuestionRun.progression_run_id !== sourceReference) {
+    // Content-based staleness: the frontend sends the decision + nextBestAction
+    // it displayed. If both match the current state, the question is unchanged.
+    const sameDecision = body.decision === latestQuestionRun.decision
+    const sameNba = deepJsonEqual(body.nextBestAction ?? null, latestQuestionRun.next_best_action_json ?? null)
+    if (!sameDecision || !sameNba) {
       json(res, {
         error: 'question_stale',
         currentSourceReference: latestQuestionRun.progression_run_id,

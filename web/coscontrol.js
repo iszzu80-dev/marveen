@@ -141,7 +141,8 @@
     var html = ''
     if (dec === 'REQUEST_DECISION') {
       html = '<div class="cos-owner-ctrl" data-owner-ctrl-decision="' + esc(dec) +
-        '" data-source-ref="' + runId + '" data-case-version="' + caseVersion + '">' +
+        '" data-source-ref="' + runId + '" data-case-version="' + caseVersion +
+        '" data-owner-ctrl-nba="' + esc(prog.nbaDescription || '') + '">' +
         '<div class="cos-owner-radio-group">' +
         '<label class="cos-owner-radio"><input type="radio" name="owner-dec-' + runId + '" value="YES"> Igen</label>' +
         '<label class="cos-owner-radio"><input type="radio" name="owner-dec-' + runId + '" value="NO"> Nem</label>' +
@@ -151,19 +152,22 @@
         '</div>'
     } else if (dec === 'ASK_INFORMATION') {
       html = '<div class="cos-owner-ctrl" data-owner-ctrl-decision="' + esc(dec) +
-        '" data-source-ref="' + runId + '" data-case-version="' + caseVersion + '">' +
+        '" data-source-ref="' + runId + '" data-case-version="' + caseVersion +
+        '" data-owner-ctrl-nba="' + esc(prog.nbaDescription || '') + '">' +
         '<input type="text" class="cos-owner-text" placeholder="' + esc(nbaDesc || 'Válasz...') + '">' +
         '<button class="cos-owner-btn">Küldés</button>' +
         '</div>'
     } else if (dec === 'RECOVERY_REQUIRED') {
       html = '<div class="cos-owner-ctrl" data-owner-ctrl-decision="' + esc(dec) +
-        '" data-source-ref="' + runId + '" data-case-version="' + caseVersion + '">' +
+        '" data-source-ref="' + runId + '" data-case-version="' + caseVersion +
+        '" data-owner-ctrl-nba="' + esc(prog.nbaDescription || '') + '">' +
         '<textarea class="cos-owner-text" placeholder="Megjegyzés (opcionális)" rows="2"></textarea>' +
         '<button class="cos-owner-btn">Rendben, mehet tovább</button>' +
         '</div>'
     } else if (dec === 'WAIT_EXTERNAL') {
       html = '<div class="cos-owner-ctrl" data-owner-ctrl-decision="' + esc(dec) +
-        '" data-source-ref="' + runId + '" data-case-version="' + caseVersion + '">' +
+        '" data-source-ref="' + runId + '" data-case-version="' + caseVersion +
+        '" data-owner-ctrl-nba="' + esc(prog.nbaDescription || '') + '">' +
         '<input type="text" class="cos-owner-text" placeholder="Mi érkezett? (rövid leírás)">' +
         '<button class="cos-owner-btn">Megjött a válasz</button>' +
         '</div>'
@@ -850,6 +854,7 @@
         var decision = ctrl.dataset.ownerCtrlDecision
         var sourceRef = ctrl.dataset.sourceRef
         var caseVersion = parseInt(ctrl.dataset.caseVersion, 10) || 0
+        var nbaDescription = ctrl.dataset.ownerCtrlNba || null
 
         // Map decision → eventType.
         var decisionEventMap = {
@@ -888,6 +893,8 @@
           caseVersion: caseVersion,
           idempotencyKey: idempotencyKey,
           externalEffectAck: false, // round one: no external-effect controls (§5)
+          decision: decision,
+          nextBestAction: nbaDescription,
         })
 
         // Grey out immediately (optimistic).
