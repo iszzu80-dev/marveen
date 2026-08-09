@@ -271,9 +271,17 @@ def _ap2():
     if not personal or not zst:
         return ERROR, "az egyik jóváhagyási tábla hiányzik"
     diff = personal.symmetric_difference(zst)
-    core = prod_files("campaign-approval-core", "cos")
-    if core:
-        return PASS, "közös mag: %s" % ", ".join(os.path.basename(f) for f in core)
+    # Check the PROPERTY, not a guessed filename. The first version of this
+    # criterion grepped for a module called "campaign-approval-core" and kept
+    # failing after the core landed as approval-core.ts — a criterion that
+    # asserts a name rather than a structure measures my naming, not the system.
+    # A shared core means: one module defines the engine for BOTH namespaces.
+    shared = [f for f in (prod_files("personalApprovals", "cos") or [])
+              if f in (prod_files("zstApprovals", "cos") or [])]
+    if shared and not diff:
+        return PASS, "közös mag: %s, és a két tábla szimmetrikus" % ", ".join(os.path.basename(f) for f in shared)
+    if shared:
+        return FAIL, "van közös mag, de a két tábla eltér: %s" % ", ".join(sorted(diff))
     return FAIL, "nincs közös mag; a két tábla eltérése: %s" % (", ".join(sorted(diff)) or "azonos, de duplikált")
 
 
