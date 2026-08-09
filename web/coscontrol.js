@@ -121,10 +121,24 @@
 
   // ---- Case tile (closed) + expand handler (card 3d9d62b1, 969e5c3b) ----
   // ---- Owner-action controls (card 9193eedd) ----
+  // Tolerant owner match (card 9193eedd follow-up #3). The next_action_owner
+  // field is free text — known forms include "Istvan", "István", and
+  // "Chief of Staff / István". Null/undefined/empty means no owner → no control.
+  function isIstvanOwner(name) {
+    if (!name) return false
+    var n = name.toLowerCase()
+    return n.indexOf('istvan') !== -1 || n.indexOf('istván') !== -1
+  }
+
   // Derives the control widget from the engine's last decision + NBA.
   // Unknown decisions → no control (fail-safe, §3).
-  function ownerControl(prog) {
+  //
+  // Card 9193eedd follow-up #3: the control is rendered ONLY when the next
+  // step belongs to Istvan. The field is free text so we match tolerantly
+  // against the known forms (Istvan, István, Chief of Staff / István).
+  function ownerControl(prog, nextActionOwner) {
     if (!prog || !prog.lastDecision) return ''
+    if (!isIstvanOwner(nextActionOwner)) return ''
     var dec = prog.lastDecision
     var runId = esc(prog.lastRunId || '')
     var caseVersion = esc(prog.totalRunCount) // totalRunCount tracks cycle count ≈ version
@@ -224,7 +238,7 @@
         '</span>' +
       '</div>' +
       '<div class="cos-tile-status">' + ballHolderHtml(c, nowSec) + '</div>' +
-      ownerControl(prog) +
+      ownerControl(prog, c.next_action_owner) +
       (progBadgeHtml ? '<div class="cos-prog-row">' + progBadgeHtml + '</div>' : '') +
       progNbaHtml +
       // Expanded detail placeholder — populated on first expand.
