@@ -145,6 +145,20 @@ export function ingestTriagedZstEmail(db: Database.Database, input: ZstTriagedEm
       } catch { /* extraction is best-effort; the case still stands */ }
     }
     recordLedger(db, input, 'LOCAL_APPLIED', caseId, now)
+    // Seed progression state for the new case so it doesn't stagnate at NEW.
+    // Guarded by table existence — if the progression schema hasn't been deployed
+    // yet, the intake path is unchanged (existing brownfield behavior).
+    const progTableExists = db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='case_progression_state'",
+    ).get() as { 1: number } | undefined
+    if (progTableExists) {
+      db.prepare(
+        `INSERT OR IGNORE INTO case_progression_state
+         (domain, case_id, progression_enabled, progression_mode,
+          next_progression_at, created_at, updated_at)
+         VALUES ('zst', ?, 1, 'internal', ?, ?, ?)`,
+      ).run(caseId, now, now, now)
+    }
     return { outcome: 'CASE_CREATED', caseId, messageStatus: 'LOCAL_APPLIED', sensitivity: tier }
   })
   return tx()
