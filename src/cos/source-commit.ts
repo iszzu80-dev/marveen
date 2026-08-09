@@ -29,6 +29,7 @@
 
 import type Database from 'better-sqlite3'
 import { sourceCommit, tryAdvanceCheckpoint, isBatchTerminal } from './email-ingest.js'
+import { quarantineBatchPoison, type QuarantineDeps } from './poison-quarantine.js'
 
 export type CommitOutcome = 'COMMITTED' | 'SKIPPED_NO_CAPABILITY' | 'FAILED'
 
@@ -73,6 +74,10 @@ export class NoSourceWriteCommitter implements SourceCommitter {
 }
 
 export interface CloseOptions {
+  /** A.1 poison sweep. Absent = no sweep: quarantining is never something that
+   *  happens by default, because it is the step that lets the cursor pass
+   *  unprocessed mail. */
+  quarantine?: QuarantineDeps
   /** Required to terminalise a batch whose messages could not be source-marked.
    *  Default false: without an explicit policy the chain stays open, visibly,
    *  which is the honest state. */
@@ -84,6 +89,8 @@ export interface CloseResult {
   committed: number
   skipped: number
   failed: number
+  /** Poison messages parked under A.1 during this close. */
+  quarantined: number
   batchClosed: boolean
   cursor: string | null
   reason: string
@@ -138,17 +145,30 @@ export async function closeBatch(
     }
   }
 
+  // A.1: a message that keeps failing must not pin the cursor forever. Swept
+  // BEFORE the terminality check, so a jam cleared here lets the batch close in
+  // the same pass rather than waiting for the next run.
+  let quarantined = 0
+  const quarantineBlocked: string[] = []
+  if (opts.quarantine) {
+    const q = quarantineBatchPoison(db, batchId, opts.quarantine, now)
+    quarantined = q.quarantined
+    for (const b of q.blocked) quarantineBlocked.push(b.reason)
+  }
+
   if (!isBatchTerminal(db, batchId)) {
     return {
-      attempted: rows.length, committed, skipped, failed, batchClosed: false, cursor: null,
-      reason: skipped && !opts.allowCursorAdvanceWithoutSourceWrite
-        ? `a köteg nyitva marad: ${skipReason} (a pozíció-léptetéshez explicit policy kell)`
-        : 'a köteg nem minden eleme terminális',
+      attempted: rows.length, committed, skipped, failed, quarantined, batchClosed: false, cursor: null,
+      reason: quarantineBlocked.length
+        ? `a köteg blokkolt: ${quarantineBlocked[0]}`
+        : skipped && !opts.allowCursorAdvanceWithoutSourceWrite
+          ? `a köteg nyitva marad: ${skipReason} (a pozíció-léptetéshez explicit policy kell)`
+          : 'a köteg nem minden eleme terminális',
     }
   }
   const adv = tryAdvanceCheckpoint(db, batchId, now)
   return {
-    attempted: rows.length, committed, skipped, failed,
+    attempted: rows.length, committed, skipped, failed, quarantined,
     batchClosed: adv.advanced, cursor: adv.cursor,
     reason: adv.advanced ? 'a köteg lezárult, a pozíció lépett' : 'a köteg terminális, de a pozíció nem lépett',
   }
