@@ -299,93 +299,110 @@ export function determineNextBestAction(
 
 // ── Owner answer consumption ─────────────────────────────────────────────
 //
-// When the pipeline returns REQUEST_DECISION, Mission Control shows a button
-// to the owner. The owner's answer arrives as an event in personal_case_events
-// (or zst_case_events) with:
+// When the pipeline returns REQUEST_DECISION / REQUEST_APPROVAL, Mission
+// Control shows a button to the owner. The owner's answer arrives as an
+// event in personal_case_events (or zst_case_events) with:
 //   event_type      = OWNER_DECISION | OWNER_INFORMATION | OWNER_CONFIRMATION
 //   source_system   = mission_control
-//   source_reference = the progression_run_id that asked
+//   source_reference = the progression_run_id that was current when they pressed
 //   payload         = { choice: "YES" | "NO" } (for OWNER_DECISION)
 //
-// This function finds the latest REQUEST_DECISION run and checks whether the
-// owner has answered it. The caller then consumes the answer by advancing the
-// completed plan step (YES / INFO / CONFIRMATION) or escalating (NO).
+// A question is identified by its CONTENT — (decision, nbaStep) — not by the
+// run that asked it. Heartbeat runs re-ask the same question every 5 minutes
+// with a new run ID, so matching by run ID would permanently strand answers
+// written between heartbeats. An answer is valid while the question is
+// unchanged; it becomes stale only when the case genuinely asks something
+// different (e.g. status changed, plan step advanced).
 
 interface OwnerAnswer {
   /** The event type that was matched. */
   eventType: string
   /** For OWNER_DECISION: the owner's choice (YES/NO). null for INFO/CONFIRMATION. */
   choice: string | null
-  /** The progression_run_id of the run that asked. */
+  /** The progression_run_id that the answer event references. */
   answeredRunId: string
-  /** The NBA step that was being asked about (from the run's progress_delta_json). */
+  /** The NBA step that was being asked about (from the referenced run). */
   answeredNbaStep: number
 }
 
+/** Check whether the owner has answered the CURRENT question. A question is
+ *  defined by (decision, nbaStep) — two questions are the same iff both
+ *  fields match, regardless of which heartbeat run emitted them.
+ *
+ *  Returns the answer if the latest owner event matches the current question;
+ *  null if there is no answer, or the question has changed since the answer
+ *  was recorded (stale). */
 function consumeOwnerAnswer(
   db: Database.Database,
   domain: 'personal' | 'zst',
   caseId: string,
+  currentDecision: ProgressionDecision,
+  currentNbaStep: number,
 ): OwnerAnswer | null {
-  // 1. Find the latest "ask" run for this case (any decision that requires
-  //    a human owner response: REQUEST_DECISION, REQUEST_APPROVAL, ASK_INFORMATION).
-  const lastAskRun = db.prepare(
-    `SELECT progression_run_id, progress_delta_json
-     FROM case_progression_runs
-     WHERE domain = ? AND case_id = ?
-       AND decision IN ('REQUEST_DECISION', 'REQUEST_APPROVAL', 'ASK_INFORMATION')
-     ORDER BY completed_at DESC LIMIT 1`,
-  ).get(domain, caseId) as {
-    progression_run_id: string
-    progress_delta_json: string | null
-  } | undefined
-
-  if (!lastAskRun) return null
-
-  // 2. Find the latest owner answer event whose source_reference matches
-  //    that run. Only the LATEST REQUEST_DECISION run's answer is valid —
-  //    answers pointing at superseded runs are recorded but not consumed.
+  // 1. Find the latest owner answer event for this case (any type).
   const eventsTable = domain === 'personal' ? 'personal_case_events' : 'zst_case_events'
   const answerEvent = db.prepare(
     `SELECT event_id, event_type, payload, source_reference
      FROM ${eventsTable}
      WHERE case_id = ?
        AND event_type IN ('OWNER_DECISION', 'OWNER_INFORMATION', 'OWNER_CONFIRMATION')
-       AND source_reference = ?
      ORDER BY created_at DESC LIMIT 1`,
-  ).get(caseId, lastAskRun.progression_run_id) as {
+  ).get(caseId) as {
     event_id: number
     event_type: string
     payload: string | null
-    source_reference: string
+    source_reference: string | null
   } | undefined
 
   if (!answerEvent) return null
 
-  // 3. Parse the payload for a choice (OWNER_DECISION) or treat INFO/CONFIRM
-  //    as an implicit "proceed" signal.
+  // 2. Look up the run that the answer references (source_reference = run ID).
+  //    If source_reference is missing or the run is gone, we cannot verify
+  //    question identity — treat as stale.
+  if (!answerEvent.source_reference) return null
+
+  const referencedRun = db.prepare(
+    `SELECT decision, progress_delta_json
+     FROM case_progression_runs
+     WHERE progression_run_id = ? AND domain = ? AND case_id = ?`,
+  ).get(answerEvent.source_reference, domain, caseId) as {
+    decision: string | null
+    progress_delta_json: string | null
+  } | undefined
+
+  if (!referencedRun) return null
+
+  // 3. Extract the question that was asked in the referenced run.
+  const referencedDecision = referencedRun.decision
+  let referencedNbaStep = 0
+  if (referencedRun.progress_delta_json) {
+    try {
+      const delta = JSON.parse(referencedRun.progress_delta_json) as { nbaStep?: number }
+      referencedNbaStep = delta.nbaStep ?? 0
+    } catch { /* ignore */ }
+  }
+
+  // 4. Does the referenced question match the CURRENT question?
+  //    Same decision + same nbaStep → same question → answer is valid.
+  //    Different → question has genuinely changed → answer is stale.
+  if (referencedDecision !== currentDecision || referencedNbaStep !== currentNbaStep) {
+    return null
+  }
+
+  // 5. Parse the payload for a choice.
   let choice: string | null = null
   if (answerEvent.payload) {
     try {
       const parsed = JSON.parse(answerEvent.payload) as { choice?: string }
       choice = parsed.choice ?? null
-    } catch { /* malformed payload — ignore */ }
-  }
-
-  // 4. Extract the NBA step that was being asked about
-  let answeredNbaStep = 0
-  if (lastAskRun.progress_delta_json) {
-    try {
-      const delta = JSON.parse(lastAskRun.progress_delta_json) as { nbaStep?: number }
-      answeredNbaStep = delta.nbaStep ?? 0
     } catch { /* ignore */ }
   }
 
   return {
     eventType: answerEvent.event_type,
     choice,
-    answeredRunId: lastAskRun.progression_run_id,
-    answeredNbaStep,
+    answeredRunId: answerEvent.source_reference,
+    answeredNbaStep: referencedNbaStep,
   }
 }
 
@@ -739,61 +756,6 @@ export function runProgressionCycle(
   let currentStatus = caseRow.status
   let currentVersion = caseRow.version
 
-  // ── Owner answer consumption (card 52250c7f Phase C) ───────────────
-  // Before picking the NBA, check whether the owner has answered a pending
-  // REQUEST_DECISION from a previous run. YES advances past the asked step;
-  // NO transitions the case to BLOCKED and rebuilds the plan from scratch.
-  const ownerAnswer = consumeOwnerAnswer(db, domain, caseId)
-  if (ownerAnswer) {
-    if (ownerAnswer.eventType === 'OWNER_DECISION' && ownerAnswer.choice === 'NO') {
-      // Owner explicitly rejected → escalate to BLOCKED for replanning.
-      const transitionFn = domain === 'personal' ? transitionCase : transitionZstCase
-      transitionFn(db, {
-        caseId,
-        newStatus: 'BLOCKED' as const,
-        actor: 'progression-engine',
-        seenVersion: currentVersion,
-        reason: 'Owner rejected the proposed action',
-      }, now)
-      currentStatus = 'BLOCKED'
-      currentVersion += 1 // transition bumps version
-
-      // Rebuild everything for the new status
-      plan = buildRollingPlan(contract, context, currentStatus)
-      planJson = JSON.stringify(plan)
-      storedPlanJson = null
-      planChanged = true
-      completedPlanStep = 0
-    } else if (currentStatus === 'AWAITING_APPROVAL') {
-      // Status-driven: decide() returns REQUEST_APPROVAL for AWAITING_APPROVAL
-      // BEFORE checking the NBA kind. Advancing the step would not change the
-      // decision — the case status must change. Owner YES → approve → READY.
-      const transitionFn = domain === 'personal' ? transitionCase : transitionZstCase
-      transitionFn(db, {
-        caseId,
-        newStatus: 'READY' as const,
-        actor: 'progression-engine',
-        seenVersion: currentVersion,
-        reason: 'Owner approved the request',
-      }, now)
-      currentStatus = 'READY'
-      currentVersion += 1
-
-      // Rebuild everything for the new status
-      plan = buildRollingPlan(contract, context, currentStatus)
-      planJson = JSON.stringify(plan)
-      storedPlanJson = null
-      planChanged = true
-      completedPlanStep = 0
-    } else {
-      // YES / OWNER_INFORMATION / OWNER_CONFIRMATION → advance past the
-      // answered step so the NBA picks the FOLLOWING step.
-      // This works for NBA-driven decisions (REQUEST_DECISION) where the
-      // status does NOT short-circuit decide().
-      completedPlanStep = ownerAnswer.answeredNbaStep
-    }
-  }
-
   const previousNbaStep = planChanged
     ? 0
     : ((): number => {
@@ -807,10 +769,76 @@ export function runProgressionCycle(
       })()
 
   // 5. Next Best Action — skip steps already completed in a previous run
-  const nba = determineNextBestAction(plan, context, completedPlanStep)
+  let nba = determineNextBestAction(plan, context, completedPlanStep)
 
-  // 6. Decision
+  // 6. Decision (tentative — may be overridden by answer consumption below)
   let { decision, reason } = decide(nba, context, currentStatus)
+
+  // ── Owner answer consumption (card 52250c7f Phase C) ───────────────
+  //
+  // Match by question CONTENT (decision + nbaStep), not by run ID.
+  // Heartbeat runs re-ask the same question every 5 minutes with new run IDs;
+  // an answer remains valid while the question is unchanged, and becomes
+  // stale only when the case genuinely asks something different.
+  const ownerAnswer = consumeOwnerAnswer(db, domain, caseId, decision, nba.planStep)
+  if (ownerAnswer) {
+    if (ownerAnswer.eventType === 'OWNER_DECISION' && ownerAnswer.choice === 'NO') {
+      // Owner explicitly rejected → escalate to BLOCKED for replanning.
+      const transitionFn = domain === 'personal' ? transitionCase : transitionZstCase
+      transitionFn(db, {
+        caseId,
+        newStatus: 'BLOCKED' as const,
+        actor: 'progression-engine',
+        seenVersion: currentVersion,
+        reason: 'Owner rejected the proposed action',
+      }, now)
+      currentStatus = 'BLOCKED'
+      currentVersion += 1
+
+      // Rebuild for the new status and re-determine
+      plan = buildRollingPlan(contract, context, currentStatus)
+      planJson = JSON.stringify(plan)
+      storedPlanJson = null
+      planChanged = true
+      completedPlanStep = 0
+      nba = determineNextBestAction(plan, context, 0)
+      const redone = decide(nba, context, currentStatus)
+      decision = redone.decision
+      reason = redone.reason
+    } else if (currentStatus === 'AWAITING_APPROVAL') {
+      // Status-driven: decide() returns REQUEST_APPROVAL for AWAITING_APPROVAL
+      // regardless of step. Owner YES → approve → transition to READY.
+      const transitionFn = domain === 'personal' ? transitionCase : transitionZstCase
+      transitionFn(db, {
+        caseId,
+        newStatus: 'READY' as const,
+        actor: 'progression-engine',
+        seenVersion: currentVersion,
+        reason: 'Owner approved the request',
+      }, now)
+      currentStatus = 'READY'
+      currentVersion += 1
+
+      // Rebuild for the new status and re-determine
+      plan = buildRollingPlan(contract, context, currentStatus)
+      planJson = JSON.stringify(plan)
+      storedPlanJson = null
+      planChanged = true
+      completedPlanStep = 0
+      nba = determineNextBestAction(plan, context, 0)
+      const redone = decide(nba, context, currentStatus)
+      decision = redone.decision
+      reason = redone.reason
+    } else {
+      // YES / OWNER_INFORMATION / OWNER_CONFIRMATION → advance past the
+      // answered step so the NBA picks the FOLLOWING step.
+      completedPlanStep = ownerAnswer.answeredNbaStep
+      nba = determineNextBestAction(plan, context, completedPlanStep)
+      const redone = decide(nba, context, currentStatus)
+      decision = redone.decision
+      reason = redone.reason
+    }
+  }
 
   // 7. Upsert progression state
   // Only bump plan_version if the plan actually changed (status transition, etc.).

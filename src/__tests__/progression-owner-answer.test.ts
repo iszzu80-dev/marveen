@@ -204,67 +204,100 @@ describe('OWNER_DECISION with NO', () => {
   })
 })
 
-// ── Superseded answer: not consumed ────────────────────────────────────
+// ── Stale answer: question changed since answer was recorded ─────────
 
-describe('superseded answer', () => {
-  it('does NOT consume an answer for a non-latest REQUEST_DECISION run', () => {
+describe('stale answer (question changed)', () => {
+  it('does NOT consume an answer when the question has genuinely changed (different decision + nbaStep)', () => {
     const db = freshDb()
     const t = now()
-    seedAwaitingSelectionCase(db, 'c-sup', t)
+    seedAwaitingSelectionCase(db, 'c-stale', t)
 
-    // Get REQUEST_DECISION (run 2) — this is the first ask
-    const askedRunId1 = advanceToRequestDecision(db, 'c-sup', t)
+    // Advance to REQUEST_DECISION at nbaStep=2
+    const askedRunId = advanceToRequestDecision(db, 'c-stale', t)
 
-    // Run 3: no answer yet → REQUEST_DECISION again (latest ask)
-    releaseProgressionClaim(db, 'personal', 'c-sup', 'runner', t + 60)
-    const r3 = runProgressionCycle(db, 'personal', 'c-sup', t + 3, MANUAL_OPTS)
-    expect(r3.decision).toBe('REQUEST_DECISION')
-    // r3.runId is now the latest ask
-
-    // Istvan answers the FIRST (superseded) run, not the latest
+    // Istvan answers YES, but the answer references a run that asked
+    // (REQUEST_DECISION, nbaStep=2)
     appendCaseEvent(db, {
-      caseId: 'c-sup', caseVersion: 1, actor: 'istvan',
+      caseId: 'c-stale', caseVersion: 1, actor: 'istvan',
       eventType: 'OWNER_DECISION', payload: { choice: 'YES' },
-      sourceSystem: 'mission_control', sourceReference: askedRunId1,
+      sourceSystem: 'mission_control', sourceReference: askedRunId,
     }, t + 10)
 
-    // Run 4: should STILL return REQUEST_DECISION (answer is for superseded run)
-    releaseProgressionClaim(db, 'personal', 'c-sup', 'runner', t + 60)
-    const r4 = runProgressionCycle(db, 'personal', 'c-sup', t + 11, MANUAL_OPTS)
-    expect(r4.decision).toBe('REQUEST_DECISION')
+    // BEFORE the next progression run, the case changes — e.g. external
+    // input arrives and transitions the case to a different status.
+    // This changes the PLAN, which changes the question.
+    db.prepare(
+      `UPDATE personal_cases SET status = 'READY', version = version + 1 WHERE case_id = ?`,
+    ).run('c-stale')
+
+    // Run 3: now the case is READY → plan is different → question is
+    // (CONTINUE_AUTONOMOUSLY, nbaStep=1), NOT (REQUEST_DECISION, nbaStep=2).
+    // The answer for the old question should NOT be consumed.
+    releaseProgressionClaim(db, 'personal', 'c-stale', 'runner', t + 60)
+    const r3 = runProgressionCycle(db, 'personal', 'c-stale', t + 11, MANUAL_OPTS)
+    // Should NOT be REQUEST_DECISION (the question changed), but also
+    // should NOT have consumed the old answer.
+    expect(r3.decision).not.toBe('REQUEST_DECISION')
   })
 
-  it('consumes the answer matching the latest run when both superseded and current answers exist', () => {
+  it('picks the latest answer when multiple answers exist for the same question', () => {
     const db = freshDb()
     const t = now()
-    seedAwaitingSelectionCase(db, 'c-latest', t)
+    seedAwaitingSelectionCase(db, 'c-multi', t)
 
     // First ask
-    const askedRunId1 = advanceToRequestDecision(db, 'c-latest', t)
+    advanceToRequestDecision(db, 'c-multi', t)
 
-    // Run 3: second ask (latest)
-    releaseProgressionClaim(db, 'personal', 'c-latest', 'runner', t + 60)
-    const r3 = runProgressionCycle(db, 'personal', 'c-latest', t + 3, MANUAL_OPTS)
+    // Run 3: same question again (heartbeat re-ask)
+    releaseProgressionClaim(db, 'personal', 'c-multi', 'runner', t + 60)
+    const r3 = runProgressionCycle(db, 'personal', 'c-multi', t + 3, MANUAL_OPTS)
     expect(r3.decision).toBe('REQUEST_DECISION')
-    const askedRunId2 = r3.runId
 
-    // Answer for run 1 (superseded) AND run 3 (latest) both exist
+    // Two answers, both for the same question (REQUEST_DECISION, nbaStep=2)
+    // First: YES → would advance
     appendCaseEvent(db, {
-      caseId: 'c-latest', caseVersion: 1, actor: 'istvan',
+      caseId: 'c-multi', caseVersion: 1, actor: 'istvan',
+      eventType: 'OWNER_DECISION', payload: { choice: 'YES' },
+      sourceSystem: 'mission_control', sourceReference: r3.runId,
+    }, t + 10)
+    // Second (latest): NO → should be the one consumed
+    appendCaseEvent(db, {
+      caseId: 'c-multi', caseVersion: 1, actor: 'istvan',
+      eventType: 'OWNER_DECISION', payload: { choice: 'NO' },
+      sourceSystem: 'mission_control', sourceReference: r3.runId,
+    }, t + 11)
+
+    // Run 4: latest answer (NO) wins → BLOCKED → RECOVERY_REQUIRED
+    releaseProgressionClaim(db, 'personal', 'c-multi', 'runner', t + 60)
+    const r4 = runProgressionCycle(db, 'personal', 'c-multi', t + 12, MANUAL_OPTS)
+    expect(r4.decision).toBe('RECOVERY_REQUIRED')
+  })
+
+  it('consumes an answer referencing an OLD heartbeat run when the question is still the same', () => {
+    const db = freshDb()
+    const t = now()
+    seedAwaitingSelectionCase(db, 'c-oldrun', t)
+
+    // Get REQUEST_DECISION (run 2) — question is (REQUEST_DECISION, nbaStep=2)
+    const askedRunId1 = advanceToRequestDecision(db, 'c-oldrun', t)
+
+    // Run 3: same question (heartbeat re-ask) — still (REQUEST_DECISION, 2)
+    releaseProgressionClaim(db, 'personal', 'c-oldrun', 'runner', t + 60)
+    const r3 = runProgressionCycle(db, 'personal', 'c-oldrun', t + 3, MANUAL_OPTS)
+    expect(r3.decision).toBe('REQUEST_DECISION')
+
+    // Istvan answers the FIRST run (source_reference = older run ID).
+    // The question hasn't changed → answer should STILL be consumed.
+    appendCaseEvent(db, {
+      caseId: 'c-oldrun', caseVersion: 1, actor: 'istvan',
       eventType: 'OWNER_DECISION', payload: { choice: 'YES' },
       sourceSystem: 'mission_control', sourceReference: askedRunId1,
     }, t + 10)
-    appendCaseEvent(db, {
-      caseId: 'c-latest', caseVersion: 1, actor: 'istvan',
-      eventType: 'OWNER_DECISION', payload: { choice: 'NO' },
-      sourceSystem: 'mission_control', sourceReference: askedRunId2,
-    }, t + 11)
 
-    // Run 4: should consume the answer for run 3 (NO), not run 1
-    releaseProgressionClaim(db, 'personal', 'c-latest', 'runner', t + 60)
-    const r4 = runProgressionCycle(db, 'personal', 'c-latest', t + 12, MANUAL_OPTS)
-    // NO → BLOCKED → RECOVERY_REQUIRED
-    expect(r4.decision).toBe('RECOVERY_REQUIRED')
+    // Run 4: answer matches current question → consumed → advances
+    releaseProgressionClaim(db, 'personal', 'c-oldrun', 'runner', t + 60)
+    const r4 = runProgressionCycle(db, 'personal', 'c-oldrun', t + 11, MANUAL_OPTS)
+    expect(r4.decision).toBe('CONTINUE_AUTONOMOUSLY')
   })
 })
 
