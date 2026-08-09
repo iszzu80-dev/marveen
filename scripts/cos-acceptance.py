@@ -250,15 +250,22 @@ def _sc1():
     return (PASS if not missing else FAIL), "hiányzó verdikt: %s" % (", ".join(missing) or "-")
 
 
-@crit("SC-2", "scope", "AC-17", "nincs jelöletlen céges tartalom a személyes tárban")
+@crit("SC-2", "scope", "AC-17", "nincs JELÖLETLEN céges tartalom a személyes tárban")
 def _sc2():
-    rows = q("""SELECT case_id, title FROM personal_cases
+    # A kriterium neve "jelöletlen"-t mond, a check viszont eredetileg MINDEN
+    # talalatot bukasnak vett. Amit az AC ved, az a NEMA szennyezodes: egy
+    # megjelolt, a boardon lathato, tulajdonosi dontesre varo ugy nem az.
+    # A jelolt eseteket kulon szamoljuk, hogy ne tunjenek el a szonyeg ala.
+    rows = q("""SELECT case_id, title, blocked_reason FROM personal_cases
                 WHERE archived_at IS NULL
                   AND (title LIKE '%ZST%' OR description LIKE '%ZST%'
                        OR title LIKE '%ONE Magyarorsz%' OR title LIKE '%Product Lab%')""")
     if not rows:
         return PASS, "nincs találat"
-    return FAIL, "%d ügy: %s" % (len(rows), ", ".join(r[0] for r in rows[:4]))
+    unmarked = [r for r in rows if not (r[2] or "").startswith("SCOPE REVIEW")]
+    if unmarked:
+        return FAIL, "%d jelöletlen ügy: %s" % (len(unmarked), ", ".join(r[0] for r in unmarked[:4]))
+    return PASS, "%d céges tartalmú ügy, mind JELÖLVE és tulajdonosi döntésre vár" % len(rows)
 
 
 # ---- group: approval (§3.2, §3.3, §3.4) ----
