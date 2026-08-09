@@ -136,6 +136,43 @@
   // Card 9193eedd follow-up #3: the control is rendered ONLY when the next
   // step belongs to Istvan. The field is free text so we match tolerantly
   // against the known forms (Istvan, István, Chief of Staff / István).
+
+  // A kerdesbol szarmazo valaszlehetosegek (Istvan, 2026-08-09). Ugyanaz a
+  // szabalykeszlet fut itt, mint a szerveren (answer-options.ts) -- a felulet
+  // NEM talal ki gombokat, csak megjelenit. Nyitott kerdesnel NINCS gomb, mert
+  // egy hamis igen/nem nem valaszt gyujt, hanem a kozelebbi gombot.
+  var ANSWER_PATTERNS = [
+    { re: /(ajanlat).*(mastol|masik)|kerjunk.*mastol/, opts: [['ASK_OTHERS','Kérjünk mástól is'],['KEEP_WAITING','Várjunk még rá'],['DROP','Hagyjuk ezt az utat']] },
+    { re: /(utaz|ut)\w*.*(megy|halaszt|lemond)|megyunk/, opts: [['GO','Megyünk'],['POSTPONE','Elhalasztjuk'],['CANCEL','Lemondjuk']] },
+    { re: /(javit|cserel)\w*.*vagy|javitsuk vagy/, opts: [['REPAIR','Javítsuk'],['REPLACE','Cseréljük'],['GET_QUOTE','Kérjünk rá árat']] },
+    { re: /mikor|hatarido/, opts: [['NOW','Most'],['LATER','Később'],['SPECIFY','Megmondom mikor']] },
+  ]
+  var BINARY_RE = /jovahagyod|rendben van|egyetertesz|menjen ki|elkuldjem|kerjek|induljon|megrendeljem|foglaljam|igen vagy nem/
+
+  function foldHu(s) {
+    return String(s || '').replace(/[áéíóöőúüű]/g, function (c) {
+      return { 'á':'a','é':'e','í':'i','ó':'o','ö':'o','ő':'o','ú':'u','ü':'u','ű':'u' }[c]
+    }).toLowerCase()
+  }
+
+  function answerOptionsHtml(question, runId) {
+    var q = foldHu(question)
+    var opts = null
+    if (q) {
+      for (var i = 0; i < ANSWER_PATTERNS.length; i++) {
+        if (ANSWER_PATTERNS[i].re.test(q)) { opts = ANSWER_PATTERNS[i].opts; break }
+      }
+      if (!opts && BINARY_RE.test(q)) opts = [['YES','Igen'],['NO','Nem']]
+    }
+    if (!opts) return ''   // nyitott kerdes: csak a szovegmezo marad
+    var html = '<div class="cos-owner-radio-group">'
+    for (var j = 0; j < opts.length; j++) {
+      html += '<label class="cos-owner-radio"><input type="radio" name="owner-dec-' + runId +
+        '" value="' + esc(opts[j][0]) + '"> ' + esc(opts[j][1]) + '</label>'
+    }
+    return html + '</div>'
+  }
+
   function ownerControl(prog, nextActionOwner) {
     if (!prog || !prog.lastDecision) return ''
     if (!isIstvanOwner(nextActionOwner)) return ''
@@ -157,10 +194,7 @@
       html = '<div class="cos-owner-ctrl" data-owner-ctrl-decision="' + esc(dec) +
         '" data-source-ref="' + runId + '" data-case-version="' + caseVersion +
         '" data-owner-ctrl-nba="' + esc(prog.nbaDescription || '') + '">' +
-        '<div class="cos-owner-radio-group">' +
-        '<label class="cos-owner-radio"><input type="radio" name="owner-dec-' + runId + '" value="YES"> Igen</label>' +
-        '<label class="cos-owner-radio"><input type="radio" name="owner-dec-' + runId + '" value="NO"> Nem</label>' +
-        '</div>' +
+        answerOptionsHtml(nbaDesc, runId) +
         '<textarea class="cos-owner-text" placeholder="Megjegyzés (opcionális)" rows="2"></textarea>' +
         '<button class="cos-owner-btn">Küldés</button>' +
         '</div>'
