@@ -17,6 +17,7 @@ import { ingestTriagedZstEmail, type ZstTriagedEmail } from '../../cos/zst-intak
 import { validateSkillMd, validateSkillPermissions } from '../../cos/skill-permission-validator.js'
 import { getMissionControlProgressionView, runProgressionCycle } from '../../cos/progression-pipeline.js'
 import { storeDocument, documentsForCase, readDocumentBytes } from '../../cos/cos-documents.js'
+import { evaluateOutputFloors, breachedFloors } from '../../cos/output-floor.js'
 import { APP_TZ } from '../../config.js'
 import type { RouteContext } from './types.js'
 
@@ -496,10 +497,18 @@ export function listRadarSummary(db: ReturnType<typeof getDb>): unknown[] {
  * Operational monitoring for the Mission Control "Monitoring" view (#5b): the
  * connector-health matrix, an outbound-status roll-up with the rows that need a
  * HUMAN (RECOVERY_REQUIRED / FAILED_TERMINAL — the executor never auto-resolves
- * these), and send-quota usage. All read-only.
+ * these), send-quota usage, and the OUTPUT FLOORS.
+ *
+ * The floors answer the question the rest of this function cannot: not "did
+ * something go wrong?" but "did anything happen at all?". Every surface here
+ * reports on work that exists; a pipeline producing nothing has no rows to
+ * report, and so reads as calm. That is precisely how the 2026-08-09 failures
+ * stayed invisible for three days. `breached` is surfaced separately so a zero
+ * cannot be scrolled past.
  */
 export function listMonitoring(db: ReturnType<typeof getDb>): {
-  connectors: unknown[]; outboundHealth: { byStatus: Record<string, number>; needsAttention: unknown[] }; quotas: unknown[]
+  connectors: unknown[]; outboundHealth: { byStatus: Record<string, number>; needsAttention: unknown[] }
+  quotas: unknown[]; outputFloors: unknown[]; breached: unknown[]
 } {
   const connectors = db.prepare(
     `SELECT connector_id, kind, mode, status, consecutive_failures, last_ok_at, last_error_at, last_error
@@ -518,5 +527,7 @@ export function listMonitoring(db: ReturnType<typeof getDb>): {
   const quotas = db.prepare(
     `SELECT quota_key, used_count, max_count, window_sec, window_start FROM send_quotas ORDER BY quota_key`
   ).all()
-  return { connectors, outboundHealth: { byStatus, needsAttention }, quotas }
+  const outputFloors = evaluateOutputFloors(db)
+  return { connectors, outboundHealth: { byStatus, needsAttention }, quotas,
+    outputFloors, breached: breachedFloors(outputFloors) }
 }
