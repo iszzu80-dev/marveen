@@ -29,8 +29,7 @@ function dispatchArgs(d: ReturnType<typeof draftSend>) {
   return {
     ledgerId: d.ledgerId, campaignId: d.campaignId, connectorId: 'gmail', email: EMAIL,
     templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash,
-    declaredSensitivity: 'PERSONAL', targetProfile: 'premium_reasoning',
-  }
+    declaredSensitivity: 'PERSONAL', targetProfile: 'premium_reasoning', recipient: 'teszt@pelda.hu' }
 }
 
 describe('COS approval-gated send flow (#4)', () => {
@@ -50,7 +49,7 @@ describe('COS approval-gated send flow (#4)', () => {
   it('draft → approve → dispatch SENDS exactly once (through the gate)', async () => {
     const db = getDb()
     const d = draftSend(db, draftArgs(), NOW)
-    approveSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan' }, NOW + 1)
+    approveSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to }, NOW + 1)
     const t = new DryRunTransport()
     const r = await dispatchApprovedSend(db, new GmailSendAdapter(t), dispatchArgs(d), NOW + 2)
     expect(r.decision.allowed).toBe(true)
@@ -62,13 +61,12 @@ describe('COS approval-gated send flow (#4)', () => {
   it('a payload EDITED after approval is rejected (rendered-hash mismatch)', async () => {
     const db = getDb()
     const d = draftSend(db, draftArgs(), NOW)
-    approveSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan' }, NOW + 1)
+    approveSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to }, NOW + 1)
     // attacker/typo edits the body → a different rendered hash than what was approved
     const tampered = { ...EMAIL, body: EMAIL.body + ' (utólag módosítva)' }
     const t = new DryRunTransport()
     const r = await dispatchApprovedSend(db, new GmailSendAdapter(t), {
-      ...dispatchArgs(d), email: tampered, renderedPayloadHash: renderedPayloadHash(tampered),
-    }, NOW + 2)
+      ...dispatchArgs(d), email: tampered, renderedPayloadHash: renderedPayloadHash(tampered) }, NOW + 2)
     expect(r.sent).toBe(false)
     expect(r.decision.reasons.join()).toMatch(/not authorized|no APPROVED approval/i)
     expect(t.sent.size).toBe(0)
@@ -77,7 +75,7 @@ describe('COS approval-gated send flow (#4)', () => {
   it('rejectSend cancels the planned row → a later dispatch is a no-op', async () => {
     const db = getDb()
     const d = draftSend(db, draftArgs(), NOW)
-    approveSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan' }, NOW + 1)
+    approveSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to }, NOW + 1)
     const cancelled = rejectSend(db, d.ledgerId, 'Istvan meggondolta magát', NOW + 2)
     expect(cancelled.status).toBe('CANCELLED')
     const t = new DryRunTransport()
@@ -89,7 +87,7 @@ describe('COS approval-gated send flow (#4)', () => {
   it('a READ_ONLY connector blocks the send even with a valid approval', async () => {
     const db = getDb()
     const d = draftSend(db, draftArgs(), NOW)
-    approveSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan' }, NOW + 1)
+    approveSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to }, NOW + 1)
     setMode(db, 'gmail', 'READ_ONLY', NOW + 2) // connector downgraded
     const t = new DryRunTransport()
     const r = await dispatchApprovedSend(db, new GmailSendAdapter(t), dispatchArgs(d), NOW + 3)
@@ -102,11 +100,10 @@ describe('COS approval-gated send flow (#4)', () => {
     const db = getDb()
     const sensitive = { to: 'x@y.z', subject: 'kártyaadatok', body: 'a kártyaszám 4111 1111 1111 1111' }
     const d = draftSend(db, { ...draftArgs(), email: sensitive }, NOW)
-    approveSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan' }, NOW + 1)
+    approveSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: sensitive.to }, NOW + 1)
     const t = new DryRunTransport()
     const r = await dispatchApprovedSend(db, new GmailSendAdapter(t), {
-      ...dispatchArgs(d), email: sensitive, renderedPayloadHash: d.renderedPayloadHash, targetProfile: 'routine_lowcost',
-    }, NOW + 2)
+      ...dispatchArgs(d), email: sensitive, renderedPayloadHash: d.renderedPayloadHash, targetProfile: 'routine_lowcost' }, NOW + 2)
     expect(r.sent).toBe(false)
     expect(r.decision.reasons.join()).toMatch(/not allowed for sensitivity/i)
     expect(t.sent.size).toBe(0)

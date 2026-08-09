@@ -22,6 +22,7 @@
 import type Database from 'better-sqlite3'
 import { sha256Hex } from './attachments.js'
 import { createCampaign, getCampaign, approveCampaign, recordApproval } from './campaigns.js'
+import type { ApprovalEnvelope } from './approval-core.js'
 import { planAction, executeAction, cancelAction, type OutboundAdapter, type OutboundAction, type ExecuteOpts } from './executor.js'
 import { evaluateDispatch, type DispatchDecision } from './dispatch-gate.js'
 
@@ -87,6 +88,12 @@ export interface ApproveSendInput {
   renderedPayloadHash: string
   approvedBy: string
   approvalId?: string
+  /** The address this payload was approved FOR. The allowlist is exactly this
+   *  one recipient: approving a message to eCipő does not authorize the same
+   *  text to anyone else (AC-4). */
+  recipient: string
+  /** Optional narrowing: expiry, quotas, stop conditions (§3.2). */
+  envelope?: Partial<ApprovalEnvelope>
 }
 /** The owner's explicit YES to THIS exact rendered payload. After this,
  *  authorizeSend passes for the matching payload at the current campaign version. */
@@ -95,6 +102,9 @@ export function approveSend(db: Database.Database, input: ApproveSendInput, now:
     approvalId: input.approvalId ?? `appr-${input.campaignId}-${input.renderedPayloadHash.slice(0, 16)}`,
     campaignId: input.campaignId, approvedBy: input.approvedBy,
     templateHash: input.templateHash, renderedPayloadHash: input.renderedPayloadHash,
+    allowedChannels: ['EMAIL'],
+    ...input.envelope,
+    allowedRecipients: [input.recipient],
   }, now)
 }
 
@@ -132,6 +142,9 @@ export async function dispatchApprovedSend(
     content: `${input.email.subject}\n${input.email.body}`,
     targetProfile: input.targetProfile,
     campaignId: input.campaignId, templateHash: input.templateHash, renderedPayloadHash: input.renderedPayloadHash,
+    // The address on the envelope we are about to put in the post, not a stored
+    // intention: the allowlist must be checked against what actually goes out.
+    recipient: input.email.to,
   })
   if (!decision.allowed) return { sent: false, decision }
   const action = await executeAction(db, adapter, input.ledgerId, now, opts)

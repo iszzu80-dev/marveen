@@ -337,6 +337,57 @@ export function initCosSchema(db: Database.Database): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_capprovals_campaign ON campaign_approvals(campaign_id, status)`)
 
+  // ── §3.2 approval envelope (2026-08-09) ──────────────────────────────
+  // Approving a template is not approving a message. The envelope carries the
+  // whole frame: who may receive, on which channel, how many times, until when,
+  // with what money ceiling, and what makes the campaign stop. Added to BOTH
+  // namespaces from one definition — the personal and ZST approval tables had
+  // already drifted (ZST had allowed_recipients, personal did not), which meant
+  // AC-4 was enforced for the company mailbox and absent for the personal one.
+  // See approval-core.ts.
+  const APPROVAL_ENVELOPE: Record<string, string> = {
+    allowed_recipients:       'TEXT',      // JSON array — no list means no authority
+    allowed_channels:         'TEXT',
+    template_id:              'TEXT',
+    template_version:         'INTEGER',
+    allowed_variable_schema:  'TEXT',
+    allowed_variable_sources: 'TEXT',
+    forbidden_variables:      'TEXT',
+    shareable_data:           'TEXT',
+    quote_target_budget:      'REAL',
+    quote_hard_limit:         'REAL',
+    autonomous_spend_limit:   'REAL NOT NULL DEFAULT 0',   // §3.2 invariant, never non-zero
+    currency:                 'TEXT',
+    max_initial_outbound:     'INTEGER',
+    max_follow_up_outbound:   'INTEGER',
+    max_autonomous_replies:   'INTEGER',
+    max_total_outbound:       'INTEGER',
+    follow_up_policy:         'TEXT',
+    allowed_reply_classes:    'TEXT',
+    allowed_attachment_types: 'TEXT',
+    stop_conditions:          'TEXT',
+    escalation_conditions:    'TEXT',
+    final_gate:               "TEXT NOT NULL DEFAULT 'NONE'",
+    valid_until:              'INTEGER',
+    stopped_reason:           'TEXT',      // §3.4 — set when a stop condition trips
+  }
+  ensureColumns(db, 'campaign_approvals', APPROVAL_ENVELOPE)
+  if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='zst_campaign_approvals'").get()) {
+    ensureColumns(db, 'zst_campaign_approvals', APPROVAL_ENVELOPE)
+  }
+
+  // The ledger needs to say WHICH campaign and WHICH kind of send it was, or the
+  // per-kind and total quotas above have nothing to count.
+  const LEDGER_QUOTA_COLUMNS: Record<string, string> = {
+    campaign_id:   'TEXT',
+    outbound_kind: 'TEXT',   // INITIAL | FOLLOW_UP | REPLY
+    recipient:     'TEXT',
+  }
+  ensureColumns(db, 'outbound_ledger', LEDGER_QUOTA_COLUMNS)
+  if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='zst_outbound_ledger'").get()) {
+    ensureColumns(db, 'zst_outbound_ledger', LEDGER_QUOTA_COLUMNS)
+  }
+
   // ── connector_health (Slice 1 reliability; §20 connector matrix) ──────
   // One row per connector (gmail/calendar/shopping/rental/...). The preCheck
   // gates actions on isUsable(); repeated failures degrade OK → DEGRADED → DOWN,
