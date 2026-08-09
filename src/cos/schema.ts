@@ -123,14 +123,9 @@ export function initCosSchema(db: Database.Database): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_pcevents_case ON personal_case_events(case_id, created_at)`)
-  db.exec(`
-    CREATE TRIGGER IF NOT EXISTS pcevents_no_update BEFORE UPDATE ON personal_case_events
-      BEGIN SELECT RAISE(ABORT,'personal_case_events is append-only'); END
-  `)
-  db.exec(`
-    CREATE TRIGGER IF NOT EXISTS pcevents_no_delete BEFORE DELETE ON personal_case_events
-      BEGIN SELECT RAISE(ABORT,'personal_case_events is append-only'); END
-  `)
+  // A personal_case_events append-only triggerei lentebb, a ZST-parjukkal
+  // egyutt epulnek ujra (DROP + CREATE) -- lasd az ottani indoklast.
+
 
   // ── case_claims (P0.2 fencing token, P0.3 UNIQUE, P0.5 atomic; §6.6/§9) ──
   // A single worker may claim a case (or a thread) exclusively. claim_fence is a
@@ -845,14 +840,27 @@ export function initZstSchema(db: Database.Database): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_zevents_case ON zst_case_events(case_id, created_at)`)
-  db.exec(`
-    CREATE TRIGGER IF NOT EXISTS zevents_no_update BEFORE UPDATE ON zst_case_events
-      BEGIN SELECT RAISE(ABORT,'zst_case_events is append-only'); END
-  `)
-  db.exec(`
-    CREATE TRIGGER IF NOT EXISTS zevents_no_delete BEFORE DELETE ON zst_case_events
-      BEGIN SELECT RAISE(ABORT,'zst_case_events is append-only'); END
-  `)
+  // DROP + CREATE, deliberately NOT "IF NOT EXISTS" (2026-08-09, elesben):
+  // egy korabbi build ezeket a triggereket DUPLA idezojeles RAISE-zel hozta
+  // letre. SQLite-ban a dupla idezojel azonositot jelent, es csak a legacy
+  // fallback tette hasznalhatova -- amig egy sema-atnevezes ujra nem parseolta
+  // az EGESZ semat, ekkor "no such column: ..."-ra bukott, es a dashboard
+  // boot-loopba esett. A javitott definicio a forrasban MAR helyes volt,
+  // csak az `IF NOT EXISTS` miatt sosem ert el a meglevo installhoz.
+  //
+  // Tanulsag: egy `IF NOT EXISTS` trigger/index definicio egy MAR LETEZO,
+  // hibas valtozatot orokre eletben tart. Ahol a definicio maga a szabaly,
+  // ott ujra kell irni, nem "csak ha nincs".
+  for (const [name, ev] of [['zevents_no_update', 'UPDATE'], ['zevents_no_delete', 'DELETE']] as const) {
+    db.exec(`DROP TRIGGER IF EXISTS ${name}`)
+    db.exec(`CREATE TRIGGER ${name} BEFORE ${ev} ON zst_case_events
+             BEGIN SELECT RAISE(ABORT,'zst_case_events is append-only'); END`)
+  }
+  for (const [name, ev] of [['pcevents_no_update', 'UPDATE'], ['pcevents_no_delete', 'DELETE']] as const) {
+    db.exec(`DROP TRIGGER IF EXISTS ${name}`)
+    db.exec(`CREATE TRIGGER ${name} BEFORE ${ev} ON personal_case_events
+             BEGIN SELECT RAISE(ABORT,'personal_case_events is append-only'); END`)
+  }
 
   // ── zst_case_claims (fencing token; UNIQUE atomic claim) ─────────────
   db.exec(`
