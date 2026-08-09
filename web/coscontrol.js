@@ -389,6 +389,13 @@
     var openTile = null
 
     container.addEventListener('click', function (e) {
+      // Card 9193eedd follow-up: clicks inside owner controls must NOT
+      // toggle the tile. The owner-action handler lives on document.body
+      // so it fires after this handler; returning here lets the event
+      // continue to the body handler while the tile stays in its current
+      // open/closed state.
+      if (e.target.closest('.cos-owner-ctrl')) return
+
       var tile = e.target.closest('.cos-case-tile')
       if (!tile) return
       var caseId = tile.dataset.caseId

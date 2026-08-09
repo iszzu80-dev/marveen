@@ -470,4 +470,5 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
       expect(p.external_effect_ack).toBe(true)
     })
   })
+
 })
