@@ -49,6 +49,16 @@ describe('COS daily reconcile', () => {
     expect(ids(after.findings)).not.toContain('messages_never_source_committed')
   })
 
+  it('a CLOSED corporate case is NOT reported — a tombstone is not contamination', () => {
+    // After a namespace move the old case stays as a CANCELLED record naming
+    // where it went. An alarm that outlives its cause teaches people to ignore
+    // alarms.
+    const db = getDb()
+    createCase(db, { caseId: 'z1', title: 'ZST Radio üzletrész', caseType: 'ADMIN' }, NOW - 100)
+    db.prepare(`UPDATE personal_cases SET status='CANCELLED', closure_reason='Áthelyezve' WHERE case_id='z1'`).run()
+    expect(ids(runDailyReconcile(db, NOW).findings)).not.toContain('corporate_content_in_personal_store')
+  })
+
   it('names corporate content sitting in the personal store (AC-17)', () => {
     const db = getDb()
     createCase(db, { caseId: 'z1', title: 'ZST Radio üzletrész', caseType: 'ADMIN' }, NOW - 100)
