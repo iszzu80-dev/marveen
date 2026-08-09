@@ -162,11 +162,12 @@
       '<div class="cos-tile-top">' +
         '<strong class="cos-tile-title" title="' + esc(c.title) + '">' + esc(c.title) + '</strong>' +
         '<span class="cos-tile-pills">' +
-          pill(c.status, prio) + pill(c.sensitivity, sens) + progBadgeHtml +
+          pill(c.status, prio) + pill(c.sensitivity, sens) +
           '<span class="cos-tile-type">' + esc(c.case_type) + '</span>' +
         '</span>' +
       '</div>' +
       '<div class="cos-tile-status">' + ballHolderHtml(c, nowSec) + '</div>' +
+      (progBadgeHtml ? '<div class="cos-prog-row">' + progBadgeHtml + '</div>' : '') +
       progNbaHtml +
       // Expanded detail placeholder — populated on first expand.
       '<div class="cos-case-detail" hidden></div>' +
@@ -530,7 +531,10 @@
       '  font-size:12px;margin-top:4px;color:var(--text-muted,#888);',
       '  display:flex;align-items:center;gap:4px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;',
       '}',
-      // Progression badge on closed tile (card 969e5c3b)
+      // Progression badge row — its own line so it never overflows at narrow widths (card 969e5c3b)
+      '.cos-prog-row {',
+      '  display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-top:4px;',
+      '}',
       '.cos-prog-badge {',
       '  display:inline-block;padding:1px 8px;border-radius:10px;font-size:10px;white-space:nowrap;',
       '  font-weight:500;',
