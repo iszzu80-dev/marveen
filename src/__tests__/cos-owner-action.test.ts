@@ -1,12 +1,12 @@
 /**
- * Owner-action endpoint tests (card 9193eedd).
+ * Owner-action endpoint tests (card 9193eedd + follow-up).
  *
  * Acceptance gates:
  *   (h) event-not-state: the endpoint inserts an event but does NOT change
  *       the case row or case_progression_state before the engine runs.
  *   (i) idempotency: same idempotencyKey → duplicate, one event row.
- *   (j) stale version: mismatched case_version → 409, no event inserted.
- *   (d) decision-type mapping: each decision → correct event_type.
+ *   (j) question staleness: sourceReference mismatch vs latest question run → 409;
+ *       matching sourceReference is accepted even when case_version has moved.
  */
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
@@ -72,13 +72,16 @@ function seedProgressionState(db: ReturnType<typeof getDb>, domain: string, case
   ).run(domain, caseId, caseVersion, now, now)
 }
 
-function seedProgressionRun(db: ReturnType<typeof getDb>, domain: string, caseId: string, runId: string, decision: string) {
-  const now = Math.floor(Date.now() / 1000)
+function seedProgressionRun(
+  db: ReturnType<typeof getDb>, domain: string, caseId: string,
+  runId: string, decision: string, startedAt?: number,
+) {
+  const t = startedAt ?? Math.floor(Date.now() / 1000)
   db.prepare(`INSERT OR IGNORE INTO case_progression_runs
     (progression_run_id, domain, case_id, trigger_type, decision, reason, status, started_at, completed_at,
      case_version_before, case_version_after, plan_version_before, plan_version_after)
     VALUES (?, ?, ?, 'MANUAL', ?, 'test reason', 'COMPLETED', ?, ?, 1, 2, 3, 3)`
-  ).run(runId, domain, caseId, decision, now, now)
+  ).run(runId, domain, caseId, decision, t, t)
 }
 
 describe('Owner-action endpoint (card 9193eedd)', () => {
@@ -110,6 +113,7 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
           eventType: 'OWNER_DECISION', choice: 'YES',
           sourceReference: PROG_RUN_ID, caseVersion: 3,
           idempotencyKey: 'idem-h-1',
+          decision: 'REQUEST_DECISION', nextBestAction: null,
         })
       await tryHandleCos(ctx)
 
@@ -143,27 +147,24 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
           eventType: 'OWNER_DECISION', choice: 'NO',
           sourceReference: PROG_RUN_ID, caseVersion: 3,
           idempotencyKey: 'idem-h-2',
+          decision: 'REQUEST_DECISION', nextBestAction: null,
         })
       await tryHandleCos(ctx)
 
       expect(out.status).toBe(200)
       expect(out.body.ok).toBe(true)
       expect(out.body.eventId).toBeGreaterThan(0)
-      // Engine ran — the endpoint runs one cycle inline.
       expect(out.body.progressionRan).toBe(true)
 
-      // Progression state case_version was bumped by the engine.
       const stateAfter = db.prepare(
         `SELECT case_version FROM case_progression_state WHERE domain = ? AND case_id = ?`
       ).get('personal', PRI_CASE) as { case_version: number }
       expect(stateAfter.case_version).toBeGreaterThan(stateBefore.case_version)
 
-      // Case row (personal_cases) is NOT touched by the endpoint.
       const caseAfter = db.prepare(
         'SELECT status FROM personal_cases WHERE case_id = ?'
       ).get(PRI_CASE) as { status: string }
-      // The endpoint writes events + progression state, not the case row.
-      expect(caseAfter.status).toBe('READY') // unchanged from seed
+      expect(caseAfter.status).toBe('READY')
     })
 
     it('event row has correct actor, source_system, event_type', async () => {
@@ -173,6 +174,7 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
           eventType: 'OWNER_DECISION', choice: 'YES',
           sourceReference: PROG_RUN_ID, caseVersion: 3,
           idempotencyKey: 'idem-h-3',
+          decision: 'REQUEST_DECISION', nextBestAction: null,
         })
       await tryHandleCos(ctx)
 
@@ -204,22 +206,20 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
         eventType: 'OWNER_DECISION', choice: 'YES',
         sourceReference: PROG_RUN_ID, caseVersion: 3,
         idempotencyKey: 'idem-i-dup',
+        decision: 'REQUEST_DECISION', nextBestAction: null,
       }
 
-      // First call.
       const { ctx: ctx1, out: out1 } = fakeCtxWithBody(
         `/api/cos/cases/personal/${PRI_CASE}/owner-action`, 'POST', body)
       await tryHandleCos(ctx1)
       expect(out1.status).toBe(200)
 
-      // Second call — same key.
       const { ctx: ctx2, out: out2 } = fakeCtxWithBody(
         `/api/cos/cases/personal/${PRI_CASE}/owner-action`, 'POST', body)
       await tryHandleCos(ctx2)
       expect(out2.status).toBe(200)
       expect(out2.body.duplicate).toBe(true)
 
-      // Only ONE event row was added.
       const eventsAfter = db.prepare(
         'SELECT count(*) c FROM personal_case_events WHERE case_id = ?'
       ).get(PRI_CASE) as { c: number }
@@ -227,10 +227,43 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
     })
   })
 
-  // ── Gate (j): stale version ──
-  describe('stale version (gate j)', () => {
-    it('mismatched caseVersion returns 409 with currentVersion', async () => {
+  // ── Gate (j): question staleness (follow-up fix #2 — content-based) ──
+  describe('question staleness (gate j)', () => {
+    it('accepts answer after 2+ heartbeats on unchanged question', async () => {
       const db = getDb()
+      // Simulate heartbeats: write ADDITIONAL REQUEST_DECISION runs (same
+      // decision, same case), each with a different progression_run_id.
+      // The question content (decision + next_best_action) is unchanged.
+      const baseTime = Math.floor(Date.now() / 1000)
+      seedProgressionRun(db, 'personal', PRI_CASE, 'run-hb-1', 'REQUEST_DECISION', baseTime + 60)
+      seedProgressionRun(db, 'personal', PRI_CASE, 'run-hb-2', 'REQUEST_DECISION', baseTime + 120)
+
+      // Answer references the ORIGINAL run ID but sends the correct content.
+      const { ctx, out } = fakeCtxWithBody(
+        `/api/cos/cases/personal/${PRI_CASE}/owner-action`, 'POST', {
+          eventType: 'OWNER_DECISION', choice: 'YES',
+          sourceReference: PROG_RUN_ID, // old run — content is still current
+          caseVersion: 3,
+          idempotencyKey: 'idem-j-heartbeat',
+          decision: 'REQUEST_DECISION',
+          nextBestAction: null,
+        })
+      await tryHandleCos(ctx)
+
+      // Must be accepted: same decision + same NBA → question unchanged.
+      expect(out.status).toBe(200)
+      expect(out.body.ok).toBe(true)
+      expect(out.body.eventId).toBeGreaterThan(0)
+    })
+
+    it('409 when decision type changed (genuinely new question)', async () => {
+      const db = getDb()
+      // Seed a NEWER run with a DIFFERENT decision type. The engine genuinely
+      // moved on — this is not just a heartbeat.
+      const newRunId = 'run-newer-question-zzz'
+      const baseTime = Math.floor(Date.now() / 1000)
+      seedProgressionRun(db, 'personal', PRI_CASE, newRunId, 'ASK_INFORMATION', baseTime + 60)
+
       const eventsBefore = db.prepare(
         'SELECT count(*) c FROM personal_case_events WHERE case_id = ?'
       ).get(PRI_CASE) as { c: number }
@@ -238,16 +271,17 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
       const { ctx, out } = fakeCtxWithBody(
         `/api/cos/cases/personal/${PRI_CASE}/owner-action`, 'POST', {
           eventType: 'OWNER_DECISION', choice: 'YES',
-          sourceReference: PROG_RUN_ID,
-          caseVersion: 99, // stale — actual is 3
-          idempotencyKey: 'idem-j-stale',
+          sourceReference: PROG_RUN_ID, // old question — decision says REQUEST_DECISION
+          caseVersion: 3,
+          idempotencyKey: 'idem-j-different-decision',
+          decision: 'REQUEST_DECISION',
+          nextBestAction: null,
         })
       await tryHandleCos(ctx)
 
       expect(out.status).toBe(409)
-      expect(out.body.error).toBe('case_version_stale')
-      expect(out.body.currentVersion).toBe(3)
-      expect(out.body.currentDecision).toBeTruthy()
+      expect(out.body.error).toBe('question_stale')
+      expect(out.body.currentDecision).toBe('ASK_INFORMATION')
 
       // No event was inserted.
       const eventsAfter = db.prepare(
@@ -255,9 +289,58 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
       ).get(PRI_CASE) as { c: number }
       expect(eventsAfter.c).toBe(eventsBefore.c)
     })
+
+    it('409 when next_best_action changed (different step)', async () => {
+      const db = getDb()
+      // Set the current NBA to something, then write a heartbeat run that
+      // carries the same decision type. The answer's NBA doesn't match.
+      const baseTime = Math.floor(Date.now() / 1000)
+      const newRunId = 'run-new-step-zzz'
+      seedProgressionRun(db, 'personal', PRI_CASE, newRunId, 'REQUEST_DECISION', baseTime + 60)
+      db.prepare(`UPDATE case_progression_state
+        SET next_best_action_json = ?
+        WHERE domain = 'personal' AND case_id = ?`
+      ).run('{"action":"send_email","description":"Küldj emailt a partnernek"}', PRI_CASE)
+
+      const { ctx, out } = fakeCtxWithBody(
+        `/api/cos/cases/personal/${PRI_CASE}/owner-action`, 'POST', {
+          eventType: 'OWNER_DECISION', choice: 'YES',
+          sourceReference: PROG_RUN_ID,
+          caseVersion: 3,
+          idempotencyKey: 'idem-j-different-nba',
+          decision: 'REQUEST_DECISION',
+          nextBestAction: '{"action":"draft_report","description":"Írd meg a jelentést"}',
+        })
+      await tryHandleCos(ctx)
+
+      expect(out.status).toBe(409)
+      expect(out.body.error).toBe('question_stale')
+    })
+
+    it('404 when no question-asking run exists at all', async () => {
+      const db = getDb()
+      // Delete all question runs so only CONTINUE_AUTONOMOUSLY remains.
+      db.prepare('DELETE FROM case_progression_runs WHERE case_id = ?').run(PRI_CASE)
+      const baseTime = Math.floor(Date.now() / 1000)
+      seedProgressionRun(db, 'personal', PRI_CASE, 'run-auto-only', 'CONTINUE_AUTONOMOUSLY', baseTime)
+
+      const { ctx, out } = fakeCtxWithBody(
+        `/api/cos/cases/personal/${PRI_CASE}/owner-action`, 'POST', {
+          eventType: 'OWNER_DECISION', choice: 'YES',
+          sourceReference: PROG_RUN_ID,
+          caseVersion: 3,
+          idempotencyKey: 'idem-j-no-q',
+          decision: 'REQUEST_DECISION',
+          nextBestAction: null,
+        })
+      await tryHandleCos(ctx)
+
+      expect(out.status).toBe(404)
+      expect(out.body.error).toBe('no active question for this case')
+    })
   })
 
-  // ── Decision → event_type mapping ──
+  // ── Validation ──
   describe('validation', () => {
     it('rejects invalid eventType', async () => {
       const { ctx, out } = fakeCtxWithBody(
@@ -291,12 +374,13 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
       expect(out.status).toBe(400)
     })
 
-    it('rejects non-existent case (404 from progression state lookup)', async () => {
+    it('rejects non-existent case (404 — no question run)', async () => {
       const { ctx, out } = fakeCtxWithBody(
         '/api/cos/cases/personal/NONEXISTENT/owner-action', 'POST', {
           eventType: 'OWNER_DECISION', choice: 'YES',
           sourceReference: PROG_RUN_ID, caseVersion: 1,
           idempotencyKey: 'idem-v-3',
+          decision: 'REQUEST_DECISION', nextBestAction: null,
         })
       await tryHandleCos(ctx)
       expect(out.status).toBe(404)
@@ -307,16 +391,17 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
   describe('OWNER_CONFIRMATION event type', () => {
     it('accepts OWNER_CONFIRMATION for RECOVERY_REQUIRED decisions', async () => {
       const db = getDb()
+      const baseTime = Math.floor(Date.now() / 1000)
       const runId = 'run-rec-aaaaaaaaaaa1'
-      seedProgressionRun(db, 'personal', PRI_CASE, runId, 'RECOVERY_REQUIRED')
-      // Advance case_version for the seed.
-      db.prepare(`UPDATE case_progression_state SET case_version = 4 WHERE domain = 'personal' AND case_id = ?`).run(PRI_CASE)
+      // Seed with later timestamp so it's the latest question run.
+      seedProgressionRun(db, 'personal', PRI_CASE, runId, 'RECOVERY_REQUIRED', baseTime + 60)
 
       const { ctx, out } = fakeCtxWithBody(
         `/api/cos/cases/personal/${PRI_CASE}/owner-action`, 'POST', {
           eventType: 'OWNER_CONFIRMATION', choice: 'DONE',
-          sourceReference: runId, caseVersion: 4,
+          sourceReference: runId, caseVersion: 3,
           idempotencyKey: 'idem-confirm-1',
+          decision: 'RECOVERY_REQUIRED', nextBestAction: null,
         })
       await tryHandleCos(ctx)
 
@@ -334,15 +419,16 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
   describe('OWNER_INFORMATION event type', () => {
     it('accepts OWNER_INFORMATION with text for ASK_INFORMATION decisions', async () => {
       const db = getDb()
+      const baseTime = Math.floor(Date.now() / 1000)
       const runId = 'run-ask-aaaaaaaaaaa1'
-      seedProgressionRun(db, 'personal', PRI_CASE, runId, 'ASK_INFORMATION')
-      db.prepare(`UPDATE case_progression_state SET case_version = 5 WHERE domain = 'personal' AND case_id = ?`).run(PRI_CASE)
+      seedProgressionRun(db, 'personal', PRI_CASE, runId, 'ASK_INFORMATION', baseTime + 60)
 
       const { ctx, out } = fakeCtxWithBody(
         `/api/cos/cases/personal/${PRI_CASE}/owner-action`, 'POST', {
           eventType: 'OWNER_INFORMATION', text: 'A válaszom: igen',
-          sourceReference: runId, caseVersion: 5,
+          sourceReference: runId, caseVersion: 3,
           idempotencyKey: 'idem-info-1',
+          decision: 'ASK_INFORMATION', nextBestAction: null,
         })
       await tryHandleCos(ctx)
 
@@ -363,13 +449,13 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
     it('writes to zst_case_events when domain is zst', async () => {
       const db = getDb()
       const zstRunId = 'run-zst-aaaaaaaaaaa1'
-      // The beforeEach already seeded ZST_CASE with WAIT_EXTERNAL decision.
 
       const { ctx, out } = fakeCtxWithBody(
         `/api/cos/cases/zst/${ZST_CASE}/owner-action`, 'POST', {
           eventType: 'OWNER_INFORMATION', text: 'Megjött',
           sourceReference: zstRunId, caseVersion: 1,
           idempotencyKey: 'idem-zst-1',
+          decision: 'WAIT_EXTERNAL', nextBestAction: null,
         })
       await tryHandleCos(ctx)
 
@@ -386,13 +472,13 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
   describe('externalEffectAck', () => {
     it('stores external_effect_ack in payload when provided', async () => {
       const db = getDb()
-      db.prepare(`UPDATE case_progression_state SET case_version = 6 WHERE domain = 'personal' AND case_id = ?`).run(PRI_CASE)
 
       const { ctx, out } = fakeCtxWithBody(
         `/api/cos/cases/personal/${PRI_CASE}/owner-action`, 'POST', {
           eventType: 'OWNER_DECISION', choice: 'YES',
-          sourceReference: PROG_RUN_ID, caseVersion: 6,
+          sourceReference: PROG_RUN_ID, caseVersion: 3,
           idempotencyKey: 'idem-extack-1',
+          decision: 'REQUEST_DECISION', nextBestAction: null,
           externalEffectAck: true,
         })
       await tryHandleCos(ctx)
@@ -407,4 +493,5 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
       expect(p.external_effect_ack).toBe(true)
     })
   })
+
 })

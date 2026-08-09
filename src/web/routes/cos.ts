@@ -37,6 +37,19 @@ export function endOfTodaySec(now: Date): number {
   }
 }
 
+// Deep-compare two JSON strings by parsing and re-serializing — normalizes
+// whitespace / key ordering so drift in serialization doesn't look like a
+// changed question.
+function deepJsonEqual(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (a === b) return true
+  if (a == null || b == null) return false
+  try {
+    return JSON.stringify(JSON.parse(a)) === JSON.stringify(JSON.parse(b))
+  } catch {
+    return a === b
+  }
+}
+
 export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method } = ctx
 
@@ -222,7 +235,7 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     let body: {
       eventType?: string; choice?: string; text?: string
       sourceReference?: string; caseVersion?: number; idempotencyKey?: string
-      externalEffectAck?: boolean
+      externalEffectAck?: boolean; decision?: string; nextBestAction?: string | null
     }
     try { body = JSON.parse((await readBody(req)).toString()) }
     catch { json(res, { error: 'invalid JSON' }, 400); return true }
@@ -254,24 +267,41 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
       return true
     }
 
-    // Version guard: stale case_version → 409.
-    const stateRow = db.prepare(
-      `SELECT case_version FROM case_progression_state WHERE domain = ? AND case_id = ?`
-    ).get(domain, caseId) as { case_version: number } | undefined
-    if (!stateRow) {
-      json(res, { error: 'no progression state for this case' }, 404); return true
+    // Question-staleness guard (card 9193eedd follow-up #2):
+    // Every heartbeat writes a new run row with a new progression_run_id, even
+    // when the question hasn't changed — so comparing run IDs is the same bug
+    // as comparing case_version, wearing a different field name.
+    //
+    // A question is identified by its CONTENT: the decision type plus what is
+    // being asked (next_best_action_json). If both are unchanged, the answer
+    // is current no matter how many heartbeats fired. 409 only when the case
+    // genuinely moved on: a different decision, or a different step.
+    const QUESTION_DECISIONS = ['REQUEST_DECISION', 'ASK_INFORMATION', 'RECOVERY_REQUIRED', 'WAIT_EXTERNAL']
+    const latestQuestionRun = db.prepare(
+      `SELECT r.progression_run_id, r.decision, s.next_best_action_json
+       FROM case_progression_runs r
+       LEFT JOIN case_progression_state s ON s.domain = r.domain AND s.case_id = r.case_id
+       WHERE r.domain = ? AND r.case_id = ?
+         AND r.decision IN (${QUESTION_DECISIONS.map(() => '?').join(',')})
+       ORDER BY r.started_at DESC LIMIT 1`
+    ).get(domain, caseId, ...QUESTION_DECISIONS) as {
+      progression_run_id: string; decision: string; next_best_action_json: string | null
+    } | undefined
+
+    if (!latestQuestionRun) {
+      json(res, { error: 'no active question for this case' }, 404); return true
     }
-    if (stateRow.case_version !== caseVersion) {
-      // Read current decision for the 409 payload.
-      const lastRun = db.prepare(
-        `SELECT decision FROM case_progression_runs
-         WHERE domain = ? AND case_id = ?
-         ORDER BY started_at DESC LIMIT 1`
-      ).get(domain, caseId) as { decision: string | null } | undefined
+
+    // Content-based staleness: the frontend sends the decision + nextBestAction
+    // it displayed. If both match the current state, the question is unchanged.
+    const sameDecision = body.decision === latestQuestionRun.decision
+    const sameNba = deepJsonEqual(body.nextBestAction ?? null, latestQuestionRun.next_best_action_json ?? null)
+    if (!sameDecision || !sameNba) {
       json(res, {
-        error: 'case_version_stale',
-        currentVersion: stateRow.case_version,
-        currentDecision: lastRun?.decision ?? null,
+        error: 'question_stale',
+        currentSourceReference: latestQuestionRun.progression_run_id,
+        currentDecision: latestQuestionRun.decision,
+        currentNextBestAction: latestQuestionRun.next_best_action_json ?? null,
       }, 409)
       return true
     }
