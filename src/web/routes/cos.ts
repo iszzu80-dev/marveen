@@ -15,6 +15,7 @@ import { dueZstItems } from '../../cos/zst-watch.js'
 import { ingestTriagedEmail, type TriagedEmail } from '../../cos/triage-bridge.js'
 import { ingestTriagedZstEmail, type ZstTriagedEmail } from '../../cos/zst-intake.js'
 import { validateSkillMd, validateSkillPermissions } from '../../cos/skill-permission-validator.js'
+import { getMissionControlProgressionView } from '../../cos/progression-pipeline.js'
 import { storeDocument, documentsForCase, readDocumentBytes } from '../../cos/cos-documents.js'
 import { APP_TZ } from '../../config.js'
 import type { RouteContext } from './types.js'
@@ -187,6 +188,19 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
 
   if (path === '/api/cos/analytics' && method === 'GET') {
     json(res, listAnalytics(getDb()))
+    return true
+  }
+
+  // Progression layer Mission Control view (card 52250c7f). Read-only — the
+  // progression engine writes state; this endpoint only returns it for the UI.
+  if (path === '/api/cos/progression' && method === 'GET') {
+    const q = new URLSearchParams(req.url?.split('?')[1] ?? '')
+    const domain = (q.get('domain') || 'personal') as 'personal' | 'zst'
+    if (domain !== 'personal' && domain !== 'zst') {
+      json(res, { error: 'domain must be personal or zst' }, 400); return true
+    }
+    const view = getMissionControlProgressionView(getDb(), domain)
+    json(res, view)
     return true
   }
 
