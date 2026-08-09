@@ -18,6 +18,7 @@ import { validateSkillMd, validateSkillPermissions } from '../../cos/skill-permi
 import { getMissionControlProgressionView, runProgressionCycle } from '../../cos/progression-pipeline.js'
 import { storeDocument, documentsForCase, readDocumentBytes } from '../../cos/cos-documents.js'
 import { evaluateOutputFloors, breachedFloors } from '../../cos/output-floor.js'
+import { runDailyReconcile } from '../../cos/reconcile.js'
 import { APP_TZ } from '../../config.js'
 import type { RouteContext } from './types.js'
 
@@ -505,10 +506,15 @@ export function listRadarSummary(db: ReturnType<typeof getDb>): unknown[] {
  * report, and so reads as calm. That is precisely how the 2026-08-09 failures
  * stayed invisible for three days. `breached` is surfaced separately so a zero
  * cannot be scrolled past.
+ *
+ * `alerts` is the SAME reconcile the daily job runs (§19 + §14). One source, two
+ * surfaces: if the Mission Control view and the 07:00 report could disagree,
+ * you would eventually trust the quieter one.
  */
 export function listMonitoring(db: ReturnType<typeof getDb>): {
   connectors: unknown[]; outboundHealth: { byStatus: Record<string, number>; needsAttention: unknown[] }
   quotas: unknown[]; outputFloors: unknown[]; breached: unknown[]
+  alerts: { findings: unknown[]; counts: Record<string, number>; clean: boolean }
 } {
   const connectors = db.prepare(
     `SELECT connector_id, kind, mode, status, consecutive_failures, last_ok_at, last_error_at, last_error
@@ -528,6 +534,8 @@ export function listMonitoring(db: ReturnType<typeof getDb>): {
     `SELECT quota_key, used_count, max_count, window_sec, window_start FROM send_quotas ORDER BY quota_key`
   ).all()
   const outputFloors = evaluateOutputFloors(db)
+  const rec = runDailyReconcile(db)
   return { connectors, outboundHealth: { byStatus, needsAttention }, quotas,
-    outputFloors, breached: breachedFloors(outputFloors) }
+    outputFloors, breached: breachedFloors(outputFloors),
+    alerts: { findings: rec.findings, counts: rec.counts, clean: rec.clean } }
 }
