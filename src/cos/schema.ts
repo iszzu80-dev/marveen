@@ -563,6 +563,7 @@ export function initCosSchema(db: Database.Database): void {
 
   initCosDocumentsSchema(db)
   initZstSchema(db)
+  initProgressionSchema(db)
 }
 
 // ── Unified COS document/attachment store (personal + ZST) ───────────────────
@@ -1198,4 +1199,95 @@ export function initZstProductLabSchema(db: Database.Database): void {
       CHECK (status IN ('OPEN','ACKNOWLEDGED','IN_PROGRESS','WAITING_SOURCE','RESULT_READY','ACCEPTED','REJECTED','CANCELLED'))
     )
   `)
+}
+
+// ── Autonomous Case Progression Layer v1.1 — Gate 0 foundation (Option B) ──────
+// Separate progression-specific state table (Option B: smaller blast radius than
+// adding columns to both personal_cases AND zst_cases, which already diverge by
+// 14 columns). One migration, one code path, zero changes to existing case tables.
+// Unique (domain, case_id) — one progression row per case, domain-scoped.
+// progression_enabled=0 + progression_mode='off' means legacy behavior unchanged.
+//
+// case_progression_runs is the audit/replay ledger (plan §14): every progression
+// cycle records its inputs, decision, and output here so the eval harness can
+// replay historical cases deterministically.
+export function initProgressionSchema(db: Database.Database): void {
+  // ── case_progression_state (plan §7/§26, Option B) ─────────────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS case_progression_state (
+      domain              TEXT NOT NULL,
+      case_id             TEXT NOT NULL,
+      goal                TEXT,
+      definition_of_done_json TEXT,
+      success_evidence_requirements_json TEXT,
+      semantic_completion_status TEXT NOT NULL DEFAULT 'NOT_STARTED',
+      rolling_plan_json   TEXT,
+      plan_version        INTEGER NOT NULL DEFAULT 0,
+      next_best_action_json TEXT,
+      progression_enabled INTEGER NOT NULL DEFAULT 0,
+      progression_mode    TEXT NOT NULL DEFAULT 'off',
+      next_progression_at INTEGER,
+      last_progressed_at  INTEGER,
+      progression_claimed_by TEXT,
+      progression_claim_expires_at INTEGER,
+      blocked_reason      TEXT,
+      waiting_on          TEXT,
+      interruption_count  INTEGER NOT NULL DEFAULT 0,
+      no_progress_run_count INTEGER NOT NULL DEFAULT 0,
+      goal_version        INTEGER NOT NULL DEFAULT 0,
+      case_version        INTEGER NOT NULL DEFAULT 0,
+      created_at          INTEGER NOT NULL,
+      updated_at          INTEGER NOT NULL,
+      PRIMARY KEY (domain, case_id),
+      CHECK (domain IN ('personal','zst')),
+      CHECK (progression_mode IN ('off','shadow','internal','external_shadow','live')),
+      CHECK (semantic_completion_status IN ('NOT_STARTED','IN_PROGRESS','PROPOSED','VERIFIED'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_cps_next_prog ON case_progression_state(domain, next_progression_at) WHERE progression_enabled = 1`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_cps_claimed ON case_progression_state(progression_claimed_by, progression_claim_expires_at)`)
+
+  // ── case_progression_runs (plan §14 — audit/replay ledger) ─────────────
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS case_progression_runs (
+      progression_run_id   TEXT PRIMARY KEY,
+      domain               TEXT NOT NULL,
+      case_id              TEXT NOT NULL,
+      trigger_type         TEXT NOT NULL,
+      trigger_reference    TEXT,
+      case_version_before  INTEGER,
+      case_version_after   INTEGER,
+      goal_version         INTEGER,
+      context_hash         TEXT,
+      plan_version_before  INTEGER,
+      plan_version_after   INTEGER,
+      decision             TEXT,
+      reason               TEXT,
+      progress_delta_json  TEXT,
+      action_ids_json      TEXT,
+      escalation_id        TEXT,
+      started_at           INTEGER NOT NULL,
+      completed_at         INTEGER,
+      status               TEXT NOT NULL DEFAULT 'STARTED',
+      error_code           TEXT,
+      error_summary        TEXT,
+      -- Safety assertion results (JSON array of {assertion, passed, detail})
+      safety_assertions_json TEXT,
+      CHECK (domain IN ('personal','zst')),
+      CHECK (status IN ('STARTED','COMPLETED','FAILED','RECOVERY_REQUIRED','CANCELLED')),
+      CHECK (trigger_type IN ('INTAKE','SCHEDULED','MANUAL','WAKE','ESCALATION_RESOLVED','RECOVERY'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_cpruns_case ON case_progression_runs(domain, case_id, started_at)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_cpruns_status ON case_progression_runs(status, started_at)`)
+
+  // Checkpoint C (card 53f1fd06): resolution audit trail (§10). Migrated in
+  // place for existing dbs; the column defaults to NULL for pre-C rows.
+  // Checkpoint D (card 6b7e7e5e): LLM-interpreted case summary (§10.2).
+  // Checkpoint E.4 (card 25e06d97): DoD verification state (§10.4).
+  ensureColumns(db, 'case_progression_state', {
+    resolution_audit_json: 'TEXT',
+    summary: 'TEXT',
+    dod_verification_json: 'TEXT',
+  })
 }
