@@ -337,6 +337,101 @@ export function initCosSchema(db: Database.Database): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_capprovals_campaign ON campaign_approvals(campaign_id, status)`)
 
+  // ── §6.3 / A.3: a thread_id BEKERUL az egyedi kulcsba ────────────────
+  // A spec kulcsa (fiok, thread_id, message_id); ami epult, az (fiok, message_id).
+  // SQLite nem tud meglevo UNIQUE-ot boviteni, ezert tabla-ujraepites — ugyanaz a
+  // minta, amit az outbound_ledger P1.1 migracioja hasznal fentebb.
+  //
+  // A thread_id NULLABLE marad: SQLite-ban egy NULL nem utkozik semmivel, tehat
+  // egy szal nelkuli sor tovabbra is bekerulhet. Ezert a message_id-ra KULON
+  // egyedi index is kell — enelkul a bovitett kulcs GYENGIThetne a vedelmet
+  // (ugyanaz az uzenet ketszer, egyszer szal nelkul, egyszer szallal).
+  const _epExists = db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='email_processing'`).get()
+  if (_epExists) {
+    const _epSql = (db.prepare(`SELECT sql FROM sqlite_master WHERE name='email_processing'`)
+      .get() as { sql: string }).sql
+    const _hasThreadInKey = /UNIQUE\s*\([^)]*thread_id[^)]*\)/.test(_epSql)
+    if (!_hasThreadInKey) {
+      db.exec(`ALTER TABLE email_processing RENAME TO email_processing_pre_a3`)
+    }
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS email_processing (
+      gmail_account_id TEXT NOT NULL,
+      message_id       TEXT NOT NULL,
+      thread_id        TEXT,
+      batch_id         TEXT NOT NULL REFERENCES email_processing_batches(batch_id),
+      status           TEXT NOT NULL DEFAULT 'DISCOVERED',
+      case_id          TEXT,
+      attempt          INTEGER NOT NULL DEFAULT 0,
+      last_error       TEXT,
+      quarantine_reason TEXT,
+      content_hash     TEXT,
+      self_event_count INTEGER NOT NULL DEFAULT 0,
+      last_self_event_at INTEGER,
+      created_at       INTEGER NOT NULL,
+      updated_at       INTEGER NOT NULL,
+      UNIQUE(gmail_account_id, thread_id, message_id),
+      CHECK (status IN ('DISCOVERED','CLAIMED','LOCAL_APPLIED','SOURCE_COMMITTED',
+        'RECOVERY_REQUIRED','EXCLUDED','DUPLICATE','QUARANTINED'))
+    )
+  `)
+  // A message-szintu egyediseg NEM veszhet el a bovitett kulcs miatt (lasd fent).
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_email_processing_msg
+           ON email_processing(gmail_account_id, message_id)`)
+  const _epOld = db.prepare(`SELECT 1 FROM sqlite_master WHERE type='table' AND name='email_processing_pre_a3'`).get()
+  if (_epOld) {
+    db.exec(`
+      INSERT OR IGNORE INTO email_processing
+        (gmail_account_id, message_id, thread_id, batch_id, status, case_id, attempt,
+         last_error, quarantine_reason, content_hash, self_event_count, last_self_event_at,
+         created_at, updated_at)
+      SELECT gmail_account_id, message_id, thread_id, batch_id, status, case_id, attempt,
+             last_error, quarantine_reason, content_hash, self_event_count, last_self_event_at,
+             created_at, updated_at
+      FROM email_processing_pre_a3
+    `)
+    db.exec(`DROP TABLE email_processing_pre_a3`)
+  }
+  // A RENAME magaval vitte a tabla indexeit, a DROP pedig el is vitte oket.
+  // Ezt a meglevo P1.2 migracios teszt kapta el (idx_eproc_chash eltunt) -- a
+  // sajat tesztem csak azt nezte, hogy a regi tabla nincs meg. Az indexeket
+  // KOTELEZO ujraepiteni a rebuild UTAN, kulonben a migracio nemaan lassit.
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_eproc_batch ON email_processing(batch_id, status)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_eproc_chash ON email_processing(gmail_account_id, content_hash)`)
+
+  // ── §6.2 / A.5: a ledger hordozza a cimzettet, a szolgaltatoi azonositokat
+  //    es a verzio-kotest. Enelkul az AC-21 (minden kimeno visszavezetheto
+  //    approvalhoz + case+version-hoz) technikailag nem ellenorizheto.
+  ensureColumns(db, 'outbound_ledger', {
+    channel:              'TEXT',
+    provider_message_id:  'TEXT',
+    rfc_message_id:       'TEXT',
+    campaign_version:     'INTEGER',
+    approval_version:     'INTEGER',
+    rendered_variables_hash: 'TEXT',
+    first_attempt_at:     'INTEGER',
+    error_code:           'TEXT',
+  })
+
+  // ── §15: kampany-eletciklus mezok ────────────────────────────────────
+  ensureColumns(db, 'campaigns', {
+    revoked_at:       'INTEGER',
+    revoked_by:       'TEXT',
+    pause_reason:     'TEXT',
+    outbound_count:   'INTEGER NOT NULL DEFAULT 0',
+    follow_up_count:  'INTEGER NOT NULL DEFAULT 0',
+    last_activity_at: 'INTEGER',
+  })
+
+  // ── §17: a migralt ugyek bizonytalansagi jelolese ────────────────────
+  // "bizonytalan = MIGRATED_UNVERIFIED". A Drive-bol hozott ugyek eddig
+  // ugyanolyan magabiztosnak latszottak, mint a sajat forrasbol szarmazok.
+  db.exec(`
+    UPDATE personal_cases SET scope = 'MIGRATED_UNVERIFIED'
+    WHERE source_system = 'chatgpt-cos-drive' AND scope = 'PERSONAL_CONFIRMED'
+  `)
+
   // ── §3.2 approval envelope (2026-08-09) ──────────────────────────────
   // Approving a template is not approving a message. The envelope carries the
   // whole frame: who may receive, on which channel, how many times, until when,
