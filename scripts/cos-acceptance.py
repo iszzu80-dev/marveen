@@ -415,17 +415,22 @@ def _sd1():
 
 @crit("SD-2", "scheduler", "audit 2026-08-09", "a haladás-motor ütemezése engedélyezett")
 def _sd2():
-    cfg = task_config("cos-progression-heartbeat")
+    # Ugyanaz a feladat, 2026-08-09-en a spec §14 nevere atnevezve
+    # (cos-progression-heartbeat -> personal-case-wake) es bekapcsolva.
+    cfg = task_config("personal-case-wake") or task_config("cos-progression-heartbeat")
     if cfg is None:
-        return FAIL, "a cos-progression-heartbeat feladat nincs"
+        return FAIL, "az ugy-ebreszto feladat nincs"
     return (PASS if cfg.get("enabled") else FAIL), "enabled=%s" % cfg.get("enabled")
 
 
 @crit("SD-3", "scheduler", "audit 2026-08-09", "a levélfigyelés köre nem esik ki csendben")
 def _sd3():
-    cfg = task_config("email-triage")
+    # A feladat 2026-08-09-en at lett nevezve a spec §14 nevere
+    # (email-triage -> personal-gmail-delta), es orankentire allitva. A kriterium
+    # a feladatot koveti, nem a regi nevet; a tartalma valtozatlan.
+    cfg = task_config("personal-gmail-delta") or task_config("email-triage")
     if cfg is None:
-        return FAIL, "az email-triage feladat nincs"
+        return FAIL, "a bejovo levelfigyelo feladat nincs"
     if cfg.get("skipIfBusy"):
         return FAIL, "skipIfBusy=true, 3 órás kadencián a kimaradt kör elvész"
     return PASS, "skipIfBusy=false"
