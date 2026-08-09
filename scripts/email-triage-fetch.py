@@ -70,6 +70,13 @@ TRANSACTIONAL = [
     "under review", "case ", "ticket ", "contract", "renewal", "expires",
 ]
 
+# Egyertelmu promocios jelolok. Ezek NEM dobasi okok onmagukban -- csak azt
+# tiltjak, hogy a tranzakcios felulbiralas kimentsen egy zaj-feladot.
+PROMO_MARKERS = [
+    "last minute", "felaron", "fel aron", "kedvezmeny", "akcio", "learazas",
+    "% off", "kupon", "utalvany", "black friday", "csak ma", "meglepetes ar",
+]
+
 _ACC = str.maketrans("áéíóöőúüűÁÉÍÓÖŐÚÜŰ", "aeiooouuuAEIOOOUUU")
 
 
@@ -126,6 +133,14 @@ def is_noise(m):
     if any(s in frm for s in NOISE_SENDERS):
         # Sender alone is not a drop reason: rescue anything whose subject or
         # body reads transactional (GLS parcel, AWS Activate, order receipts).
+        # BUT a promo body disables the rescue (2026-08-09, elesben): a szinhazi
+        # hirlevel atcsuszott, mert a torzseben ott volt a "jegyek" szo. A
+        # tranzakcios szavak egy resze (jegy, utazas) minden reklamban ott van;
+        # ezert ha a torzs egyertelmuen promocios, a felulbiralas NEM sul el.
+        # Szandekosan NEM dobjuk el a levelet a torzs alapjan -- egy valodi
+        # visszaigazolasban is szerepelhet az "ingyenes szallitas".
+        if any(p in subj + " " + snip for p in PROMO_MARKERS):
+            return True
         if any(t in subj + " " + snip for t in TRANSACTIONAL):
             return False
         return True
@@ -151,6 +166,10 @@ SELFTEST = [
             "snippet": "New sign-in on your device."}),
     (True, {"from": "marketing@hellonancy.com", "subject": "Weekly digest",
             "snippet": "Read what happened this week."}),
+    # 2026-08-09 elesben atcsuszott: a "jegyek" szo mentette ki a szinhazi
+    # hirlevelet. A promo-jelolo ("last minute", "felaron") most letiltja ezt.
+    (True, {"from": "napi@ajanlo.ma", "subject": "Hetfo Augusztus 10. Dumaszinhaz",
+            "snippet": "Ma este Szinhaz! Last minute jegyek, felaron 2026.08.10"}),
 ]
 
 
