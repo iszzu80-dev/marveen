@@ -197,10 +197,137 @@ const outputFloorBreaches: Check = (db, now) => {
   }
 }
 
+const duplicateSendAttempt: Check = (db) => {
+  // §19 minimum #1. The UNIQUE constraints make a duplicate physically
+  // impossible, so what we look for is the ATTEMPT: two ledger rows for the same
+  // campaign+recipient+kind. A silent "the constraint held" is not the same as
+  // "nothing tried" — the second means the idempotency key is being derived
+  // wrongly somewhere upstream.
+  let rows: Array<{ n: number }> = []
+  try {
+    rows = db.prepare(
+      `SELECT COUNT(*) AS n FROM (
+         SELECT campaign_id, recipient, action_type, COUNT(*) AS c
+         FROM outbound_ledger WHERE campaign_id IS NOT NULL AND recipient IS NOT NULL
+         GROUP BY campaign_id, recipient, action_type HAVING c > 1)`
+    ).all() as never
+  } catch { return null }
+  const n = rows[0]?.n ?? 0
+  if (!n) return null
+  return {
+    id: 'duplicate_send_attempt', severity: 'CRITICAL', ref: '§19 kritikus, AC-1',
+    title: 'Ugyanannak a címzettnek több küldés indult',
+    detail: `${n} kampány+címzett+típus hármas fordul elő többször a ledgerben.`,
+    action: 'Az idempotencia-kulcs valahol nem fedi le a küldést. Nézd meg, mielőtt bármit újraindítasz.',
+  }
+}
+
+const failedReadback: Check = (db) => {
+  // §19 minimum #3: a send the provider accepted but we could never verify.
+  const n = count(db, `SELECT COUNT(*) AS n FROM outbound_ledger WHERE status='APPLIED_UNVERIFIED'`)
+  if (n === null || n === 0) return null
+  return {
+    id: 'readback_never_succeeded', severity: 'WARNING', ref: '§19, v4.2.1 B.1',
+    title: 'Sikertelen visszaolvasás',
+    detail: `${n} küldésnél a szolgáltató sikert adott, de a visszaolvasás nem erősítette meg.`,
+    action: 'Napi egyeztetés tárgya. Újraküldeni TILOS: a levél nagy eséllyel kiment.',
+  }
+}
+
+const stalledCampaign: Check = (db, now) => {
+  // §19 minimum #4: a campaign that is paused or has not moved.
+  let rows: Array<{ campaign_id: string; status: string }> = []
+  try {
+    rows = db.prepare(
+      `SELECT campaign_id, status FROM campaigns
+       WHERE status IN ('PAUSED','DRAFT') AND updated_at < ?`
+    ).all(now - 7 * DAY) as never
+  } catch { return null }
+  if (!rows.length) return null
+  return {
+    id: 'campaign_stalled', severity: 'WARNING', ref: '§19, §15',
+    title: 'Kampány áll egy hete',
+    detail: rows.map(r => `${r.campaign_id}: ${r.status}`).join('; '),
+    action: 'Vagy folytatni kell, vagy lezárni. Egy örökre DRAFT-ban álló kampány elfelejtett szándék.',
+  }
+}
+
+const expiredApproval: Check = (db, now) => {
+  // §19 minimum #5. An approval past its validity is not a bug on its own — it
+  // becomes one when the case still expects a send to happen.
+  const n = count(db,
+    `SELECT COUNT(*) AS n FROM campaign_approvals WHERE status='APPROVED' AND valid_until IS NOT NULL AND valid_until < ?`,
+    now)
+  if (n === null || n === 0) return null
+  return {
+    id: 'approval_expired', severity: 'WARNING', ref: '§19, §3.2',
+    title: 'Lejárt jóváhagyás',
+    detail: `${n} jóváhagyás érvényessége lejárt, de még APPROVED státuszban áll.`,
+    action: 'Ha a küldés még aktuális, új jóváhagyás kell. A lejárt már úgysem hatalmaz fel semmire.',
+  }
+}
+
+const repeatedFollowUp: Check = (db) => {
+  // §19 minimum #8: the same case chasing the same party again and again.
+  let rows: Array<{ case_id: string; c: number }> = []
+  try {
+    rows = db.prepare(
+      `SELECT case_id, COUNT(*) AS c FROM outbound_ledger
+       WHERE outbound_kind='FOLLOW_UP' GROUP BY case_id HAVING c >= 3`
+    ).all() as never
+  } catch { return null }
+  if (!rows.length) return null
+  return {
+    id: 'follow_up_repeated', severity: 'WARNING', ref: '§19',
+    title: 'Sokadik utánkövetés ugyanabban az ügyben',
+    detail: rows.map(r => `${r.case_id}: ${r.c} follow-up`).join('; '),
+    action: 'Három sikertelen utánkövetés után nem a negyedik levél a megoldás. Más csatorna vagy Istvan döntése kell.',
+  }
+}
+
+const radarCheckFailing: Check = (db, now) => {
+  // §19 minimum #9: a radar item whose scheduled check is overdue — the price
+  // watch is asleep, and a target hit would pass unnoticed.
+  const n = count(db,
+    `SELECT COUNT(*) AS n FROM radar_items WHERE status='ACTIVE' AND next_check_at IS NOT NULL AND next_check_at < ?`,
+    now - DAY)
+  if (n === null || n === 0) return null
+  return {
+    id: 'radar_check_overdue', severity: 'WARNING', ref: '§19, §16',
+    title: 'Radar-ellenőrzés csúszik',
+    detail: `${n} aktív radar-elem esedékes ellenőrzése egy napnál régebben lejárt.`,
+    action: 'Az árfigyelés erre az elemre alszik; egy célár-találat észrevétlen maradna.',
+  }
+}
+
+const cursorBatchMismatch: Check = (db) => {
+  // §19 KRITIKUS: the cursor moved past a batch that never terminalised. This is
+  // the one that says the system believes it processed mail it did not.
+  let n = 0
+  try {
+    n = (db.prepare(
+      `SELECT COUNT(*) AS n FROM email_source_checkpoints cp
+       JOIN email_processing_batches b ON b.gmail_account_id = cp.gmail_account_id
+       WHERE b.status IN ('OPEN','PROCESSING') AND b.cursor_after IS NOT NULL
+         AND cp.history_cursor IS NOT NULL AND cp.history_cursor >= b.cursor_after`
+    ).get() as { n: number }).n
+  } catch { return null }
+  if (!n) return null
+  return {
+    id: 'cursor_past_open_batch', severity: 'CRITICAL', ref: '§19 kritikus, AC-11',
+    title: 'A pozíció túllépett egy lezáratlan kötegen',
+    detail: `${n} köteg nyitva van, miközben a fiók pozíciója már túl van rajta.`,
+    action: 'A rendszer azt hiszi, feldolgozott olyan levelet, amit nem. Ez adatvesztés, nem késés.',
+  }
+}
+
 export const CHECKS: Check[] = [
   stuckLocalApplied, openBatches, missingCheckpoint,
   outboundNeedsHuman, outcomeUnknown, stuckSending,
   connectorDown, staleClaims, corporateInPersonal, outputFloorBreaches,
+  // §19 further minimum + critical alerts
+  duplicateSendAttempt, failedReadback, stalledCampaign, expiredApproval,
+  repeatedFollowUp, radarCheckFailing, cursorBatchMismatch,
 ]
 
 /** Run every check. Order of findings: CRITICAL first — a report that buries the
