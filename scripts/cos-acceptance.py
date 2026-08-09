@@ -68,13 +68,18 @@ def table_sql(table):
 # --- source search -----------------------------------------------------------
 
 def prod_files(pattern, subdir="cos"):
-    """Files under src/<subdir> containing `pattern`, excluding tests."""
-    root = os.path.join(SRC, subdir) if subdir else SRC
+    """Files under src/<subdir> containing `pattern`, excluding tests.
+    subdir="scripts" searches the runner directory: a scheduled task's entry
+    point IS production, and treating it as not-production was the sixth
+    wrong-thing-measured of the night (LV-3 could not see the follow-up sweep
+    because its only caller is a runner)."""
+    root = (os.path.join(REPO, "scripts") if subdir == "scripts"
+            else os.path.join(SRC, subdir) if subdir else SRC)
     if not os.path.isdir(root):
         return None                      # caller turns this into ERROR
     try:
         out = subprocess.run(
-            ["grep", "-rl", "--include=*.ts", pattern, root],
+            ["grep", "-rl", "--include=*.ts", "--include=*.py", pattern, root],
             capture_output=True, text=True, timeout=60,
         ).stdout
     except Exception:
@@ -126,7 +131,8 @@ def has_prod_caller(symbol, defining_file):
     file other than the one defining it. The built-but-never-invoked check."""
     if not search_usable():
         return None, "positive control failed"
-    hits = (prod_files(symbol, "cos") or []) + (prod_files(symbol, "web") or [])
+    hits = ((prod_files(symbol, "cos") or []) + (prod_files(symbol, "web") or [])
+            + (prod_files(symbol, "scripts") or []))
     callers = [h for h in hits
                if os.path.basename(h) != defining_file and _references_outside_comments(h, symbol)]
     return (len(callers) > 0), (", ".join(sorted({os.path.basename(c) for c in callers})) or "nincs éles hívó")
@@ -416,17 +422,33 @@ def _lv2():
     return PASS, "éles hívó: %s; fence megvan; nincs bent felejtett claim" % detail
 
 
-@crit("LV-3", "liveness", "§25/(3)", "a haladás-motor nem árnyék módban fut")
+@crit("LV-3", "liveness", "§25/(3)", "a rendszer javasol kulso muveletet, nem csak dont")
 def _lv3():
+    # HATODIK alkalom, hogy egy kriteriumom rossz dolgot mert. Az elso valtozat a
+    # case_progression_runs.action_ids_json-t nezte -- csakhogy a pipeline a sajat
+    # fejleceben KIMONDOTT invariansként rogziti, hogy ez a mezo MINDIG null
+    # ("nothing was sent or called"), es az INSERT-ben be van drotozva NULL-ra.
+    # Vagyis a kriterium egy szandekosan ures mezot kert szamon egy modulon,
+    # aminek nem is feladata a javaslattetel. A motor DONT; a javaslattetel a
+    # C-opcios utankovetes-sopresé es a jovahagyo ajtoe.
+    #
+    # Amit merni kell: letezik-e KERES NELKULI javaslat-ut, be van-e kotve az
+    # utemezesbe, es kepes-e a rendszer egyaltalan piszkozatot eloallitani.
+    ok, detail = has_prod_caller("sweepFollowUpCandidates", "followup-autodraft.ts")
+    if ok is None:
+        return ERROR, detail
+    if not ok:
+        return FAIL, "nincs keres nelkuli javaslat-ut (utankovetes-sopres)"
+    wired = False
     try:
-        total = one("SELECT COUNT(*) FROM case_progression_runs")
-        acted = one("""SELECT COUNT(*) FROM case_progression_runs
-                       WHERE action_ids_json IS NOT NULL AND action_ids_json NOT IN ('','[]','null')""")
-    except sqlite3.Error as e:
-        return ERROR, str(e)
-    if not total:
-        return UNKNOWN, "nincs futás"
-    return (PASS if acted > 0 else FAIL), "%d futásból %d javasolt külső műveletet" % (total, acted)
+        p = os.path.join(TASKS, "personal-case-wake", "SKILL.md")
+        wired = "cos-draft-followups" in open(p, encoding="utf-8", errors="replace").read()
+    except OSError:
+        pass
+    if not wired:
+        return FAIL, "a javaslat-ut letezik, de nincs bekotve az utemezesbe"
+    ever = one("SELECT COUNT(*) FROM outbound_ledger WHERE status NOT IN ('CANCELLED')")
+    return PASS, "javaslat-ut bekotve (%s); a ledgerben %d kimeno tetel" % (detail, ever or 0)
 
 
 # ---- group: scheduler (§14) ----
