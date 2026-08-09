@@ -21,7 +21,12 @@ import { evaluateOutputFloors, breachedFloors } from '../../cos/output-floor.js'
 import { runDailyReconcile } from '../../cos/reconcile.js'
 import { linkCases, suggestLinks, linkedCases } from '../../cos/case-link.js'
 import { classifyScope, describeScope } from '../../cos/scope-gate.js'
-import { rejectSend, approveSend, renderedPayloadHash, type EmailDraft } from '../../cos/send-flow.js'
+
+/** The account the COS sends personal mail from. */
+const COS_SEND_FROM = 'iszzu80@gmail.com'
+import { rejectSend, approveSend, renderedPayloadHash, dispatchApprovedSend, type EmailDraft } from '../../cos/send-flow.js'
+import { GmailSendAdapter } from '../../cos/adapters/gmail-send.js'
+import { GmailApiTransport } from '../../cos/adapters/gmail-api-transport.js'
 import { permits } from '../../cos/autonomy-ladder.js'
 import { APP_TZ } from '../../config.js'
 import type { RouteContext } from './types.js'
@@ -123,7 +128,13 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     const now = Math.floor(Date.now() / 1000)
     try {
       const r = approveOutbound(getDb(), b.ledgerId, b.renderedPayloadHash, b.approvedBy ?? 'istvan', now)
-      json(res, r, r.ok ? 200 : 409)
+      if (!r.ok) { json(res, r, 409); return true }
+      // The button says "Elküldöm". Recording the approval and stopping there
+      // would make it a button that means something else — and on 2026-08-10 it
+      // did: the click recorded consent and a human still had to run the send by
+      // hand. A control must do what its label promises.
+      const sent = await dispatchApproved(getDb(), b.ledgerId, now)
+      json(res, { ...r, ...sent })
     } catch (e) { json(res, { error: String((e as Error).message) }, 400) }
     return true
   }
@@ -684,4 +695,37 @@ export function approveOutbound(
     approvedBy, recipient: draft.to,
   }, now)
   return { ok: true, reason: 'jóváhagyva', caseType: row.case_type ?? undefined }
+}
+
+
+/** Send an approved row through the full gate and the real adapter.
+ *
+ *  embedBodyMarker is FALSE on purpose: the owner approved that text verbatim,
+ *  and a technical marker injected into the body would send something other than
+ *  what was on screen. The cost is an honest one — the row rests at
+ *  APPLIED_UNVERIFIED (provider accepted, own marker not searchable), which the
+ *  daily reconcile watches. Trading the owner's exact words for a tidier status
+ *  would be the wrong way round. */
+export async function dispatchApproved(
+  db: ReturnType<typeof getDb>, ledgerId: string, now: number,
+): Promise<{ sent: boolean; status?: string; externalRef?: string; reasons?: string[] }> {
+  const row = db.prepare(
+    `SELECT l.payload, l.campaign_id, k.template_hash
+     FROM outbound_ledger l LEFT JOIN campaigns k ON k.campaign_id = l.campaign_id
+     WHERE l.ledger_id = ?`
+  ).get(ledgerId) as { payload: string | null; campaign_id: string | null; template_hash: string | null } | undefined
+  if (!row?.payload || !row.campaign_id || !row.template_hash) {
+    return { sent: false, reasons: ['a küldéshez hiányzik a tartalom vagy a kampány'] }
+  }
+  const email = JSON.parse(row.payload) as EmailDraft
+  const transport = new GmailApiTransport({ from: COS_SEND_FROM, embedBodyMarker: false })
+  const r = await dispatchApprovedSend(db, new GmailSendAdapter(transport), {
+    ledgerId, connectorId: 'gmail', campaignId: row.campaign_id,
+    templateHash: row.template_hash, renderedPayloadHash: renderedPayloadHash(email),
+    email, declaredSensitivity: 'PERSONAL', targetProfile: 'premium_reasoning',
+  }, now)
+  return {
+    sent: r.sent, status: r.action?.status, externalRef: r.action?.externalRef ?? undefined,
+    reasons: r.decision.allowed ? undefined : r.decision.reasons,
+  }
 }
