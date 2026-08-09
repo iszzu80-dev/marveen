@@ -20,6 +20,8 @@
 
 import type Database from 'better-sqlite3'
 import { evaluateOutputFloors, breachedFloors } from './output-floor.js'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 export type Severity = 'CRITICAL' | 'WARNING' | 'INFO'
 
@@ -321,13 +323,32 @@ const cursorBatchMismatch: Check = (db) => {
   }
 }
 
+const sourceWritePolicyActive: Check = (db) => {
+  // A policy exception that nobody can see becomes an assumption. If the cursor
+  // is allowed to advance without marking the source, the daily report says so
+  // every single day, by design — the cost of the exception has to stay visible
+  // for as long as it is in force.
+  let policy: { allowCursorAdvanceWithoutSourceWrite?: boolean; reason?: string } = {}
+  try {
+    policy = JSON.parse(readFileSync(join(process.cwd(), 'store', 'cos-source-commit-policy.json'), 'utf8'))
+  } catch { return null }
+  if (policy.allowCursorAdvanceWithoutSourceWrite !== true) return null
+  const n = count(db, `SELECT COUNT(*) AS n FROM email_processing WHERE last_error LIKE 'source-commit kihagyva%'`)
+  return {
+    id: 'source_write_policy_active', severity: 'INFO', ref: '§8, A.1 precedens',
+    title: 'A pozíció forrás-jelölés NÉLKÜL léphet (érvényes policy)',
+    detail: `${n ?? 0} üzenet zárult le így. Ok: ${policy.reason ?? 'nincs megadva'}`,
+    action: 'Amint a Gmail-token modify jogot kap, a valódi címkézés bekapcsolható és a kivétel visszavonható.',
+  }
+}
+
 export const CHECKS: Check[] = [
   stuckLocalApplied, openBatches, missingCheckpoint,
   outboundNeedsHuman, outcomeUnknown, stuckSending,
   connectorDown, staleClaims, corporateInPersonal, outputFloorBreaches,
   // §19 further minimum + critical alerts
   duplicateSendAttempt, failedReadback, stalledCampaign, expiredApproval,
-  repeatedFollowUp, radarCheckFailing, cursorBatchMismatch,
+  repeatedFollowUp, radarCheckFailing, cursorBatchMismatch, sourceWritePolicyActive,
 ]
 
 /** Run every check. Order of findings: CRITICAL first — a report that buries the
