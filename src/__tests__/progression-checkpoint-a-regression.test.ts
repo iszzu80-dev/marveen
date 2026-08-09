@@ -379,8 +379,8 @@ describe('Checkpoint A — Brownfield integrity (card 31188085)', () => {
     // After the intake tests above, we expect at least one seeded state row.
     expect(stateCount).toBeGreaterThan(0)
     // Progression runs are NOT created by intake (only by the heartbeat/migration).
-    // If any exist here, they came from the test that explicitly calls runProgressionCycle.
-    expect(runCount).toBeGreaterThanOrEqual(0)
+    // This is a GATE 2 safety invariant: intake seeds state but never starts a run.
+    expect(runCount).toBe(0)
   })
 
   it('intake seeds progression_enabled=1, progression_mode=internal', () => {
@@ -459,7 +459,10 @@ describe('Checkpoint A — Brownfield integrity (card 31188085)', () => {
     // tables MUST now contain rows — intake seeds progression state when the
     // tables exist (card 52250c7f, thin slice GATE 2).
     const stateCount = (dbWithProg.prepare('SELECT count(*) as c FROM case_progression_state').get() as {c:number}).c
+    const runCount = (dbWithProg.prepare('SELECT count(*) as c FROM case_progression_runs').get() as {c:number}).c
     expect(stateCount).toBeGreaterThan(0)
+    // GATE 2 safety invariant: intake seeds state but never starts a run.
+    expect(runCount).toBe(0)
 
     // On the WITHOUT DB, progression tables don't even exist — intake gracefully
     // skips seeding via the sqlite_master guard.
