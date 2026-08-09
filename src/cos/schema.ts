@@ -52,10 +52,13 @@ function ensureColumns(db: Database.Database, table: string, defs: Record<string
 }
 
 import { ensureLadderSchema } from './autonomy-ladder.js'
+import { ensureQuoteSchema } from './quote-campaign.js'
 
 export function initCosSchema(db: Database.Database): void {
   // §22 fokozatos autonomia tablai
   ensureLadderSchema(db)
+  // §13.1 ajanlatkero-kampany
+  ensureQuoteSchema(db)
 
   // ── personal_cases (P0.5 version; §6.1) ──────────────────────────────
   // version: optimistic concurrency. Every domain command reads the version it
