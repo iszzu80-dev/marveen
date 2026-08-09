@@ -125,25 +125,62 @@ describe('plan step advancement (completed_plan_step)', () => {
     expect(v2).toBe(v1)
   })
 
-  it('resets completed_plan_step when all plan steps are exhausted', () => {
+  it('completes the case when plan is exhausted and DoD is met (NO wrap-around)', () => {
     const db = freshDb()
     const t = now()
-    seedCaseWithoutInitialRun(db, 'c-exhaust', 'NEW', t)
+    // seedCaseWithoutInitialRun pre-sets dod_verification_json with _seed_guard
+    // (all_met=true), so canCompleteCase() returns allowed=true.
+    seedCaseWithoutInitialRun(db, 'c-complete', 'NEW', t)
 
-    // NEW status plan: step 1 VERIFY, step 2 GATHER_INFO, step 3 EXECUTE, step 4 VERIFY DoD
-    // After 4 CONTINUE_AUTONOMOUSLY runs, all steps should be exhausted.
+    // Run through all 4 plan steps. The 4th run should trigger COMPLETE.
     for (let i = 0; i < 4; i++) {
-      releaseProgressionClaim(db, 'personal', 'c-exhaust', 'runner', t + 60)
-      runProgressionCycle(db, 'personal', 'c-exhaust', t + i + 1, MANUAL_OPTS)
-      const s = getState(db, 'c-exhaust')
-      console.log(`  cycle ${i}: completed_step=${s.completed_plan_step} plan_ver=${s.plan_version}`)
+      releaseProgressionClaim(db, 'personal', 'c-complete', 'runner', t + 60)
+      const r = runProgressionCycle(db, 'personal', 'c-complete', t + i + 1, MANUAL_OPTS)
+      if (i === 3) {
+        expect(r.decision).toBe('COMPLETE')
+      }
     }
 
-    // After exhausting step 4, completed_plan_step resets to 0.
-    // Next run will have planChanged=true (completed_plan_step reset),
-    // bump plan_version, rebuild plan, and start at step 1.
-    const final = getState(db, 'c-exhaust')
-    expect(final.completed_plan_step).toBe(0) // reset after exhaustion
+    // completed_plan_step stays at maxStep (4) — case IS done, not reset
+    const final = getState(db, 'c-complete')
+    expect(final.completed_plan_step).toBe(4)
+    // progression_enabled should be 0 after auto-completion
+    const state = db.prepare(
+      'SELECT progression_enabled FROM case_progression_state WHERE domain = ? AND case_id = ?',
+    ).get('personal', 'c-complete') as { progression_enabled: number }
+    expect(state.progression_enabled).toBe(0)
+  })
+
+  it('resets completed_plan_step when all plan steps are exhausted but DoD is NOT met', () => {
+    const db = freshDb()
+    const t = now()
+    seedCaseWithoutInitialRun(db, 'c-wrap', 'NEW', t)
+
+    // Override the seed's DoD with 5 unmet criteria — auto-satisfy satisfies
+    // one per run, so after 4 runs only 4 of 5 are met. canCompleteCase
+    // returns allowed=false → plan wraps around instead of completing.
+    db.prepare(
+      `UPDATE case_progression_state SET dod_verification_json = ? WHERE domain = ? AND case_id = ?`,
+    ).run(JSON.stringify({
+      criteria: [
+        { label: 'Task 1', met: false, met_at: null, met_by_run: null },
+        { label: 'Task 2', met: false, met_at: null, met_by_run: null },
+        { label: 'Task 3', met: false, met_at: null, met_by_run: null },
+        { label: 'Task 4', met: false, met_at: null, met_by_run: null },
+        { label: 'Task 5', met: false, met_at: null, met_by_run: null },
+      ],
+      all_met: false,
+      evaluated_at: t,
+    }), 'personal', 'c-wrap')
+
+    for (let i = 0; i < 4; i++) {
+      releaseProgressionClaim(db, 'personal', 'c-wrap', 'runner', t + 60)
+      runProgressionCycle(db, 'personal', 'c-wrap', t + i + 1, MANUAL_OPTS)
+    }
+
+    // DoD unmet → plan wraps around, completed_plan_step resets to 0
+    const final = getState(db, 'c-wrap')
+    expect(final.completed_plan_step).toBe(0)
   })
 })
 

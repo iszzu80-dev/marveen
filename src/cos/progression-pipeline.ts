@@ -13,7 +13,9 @@
 //   6. Progression Run    — record in case_progression_runs (GATE 0 ledger)
 //
 // HARD INVARIANTS (Checkpoint B/C/D scope):
-//   - ZERO side effects: no email send, no status mutation on personal_cases/zst_cases
+//   - ZERO side effects EXCEPT for COMPLETED transition: when all plan steps
+//     are done AND all DoD criteria are met, the pipeline transitions the case
+//     to COMPLETED and removes it from the scheduler.
 //   - Write ONLY to case_progression_state + case_progression_runs
 //   - progression_enabled stays false, progression_mode stays 'shadow'
 //   - external_reference and action_ids_json are ALWAYS null — nothing was sent or called
@@ -24,6 +26,9 @@ import { HARD_SAFETY_ASSERTIONS, type SafetyViolation } from './progression-eval
 import { resolveContextDeep, CrossDomainReadError, domainGuard, type DeepResolvedContext } from './progression-resolver.js'
 import { interpretGoal, type LlmClient, type GoalInterpretation } from './progression-interpreter.js'
 import { initializeDoDVerification, autoSatisfyNextDoDCriterion, canCompleteCase } from './progression-completion.js'
+import { transitionCase } from './case-store.js'
+import { transitionZstCase } from './zst-case-store.js'
+import { scheduleNextProgression } from './progression-scheduler.js'
 
 // ── Valid progression decisions (plan §13) ──────────────────────────────
 
@@ -566,8 +571,8 @@ export function runProgressionCycle(
 
   // 1. Read the case
   const caseRow = db.prepare(
-    `SELECT title, case_type, status, sensitivity, created_at FROM ${tableName} WHERE case_id = ?`,
-  ).get(caseId) as { title: string; case_type: string; status: string; sensitivity: string; created_at: number } | undefined
+    `SELECT title, case_type, status, sensitivity, version, created_at FROM ${tableName} WHERE case_id = ?`,
+  ).get(caseId) as { title: string; case_type: string; status: string; sensitivity: string; version: number; created_at: number } | undefined
 
   if (!caseRow) {
     // Domain-scoped guard: if the case exists in the OTHER domain, this is
@@ -810,11 +815,26 @@ export function runProgressionCycle(
   if (runStatus === 'COMPLETED' && nba.canProceedAutonomously) {
     // Mark this NBA step as completed for the next run
     newCompletedPlanStep = nba.planStep
-    // If all plan steps are now completed, reset to 0 — the next run will
-    // rebuild the plan (plan_version bump means planChanged=true above).
+    // If all plan steps are now completed, check whether the case can
+    // actually finish. If all DoD criteria are met → upgrade decision to
+    // COMPLETE (the pipeline's own trigger, not just the guard). If DoD
+    // is unmet → reset to 0 to start a fresh plan cycle (wrap-around).
     const maxStep = plan.length > 0 ? plan[plan.length - 1].step : 0
     if (newCompletedPlanStep >= maxStep) {
-      newCompletedPlanStep = 0
+      const gate = canCompleteCase(db, domain, caseId)
+      if (gate.allowed) {
+        // All plan steps done + all DoD criteria met → COMPLETE.
+        decision = 'COMPLETE'
+        reason = `All ${plan.length} plan steps completed and DoD criteria satisfied`
+        // Update the run row (already INSERTed with the original decision)
+        db.prepare(
+          `UPDATE case_progression_runs SET decision = ?, reason = ? WHERE progression_run_id = ?`,
+        ).run(decision, reason, runId)
+        // Keep newCompletedPlanStep at maxStep — the case IS done
+      } else {
+        // DoD not yet met — reset to 0 for a fresh plan cycle
+        newCompletedPlanStep = 0
+      }
     }
   }
 
@@ -856,6 +876,27 @@ export function runProgressionCycle(
         ).run(decision, reason, runId)
       }
     }
+  }
+
+  // When the pipeline decides COMPLETE (either via decide() for an
+  // already-COMPLETED case, or via plan-exhaustion trigger above), actually
+  // transition the case and remove it from the scheduler. This is the ONE
+  // status mutation the progression pipeline is permitted: completion of
+  // its own supervised work.
+  if (decision === 'COMPLETE' && caseRow.status !== 'COMPLETED') {
+    const transitionFn = domain === 'personal' ? transitionCase : transitionZstCase
+    transitionFn(db, {
+      caseId,
+      newStatus: 'COMPLETED' as const,
+      actor: 'progression-engine',
+      seenVersion: caseRow.version,
+      reason,
+    }, now)
+    // Remove from heartbeat scheduler — no more polling for this case
+    scheduleNextProgression(db, domain, caseId, null, now)
+    db.prepare(
+      `UPDATE case_progression_state SET progression_enabled = 0, updated_at = ? WHERE domain = ? AND case_id = ?`,
+    ).run(now, domain, caseId)
   }
 
   return {
