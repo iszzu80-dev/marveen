@@ -20,6 +20,7 @@ import { storeDocument, documentsForCase, readDocumentBytes } from '../../cos/co
 import { evaluateOutputFloors, breachedFloors } from '../../cos/output-floor.js'
 import { runDailyReconcile } from '../../cos/reconcile.js'
 import { linkCases, suggestLinks, linkedCases } from '../../cos/case-link.js'
+import { classifyScope, describeScope } from '../../cos/scope-gate.js'
 import { APP_TZ } from '../../config.js'
 import type { RouteContext } from './types.js'
 
@@ -67,14 +68,39 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     if (!input?.accountId || !input?.messageId || !input?.subject) {
       json(res, { error: 'accountId, messageId, subject required' }, 400); return true
     }
-    // Route by account (connector identity = scope boundary): the ZST company
-    // mailbox becomes a zst_case; everything else a personal_case. The two
-    // namespaces never mix, at the source.
+    // Scope Gate (§2). The mailbox used to decide the store on its own, which
+    // is deterministic and cheap and put two ZST share-transfer cases into the
+    // personal store on 2026-08-09 because Istvan wrote them from his private
+    // address. Owner decision the same day: the gate is the truth, the mailbox
+    // is a signal that helps. So the mailbox is a prior and content can override
+    // it; where neither is decisive the verdict says so instead of guessing
+    // confidently.
     const now = Math.floor(Date.now() / 1000)
-    const result = input.accountId === 'zst'
+    const scope = classifyScope({
+      text: `${input.subject}\n${input.snippet ?? ''}`,
+      accountId: input.accountId,
+    })
+    if (scope.target === null) {
+      // SECURITY_BLOCKED or CORPORATE_EXCLUDED: nothing is written anywhere. The
+      // caller gets the verdict and the reasons, so a refusal is diagnosable.
+      json(res, { outcome: 'SCOPE_BLOCKED', scope: scope.verdict, reasons: scope.reasons })
+      return true
+    }
+    const zstTarget = scope.target === 'zst'
+    const routed = zstTarget
       ? ingestTriagedZstEmail(getDb(), input as unknown as ZstTriagedEmail, now)
       : ingestTriagedEmail(getDb(), input, now)
-    json(res, result)
+    // A placement the gate is not sure about is recorded ON the case, not only
+    // in this response: the review flag has to survive the request.
+    if (scope.needsReview && (routed as { caseId?: string }).caseId) {
+      try {
+        getDb().prepare(
+          `UPDATE ${zstTarget ? 'zst_cases' : 'personal_cases'}
+           SET blocked_reason = @why, updated_at = @now WHERE case_id = @id`
+        ).run({ why: `SCOPE REVIEW — ${describeScope(scope)}`, now, id: (routed as { caseId: string }).caseId })
+      } catch { /* a missing column must not lose the case that was just filed */ }
+    }
+    json(res, { ...routed, scope: scope.verdict, scopeReasons: scope.reasons, scopeNeedsReview: scope.needsReview })
     return true
   }
 
