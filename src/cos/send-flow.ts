@@ -133,6 +133,17 @@ export interface DispatchSendResult {
  *  (connector write-usable AND content's sensitivity allowed for the profile AND
  *  the exact payload approved at the current version). Any veto → sent:false,
  *  nothing leaves. On pass, the crash-safe executor performs the send. */
+/** The case type behind a ledger row, from the store. Returns undefined when it
+ *  cannot be determined — and undefined means the gate treats it as a new type,
+ *  which cannot send. Fail-closed. */
+function caseTypeOf(db: Database.Database, ledgerId: string): string | undefined {
+  const r = db.prepare(
+    `SELECT c.case_type AS t FROM outbound_ledger l
+     JOIN personal_cases c ON c.case_id = l.case_id WHERE l.ledger_id = ?`
+  ).get(ledgerId) as { t: string } | undefined
+  return r?.t
+}
+
 export async function dispatchApprovedSend(
   db: Database.Database, adapter: OutboundAdapter, input: DispatchSendInput, now: number, opts: ExecuteOpts = {},
 ): Promise<DispatchSendResult> {
@@ -145,6 +156,10 @@ export async function dispatchApprovedSend(
     // The address on the envelope we are about to put in the post, not a stored
     // intention: the allowlist must be checked against what actually goes out.
     recipient: input.email.to,
+    // §22: the case's OWN type decides the rung, read from the store rather than
+    // taken from the caller. A caller-asserted type would let the same code path
+    // pick a more permissive rung by claiming to be a different kind of case.
+    caseType: caseTypeOf(db, input.ledgerId),
   })
   if (!decision.allowed) return { sent: false, decision }
   const action = await executeAction(db, adapter, input.ledgerId, now, opts)

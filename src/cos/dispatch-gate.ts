@@ -17,6 +17,7 @@ import type Database from 'better-sqlite3'
 import { isUsable } from './connector-health.js'
 import { effectiveSensitivity, isProfileAllowedForSensitivity } from './sensitivity.js'
 import { authorizeSend } from './campaigns.js'
+import { permits } from './autonomy-ladder.js'
 import { routeModelForSensitivity, type RoutingStrategy } from './model-routing.js'
 import type { CaseSensitivity } from './schema.js'
 
@@ -26,6 +27,9 @@ export interface DispatchRequest {
   requireWrite?: boolean
   /** Recipient of this send — required for the AC-4 allowlist check. */
   recipient: string
+  /** Case type, for the §22 autonomy rung. Absent = treated as a new type,
+   *  which starts at PREPARE and therefore cannot send. */
+  caseType?: string
   /** The case's declared sensitivity (escalated against the content). */
   declaredSensitivity: unknown
   /** The rendered outbound content (classified for sensitivity). */
@@ -64,6 +68,12 @@ export function evaluateDispatch(db: Database.Database, req: DispatchRequest): D
   if (!isProfileAllowedForSensitivity(req.targetProfile, tier)) {
     reasons.push(`profile "${req.targetProfile}" is not allowed for sensitivity ${tier}`)
   }
+
+  // §22: the rung decides whether a send may happen for this case type at all.
+  // Checked alongside the others, not instead of them — a permissive rung never
+  // substitutes for an approval, and an approval never substitutes for the rung.
+  const rung = permits(db, req.caseType ?? 'UNKNOWN', 'SEND')
+  if (!rung.allowed) reasons.push(`autonómia-fokozat: ${rung.reason}`)
 
   const auth = authorizeSend(db, {
     campaignId: req.campaignId, templateHash: req.templateHash,

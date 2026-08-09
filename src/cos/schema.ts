@@ -51,7 +51,12 @@ function ensureColumns(db: Database.Database, table: string, defs: Record<string
   }
 }
 
+import { ensureLadderSchema } from './autonomy-ladder.js'
+
 export function initCosSchema(db: Database.Database): void {
+  // §22 fokozatos autonomia tablai
+  ensureLadderSchema(db)
+
   // ── personal_cases (P0.5 version; §6.1) ──────────────────────────────
   // version: optimistic concurrency. Every domain command reads the version it
   // saw, and the UPDATE carries `WHERE version = :seen` + `version = version+1`;
