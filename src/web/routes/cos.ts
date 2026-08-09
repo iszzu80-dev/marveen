@@ -21,6 +21,7 @@ import { evaluateOutputFloors, breachedFloors } from '../../cos/output-floor.js'
 import { runDailyReconcile } from '../../cos/reconcile.js'
 import { linkCases, suggestLinks, linkedCases } from '../../cos/case-link.js'
 import { classifyScope, describeScope } from '../../cos/scope-gate.js'
+import { deriveAnswerOptions } from '../../cos/answer-options.js'
 
 /** The account the COS sends personal mail from. */
 const COS_SEND_FROM = 'iszzu80@gmail.com'
@@ -315,6 +316,19 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
 
   // Progression layer Mission Control view (card 52250c7f). Read-only — the
   // progression engine writes state; this endpoint only returns it for the UI.
+  // Answer options for a question, derived from the question itself.
+  // Istvan, 2026-08-09: "az igen/nem rádiógomb sem egyértelmű sokszor". The
+  // cause was structural — the engine asked without supplying options, so the
+  // surface had only the generic pair to show. Derived here, once, and rendered
+  // as given: on an open question the honest answer is NO buttons.
+  if (path === '/api/cos/answer-options' && method === 'POST') {
+    let b: { question?: string; choices?: Array<{ value: string; label: string }> }
+    try { b = JSON.parse((await readBody(req)).toString()) }
+    catch { json(res, { error: 'invalid JSON' }, 400); return true }
+    json(res, deriveAnswerOptions(b.question ?? '', b.choices))
+    return true
+  }
+
   if (path === '/api/cos/progression' && method === 'GET') {
     const q = new URLSearchParams(req.url?.split('?')[1] ?? '')
     const domain = (q.get('domain') || 'personal') as 'personal' | 'zst'
