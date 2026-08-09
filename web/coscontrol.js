@@ -500,12 +500,55 @@
   }
   function outboundItem(o) {
     var c = OUT_COLOR[o.status] || '#9ca3af'
-    return row(
-      '<strong style="font-size:13px;">' + esc(o.action_type) + '</strong>' + pill(o.status, c) +
-        '<span style="font-size:11px;color:var(--text-muted,#888);">' + esc(o.case_id || '') + ' #' + esc(o.sequence_number) + '</span>',
-      (o.external_ref ? '<span style="font-size:11px;color:var(--text-muted,#888);">' + esc(o.external_ref) + '</span>' : '') +
-        (o.attempt > 1 ? ' <span style="font-size:11px;color:#f59e0b;">×' + esc(o.attempt) + '</span>' : ''), c)
+    var head = '<strong style="font-size:13px;">' + esc(o.action_type) + '</strong>' + pill(o.status, c) +
+      '<span style="font-size:11px;color:var(--text-muted,#888);">' + esc(o.case_title || o.case_id || '') + '</span>'
+    var body = (o.external_ref ? '<span style="font-size:11px;color:var(--text-muted,#888);">' + esc(o.external_ref) + '</span>' : '') +
+      (o.attempt > 1 ? ' <span style="font-size:11px;color:#f59e0b;">×' + esc(o.attempt) + '</span>' : '')
+
+    // A PLANNED sor a te dontesedre var. Itt a levelet TELJES egeszeben ki kell
+    // irni: egy jovahagyo felulet, ami nem mutatja meg mit hagysz jova, nem
+    // jovahagyas, hanem egy gomb.
+    if (o.status === 'PLANNED' && o.payload) {
+      var d = {}
+      try { d = JSON.parse(o.payload) } catch (e) { d = {} }
+      body += '<div class="cos-send-approve" data-ledger="' + esc(o.ledger_id) + '" style="' +
+        'margin-top:8px;border:1px solid var(--border,#333);padding:10px;">' +
+        '<div style="font-size:12px;margin-bottom:4px;"><b>Címzett:</b> ' + esc(d.to || '(hiányzik)') + '</div>' +
+        '<div style="font-size:12px;margin-bottom:6px;"><b>Tárgy:</b> ' + esc(d.subject || '') + '</div>' +
+        '<pre style="white-space:pre-wrap;font-size:12px;margin:0 0 8px;max-height:260px;overflow:auto;">' +
+          esc(d.body || '') + '</pre>' +
+        '<button class="cos-send-yes" style="margin-right:8px;">Elküldöm</button>' +
+        '<button class="cos-send-no">Elvetem</button>' +
+        '<span class="cos-send-msg" style="margin-left:10px;font-size:12px;"></span>' +
+      '</div>'
+    }
+    return row(head, body, c)
   }
+
+  // A gombok kezelese delegalva, mert a lista ujrarajzolodik minden frissiteskor.
+  document.addEventListener('click', function (ev) {
+    var yes = ev.target.closest && ev.target.closest('.cos-send-yes')
+    var no = ev.target.closest && ev.target.closest('.cos-send-no')
+    if (!yes && !no) return
+    var box = (yes || no).closest('.cos-send-approve')
+    if (!box) return
+    var ledger = box.getAttribute('data-ledger')
+    var msg = box.querySelector('.cos-send-msg')
+    var btns = box.querySelectorAll('button')
+    for (var i = 0; i < btns.length; i++) btns[i].disabled = true   // ketszer kattintas ellen
+    msg.textContent = yes ? 'Küldés...' : 'Elvetés...'
+    fetch(yes ? '/api/cos/outbound/approve' : '/api/cos/outbound/reject', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(yes ? { ledgerId: ledger } : { ledgerId: ledger, reason: 'Istvan elvetette a felületen' })
+    }).then(function (r) { return r.json() }).then(function (j) {
+      msg.textContent = j.ok ? (yes ? 'Jóváhagyva' : 'Elvetve') : ('Nem ment: ' + (j.reason || j.error || '?'))
+      if (!j.ok) for (var i = 0; i < btns.length; i++) btns[i].disabled = false
+    }).catch(function (e) {
+      msg.textContent = 'Hiba: ' + e
+      for (var i = 0; i < btns.length; i++) btns[i].disabled = false
+    })
+  })
   function campaignItem(c) {
     var col = CAMP_COLOR[c.status] || '#9ca3af'
     return row(

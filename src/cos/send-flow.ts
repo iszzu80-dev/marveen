@@ -76,6 +76,15 @@ export function draftSend(db: Database.Database, input: DraftSendInput, now: num
     `SELECT COUNT(*) AS n FROM outbound_ledger WHERE case_id=? AND action_type='EMAIL_SEND'`
   ).get(input.caseId) as { n: number }).n) + 1
   const planned = planAction(db, { caseId: input.caseId, actionType: 'EMAIL_SEND', sequenceNumber: seq, payload: input.email }, now)
+  // Fill the columns §6.2 / A.5 added: which campaign, to whom, what kind. The
+  // quota has nothing to count without them, and the approval door cannot find
+  // the campaign whose template it must bind to — a ledger row that does not say
+  // which campaign it belongs to is unauditable by AC-21.
+  db.prepare(
+    `UPDATE outbound_ledger SET campaign_id=@c, recipient=@r, channel='EMAIL',
+       outbound_kind=COALESCE(outbound_kind, @k), first_attempt_at=COALESCE(first_attempt_at, @now)
+     WHERE ledger_id=@id`
+  ).run({ c: campaignId, r: input.email.to, k: seq === 1 ? 'INITIAL' : 'FOLLOW_UP', now, id: planned.ledgerId })
   return {
     campaignId, ledgerId: planned.ledgerId, sequenceNumber: seq,
     templateHash, renderedPayloadHash: rHash, email: input.email, status: 'AWAITING_APPROVAL',

@@ -21,6 +21,8 @@ import { evaluateOutputFloors, breachedFloors } from '../../cos/output-floor.js'
 import { runDailyReconcile } from '../../cos/reconcile.js'
 import { linkCases, suggestLinks, linkedCases } from '../../cos/case-link.js'
 import { classifyScope, describeScope } from '../../cos/scope-gate.js'
+import { rejectSend, approveSend, renderedPayloadHash, type EmailDraft } from '../../cos/send-flow.js'
+import { permits } from '../../cos/autonomy-ladder.js'
 import { APP_TZ } from '../../config.js'
 import type { RouteContext } from './types.js'
 
@@ -101,6 +103,40 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
       } catch { /* a missing column must not lose the case that was just filed */ }
     }
     json(res, { ...routed, scope: scope.verdict, scopeReasons: scope.reasons, scopeNeedsReview: scope.needsReview })
+    return true
+  }
+
+  // Owner approval for a prepared send (§22 EXECUTE_WITH_APPROVAL).
+  //
+  // Until now the send flow had no door: the code existed and was tested, and
+  // nothing could reach it. That is what the gate meant by "no production
+  // caller" — and why the honest answer to "where do I click?" was "nowhere".
+  //
+  // The approval is bound to the payload hash the owner actually saw. If the
+  // draft changes between display and click, the hash no longer matches and the
+  // approval authorizes nothing: approving a message means approving THAT text.
+  if (path === '/api/cos/outbound/approve' && method === 'POST') {
+    let b: { ledgerId?: string; renderedPayloadHash?: string; approvedBy?: string }
+    try { b = JSON.parse((await readBody(req)).toString()) }
+    catch { json(res, { error: 'invalid JSON' }, 400); return true }
+    if (!b.ledgerId) { json(res, { error: 'ledgerId required' }, 400); return true }
+    const now = Math.floor(Date.now() / 1000)
+    try {
+      const r = approveOutbound(getDb(), b.ledgerId, b.renderedPayloadHash, b.approvedBy ?? 'istvan', now)
+      json(res, r, r.ok ? 200 : 409)
+    } catch (e) { json(res, { error: String((e as Error).message) }, 400) }
+    return true
+  }
+
+  if (path === '/api/cos/outbound/reject' && method === 'POST') {
+    let b: { ledgerId?: string; reason?: string }
+    try { b = JSON.parse((await readBody(req)).toString()) }
+    catch { json(res, { error: 'invalid JSON' }, 400); return true }
+    if (!b.ledgerId) { json(res, { error: 'ledgerId required' }, 400); return true }
+    try {
+      const action = rejectSend(getDb(), b.ledgerId, b.reason ?? 'Istvan elvetette', Math.floor(Date.now() / 1000))
+      json(res, { ok: true, status: action.status })
+    } catch (e) { json(res, { error: String((e as Error).message) }, 400) }
     return true
   }
 
@@ -530,8 +566,14 @@ export function listAnalytics(db: ReturnType<typeof getDb>): {
 
 export function listOutbound(db: ReturnType<typeof getDb>): unknown[] {
   return db.prepare(
-    `SELECT ledger_id, case_id, action_type, sequence_number, status, external_ref, attempt, updated_at
-     FROM outbound_ledger ORDER BY created_at DESC LIMIT 50`
+    // A payload is jon: egy jovahagyo felulet, ami nem mutatja meg MIT hagysz
+    // jova, nem jovahagyas, hanem egy gomb. A cimzett kulon mezoben is, mert azt
+    // kell a leghamarabb eszrevenni, ha rossz.
+    `SELECT l.ledger_id, l.case_id, l.action_type, l.sequence_number, l.status,
+            l.external_ref, l.attempt, l.updated_at, l.payload, l.recipient,
+            l.campaign_id, c.title AS case_title
+     FROM outbound_ledger l LEFT JOIN personal_cases c ON c.case_id = l.case_id
+     ORDER BY l.created_at DESC LIMIT 50`
   ).all()
 }
 
@@ -598,4 +640,48 @@ export function listMonitoring(db: ReturnType<typeof getDb>): {
   return { connectors, outboundHealth: { byStatus, needsAttention }, quotas,
     outputFloors, breached: breachedFloors(outputFloors),
     alerts: { findings: rec.findings, counts: rec.counts, clean: rec.clean } }
+}
+
+
+/** Approve a prepared send. Everything that can refuse, refuses here rather than
+ *  in the UI: a browser-side check is a convenience, never a guarantee. */
+export function approveOutbound(
+  db: ReturnType<typeof getDb>, ledgerId: string, seenPayloadHash: string | undefined,
+  approvedBy: string, now: number,
+): { ok: boolean; reason: string; caseType?: string } {
+  const row = db.prepare(
+    `SELECT l.ledger_id, l.status, l.payload, l.recipient, l.campaign_id, l.case_id,
+            c.case_type, k.template_hash
+     FROM outbound_ledger l
+     LEFT JOIN personal_cases c ON c.case_id = l.case_id
+     LEFT JOIN campaigns k ON k.campaign_id = l.campaign_id
+     WHERE l.ledger_id = ?`
+  ).get(ledgerId) as
+    | { status: string; payload: string | null; recipient: string | null; campaign_id: string | null
+        case_id: string | null; case_type: string | null; template_hash: string | null } | undefined
+  if (!row) return { ok: false, reason: `nincs ilyen kimenő művelet: ${ledgerId}` }
+  if (row.status !== 'PLANNED') {
+    return { ok: false, reason: `ez a művelet már ${row.status} állapotban van, nem hagyható jóvá újra` }
+  }
+  let draft: EmailDraft
+  try { draft = JSON.parse(row.payload ?? '{}') as EmailDraft }
+  catch { return { ok: false, reason: 'a levél tartalma nem olvasható' } }
+  if (!draft.to || !draft.subject) return { ok: false, reason: 'a piszkozatból hiányzik a címzett vagy a tárgy' }
+
+  const hash = renderedPayloadHash(draft)
+  if (seenPayloadHash && seenPayloadHash !== hash) {
+    // The draft moved under the owner between display and click.
+    return { ok: false, reason: 'a levél megváltozott, mióta megnyitottad — nézd meg újra' }
+  }
+  const rung = permits(db, row.case_type ?? 'UNKNOWN', 'SEND')
+  if (!rung.allowed) return { ok: false, reason: `autonómia-fokozat: ${rung.reason}`, caseType: row.case_type ?? undefined }
+
+  if (!row.campaign_id || !row.template_hash) {
+    return { ok: false, reason: 'ehhez a küldéshez nincs kampány vagy sablon — jóváhagyás nélkül nem megy ki' }
+  }
+  approveSend(db, {
+    campaignId: row.campaign_id, templateHash: row.template_hash, renderedPayloadHash: hash,
+    approvedBy, recipient: draft.to,
+  }, now)
+  return { ok: true, reason: 'jóváhagyva', caseType: row.case_type ?? undefined }
 }
