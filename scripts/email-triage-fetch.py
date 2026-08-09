@@ -243,7 +243,8 @@ def main():
                     continue
                 kept += 1
                 cand = {
-                    "account": name, "id": mid, "direction": direction,
+                    "account": name, "id": mid, "threadId": m.get("threadId"),
+                    "direction": direction,
                     "from": m.get("from"), "subject": m.get("subject"),
                     "date": m.get("date"), "snippet": (m.get("snippet") or "")[:300],
                 }
