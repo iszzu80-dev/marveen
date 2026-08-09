@@ -800,6 +800,7 @@ export interface MissionControlProgressionView {
   planVersion: number
   nbaDescription: string | null
   totalRunCount: number
+  lastRunId: string | null  // progression_run_id of the last run (card 9193eedd: sourceReference for owner-action)
 }
 
 /** Read-only Mission Control projection that joins case_progression_state
@@ -826,7 +827,8 @@ export function getMissionControlProgressionView(
        s.last_progressed_at   AS "lastProgressedAt",
        s.plan_version         AS "planVersion",
        s.next_best_action_json AS "nbaDescription",
-       (SELECT count(*) FROM case_progression_runs WHERE case_id = c.case_id AND domain = s.domain) AS "totalRunCount"
+       (SELECT count(*) FROM case_progression_runs WHERE case_id = c.case_id AND domain = s.domain) AS "totalRunCount",
+       r.progression_run_id   AS "lastRunId"
      FROM case_progression_state s
      JOIN ${tableName} c ON c.case_id = s.case_id
      LEFT JOIN case_progression_runs r ON r.progression_run_id = (

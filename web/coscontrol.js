@@ -120,6 +120,58 @@
   }
 
   // ---- Case tile (closed) + expand handler (card 3d9d62b1, 969e5c3b) ----
+  // ---- Owner-action controls (card 9193eedd) ----
+  // Derives the control widget from the engine's last decision + NBA.
+  // Unknown decisions → no control (fail-safe, §3).
+  function ownerControl(prog) {
+    if (!prog || !prog.lastDecision) return ''
+    var dec = prog.lastDecision
+    var runId = esc(prog.lastRunId || '')
+    var caseVersion = esc(prog.totalRunCount) // totalRunCount tracks cycle count ≈ version
+
+    // Parse NBA description for ASK_INFORMATION placeholder text.
+    var nbaDesc = ''
+    try {
+      if (prog.nbaDescription) {
+        var nba = JSON.parse(prog.nbaDescription)
+        nbaDesc = nba.description || ''
+      }
+    } catch (e) { /* leave empty */ }
+
+    var html = ''
+    if (dec === 'REQUEST_DECISION') {
+      html = '<div class="cos-owner-ctrl" data-owner-ctrl-decision="' + esc(dec) +
+        '" data-source-ref="' + runId + '" data-case-version="' + caseVersion + '">' +
+        '<div class="cos-owner-radio-group">' +
+        '<label class="cos-owner-radio"><input type="radio" name="owner-dec-' + runId + '" value="YES"> Igen</label>' +
+        '<label class="cos-owner-radio"><input type="radio" name="owner-dec-' + runId + '" value="NO"> Nem</label>' +
+        '</div>' +
+        '<textarea class="cos-owner-text" placeholder="Megjegyzés (opcionális)" rows="2"></textarea>' +
+        '<button class="cos-owner-btn">Küldés</button>' +
+        '</div>'
+    } else if (dec === 'ASK_INFORMATION') {
+      html = '<div class="cos-owner-ctrl" data-owner-ctrl-decision="' + esc(dec) +
+        '" data-source-ref="' + runId + '" data-case-version="' + caseVersion + '">' +
+        '<input type="text" class="cos-owner-text" placeholder="' + esc(nbaDesc || 'Válasz...') + '">' +
+        '<button class="cos-owner-btn">Küldés</button>' +
+        '</div>'
+    } else if (dec === 'RECOVERY_REQUIRED') {
+      html = '<div class="cos-owner-ctrl" data-owner-ctrl-decision="' + esc(dec) +
+        '" data-source-ref="' + runId + '" data-case-version="' + caseVersion + '">' +
+        '<textarea class="cos-owner-text" placeholder="Megjegyzés (opcionális)" rows="2"></textarea>' +
+        '<button class="cos-owner-btn">Rendben, mehet tovább</button>' +
+        '</div>'
+    } else if (dec === 'WAIT_EXTERNAL') {
+      html = '<div class="cos-owner-ctrl" data-owner-ctrl-decision="' + esc(dec) +
+        '" data-source-ref="' + runId + '" data-case-version="' + caseVersion + '">' +
+        '<input type="text" class="cos-owner-text" placeholder="Mi érkezett? (rövid leírás)">' +
+        '<button class="cos-owner-btn">Megjött a válasz</button>' +
+        '</div>'
+    }
+    // CONTINUE_AUTONOMOUSLY and unknown → no control (fail-safe)
+    return html
+  }
+
   function caseTile(c, namespace, nowSec, prog) {
     var prio = PRIO_COLOR[c.priority] || '#9ca3af'
     var sens = SENS_COLOR[c.sensitivity] || '#9ca3af'
@@ -154,7 +206,8 @@
         ' data-prog-decision-reason="' + esc(prog.lastDecisionReason || '') + '"' +
         ' data-prog-plan-version="' + esc(prog.planVersion) + '"' +
         ' data-prog-run-count="' + esc(prog.totalRunCount) + '"' +
-        ' data-prog-last-progressed="' + esc(prog.lastProgressedAt) + '"'
+        ' data-prog-last-progressed="' + esc(prog.lastProgressedAt) + '"' +
+        ' data-prog-last-run-id="' + esc(prog.lastRunId || '') + '"'
     }
 
     return '<div class="cos-case-tile" data-case-id="' + caseId + '" data-ns="' + ns + '"' +
@@ -167,6 +220,7 @@
         '</span>' +
       '</div>' +
       '<div class="cos-tile-status">' + ballHolderHtml(c, nowSec) + '</div>' +
+      ownerControl(prog) +
       (progBadgeHtml ? '<div class="cos-prog-row">' + progBadgeHtml + '</div>' : '') +
       progNbaHtml +
       // Expanded detail placeholder — populated on first expand.
@@ -544,6 +598,58 @@
       '  font-size:11px;margin-top:2px;color:var(--text-muted,#888);',
       '  overflow:hidden;white-space:nowrap;text-overflow:ellipsis;',
       '}',
+      // Owner-action controls (card 9193eedd) — placed on closed tile.
+      '.cos-owner-ctrl {',
+      '  display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:6px;',
+      '}',
+      '.cos-owner-ctrl.recorded { opacity:0.5;pointer-events:none; }',
+      '.cos-owner-ctrl.recorded .cos-owner-btn::after { content:" — Rögzítve"; }',
+      '.cos-owner-radio-group { display:flex;gap:12px;align-items:center; }',
+      '.cos-owner-radio {',
+      '  font-size:13px;color:var(--text,#ddd);cursor:pointer;',
+      '  display:flex;align-items:center;gap:4px;min-height:44px;',
+      '}',
+      '.cos-owner-radio input[type="radio"] {',
+      '  width:18px;height:18px;accent-color:var(--accent,#60a5fa);cursor:pointer;',
+      '}',
+      '.cos-owner-text {',
+      '  flex:1;min-width:140px;padding:6px 10px;font-size:13px;',
+      '  background:var(--input-bg,#1a1a1a);color:var(--text,#ddd);',
+      '  border:1px solid var(--border,#2a2a2a);border-radius:6px;',
+      '  font-family:inherit;resize:vertical;',
+      '}',
+      '.cos-owner-text:focus { outline:none;border-color:var(--accent,#60a5fa); }',
+      '.cos-owner-btn {',
+      '  padding:6px 16px;font-size:13px;font-weight:500;',
+      '  background:var(--accent,#60a5fa);color:#fff;border:none;border-radius:6px;',
+      '  cursor:pointer;min-height:44px;min-width:44px;white-space:nowrap;',
+      '  font-family:inherit;',
+      '}',
+      '.cos-owner-btn:hover { opacity:0.85; }',
+      '.cos-owner-btn:active { opacity:0.7; }',
+      // Confirmation modal (card 9193eedd §5)
+      '.cos-confirm-overlay {',
+      '  position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;',
+      '  display:flex;align-items:center;justify-content:center;',
+      '}',
+      '.cos-confirm-card {',
+      '  background:var(--bg,#0d0d0d);border:1px solid var(--border,#2a2a2a);',
+      '  border-radius:10px;padding:20px 24px;max-width:400px;width:90vw;',
+      '  box-shadow:0 4px 24px rgba(0,0,0,0.4);',
+      '}',
+      '.cos-confirm-card h3 { margin:0 0 8px;font-size:15px; }',
+      '.cos-confirm-card p { margin:0 0 16px;font-size:13px;color:var(--text-muted,#888);line-height:1.5; }',
+      '.cos-confirm-actions { display:flex;gap:8px;justify-content:flex-end; }',
+      '.cos-confirm-cancel {',
+      '  padding:8px 16px;font-size:13px;background:transparent;',
+      '  border:1px solid var(--border,#2a2a2a);border-radius:6px;',
+      '  color:var(--text-muted,#888);cursor:pointer;font-family:inherit;',
+      '}',
+      '.cos-confirm-ok {',
+      '  padding:8px 16px;font-size:13px;font-weight:500;',
+      '  background:var(--accent,#60a5fa);color:#fff;border:none;border-radius:6px;',
+      '  cursor:pointer;font-family:inherit;',
+      '}',
       '.cos-ball-who { font-weight:500;color:var(--text,#ddd); }',
       '.cos-ball-when { color:var(--text-muted,#888); }',
       '.cos-ball-sub { color:var(--text-muted,#888);overflow:hidden;text-overflow:ellipsis; }',
@@ -717,6 +823,118 @@
         if (pp) pp.hidden = (tab !== 'personal')
         if (zp) zp.hidden = (tab !== 'zst')
       })
+
+      // Owner-action click delegation (card 9193eedd).
+      // Attached to body so it survives re-renders of the cosBody content.
+      document.body.addEventListener('click', function (e) {
+        var btn = e.target.closest('.cos-owner-btn')
+        if (!btn) return
+        e.stopPropagation()  // prevent accordion toggle
+        e.preventDefault()
+
+        var ctrl = btn.closest('.cos-owner-ctrl')
+        if (!ctrl || ctrl.classList.contains('recorded')) return
+
+        var tile = btn.closest('.cos-case-tile')
+        if (!tile) return
+
+        var caseId = tile.dataset.caseId
+        var ns = tile.dataset.ns || 'personal'
+        var decision = ctrl.dataset.ownerCtrlDecision
+        var sourceRef = ctrl.dataset.sourceRef
+        var caseVersion = parseInt(ctrl.dataset.caseVersion, 10) || 0
+
+        // Map decision → eventType.
+        var decisionEventMap = {
+          REQUEST_DECISION: 'OWNER_DECISION',
+          ASK_INFORMATION: 'OWNER_INFORMATION',
+          RECOVERY_REQUIRED: 'OWNER_CONFIRMATION',
+          WAIT_EXTERNAL: 'OWNER_INFORMATION',
+        }
+        var eventType = decisionEventMap[decision]
+        if (!eventType) return
+
+        // Read choice (radio) or text (input/textarea).
+        var choice = null
+        var text = null
+        var radio = ctrl.querySelector('input[type="radio"]:checked')
+        if (radio) choice = radio.value
+        var textEl = ctrl.querySelector('.cos-owner-text')
+        if (textEl) text = textEl.value.trim() || null
+
+        // Validate: REQUEST_DECISION requires a choice.
+        if (decision === 'REQUEST_DECISION' && !choice) {
+          var radios = ctrl.querySelectorAll('input[type="radio"]')
+          if (radios.length) { radios[0].focus(); return } // don't submit without choice
+        }
+
+        var idempotencyKey = (typeof crypto !== 'undefined' && crypto.randomUUID)
+          ? crypto.randomUUID()
+          : 'owner-' + caseId + '-' + Date.now() + '-' + Math.random().toString(36).slice(2)
+
+        // Build body — choice/text/reason follow spec §2.
+        var body = JSON.stringify({
+          eventType: eventType,
+          choice: choice,
+          text: text,
+          sourceReference: sourceRef,
+          caseVersion: caseVersion,
+          idempotencyKey: idempotencyKey,
+          externalEffectAck: false, // round one: no external-effect controls (§5)
+        })
+
+        // Grey out immediately (optimistic).
+        ctrl.classList.add('recorded')
+
+        fetch('/api/cos/cases/' + ns + '/' + caseId + '/owner-action', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: body,
+        }).then(function (r) { return r.json() }).then(function (data) {
+          if (data.error === 'case_version_stale') {
+            // Stale: ungrey, show message, caller must re-render.
+            ctrl.classList.remove('recorded')
+            var msg = document.createElement('span')
+            msg.style.cssText = 'color:#f59e0b;font-size:12px;margin-left:8px;'
+            msg.textContent = 'A döntés elavult, új kérdés érkezett — töltsd újra'
+            ctrl.appendChild(msg)
+            return
+          }
+          // Success or duplicate: leave greyed. On next mount() the engine
+          // state determines whether the control stays or disappears.
+        }).catch(function () {
+          ctrl.classList.remove('recorded')
+        })
+      })
+
+      // Confirmation dialog mechanism (card 9193eedd §5).
+      // The list of external-effect controls is EMPTY in round one (engine at
+      // GATE 2), so showConfirmDialog is never called. It exists so a future
+      // card can wire it in by adding decision types to EXTERNAL_EFFECT_DECISIONS.
+      window._cosConfirmDialog = function (message) {
+        return new Promise(function (resolve) {
+          var overlay = document.createElement('div')
+          overlay.className = 'cos-confirm-overlay'
+          overlay.innerHTML =
+            '<div class="cos-confirm-card">' +
+            '<h3>Megerősítés</h3>' +
+            '<p>' + esc(message) + '</p>' +
+            '<div class="cos-confirm-actions">' +
+            '<button class="cos-confirm-cancel">Mégsem</button>' +
+            '<button class="cos-confirm-ok">Megerősítem</button>' +
+            '</div></div>'
+          document.body.appendChild(overlay)
+          overlay.querySelector('.cos-confirm-cancel').addEventListener('click', function () {
+            document.body.removeChild(overlay); resolve(false)
+          })
+          overlay.querySelector('.cos-confirm-ok').addEventListener('click', function () {
+            document.body.removeChild(overlay); resolve(true)
+          })
+          overlay.addEventListener('click', function (ev) {
+            if (ev.target === overlay) { document.body.removeChild(overlay); resolve(false) }
+          })
+        })
+      }
     }).catch(function (e) {
       body.innerHTML = '<p style="color:#ef4444;">Hiba a betöltéskor: ' + esc(e && e.message) + '</p>'
     })

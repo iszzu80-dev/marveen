@@ -15,7 +15,7 @@ import { dueZstItems } from '../../cos/zst-watch.js'
 import { ingestTriagedEmail, type TriagedEmail } from '../../cos/triage-bridge.js'
 import { ingestTriagedZstEmail, type ZstTriagedEmail } from '../../cos/zst-intake.js'
 import { validateSkillMd, validateSkillPermissions } from '../../cos/skill-permission-validator.js'
-import { getMissionControlProgressionView } from '../../cos/progression-pipeline.js'
+import { getMissionControlProgressionView, runProgressionCycle } from '../../cos/progression-pipeline.js'
 import { storeDocument, documentsForCase, readDocumentBytes } from '../../cos/cos-documents.js'
 import { APP_TZ } from '../../config.js'
 import type { RouteContext } from './types.js'
@@ -201,6 +201,129 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     }
     const view = getMissionControlProgressionView(getDb(), domain)
     json(res, view)
+    return true
+  }
+
+  // Owner action (card 9193eedd): the control writes an event, not state.
+  // Inserts into *_case_events, then runs ONE progression cycle so the UI
+  // gets instant feedback instead of a 5-minute wait. Idempotent per key.
+  // POST /api/cos/cases/:domain/:caseId/owner-action
+  if (method === 'POST' && path.startsWith('/api/cos/cases/') && path.endsWith('/owner-action')) {
+    const inner = path.slice('/api/cos/cases/'.length, -'/owner-action'.length)
+    const slash = inner.indexOf('/')
+    if (slash < 0) { json(res, { error: 'invalid path' }, 400); return true }
+    const domain = inner.slice(0, slash) as 'personal' | 'zst'
+    const caseId = inner.slice(slash + 1)
+    if (domain !== 'personal' && domain !== 'zst') {
+      json(res, { error: 'domain must be personal or zst' }, 400); return true
+    }
+    if (!caseId) { json(res, { error: 'caseId required' }, 400); return true }
+
+    let body: {
+      eventType?: string; choice?: string; text?: string
+      sourceReference?: string; caseVersion?: number; idempotencyKey?: string
+      externalEffectAck?: boolean
+    }
+    try { body = JSON.parse((await readBody(req)).toString()) }
+    catch { json(res, { error: 'invalid JSON' }, 400); return true }
+
+    const {
+      eventType, choice, text, sourceReference, caseVersion, idempotencyKey,
+      externalEffectAck,
+    } = body
+    if (!eventType || !sourceReference || caseVersion == null || !idempotencyKey) {
+      json(res, { error: 'eventType, sourceReference, caseVersion, idempotencyKey required' }, 400)
+      return true
+    }
+    const validTypes = ['OWNER_DECISION', 'OWNER_INFORMATION', 'OWNER_CONFIRMATION']
+    if (!validTypes.includes(eventType)) {
+      json(res, { error: `eventType must be one of ${validTypes.join(', ')}` }, 400); return true
+    }
+
+    const db = getDb()
+    const eventsTable = domain === 'personal' ? 'personal_case_events' : 'zst_case_events'
+    const now = Math.floor(Date.now() / 1000)
+
+    // Idempotency guard: same key → no second event, return first result.
+    const existing = db.prepare(
+      `SELECT event_id FROM ${eventsTable}
+       WHERE case_id = ? AND json_extract(payload, '$.idempotency_key') = ?`
+    ).get(caseId, idempotencyKey) as { event_id: number } | undefined
+    if (existing) {
+      json(res, { ok: true, eventId: existing.event_id, duplicate: true })
+      return true
+    }
+
+    // Version guard: stale case_version → 409.
+    const stateRow = db.prepare(
+      `SELECT case_version FROM case_progression_state WHERE domain = ? AND case_id = ?`
+    ).get(domain, caseId) as { case_version: number } | undefined
+    if (!stateRow) {
+      json(res, { error: 'no progression state for this case' }, 404); return true
+    }
+    if (stateRow.case_version !== caseVersion) {
+      // Read current decision for the 409 payload.
+      const lastRun = db.prepare(
+        `SELECT decision FROM case_progression_runs
+         WHERE domain = ? AND case_id = ?
+         ORDER BY started_at DESC LIMIT 1`
+      ).get(domain, caseId) as { decision: string | null } | undefined
+      json(res, {
+        error: 'case_version_stale',
+        currentVersion: stateRow.case_version,
+        currentDecision: lastRun?.decision ?? null,
+      }, 409)
+      return true
+    }
+
+    // Build payload + reason.
+    const payload = JSON.stringify({
+      choice: choice ?? null,
+      text: text ?? null,
+      idempotency_key: idempotencyKey,
+      external_effect_ack: externalEffectAck === true,
+    })
+    const reason = choice || text || eventType
+
+    // Insert the event.
+    const insertResult = db.prepare(
+      `INSERT INTO ${eventsTable}
+       (case_id, case_version, actor, source_system, source_reference,
+        event_type, previous_status, new_status, reason, payload, correlation_id, created_at)
+       VALUES (?, ?, 'istvan', 'mission_control', ?, ?, NULL, NULL, ?, ?, ?, ?)`
+    ).run(caseId, caseVersion, sourceReference, eventType, reason, payload,
+      `${caseId}:${sourceReference}`, now)
+
+    // Run ONE progression cycle for instant feedback.
+    let progressionResult: { newDecision: string | null; newNextBestAction: string | null }
+    try {
+      const pr = runProgressionCycle(db, domain, caseId, now, {
+        triggerType: 'MANUAL',
+        triggerReference: sourceReference,
+      })
+      // Read new state.
+      const newState = db.prepare(
+        `SELECT decision, next_best_action_json
+         FROM case_progression_runs
+         WHERE domain = ? AND case_id = ?
+         ORDER BY started_at DESC LIMIT 1`
+      ).get(domain, caseId) as { decision: string | null; next_best_action_json: string | null } | undefined
+      progressionResult = {
+        newDecision: newState?.decision ?? null,
+        newNextBestAction: newState?.next_best_action_json ?? null,
+      }
+    } catch (e) {
+      // Engine failure doesn't roll back the event — the event is already
+      // committed; the next scheduled cycle will process it.
+      progressionResult = { newDecision: null, newNextBestAction: null }
+    }
+
+    json(res, {
+      ok: true,
+      eventId: Number(insertResult.lastInsertRowid),
+      progressionRan: true,
+      ...progressionResult,
+    })
     return true
   }
 
