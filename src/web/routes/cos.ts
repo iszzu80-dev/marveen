@@ -22,6 +22,8 @@ import { runDailyReconcile } from '../../cos/reconcile.js'
 import { linkCases, suggestLinks, linkedCases } from '../../cos/case-link.js'
 import { classifyScope, describeScope } from '../../cos/scope-gate.js'
 import { deriveAnswerOptions } from '../../cos/answer-options.js'
+import { interpretOwnerAnswer, ballMoved } from '../../cos/answer-interpretation.js'
+import { AnthropicLlmClient } from '../../cos/progression-interpreter.js'
 
 /** The account the COS sends personal mail from. */
 const COS_SEND_FROM = 'iszzu80@gmail.com'
@@ -326,6 +328,41 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     try { b = JSON.parse((await readBody(req)).toString()) }
     catch { json(res, { error: 'invalid JSON' }, 400); return true }
     json(res, deriveAnswerOptions(b.question ?? '', b.choices))
+    return true
+  }
+
+  // Interpret the owner's typed answer — as a PROPOSAL, at the moment he answers.
+  //
+  // His framing: the model belongs here, not in the five-minute stepping loop.
+  // The loop runs over dozens of cases unattended, and a misreading there writes
+  // state at night with nobody watching. Here there is one call and he is
+  // looking at the screen.
+  //
+  // This endpoint WRITES NOTHING. It returns what the model thinks follows; he
+  // accepts or corrects it through the existing owner-action control.
+  if (path === '/api/cos/interpret-answer' && method === 'POST') {
+    let b: { caseId?: string; question?: string; answer?: string }
+    try { b = JSON.parse((await readBody(req)).toString()) }
+    catch { json(res, { error: 'invalid JSON' }, 400); return true }
+    if (!b.caseId || !b.answer) { json(res, { error: 'caseId and answer required' }, 400); return true }
+    const c = getDb().prepare(
+      `SELECT title, status, next_action_owner FROM personal_cases WHERE case_id = ?`
+    ).get(b.caseId) as { title: string; status: string; next_action_owner: string | null } | undefined
+    if (!c) { json(res, { ok: false, reason: `nincs ilyen ügy: ${b.caseId}` }, 404); return true }
+
+    const ctx = {
+      caseId: b.caseId, caseTitle: c.title, question: b.question ?? '',
+      currentOwner: c.next_action_owner ?? undefined, currentStatus: c.status,
+    }
+    try {
+      const client = new AnthropicLlmClient()
+      const r = await interpretOwnerAnswer(client, ctx, b.answer)
+      json(res, r.ok ? { ...r, ballMoved: ballMoved(ctx, r.proposal!) } : r)
+    } catch (e) {
+      // No model available is not an error the owner should have to solve: the
+      // surface falls back to plain text entry, which always worked.
+      json(res, { ok: false, reason: `az értelmező nem érhető el: ${(e as Error).message}` })
+    }
     return true
   }
 
