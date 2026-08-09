@@ -891,7 +891,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: body,
         }).then(function (r) { return r.json() }).then(function (data) {
-          if (data.error === 'case_version_stale') {
+          if (data.error === 'question_stale') {
             // Stale: ungrey, show message, caller must re-render.
             ctrl.classList.remove('recorded')
             var msg = document.createElement('span')
