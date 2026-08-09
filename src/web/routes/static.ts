@@ -95,8 +95,14 @@ export async function tryHandleStatic(ctx: RouteContext, webDir: string): Promis
   // app.js/style.css URLs are versioned (?v=mtime-size, rewritten into
   // index.html above), so a long max-age is safe: any content change produces
   // a new URL. index.html itself stays no-cache.
-  if (path === '/style.css') { serveFile(req, res, join(webDir, 'style.css'), { cacheSeconds: 86400 }); return true }
-  if (path === '/app.js') { serveFile(req, res, join(webDir, 'app.js'), { cacheSeconds: 86400 }); return true }
+  // 2026-08-10: ezek NEM verziozott URL-ek, es app-logikat hordoznak. A 24 oras
+  // max-age azt jelentette, hogy egy kiszallitott UI-javitas EGY NAPIG lathatatlan
+  // maradt a bongeszoben -- Istvan a jovahagyo gombot kereste egy olyan lapon,
+  // ami a tegnapi JS-t futtatta. Ugyanaz az osztaly, mint a "leszallt de nem
+  // landolt" hibak: a javitas kesz volt, csak nem ert el a felhasznalohoz.
+  // A serveFile ETag-et ad, tehat a revalidacio ara egy 304, nem egy letoltes.
+  if (path === '/style.css') { serveFile(req, res, join(webDir, 'style.css')); return true }
+  if (path === '/app.js') { serveFile(req, res, join(webDir, 'app.js')); return true }
   if (path === '/manifest.json') {
     // Brand the manifest (name/short_name -> BRAND_NAME, byte-preserving for the
     // shipped default via buildManifest) and, when a main-agent avatar is stored,
@@ -128,9 +134,9 @@ export async function tryHandleStatic(ctx: RouteContext, webDir: string): Promis
   // APG Lean UI page assets (top-level, same shape as /app.js). The page's
   // shell references these directly; without them the APG view hangs on
   // "Betoltes..." forever.
-  if (path === '/coscontrol.js') { serveFile(req, res, join(webDir, 'coscontrol.js'), { cacheSeconds: 86400 }); return true }  // LOCAL-FORK: cos seam (keep on rebase)
-  if (path === '/apg.js') { serveFile(req, res, join(webDir, 'apg.js'), { cacheSeconds: 86400 }); return true }
-  if (path === '/apg.css') { serveFile(req, res, join(webDir, 'apg.css'), { cacheSeconds: 86400 }); return true }
+  if (path === '/coscontrol.js') { serveFile(req, res, join(webDir, 'coscontrol.js')); return true }  // LOCAL-FORK: cos seam (keep on rebase)
+  if (path === '/apg.js') { serveFile(req, res, join(webDir, 'apg.js')); return true }
+  if (path === '/apg.css') { serveFile(req, res, join(webDir, 'apg.css')); return true }
 
   if (path.startsWith('/lang/')) {
     const langFile = path.replace('/lang/', '')
@@ -174,7 +180,7 @@ export async function tryHandleStatic(ctx: RouteContext, webDir: string): Promis
       'optimization-controls.js', 'optimization-render-helpers.js', 'optimization.css',
     ])
     if (OPTIMIZATION_FILES.has(optFile)) {
-      serveFile(req, res, join(webDir, 'optimization', optFile), { cacheSeconds: 86400 })
+      serveFile(req, res, join(webDir, 'optimization', optFile))
       return true
     }
     res.writeHead(404); res.end()
