@@ -262,8 +262,12 @@ def _sc2():
     # talalatot bukasnak vett. Amit az AC ved, az a NEMA szennyezodes: egy
     # megjelolt, a boardon lathato, tulajdonosi dontesre varo ugy nem az.
     # A jelolt eseteket kulon szamoljuk, hogy ne tunjenek el a szonyeg ala.
+    # Lezart ugy nem szennyezodes: a nevter-athelyezes utan a regi ugy CANCELLED
+    # sirko, ami megnevezi hova kerult. Beleszamolni annyi lenne, mint a javitas
+    # utan is riasztani -- ugyanaz a hiba, amirol az egesz audit szol.
     rows = q("""SELECT case_id, title, blocked_reason FROM personal_cases
                 WHERE archived_at IS NULL
+                  AND status NOT IN ('COMPLETED','CANCELLED','ARCHIVED')
                   AND (title LIKE '%ZST%' OR description LIKE '%ZST%'
                        OR title LIKE '%ONE Magyarorsz%' OR title LIKE '%Product Lab%')""")
     if not rows:
