@@ -6,9 +6,16 @@
 // SAFE to run repeatedly: deployAndSeedProgression is idempotent,
 // runProgressionHeartbeat has atomic claim + lease.
 
-import { getDb } from '../src/db.js'
+import { getDb, initDatabase } from '../src/db.js'
 import { deployAndSeedProgression } from '../src/cos/progression-migrate.js'
 import { runProgressionHeartbeat } from '../src/cos/progression-heartbeat.js'
+
+// getDb() returns a module-level handle that is only assigned by initDatabase().
+// Inside the dashboard process that already happened at boot; a standalone
+// runner must do it itself or getDb() hands back undefined and the first
+// .prepare() throws. (Found by actually running this file, 2026-08-09 —
+// the test suite never exercised the entry point.)
+initDatabase()
 
 const db = getDb()
 const now = Math.floor(Date.now() / 1000)
