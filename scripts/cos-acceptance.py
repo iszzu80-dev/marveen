@@ -438,26 +438,45 @@ def _sd3():
 
 # ---- group: monitoring (§19) ----
 
-MONITORED = [
-    "duplikáció", "OUTCOME_UNKNOWN", "readback", "campaign", "approval",
-    "connector", "scope", "follow_up", "radar", "cursor",
-]
+# §19 riasztas-temak. Temankent TOBB elfogadott irasmod: a kriterium a temat
+# meri, nem azt hogy eltalaltam-e a valasztott elnevezest (2026-08-09: a
+# "duplikáció" kulcsszo pirosat adott, mikozben a duplikacio-ellenorzes
+# `duplicate_send_attempt` neven mar letezett).
+MONITORED = {
+    "duplikáció": ["duplikáci", "duplicate"],
+    "OUTCOME_UNKNOWN": ["OUTCOME_UNKNOWN"],
+    "readback": ["readback", "visszaolvas"],
+    "campaign": ["campaign", "kampány"],
+    "approval": ["approval", "jóváhagyás"],
+    "connector": ["connector", "csatlakozó"],
+    "scope": ["scope", "hatókör", "personal store"],
+    "follow_up": ["follow_up", "follow-up", "utánkövet"],
+    "radar": ["radar"],
+    "cursor": ["cursor", "pozíció"],
+}
 
 
 @crit("MO-1", "monitoring", "§19", "a monitorozás lefedi a spec riasztásait")
 def _mo1():
-    files = prod_files("listMonitoring", "cos") or prod_files("listMonitoring", "web") or []
+    # A riasztasok implementaciojat kovesd, ne egy fajlnevet: a listMonitoring
+    # route csak KISZOLGALJA a reconcile talalatait, a temak ott laknak.
+    files = (prod_files("listMonitoring", "web") or []) + (prod_files("runDailyReconcile", "cos") or [])
     if not files:
-        return ERROR, "a listMonitoring nem található"
+        return ERROR, "sem a listMonitoring, sem a reconcile nem található"
     body = ""
-    for f in files:
+    for f in set(files):
         try:
             body += open(f, encoding="utf-8", errors="replace").read()
         except OSError:
             pass
-    covered = [k for k in MONITORED if k.lower() in body.lower()]
-    ok = len(covered) >= len(MONITORED)
-    return (PASS if ok else FAIL), "%d/%d riasztás-téma lefedve" % (len(covered), len(MONITORED))
+    low = body.lower()
+    missing = [topic for topic, forms in MONITORED.items()
+               if not any(fm.lower() in low for fm in forms)]
+    covered = len(MONITORED) - len(missing)
+    if missing:
+        return FAIL, "%d/%d téma lefedve; hiányzik: %s" % (covered, len(MONITORED), ", ".join(missing))
+    return PASS, "mind a %d riasztás-téma lefedve (%s)" % (
+        len(MONITORED), ", ".join(sorted({os.path.basename(f) for f in files})))
 
 
 @crit("MO-2", "monitoring", "audit 2026-08-09 G3", "van termelés-mérés küszöbbel")
@@ -523,6 +542,51 @@ def _wf3():
     return (PASS if not missing else FAIL), "hiányzó: %s" % (", ".join(missing) or "-")
 
 
+# ---- group: ui (a v4.2-n KIVULI, owner-jovahagyott UI-munka) ----
+# Istvan 2026-08-09: "ez a funkcio bar nem volt benne az eredeti speckoban".
+# Pontosan ezert kell ide: aminek nincs kriteriuma, az nem tud elkeszulni a kapu
+# ertelmeben, es ugyanugy elsodrodik, mint amit az audit talalt. A spec-en kivuli,
+# de tulajdonos altal jovahagyott munka ugyanazt a merest kapja.
+
+@crit("UI-1", "ui", "kartya 9193eedd", "az ugy-tovabblepteto vezerlok elnek a kartyakon")
+def _ui1():
+    absent, detail = absent_in_prod("owner-action", "web")
+    if absent is None:
+        return ERROR, detail
+    return (FAIL if absent else PASS), detail
+
+
+@crit("UI-2", "ui", "kartya 36ba14a5", "a valaszlehetosegek a KERDESBOL szarmaznak, nem generikus igen/nem")
+def _ui2():
+    # Az elso valtozat HAMIS ZOLDET adott: az `answer_options` mintara ratalalt a
+    # schedules.ts-ben egy teljesen mas celu mezore, es keszen jelentette azt ami
+    # meg el sem kezdodott. Egy szeles minta az EGESZ src/-ben nem kepesseget mer,
+    # hanem szoegyezest. A kriterium most a KIMENETET nezi: eltunt-e a bedrotozott
+    # igen/nem a feluletrol, es van-e helyette kerdesbol szarmazo keszlet.
+    ui = os.path.join(REPO, "web", "coscontrol.js")
+    if not os.path.exists(ui):
+        return ERROR, "web/coscontrol.js nem található"
+    try:
+        body = open(ui, encoding="utf-8", errors="replace").read()
+    except OSError as e:
+        return ERROR, str(e)
+    hardcoded = 'value="YES"' in body or "value='YES'" in body
+    derived = any(k in body for k in ("answerOptions", "answer_options", "optionsFromQuestion"))
+    if hardcoded and not derived:
+        return FAIL, "a felület még a bedrótozott Igen/Nem rádiót rendereli"
+    if not derived:
+        return FAIL, "nincs kérdésből származó válaszkészlet a felületen"
+    return PASS, "kérdésből származó válaszkészlet, bedrótozott igen/nem nélkül"
+
+
+@crit("UI-3", "ui", "kartya 78e81155", "a szoveges valasz ertelmezese a VALASZ pillanataban tortenik, javaslatkent")
+def _ui3():
+    absent, detail = absent_in_prod("interpretAnswer\\|answer_interpretation\\|valasz_ertelmezes", None)
+    if absent is None:
+        return ERROR, detail
+    return (FAIL if absent else PASS), ("nincs valasz-ertelmezo javaslat-ut" if absent else detail)
+
+
 # ---- group: testing ----
 
 @crit("TS-1", "testing", "audit 2026-08-09 G7", "van végpontok közötti teszt a valódi bejövő láncra")
@@ -542,7 +606,7 @@ def _ts1():
 # --- runner ------------------------------------------------------------------
 
 GROUP_ORDER = ["intake", "scope", "approval", "outbound", "liveness", "scheduler",
-               "monitoring", "migration", "workflow", "testing"]
+               "monitoring", "migration", "workflow", "ui", "testing"]
 GROUP_LABEL = {
     "intake": "Bejövő lánc (§6.3, §8)",
     "scope": "Hatókör (§2, AC-17)",
@@ -553,6 +617,7 @@ GROUP_LABEL = {
     "monitoring": "Monitorozás (§19)",
     "migration": "Migráció (§17)",
     "workflow": "Workflow és autonómia (§13, §21, §22)",
+    "ui": "Mission Control válaszút (spec-en kívüli, owner-jóváhagyott)",
     "testing": "Tesztfedés",
 }
 MARK = {PASS: "PASS", FAIL: "FAIL", UNKNOWN: "UNKN", ERROR: "ERR "}
