@@ -170,10 +170,16 @@ const staleClaims: Check = (db, now) => {
 const corporateInPersonal: Check = (db) => {
   let rows: Array<{ case_id: string; title: string }> = []
   try {
+    // Terminal cases are excluded: a CANCELLED case that names where it moved
+    // to is a tombstone, not live contamination. Counting it would keep the
+    // alarm ringing after the thing it warned about was fixed, and an alarm
+    // that outlives its cause is how people learn to ignore alarms.
     rows = db.prepare(
       `SELECT case_id, title FROM personal_cases
-       WHERE archived_at IS NULL AND (title LIKE '%ZST%' OR description LIKE '%ZST%'
-         OR title LIKE '%ONE Magyarorsz%' OR title LIKE '%Product Lab%')`
+       WHERE archived_at IS NULL
+         AND status NOT IN ('COMPLETED','CANCELLED','ARCHIVED')
+         AND (title LIKE '%ZST%' OR description LIKE '%ZST%'
+              OR title LIKE '%ONE Magyarorsz%' OR title LIKE '%Product Lab%')`
     ).all() as never
   } catch { return null }
   if (!rows.length) return null
