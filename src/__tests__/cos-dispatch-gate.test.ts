@@ -4,6 +4,7 @@ import { createCase } from '../cos/case-store.js'
 import { registerConnector, recordSuccess, recordFailure, setMode, DOWN_THRESHOLD } from '../cos/connector-health.js'
 import { createCampaign, approveCampaign, recordApproval } from '../cos/campaigns.js'
 import { evaluateDispatch, type DispatchRequest } from '../cos/dispatch-gate.js'
+import { setLadder, pauseAll } from '../cos/autonomy-ladder.js'
 
 // COS dispatch gate — the single choke point. Proves each of the three layers
 // can independently veto a send, and that a fully-clean request is allowed.
@@ -18,13 +19,17 @@ function seedGreen() {
   createCampaign(db, { campaignId: 'k1', caseId: 'c1', campaignType: 'QUOTE_REQUEST', templateHash: TH }, 1000)
   approveCampaign(db, 'k1', 1001)
   recordApproval(db, { approvalId: 'a1', campaignId: 'k1', approvedBy: 'istvan', templateHash: TH, renderedPayloadHash: RH , allowedRecipients: ['teszt@pelda.hu'], allowedChannels: ['EMAIL'] }, 1002)
+  // §22: a send also needs a rung that permits it. A new type starts at PREPARE
+  // and cannot send, which is why this has to be explicit in the fixture.
+  setLadder(db, 'QUOTE_REQUEST', { rung: 'EXECUTE_WITH_APPROVAL' }, 1000)
   return db
 }
 
 const REQ: DispatchRequest = {
   connectorId: 'gmail', requireWrite: true,
   declaredSensitivity: 'PERSONAL', content: 'Kérek árajánlatot a peremelemre.',
-  targetProfile: 'premium_reasoning', campaignId: 'k1', templateHash: TH, renderedPayloadHash: RH, recipient: 'teszt@pelda.hu' }
+  targetProfile: 'premium_reasoning', campaignId: 'k1', templateHash: TH, renderedPayloadHash: RH,
+  recipient: 'teszt@pelda.hu', caseType: 'QUOTE_REQUEST' }
 
 describe('COS dispatch gate', () => {
   beforeEach(() => { initDatabase(':memory:') })
@@ -76,6 +81,20 @@ describe('COS dispatch gate', () => {
     expect(d.reasons.join()).toMatch(/campaign not authorized/i)
   })
 
+  it('autonomy layer vetoes: a case type still on PREPARE cannot send (§22)', () => {
+    const db = seedGreen()
+    setLadder(db, 'QUOTE_REQUEST', { rung: 'PREPARE' }, 1100)
+    const d = evaluateDispatch(db, REQ)
+    expect(d.allowed).toBe(false)
+    expect(d.reasons.join()).toMatch(/autonómia-fokozat/)
+  })
+
+  it('autonomy layer vetoes: the master switch stops a fully-clean request', () => {
+    const db = seedGreen()
+    pauseAll(db, true, 'teszt', 1100)
+    expect(evaluateDispatch(db, REQ).allowed).toBe(false)
+  })
+
   it('reports ALL failing layers at once (fail-closed, no short-circuit)', () => {
     const db = seedGreen()
     setMode(db, 'gmail', 'READ_ONLY', 1100) // connector veto
@@ -84,6 +103,6 @@ describe('COS dispatch gate', () => {
       renderedPayloadHash: 'nope', // campaign veto
     })
     expect(d.allowed).toBe(false)
-    expect(d.reasons.length).toBe(3)
+    expect(d.reasons.length).toBe(3)   // connector + sensitivity + campaign; the rung permits
   })
 })

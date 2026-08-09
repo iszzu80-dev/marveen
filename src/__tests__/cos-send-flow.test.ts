@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
+import { setLadder } from '../cos/autonomy-ladder.js'
 import { createCase } from '../cos/case-store.js'
 import { registerConnector, setMode, recordSuccess } from '../cos/connector-health.js'
 import { GmailSendAdapter, DryRunTransport } from '../cos/adapters/gmail-send.js'
@@ -15,6 +16,8 @@ const EMAIL = { to: 'vendor@example.com', subject: 'Ajánlatkérés', body: 'Ké
 
 function setup() {
   initDatabase(':memory:')
+    // §22: a kuldeshez fokozat is kell; uj tipus PREPARE-en indul es nem kuldhet.
+    setLadder(getDb(), 'X', { rung: 'EXECUTE_WITH_APPROVAL' }, NOW - 1000)
   const db = getDb()
   createCase(db, { caseId: 'c1', title: 'T', caseType: 'X', sensitivity: 'PERSONAL' }, NOW)
   // gmail connector write-usable (Istvan consented to gmail.send)
