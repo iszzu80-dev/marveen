@@ -129,13 +129,13 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
       expect(caseAfter.status).toBe(caseBefore.status)
     })
 
-    it('does not change case_progression_state before the engine runs', async () => {
+    it('engine processes the event (progressionRan) and progression state updates', async () => {
       const db = getDb()
       const stateBefore = db.prepare(
-        `SELECT case_version, plan_version, semantic_completion_status
+        `SELECT case_version, plan_version
          FROM case_progression_state WHERE domain = ? AND case_id = ?`
       ).get('personal', PRI_CASE) as {
-        case_version: number; plan_version: number; semantic_completion_status: string
+        case_version: number; plan_version: number
       }
 
       const { ctx, out } = fakeCtxWithBody(
@@ -149,23 +149,21 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
       expect(out.status).toBe(200)
       expect(out.body.ok).toBe(true)
       expect(out.body.eventId).toBeGreaterThan(0)
+      // Engine ran — the endpoint runs one cycle inline.
+      expect(out.body.progressionRan).toBe(true)
 
-      // After the engine ran, progression state SHOULD have changed
-      // (case_version bumped, etc.). The key property: the case row
-      // status was NOT changed by the engine — it only writes progression
-      // tables. Let's verify the case row is untouched.
-      const caseAfter = db.prepare(
-        'SELECT status FROM personal_cases WHERE case_id = ?'
-      ).get(PRI_CASE) as { status: string }
-      expect(caseAfter.status).toBe(stateBefore.semantic_completion_status === 'IN_PROGRESS' ? 'READY' : caseAfter.status)
-      // The engine does write progression state, so that changed.
+      // Progression state case_version was bumped by the engine.
       const stateAfter = db.prepare(
         `SELECT case_version FROM case_progression_state WHERE domain = ? AND case_id = ?`
       ).get('personal', PRI_CASE) as { case_version: number }
-      // Engine ran → case_version in progression_state may have incremented.
-      // The point of gate (h) is: the OWNER ACTION itself only writes the event.
-      // The engine runs AFTER the event insert and MAY change state — that's
-      // expected (spec §2: "a motor továbbra is az író").
+      expect(stateAfter.case_version).toBeGreaterThan(stateBefore.case_version)
+
+      // Case row (personal_cases) is NOT touched by the endpoint.
+      const caseAfter = db.prepare(
+        'SELECT status FROM personal_cases WHERE case_id = ?'
+      ).get(PRI_CASE) as { status: string }
+      // The endpoint writes events + progression state, not the case row.
+      expect(caseAfter.status).toBe('READY') // unchanged from seed
     })
 
     it('event row has correct actor, source_system, event_type', async () => {
