@@ -654,7 +654,7 @@ def _ts1():
     if not os.path.isdir(tdir):
         return ERROR, "nincs teszt könyvtár"
     try:
-        out = subprocess.run(["grep", "-rl", "email-triage-fetch\\|triageOutputShape\\|realFeederShape", tdir],
+        out = subprocess.run(["grep", "-rl", "email-triage-fetch", tdir],
                              capture_output=True, text=True, timeout=60).stdout
     except Exception as e:
         return ERROR, str(e)
