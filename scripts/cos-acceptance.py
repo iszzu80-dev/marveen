@@ -650,10 +650,28 @@ def _ui2():
 
 @crit("UI-3", "ui", "kartya 78e81155", "a szoveges valasz ertelmezese a VALASZ pillanataban tortenik, javaslatkent")
 def _ui3():
-    absent, detail = absent_in_prod("interpretAnswer\\|answer_interpretation\\|valasz_ertelmezes", None)
-    if absent is None:
-        return ERROR, detail
-    return (FAIL if absent else PASS), ("nincs valasz-ertelmezo javaslat-ut" if absent else detail)
+    # Otodik alkalom ma este, hogy egy kriteriumom NEVET keresett a tulajdonsag
+    # helyett: a modul `interpretOwnerAnswer` neven keszult el, a minta meg egy
+    # kitalalt `interpretAnswer`-t keresett. A kriterium most a HAROM tulajdonsagot
+    # meri, ami a tetelt tetelle teszi:
+    #   (a) van valasz-ertelmezo modul,
+    #   (b) van vegpont, ami a VALASZ pillanataban hivja,
+    #   (c) az ertelmezo NEM ir semmit -- javaslat, nem dontes.
+    f = os.path.join(SRC, "cos", "answer-interpretation.ts")
+    if not os.path.exists(f):
+        return FAIL, "nincs valasz-ertelmezo modul"
+    try:
+        body = open(f, encoding="utf-8", errors="replace").read()
+    except OSError as e:
+        return ERROR, str(e)
+    # (c): ha barhol Database-t venne at, tudna irni.
+    if "Database" in body:
+        return FAIL, "az ertelmezo hozzafer az adatbazishoz — javaslat helyett irni is tudna"
+    hits = prod_files("interpretOwnerAnswer", "web") or []
+    if not hits:
+        return FAIL, "nincs vegpont, ami a valasz pillanataban ertelmezne"
+    return PASS, "modul + vegpont (%s), es az ertelmezo nem fer az adatbazishoz" % ", ".join(
+        os.path.basename(h) for h in hits)
 
 
 # ---- group: testing ----
