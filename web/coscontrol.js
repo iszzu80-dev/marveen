@@ -614,7 +614,9 @@
       '}',
       '.cos-owner-text {',
       '  flex:1;min-width:140px;padding:6px 10px;font-size:13px;',
-      '  background:var(--input-bg,#1a1a1a);color:var(--text,#ddd);',
+      // --input-bg does not exist in this app; the fallback painted a black box.
+      // Use the same tokens every other input in index.html uses.
+      '  background:var(--bg);color:var(--fg);',
       '  border:1px solid var(--border,#2a2a2a);border-radius:6px;',
       '  font-family:inherit;resize:vertical;',
       '}',
