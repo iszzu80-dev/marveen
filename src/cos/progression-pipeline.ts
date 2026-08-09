@@ -268,12 +268,18 @@ export interface NextBestAction {
   estimatedEffortMinutes: number
 }
 
-/** Pick the Next Best Action from the rolling plan. The NBA is the first
- *  step of the plan — the very next thing to do, even if it requires
+/** Pick the Next Best Action from the rolling plan, skipping steps that
+ *  were already completed in a previous run. The NBA is the first
+ *  uncompleted step — the very next thing to do, even if it requires
  *  external input. The decision engine then determines whether that step
  *  can proceed autonomously or needs to wait. */
-export function determineNextBestAction(plan: RollingPlanStep[], _context: ResolvedContext): NextBestAction {
-  const chosen = plan[0]
+export function determineNextBestAction(
+  plan: RollingPlanStep[],
+  _context: ResolvedContext,
+  completedPlanStep: number = 0,
+): NextBestAction {
+  // Find the first step whose index is past the last completed one
+  const chosen = plan.find(s => s.step > completedPlanStep) ?? plan[0]
 
   const canProceed = !chosen.needsExternal
 
@@ -579,8 +585,18 @@ export function runProgressionCycle(
   // 2. Outcome contract — lazy enrichment: if goal was already set by
   //    enrichCaseGoal(), use it; otherwise fall back to heuristic.
   const existing = db.prepare(
-    'SELECT case_version, plan_version, goal_version, goal, summary FROM case_progression_state WHERE domain = ? AND case_id = ?',
-  ).get(domain, caseId) as { case_version: number; plan_version: number; goal_version: number; goal: string | null; summary: string | null } | undefined
+    `SELECT case_version, plan_version, goal_version, goal, summary,
+            completed_plan_step, no_progress_run_count,
+            next_best_action_json, rolling_plan_json
+     FROM case_progression_state WHERE domain = ? AND case_id = ?`,
+  ).get(domain, caseId) as {
+    case_version: number; plan_version: number; goal_version: number
+    goal: string | null; summary: string | null
+    completed_plan_step: number
+    no_progress_run_count: number
+    next_best_action_json: string | null
+    rolling_plan_json: string | null
+  } | undefined
 
   const contract = deriveOutcomeContract(caseRow.title, caseRow.case_type, caseRow.status, caseRow.sensitivity)
 
@@ -618,15 +634,35 @@ export function runProgressionCycle(
 
   // 4. Rolling plan
   const plan = buildRollingPlan(contract, context, caseRow.status)
+  const planJson = JSON.stringify(plan)
 
-  // 5. Next Best Action
-  const nba = determineNextBestAction(plan, context)
+  // Has the plan changed since last run? If yes, we are on a fresh plan and
+  // completed_plan_step must reset to 0. If no, we continue from where we left off.
+  const storedPlanJson = existing?.rolling_plan_json ?? null
+  const planChanged = storedPlanJson !== planJson
+  const completedPlanStep = planChanged ? 0 : (existing?.completed_plan_step ?? 0)
+  const previousNbaStep = planChanged
+    ? 0
+    : ((): number => {
+        try {
+          if (existing?.next_best_action_json) {
+            const prev = JSON.parse(existing.next_best_action_json) as { planStep?: number }
+            return prev.planStep ?? 0
+          }
+        } catch { /* ignore malformed JSON */ }
+        return 0
+      })()
+
+  // 5. Next Best Action — skip steps already completed in a previous run
+  const nba = determineNextBestAction(plan, context, completedPlanStep)
 
   // 6. Decision
   let { decision, reason } = decide(nba, context, caseRow.status)
 
   // 7. Upsert progression state
-  const planVersion = (existing?.plan_version ?? 0) + 1
+  // Only bump plan_version if the plan actually changed (status transition, etc.).
+  // planChanged already covers this: same plan → same version.
+  const planVersion = planChanged ? (existing?.plan_version ?? 0) + 1 : (existing?.plan_version ?? 0)
   const goalVersion = existing?.goal_version ?? 0
   const caseVersion = existing?.case_version ?? 1
 
@@ -641,7 +677,7 @@ export function runProgressionCycle(
        SET goal = ?, definition_of_done_json = ?, success_evidence_requirements_json = ?,
            semantic_completion_status = ?,
            rolling_plan_json = ?, plan_version = ?, next_best_action_json = ?,
-           resolution_audit_json = ?,
+           completed_plan_step = ?, resolution_audit_json = ?,
            last_progressed_at = ?, case_version = case_version + 1, updated_at = ?
        WHERE domain = ? AND case_id = ?`,
     ).run(
@@ -649,9 +685,10 @@ export function runProgressionCycle(
       JSON.stringify(contract.definitionOfDone),
       JSON.stringify(contract.successEvidenceRequirements),
       caseRow.status === 'COMPLETED' ? 'PROPOSED' : 'IN_PROGRESS',
-      JSON.stringify(plan),
+      planJson,
       planVersion,
       JSON.stringify(nba),
+      completedPlanStep,
       auditJson,
       now, now,
       domain, caseId,
@@ -739,14 +776,66 @@ export function runProgressionCycle(
   // the next unmet DoD criterion on each successful run. This is the only
   // side-effect of DoD — a single dod_verification_json UPDATE on
   // case_progression_state. No writes to personal_cases/zst_cases.
+  let dodSatisfiedIdx = -1
   if (runStatus === 'COMPLETED') {
     // Initialise DoD verification if not yet done (first progression run)
     initializeDoDVerification(db, domain, caseId, contract.definitionOfDone, now)
     // Auto-satisfy the next unmet DoD criterion (gradual completion).
     // This run's contribution is recorded BEFORE the completion guard check,
     // so a case can complete in the same run where the last criterion is met.
-    autoSatisfyNextDoDCriterion(db, domain, caseId, runId, now)
+    dodSatisfiedIdx = autoSatisfyNextDoDCriterion(db, domain, caseId, runId, now)
   }
+
+  // ── Stagnation detection + step advancement (GATE 2 follow-up) ─────────
+  //
+  // "Real progress" is defined as:
+  //   a) the NBA plan step advanced past the previous run's step, OR
+  //   b) a DoD criterion was newly satisfied, OR
+  //   c) the plan was rebuilt because the case status changed (fresh start)
+  //
+  // If none of these are true, the run was a no-op and no_progress_run_count
+  // is incremented. Otherwise it is reset to 0.
+  //
+  // After a successful CONTINUE_AUTONOMOUSLY run, completed_plan_step is
+  // advanced so the NEXT run picks the step AFTER the one just completed.
+  // If all plan steps are exhausted, reset completed_plan_step to 0 so the
+  // next run rebuilds the plan (plan_version bump).
+
+  // Advance completed_plan_step after a successful autonomous run.
+  // Gate on nba.canProceedAutonomously, NOT on decision — decide() returns
+  // WAIT_EXTERNAL for WAITING_EXTERNAL status even when the current step is
+  // autonomously executable (e.g. step 1 VERIFY on a case that awaits external
+  // input on step 2). The step completed; the decision is about what's next.
+  let newCompletedPlanStep = completedPlanStep
+  if (runStatus === 'COMPLETED' && nba.canProceedAutonomously) {
+    // Mark this NBA step as completed for the next run
+    newCompletedPlanStep = nba.planStep
+    // If all plan steps are now completed, reset to 0 — the next run will
+    // rebuild the plan (plan_version bump means planChanged=true above).
+    const maxStep = plan.length > 0 ? plan[plan.length - 1].step : 0
+    if (newCompletedPlanStep >= maxStep) {
+      newCompletedPlanStep = 0
+    }
+  }
+
+  // "Real progress" means the step counter actually advanced (a step was
+  // completed autonomously and its index is higher than before this run).
+  // Comparing newCompletedPlanStep vs completedPlanStep catches:
+  //   - normal advancement (1→2, 2→3, …)
+  //   - exhaustion reset (4→0) — nba.canProceedAutonomously gates it, and
+  //     we check progress BEFORE the reset (nba.planStep > completedPlanStep)
+  const nbaStepAdvanced = nba.canProceedAutonomously && nba.planStep > completedPlanStep
+  const dodMadeProgress = dodSatisfiedIdx >= 0
+  const realProgress = nbaStepAdvanced || dodMadeProgress
+  const prevNoProgressCount = existing?.no_progress_run_count ?? 0
+  const newNoProgressCount = realProgress ? 0 : prevNoProgressCount + 1
+
+  // Persist stagnation + step counters
+  db.prepare(
+    `UPDATE case_progression_state
+     SET no_progress_run_count = ?, completed_plan_step = ?, updated_at = ?
+     WHERE domain = ? AND case_id = ?`,
+  ).run(newNoProgressCount, newCompletedPlanStep, now, domain, caseId)
 
   // Checkpoint E.4 completion guard: after recording this run's DoD
   // contribution, verify that ALL criteria are met before allowing COMPLETE.

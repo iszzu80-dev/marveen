@@ -450,7 +450,7 @@ describe('Checkpoint B — Thin shadow vertical slice (card 4a809934)', () => {
   // ──────────────────────────────────────────────────────────────────
 
   describe('Stage 4: Idempotency — second progression run', () => {
-    it('PRI: second progression cycle increments plan_version and adds a second run row', () => {
+    it('PRI: second progression cycle keeps plan_version stable (plan unchanged) and adds a second run row', () => {
       const stateBefore = snapshotProgressionState('personal', PRI_CASE_ID, db)!
       const runsBefore = snapshotProgressionRuns('personal', PRI_CASE_ID, db)
 
@@ -463,8 +463,9 @@ describe('Checkpoint B — Thin shadow vertical slice (card 4a809934)', () => {
       const stateAfter = snapshotProgressionState('personal', PRI_CASE_ID, db)!
       const runsAfter = snapshotProgressionRuns('personal', PRI_CASE_ID, db)
 
-      // plan_version should increase
-      expect(stateAfter.plan_version as number).toBeGreaterThan(stateBefore.plan_version as number)
+      // plan_version should NOT increase when the plan has not changed
+      // (the old buggy behaviour bumped it every cycle — GATE 2 follow-up fix)
+      expect(stateAfter.plan_version as number).toBe(stateBefore.plan_version as number)
       // A second run row is created
       expect(runsAfter.length).toBe(runsBefore.length + 1)
       // Still only one state row (upsert)
