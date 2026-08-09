@@ -29,7 +29,7 @@ describe('COS Mission Control view queries', () => {
     const db = getDb()
     createCampaign(db, { campaignId: 'k1', caseId: 'c1', campaignType: 'QUOTE_REQUEST', templateHash: 'T' }, NOW)
     approveCampaign(db, 'k1', NOW)
-    recordApproval(db, { approvalId: 'a1', campaignId: 'k1', approvedBy: 'i', templateHash: 'T', renderedPayloadHash: 'R' }, NOW)
+    recordApproval(db, { approvalId: 'a1', campaignId: 'k1', approvedBy: 'i', templateHash: 'T', renderedPayloadHash: 'R' , allowedRecipients: ['teszt@pelda.hu'], allowedChannels: ['EMAIL']}, NOW)
     const rows = listCampaignsSummary(db) as any[]
     expect(rows[0]).toMatchObject({ campaign_type: 'QUOTE_REQUEST', status: 'APPROVED', approved_current: 1 })
   })

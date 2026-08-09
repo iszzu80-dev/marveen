@@ -24,6 +24,8 @@ export interface DispatchRequest {
   connectorId: string
   /** A send needs write; default true. */
   requireWrite?: boolean
+  /** Recipient of this send — required for the AC-4 allowlist check. */
+  recipient: string
   /** The case's declared sensitivity (escalated against the content). */
   declaredSensitivity: unknown
   /** The rendered outbound content (classified for sensitivity). */
@@ -64,7 +66,8 @@ export function evaluateDispatch(db: Database.Database, req: DispatchRequest): D
   }
 
   const auth = authorizeSend(db, {
-    campaignId: req.campaignId, templateHash: req.templateHash, renderedPayloadHash: req.renderedPayloadHash,
+    campaignId: req.campaignId, templateHash: req.templateHash,
+    renderedPayloadHash: req.renderedPayloadHash, recipient: req.recipient,
   })
   if (!auth.authorized) reasons.push(`campaign not authorized: ${auth.reason}`)
 

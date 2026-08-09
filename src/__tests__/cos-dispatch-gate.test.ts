@@ -17,15 +17,14 @@ function seedGreen() {
   recordSuccess(db, 'gmail', 1000) // OK
   createCampaign(db, { campaignId: 'k1', caseId: 'c1', campaignType: 'QUOTE_REQUEST', templateHash: TH }, 1000)
   approveCampaign(db, 'k1', 1001)
-  recordApproval(db, { approvalId: 'a1', campaignId: 'k1', approvedBy: 'istvan', templateHash: TH, renderedPayloadHash: RH }, 1002)
+  recordApproval(db, { approvalId: 'a1', campaignId: 'k1', approvedBy: 'istvan', templateHash: TH, renderedPayloadHash: RH , allowedRecipients: ['teszt@pelda.hu'], allowedChannels: ['EMAIL'] }, 1002)
   return db
 }
 
 const REQ: DispatchRequest = {
   connectorId: 'gmail', requireWrite: true,
   declaredSensitivity: 'PERSONAL', content: 'Kérek árajánlatot a peremelemre.',
-  targetProfile: 'premium_reasoning', campaignId: 'k1', templateHash: TH, renderedPayloadHash: RH,
-}
+  targetProfile: 'premium_reasoning', campaignId: 'k1', templateHash: TH, renderedPayloadHash: RH, recipient: 'teszt@pelda.hu' }
 
 describe('COS dispatch gate', () => {
   beforeEach(() => { initDatabase(':memory:') })
@@ -72,7 +71,7 @@ describe('COS dispatch gate', () => {
 
   it('campaign layer vetoes: a rendered payload that was not approved', () => {
     const db = seedGreen()
-    const d = evaluateDispatch(db, { ...REQ, renderedPayloadHash: 'rendered-DIFFERENT' })
+    const d = evaluateDispatch(db, { ...REQ, renderedPayloadHash: 'rendered-DIFFERENT' , recipient: 'teszt@pelda.hu'})
     expect(d.allowed).toBe(false)
     expect(d.reasons.join()).toMatch(/campaign not authorized/i)
   })

@@ -16,6 +16,7 @@
 // Pure DB logic — no send capability here (that is the executor + connector).
 
 import type Database from 'better-sqlite3'
+import { personalApprovals, type ApprovalEnvelope, type SendAuthResult } from './approval-core.js'
 
 export type CampaignStatus = 'DRAFT' | 'APPROVED' | 'PAUSED' | 'REVOKED' | 'COMPLETED'
 export type ApprovalStatus = 'PENDING' | 'APPROVED' | 'REJECTED' | 'REVOKED'
@@ -88,7 +89,7 @@ export function resumeCampaign(db: Database.Database, campaignId: string, now: n
   if (info.changes === 0) throw new Error(`campaign not PAUSED (or missing): ${campaignId}`)
 }
 
-export interface ApprovalInput {
+export interface ApprovalInput extends ApprovalEnvelope {
   approvalId: string
   campaignId: string
   approvedBy: string
@@ -97,51 +98,37 @@ export interface ApprovalInput {
 }
 
 /** Record an approval for a SPECIFIC rendered payload, bound to the campaign's
- *  current version. Status starts APPROVED (this models the owner's explicit
- *  yes to this exact content). */
+ *  current version, carrying the whole §3.2 envelope.
+ *
+ *  Delegates to the shared approval core: Personal and ZST must not drift again
+ *  (2026-08-09 — ZST had a recipient allowlist, Personal did not). */
 export function recordApproval(db: Database.Database, a: ApprovalInput, now: number): void {
-  const c = getCampaign(db, a.campaignId)
-  if (!c) throw new Error(`campaign not found: ${a.campaignId}`)
-  db.prepare(
-    `INSERT INTO campaign_approvals (approval_id, campaign_id, campaign_version, approved_by,
-        template_hash, rendered_payload_hash, status, created_at, updated_at)
-     VALUES (@approvalId, @campaignId, @version, @approvedBy, @templateHash, @renderedPayloadHash, 'APPROVED', @now, @now)`
-  ).run({ ...a, version: c.version, now })
+  personalApprovals.recordApproval(db, a, now)
+}
+
+/** §3.4 — trip a stop condition; every later authorizeSend refuses. */
+export function tripStopCondition(db: Database.Database, approvalId: string, reason: string, now: number): void {
+  personalApprovals.tripStopCondition(db, approvalId, reason, now)
 }
 
 export interface SendAuthQuery {
   campaignId: string
   templateHash: string
   renderedPayloadHash: string
-}
-export interface SendAuthResult {
-  authorized: boolean
-  reason: string
+  /** REQUIRED (AC-4): a send whose recipient is not named cannot be checked
+   *  against the approved list, and unchecked means refused. */
+  recipient: string
+  channel?: string
+  outboundKind?: 'INITIAL' | 'FOLLOW_UP' | 'REPLY'
+  usedVariables?: string[]
 }
 
 /**
- * The P0.4/P0.5 gate: may this EXACT rendered payload be sent autonomously right
- * now? Requires, all at once:
- *   - campaign is APPROVED (not DRAFT/PAUSED/REVOKED/COMPLETED),
- *   - campaign does NOT allow free text (autonomous only from typed templates),
- *   - an APPROVED campaign_approval exists whose template_hash AND
- *     rendered_payload_hash match the request AND whose campaign_version equals
- *     the campaign's CURRENT version (a revoke/pause bumped it → stale approval
- *     no longer authorizes).
- * Fail-closed: any miss → not authorized, with a reason.
+ * The §3.2/§3.4 gate. See approval-core.ts for the full check list — campaign
+ * state, version binding, free-text ban, expiry, recipient allowlist, channel,
+ * forbidden/undeclared variables, per-kind and total quota, stop conditions.
+ * Fail-closed everywhere.
  */
-export function authorizeSend(db: Database.Database, q: SendAuthQuery): SendAuthResult {
-  const c = getCampaign(db, q.campaignId)
-  if (!c) return { authorized: false, reason: 'campaign not found' }
-  if (c.status !== 'APPROVED') return { authorized: false, reason: `campaign status ${c.status} (not APPROVED)` }
-  if (c.allows_free_text) return { authorized: false, reason: 'campaign allows free text → autonomous send not allowed (PREPARE only)' }
-  const appr = db.prepare(
-    `SELECT COUNT(*) AS n FROM campaign_approvals
-     WHERE campaign_id=@id AND status='APPROVED' AND campaign_version=@version
-       AND template_hash=@th AND rendered_payload_hash=@rh`
-  ).get({ id: q.campaignId, version: c.version, th: q.templateHash, rh: q.renderedPayloadHash }) as { n: number }
-  if (appr.n === 0) {
-    return { authorized: false, reason: 'no APPROVED approval matching this template + rendered payload at the current campaign version' }
-  }
-  return { authorized: true, reason: 'ok' }
+export function authorizeSend(db: Database.Database, q: SendAuthQuery, now = Math.floor(Date.now() / 1000)): SendAuthResult {
+  return personalApprovals.authorizeSend(db, q, now)
 }
