@@ -1,0 +1,319 @@
+=== DATE ===
+Thu Jul  2 07:57:17 CEST 2026
+
+=== GIT STATUS ===
+ M src/web/schedule-runner.ts
+?? .env.backup-20260630-1947
+?? .env.backup-max-20260630-215248
+?? audits/
+?? scripts/inter-agent-evidence-gate.py
+?? scripts/inter-agent-evidence-gate.sh
+?? scripts/stale-instructions-detect.sh
+?? scripts/stale-instructions-guard.sh
+?? shared-dev/
+
+=== DIFF STAT ===
+ src/web/schedule-runner.ts | 104 ++++++++++++++++++++++++++++++++++++++++-----
+ 1 file changed, 94 insertions(+), 10 deletions(-)
+
+=== SCHEDULE-RUNNER DIFF ===
+diff --git a/src/web/schedule-runner.ts b/src/web/schedule-runner.ts
+index 2bfeda1..91bee68 100644
+--- a/src/web/schedule-runner.ts
++++ b/src/web/schedule-runner.ts
+@@ -40,6 +40,28 @@ import {
+ import { MAIN_CHANNELS_SESSION } from './main-agent.js'
+ import { sendTelegramMessage } from './telegram.js'
+ import { runCommandTask } from './command-task.js'
++import { paneShowsContextSaturation } from '../pane-state.js'
++
++// --- forceSend + CTX_SAT Instrumentation ---
++// Phase 1 (2026-07-02): observation-only -- NO production behaviour change.
++//
++// FEATURE_FLAG_FORCE_SEND_CTX_SAT_SAFE_MODE (default OFF): when true, a
++// forceSend task that would land on a context-saturated agent is deferred
++// (queued as a pending retry with status 'ctx_saturated') instead of
++// injected. The agent stays saturated until dispatch-guard.sh recovers it;
++// the task re-fires on the next tick once the pane is clear. Do NOT enable
++// without Istvan's explicit approval -- the existing forceSend contract
++// ("inject regardless, never silently drop") is preserved while the flag
++// is OFF.
++const FEATURE_FLAG_FORCE_SEND_CTX_SAT_SAFE_MODE = false
++
++// Monotonically-increasing counter of how many times a forceSend=true task
++// was about to inject into a context-saturated session. Reset on restart.
++// Exported for dashboard / evidence queries.
++let forceSendCtxSatDetected = 0
++export function getForceSendCtxSatCounter(): number {
++  return forceSendCtxSatDetected
++}
+ 
+ // --- Schedule Runner ---
+ // Checks every minute if any scheduled task is due and injects the prompt
+@@ -86,7 +108,7 @@ function persistScheduleLastRun(): void {
+ // Try to fire a task at a single target agent. Returns the outcome so the
+ // caller can decide whether to queue a retry. Splitting this out means the
+ // pendingTaskRetries loop and the normal cron loop share one code path.
+-function attemptFireTask(task: ScheduledTask, agentName: string, now: number): 'fired' | 'busy' | 'missing' | 'starting' | 'error' {
++function attemptFireTask(task: ScheduledTask, agentName: string, now: number): 'fired' | 'busy' | 'missing' | 'starting' | 'error' | 'ctx_saturated' {
+   const isMainAgent = agentName === MAIN_AGENT_ID
+   // Allow per-task session override via targetSession config field.
+   // Falls back to the standard agent session name derivation.
+@@ -134,21 +156,83 @@ function attemptFireTask(task: ScheduledTask, agentName: string, now: number): '
+   // A forceSend task can still land on a 100%-context agent -- it will
+   // queue behind whatever the agent is doing, same as forceSend has always
+   // behaved for a busy session, but a saturated agent may never actually
+-  // clear that queue on its own. Deliberately NOT closing this: forceSend's
+-  // whole purpose is "always eventually land, never silently drop" (see the
+-  // 275-retry incident above), and folding the CTX_SAT gate in here would
+-  // reintroduce exactly that failure mode for whatever forceSend task hits
+-  // it. No task in ~/.claude/scheduled-tasks currently sets forceSend=true
+-  // (checked 2026-07-01) -- if one is added later, its author should
+-  // manually consider whether dispatch-guard.sh's recovery should be
+-  // wired in for that specific task instead of relying on this gate.
++  // clear that queue on its own.
++  //
++  // Phase 1 instrumentation (2026-07-02, kanban 42694645): the gap is now
++  // MEASURED. When forceSend meets CTX_SAT, a structured log + counter
++  // (`forceSendCtxSatDetected`) record the event WITHOUT blocking the
++  // injection. A feature flag `FEATURE_FLAG_FORCE_SEND_CTX_SAT_SAFE_MODE`
++  // (default OFF) gates the safe-mode path: when ON, the task is deferred
++  // as a pending retry and dispatch-guard.sh recovery is triggered instead
++  // of injecting into a saturated session. Do NOT flip the flag without
++  // Istvan's explicit go-ahead. The counter + logs provide decision
++  // evidence for Phase 2.
++  //
++  // No task in ~/.claude/scheduled-tasks currently sets forceSend=true
++  // (checked 2026-07-01, re-checked 2026-07-02).
+   if (!task.forceSend && !isSessionReadyForPrompt(session, host)) {
+     logger.warn({ task: task.name, agent: agentName, session }, 'Schedule target session busy or has pending input, will retry')
+     return 'busy'
+   }
+ 
+   if (task.forceSend) {
+-    logger.info({ task: task.name, agent: agentName, session }, 'forceSend=true, bypassing busy-state check (including context-saturation gate -- see comment above)')
++    // Phase 1 instrumentation: detect CTX_SAT even when forceSend bypasses
++    // the readiness gate. This is OBSERVATION-ONLY -- the injection still
++    // proceeds (unless the feature flag below is ON, which it is NOT by
++    // default). Structured log + counter provide measurement data for the
++    // Phase 2 decision (kanban 42694645).
++    let ctxSat = false
++    try {
++      const pane = capturePane(session, host)
++      ctxSat = pane != null && paneShowsContextSaturation(pane)
++    } catch {
++      // Best-effort detection. If the pane capture fails (e.g. remote host
++      // unreachable, tmux session gone between the existence check above
++      // and now), we default to ctxSat=false and inject anyway -- a missing
++      // pane is not a CTX_SAT signal.
++    }
++
++    if (ctxSat) {
++      forceSendCtxSatDetected++
++      logger.warn({
++        task: task.name,
++        agent: agentName,
++        session,
++        forceSend: true,
++        ctxSat: true,
++        counter: forceSendCtxSatDetected,
++        safeModeEnabled: FEATURE_FLAG_FORCE_SEND_CTX_SAT_SAFE_MODE,
++      }, 'forceSend=true task injecting into context-saturated session (counter=%d, safeMode=%s)',
++        forceSendCtxSatDetected,
++        FEATURE_FLAG_FORCE_SEND_CTX_SAT_SAFE_MODE ? 'ON' : 'OFF')
++
++      // Safe-mode path (gated behind FEATURE_FLAG_FORCE_SEND_CTX_SAT_SAFE_MODE,
++      // default OFF). When ON: instead of injecting into a saturated session,
++      // defer the task as a pending retry with status 'ctx_saturated'. The
++      // pending-retry loop re-checks CTX_SAT on each tick and fires once the
++      // pane is clear. dispatch-guard.sh recovery is triggered in parallel
++      // (best-effort, does NOT block the deferral).
++      //
++      // DO NOT ENABLE without Istvan's explicit approval. The counter above
++      // still increments regardless of the flag value, so measurement data
++      // accumulates even with safe mode OFF.
++      if (FEATURE_FLAG_FORCE_SEND_CTX_SAT_SAFE_MODE) {
++        logger.info({
++          task: task.name,
++          agent: agentName,
++          session,
++        }, 'forceSend task deferred behind CTX_SAT recovery (safe-mode ON)')
++        insertPendingTaskRetryIfNew(task.name, agentName, now, 'ctx_saturated')
++        return 'ctx_saturated'
++      }
++    }
++
++    logger.info({
++      task: task.name,
++      agent: agentName,
++      session,
++      ctxSat,
++    }, 'forceSend=true, bypassing busy-state check (CTX_SAT check performed separately)')
+   }
+ 
+   try {
+
+=== FILE MTIME ===
+  File: src/web/schedule-runner.ts
+  size: 26591     	Blocks: 56         IO Block: 4096   regular file
+Device: 8,48	Inode: 161435      Links: 1
+Access: (0644/-rw-r--r--)  Uid: ( 1000/   iszzu)   Gid: ( 1000/   iszzu)
+Access: 2026-07-02 07:45:02.803939059 +0200
+Modify: 2026-07-02 07:44:31.872123738 +0200
+Change: 2026-07-02 07:44:31.916123483 +0200
+ Birth: 2026-07-02 07:44:31.872123738 +0200
+
+=== HEALTH FILE ===
+{
+  "health-watchdog": {
+    "fails": 0,
+    "alerted": false,
+    "lastStatus": "ok",
+    "lastRun": 1782971429937
+  },
+  "build-done-monitor": {
+    "fails": 0,
+    "alerted": false,
+    "lastStatus": "ok",
+    "lastRun": 1782971129955
+  },
+  "agent-oauth-sweep": {
+    "fails": 0,
+    "alerted": false,
+    "lastStatus": "ok",
+    "lastRun": 1782965248643
+  },
+  "context-watchdog": {
+    "fails": 1,
+    "alerted": true,
+    "lastStatus": "fail",
+    "lastRun": 1782971429937
+  },
+  "done-evidence-gate": {
+    "fails": 0,
+    "alerted": false,
+    "lastStatus": "ok",
+    "lastRun": 1782970829929
+  }
+}
+=== RECENT DASHBOARD LOGS ===
+Jun 29 07:21:10 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: This usually indicates unclean termination of a previous run, or service implementation deficiencies.
+Jun 29 07:21:10 LAPTOP-9GEEIM7F systemd[332]: Started marveen-dashboard.service - Marveen Dashboard.
+Jun 29 07:23:37 LAPTOP-9GEEIM7F systemd[332]: Stopping marveen-dashboard.service - Marveen Dashboard...
+Jun 29 07:23:37 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Unit process 564 (tmux: server) remains running after unit stopped.
+Jun 29 07:23:37 LAPTOP-9GEEIM7F systemd[332]: Stopped marveen-dashboard.service - Marveen Dashboard.
+Jun 29 07:23:37 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Consumed 20.924s CPU time over 2min 32.823s wall clock time, 573M memory peak, 18.6M memory swap peak.
+Jun 29 07:23:37 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Found left-over process 564 (tmux: server) in control group while starting unit. Ignoring.
+Jun 29 07:23:37 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: This usually indicates unclean termination of a previous run, or service implementation deficiencies.
+Jun 29 07:23:37 LAPTOP-9GEEIM7F systemd[332]: Started marveen-dashboard.service - Marveen Dashboard.
+Jun 29 07:28:39 LAPTOP-9GEEIM7F systemd[332]: Stopping marveen-dashboard.service - Marveen Dashboard...
+Jun 29 07:28:52 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Unit process 564 (tmux: server) remains running after unit stopped.
+Jun 29 07:28:52 LAPTOP-9GEEIM7F systemd[332]: Stopped marveen-dashboard.service - Marveen Dashboard.
+Jun 29 07:28:52 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Consumed 31.688s CPU time over 5min 14.194s wall clock time, 573M memory peak, 18.6M memory swap peak.
+Jun 29 07:28:52 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Found left-over process 564 (tmux: server) in control group while starting unit. Ignoring.
+Jun 29 07:28:52 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: This usually indicates unclean termination of a previous run, or service implementation deficiencies.
+Jun 29 07:28:52 LAPTOP-9GEEIM7F systemd[332]: Started marveen-dashboard.service - Marveen Dashboard.
+Jun 29 07:31:33 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Main process exited, code=exited, status=1/FAILURE
+Jun 29 07:31:33 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Failed with result 'exit-code'.
+Jun 29 07:31:33 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Unit process 564 (tmux: server) remains running after unit stopped.
+Jun 29 07:31:33 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Consumed 15.089s CPU time over 2min 41.064s wall clock time, 573M memory peak, 18.6M memory swap peak.
+Jun 29 07:31:38 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Scheduled restart job, restart counter is at 1.
+Jun 29 07:31:38 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Found left-over process 564 (tmux: server) in control group while starting unit. Ignoring.
+Jun 29 07:31:38 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: This usually indicates unclean termination of a previous run, or service implementation deficiencies.
+Jun 29 07:31:38 LAPTOP-9GEEIM7F systemd[332]: Started marveen-dashboard.service - Marveen Dashboard.
+Jun 29 07:40:43 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Main process exited, code=exited, status=1/FAILURE
+Jun 29 07:40:43 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Failed with result 'exit-code'.
+Jun 29 07:40:43 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Unit process 564 (tmux: server) remains running after unit stopped.
+Jun 29 07:40:43 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Consumed 1min 2.903s CPU time over 9min 10.378s wall clock time, 573M memory peak, 18.6M memory swap peak.
+Jun 29 07:40:48 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Scheduled restart job, restart counter is at 2.
+Jun 29 07:40:48 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Found left-over process 564 (tmux: server) in control group while starting unit. Ignoring.
+Jun 29 07:40:48 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: This usually indicates unclean termination of a previous run, or service implementation deficiencies.
+Jun 29 07:40:48 LAPTOP-9GEEIM7F systemd[332]: Started marveen-dashboard.service - Marveen Dashboard.
+Jun 29 07:51:05 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Main process exited, code=exited, status=1/FAILURE
+Jun 29 07:51:05 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Failed with result 'exit-code'.
+Jun 29 07:51:05 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Unit process 564 (tmux: server) remains running after unit stopped.
+Jun 29 07:51:05 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Consumed 1min 2.628s CPU time over 10min 22.310s wall clock time, 573M memory peak, 18.6M memory swap peak.
+Jun 29 07:51:11 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Scheduled restart job, restart counter is at 3.
+Jun 29 07:51:11 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Found left-over process 564 (tmux: server) in control group while starting unit. Ignoring.
+Jun 29 07:51:11 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: This usually indicates unclean termination of a previous run, or service implementation deficiencies.
+Jun 29 07:51:11 LAPTOP-9GEEIM7F systemd[332]: Started marveen-dashboard.service - Marveen Dashboard.
+Jun 29 21:29:19 LAPTOP-9GEEIM7F systemd[332]: Stopping marveen-dashboard.service - Marveen Dashboard...
+Jun 29 21:29:33 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Unit process 564 (tmux: server) remains running after unit stopped.
+Jun 29 21:29:33 LAPTOP-9GEEIM7F systemd[332]: Stopped marveen-dashboard.service - Marveen Dashboard.
+Jun 29 21:29:33 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Consumed 40min 14.952s CPU time over 13h 38min 27.386s wall clock time, 573M memory peak, 18.6M memory swap peak.
+Jun 29 21:29:33 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Found left-over process 564 (tmux: server) in control group while starting unit. Ignoring.
+Jun 29 21:29:33 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: This usually indicates unclean termination of a previous run, or service implementation deficiencies.
+Jun 29 21:29:33 LAPTOP-9GEEIM7F systemd[332]: Started marveen-dashboard.service - Marveen Dashboard.
+Jun 29 21:32:18 LAPTOP-9GEEIM7F systemd[332]: Stopping marveen-dashboard.service - Marveen Dashboard...
+Jun 29 21:32:18 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Unit process 564 (tmux: server) remains running after unit stopped.
+Jun 29 21:32:18 LAPTOP-9GEEIM7F systemd[332]: Stopped marveen-dashboard.service - Marveen Dashboard.
+Jun 29 21:32:18 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Consumed 18.389s CPU time over 2min 45.626s wall clock time, 573M memory peak, 18.6M memory swap peak.
+Jun 29 21:32:18 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Found left-over process 564 (tmux: server) in control group while starting unit. Ignoring.
+Jun 29 21:32:18 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: This usually indicates unclean termination of a previous run, or service implementation deficiencies.
+Jun 29 21:32:18 LAPTOP-9GEEIM7F systemd[332]: Started marveen-dashboard.service - Marveen Dashboard.
+Jun 29 21:34:41 LAPTOP-9GEEIM7F systemd[332]: Stopping marveen-dashboard.service - Marveen Dashboard...
+Jun 29 21:34:41 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Unit process 564 (tmux: server) remains running after unit stopped.
+Jun 29 21:34:41 LAPTOP-9GEEIM7F systemd[332]: Stopped marveen-dashboard.service - Marveen Dashboard.
+Jun 29 21:34:41 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Consumed 15.073s CPU time over 2min 22.898s wall clock time, 573M memory peak, 18.6M memory swap peak.
+Jun 29 21:34:41 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Found left-over process 564 (tmux: server) in control group while starting unit. Ignoring.
+Jun 29 21:34:41 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: This usually indicates unclean termination of a previous run, or service implementation deficiencies.
+Jun 29 21:34:41 LAPTOP-9GEEIM7F systemd[332]: Started marveen-dashboard.service - Marveen Dashboard.
+Jun 29 21:37:40 LAPTOP-9GEEIM7F systemd[332]: Stopping marveen-dashboard.service - Marveen Dashboard...
+Jun 29 21:37:44 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Unit process 564 (tmux: server) remains running after unit stopped.
+Jun 29 21:37:44 LAPTOP-9GEEIM7F systemd[332]: Stopped marveen-dashboard.service - Marveen Dashboard.
+Jun 29 21:37:44 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Consumed 15.871s CPU time over 3min 2.679s wall clock time, 573M memory peak, 18.6M memory swap peak.
+Jun 29 21:37:44 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Found left-over process 564 (tmux: server) in control group while starting unit. Ignoring.
+Jun 29 21:37:44 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: This usually indicates unclean termination of a previous run, or service implementation deficiencies.
+Jun 29 21:37:44 LAPTOP-9GEEIM7F systemd[332]: Started marveen-dashboard.service - Marveen Dashboard.
+Jun 29 21:42:35 LAPTOP-9GEEIM7F systemd[332]: Stopping marveen-dashboard.service - Marveen Dashboard...
+Jun 29 21:42:40 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Unit process 564 (tmux: server) remains running after unit stopped.
+Jun 29 21:42:40 LAPTOP-9GEEIM7F systemd[332]: Stopped marveen-dashboard.service - Marveen Dashboard.
+Jun 29 21:42:40 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Consumed 30.451s CPU time over 4min 56.335s wall clock time, 573M memory peak, 18.6M memory swap peak.
+Jun 29 21:42:40 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Found left-over process 564 (tmux: server) in control group while starting unit. Ignoring.
+Jun 29 21:42:40 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: This usually indicates unclean termination of a previous run, or service implementation deficiencies.
+Jun 29 21:42:40 LAPTOP-9GEEIM7F systemd[332]: Started marveen-dashboard.service - Marveen Dashboard.
+Jun 29 22:28:52 LAPTOP-9GEEIM7F systemd[332]: Stopping marveen-dashboard.service - Marveen Dashboard...
+Jun 29 22:28:53 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Unit process 564 (tmux: server) remains running after unit stopped.
+Jun 29 22:28:53 LAPTOP-9GEEIM7F systemd[332]: Stopped marveen-dashboard.service - Marveen Dashboard.
+Jun 29 22:28:53 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Consumed 5min 8.218s CPU time over 46min 13.020s wall clock time, 573M memory peak, 18.6M memory swap peak.
+Jun 29 22:28:53 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Found left-over process 564 (tmux: server) in control group while starting unit. Ignoring.
+Jun 29 22:28:53 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: This usually indicates unclean termination of a previous run, or service implementation deficiencies.
+Jun 29 22:28:53 LAPTOP-9GEEIM7F systemd[332]: Started marveen-dashboard.service - Marveen Dashboard.
+Jun 29 22:30:50 LAPTOP-9GEEIM7F systemd[332]: Stopping marveen-dashboard.service - Marveen Dashboard...
+Jun 29 22:30:51 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Unit process 564 (tmux: server) remains running after unit stopped.
+Jun 29 22:30:51 LAPTOP-9GEEIM7F systemd[332]: Stopped marveen-dashboard.service - Marveen Dashboard.
+Jun 29 22:30:51 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Consumed 9.797s CPU time over 1min 57.401s wall clock time, 573M memory peak, 18.6M memory swap peak.
+Jun 29 22:30:51 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Found left-over process 564 (tmux: server) in control group while starting unit. Ignoring.
+Jun 29 22:30:51 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: This usually indicates unclean termination of a previous run, or service implementation deficiencies.
+Jun 29 22:30:51 LAPTOP-9GEEIM7F systemd[332]: Started marveen-dashboard.service - Marveen Dashboard.
+Jun 29 22:33:58 LAPTOP-9GEEIM7F systemd[332]: Stopping marveen-dashboard.service - Marveen Dashboard...
+Jun 29 22:34:04 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Unit process 564 (tmux: server) remains running after unit stopped.
+Jun 29 22:34:04 LAPTOP-9GEEIM7F systemd[332]: Stopped marveen-dashboard.service - Marveen Dashboard.
+Jun 29 22:34:04 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Consumed 13.386s CPU time over 3min 13.322s wall clock time, 573M memory peak, 18.6M memory swap peak.
+Jun 29 22:34:04 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Found left-over process 564 (tmux: server) in control group while starting unit. Ignoring.
+Jun 29 22:34:04 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: This usually indicates unclean termination of a previous run, or service implementation deficiencies.
+Jun 29 22:34:04 LAPTOP-9GEEIM7F systemd[332]: Started marveen-dashboard.service - Marveen Dashboard.
+Jun 30 00:02:14 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Unit process 564 (tmux: server) remains running after unit stopped.
+Jun 30 00:02:14 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Consumed 12min 39.307s CPU time over 1h 28min 9.834s wall clock time, 573M memory peak, 18.6M memory swap peak.
+Jun 30 00:08:42 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Found left-over process 564 (tmux: server) in control group while starting unit. Ignoring.
+Jun 30 00:08:42 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: This usually indicates unclean termination of a previous run, or service implementation deficiencies.
+Jun 30 00:08:42 LAPTOP-9GEEIM7F systemd[332]: Started marveen-dashboard.service - Marveen Dashboard.
+Jun 30 01:52:37 LAPTOP-9GEEIM7F systemd[332]: Stopping marveen-dashboard.service - Marveen Dashboard...
+Jun 30 01:52:37 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Unit process 564 (tmux: server) remains running after unit stopped.
+Jun 30 01:52:37 LAPTOP-9GEEIM7F systemd[332]: Stopped marveen-dashboard.service - Marveen Dashboard.
+Jun 30 01:52:37 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Consumed 9min 35.083s CPU time over 1h 43min 55.750s wall clock time, 573M memory peak, 18.6M memory swap peak.
+Jun 30 01:59:59 LAPTOP-9GEEIM7F systemd[332]: Started marveen-dashboard.service - Marveen Dashboard.
+Jul 01 10:37:56 LAPTOP-9GEEIM7F systemd[332]: Stopping marveen-dashboard.service - Marveen Dashboard...
+Jul 01 10:37:57 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Unit process 2309021 (tmux: server) remains running after unit stopped.
+Jul 01 10:37:57 LAPTOP-9GEEIM7F systemd[332]: Stopped marveen-dashboard.service - Marveen Dashboard.
+Jul 01 10:37:57 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Consumed 4h 4min 42.704s CPU time over 1d 8h 37min 57.386s wall clock time, 292.8M memory peak, 2.7M memory swap peak.
+Jul 01 10:37:57 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Found left-over process 2309021 (tmux: server) in control group while starting unit. Ignoring.
+Jul 01 10:37:57 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: This usually indicates unclean termination of a previous run, or service implementation deficiencies.
+Jul 01 10:37:57 LAPTOP-9GEEIM7F systemd[332]: Started marveen-dashboard.service - Marveen Dashboard.
+Jul 02 07:54:42 LAPTOP-9GEEIM7F systemd[332]: Stopping marveen-dashboard.service - Marveen Dashboard...
+Jul 02 07:54:43 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Unit process 2309021 (tmux: server) remains running after unit stopped.
+Jul 02 07:54:43 LAPTOP-9GEEIM7F systemd[332]: Stopped marveen-dashboard.service - Marveen Dashboard.
+Jul 02 07:54:43 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Consumed 3h 43min 23.276s CPU time over 21h 16min 45.831s wall clock time, 292.8M memory peak, 4.9M memory swap peak.
+Jul 02 07:54:43 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: Found left-over process 2309021 (tmux: server) in control group while starting unit. Ignoring.
+Jul 02 07:54:43 LAPTOP-9GEEIM7F systemd[332]: marveen-dashboard.service: This usually indicates unclean termination of a previous run, or service implementation deficiencies.
+Jul 02 07:54:43 LAPTOP-9GEEIM7F systemd[332]: Started marveen-dashboard.service - Marveen Dashboard.

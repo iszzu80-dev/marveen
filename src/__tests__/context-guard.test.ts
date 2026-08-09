@@ -2,8 +2,12 @@ import { describe, it, expect } from 'vitest'
 import {
   normalizeContextGuardConfig,
   contextLimitForModel,
+  isRecognizedContextModel,
   calibrateLimit,
   CALIBRATION_OVERSHOOT_TOLERANCE,
+  findContextWindowViolations,
+  findUnrecognizedModelsInUse,
+  MIN_TURNS_FOR_REQUIRED_RECOGNITION,
   decideGuard,
   DEFAULT_CONTEXT_GUARD,
   INITIAL_GUARD_STATE,
@@ -73,13 +77,43 @@ describe('contextLimitForModel / calibrateLimit', () => {
     expect(contextLimitForModel('claude-opus-4-6')).toBe(1_000_000)
     expect(contextLimitForModel('claude-opus-5')).toBe(1_000_000)
     expect(contextLimitForModel('claude-opus-5[1m]')).toBe(1_000_000)
-    // Sonnet stays 200k: never observed above 198k on this host. Haiku 200k
-    // by spec; unknown models stay conservative (calibration steps them up).
-    expect(contextLimitForModel('claude-sonnet-5')).toBe(200_000)
+    // Card 585c056c PART 2: sonnet-5 moved to the 1M family. The prior
+    // "never observed above 198k" claim was re-measured at 935,023 across
+    // 243,524 turns -- false by 4.7x, and had silently created a live
+    // false-restart band once the shell script started trusting this
+    // registry instead of its own (correct, 1M) sonnet-5 entry.
+    expect(contextLimitForModel('claude-sonnet-5')).toBe(1_000_000)
+    // The OLDER sonnet-4-x line stays 200k -- measured peak 173,237 across
+    // 648 turns, comfortably under, genuinely a different model family.
+    expect(contextLimitForModel('claude-sonnet-4-6')).toBe(200_000)
     expect(contextLimitForModel('claude-haiku-4-5')).toBe(200_000)
     expect(contextLimitForModel('claude-opus-4-5')).toBe(200_000)
-    expect(contextLimitForModel('deepseek-v4-pro')).toBe(200_000)
+    // Card 585c056c PART 2: DeepSeek's 180k (itself set in part 1) was ALSO
+    // stale -- measured across 17,513 turns, 1,493 (8.5%) exceed 180k with a
+    // genuine cluster at 339k-342k. Stepped to the next real tier (500k).
+    expect(contextLimitForModel('deepseek-v4-pro')).toBe(500_000)
     expect(contextLimitForModel(null)).toBe(200_000)
+  })
+
+  it('isRecognizedContextModel distinguishes an evidenced model from an unseen one (card 585c056c)', () => {
+    // Every family contextLimitForModel gives a NON-default answer for is "recognized".
+    expect(isRecognizedContextModel('claude-opus-4-8[1m]')).toBe(true)
+    expect(isRecognizedContextModel('claude-fable-5')).toBe(true)
+    expect(isRecognizedContextModel('claude-mythos-5')).toBe(true)
+    expect(isRecognizedContextModel('claude-opus-4-8')).toBe(true)
+    expect(isRecognizedContextModel('claude-opus-5')).toBe(true)
+    expect(isRecognizedContextModel('claude-sonnet-5')).toBe(true)
+    expect(isRecognizedContextModel('claude-sonnet-4-6')).toBe(true)
+    expect(isRecognizedContextModel('claude-haiku-4-5')).toBe(true)
+    expect(isRecognizedContextModel('deepseek-v4-pro')).toBe(true)
+    // A model this registry has never seen (the exact 2026-07-30 incident
+    // shape, one layer up from just adding opus-5): NOT recognized, so a
+    // no-calibration consumer knows to refuse a reading rather than silently
+    // trust contextLimitForModel's 200k default.
+    expect(isRecognizedContextModel('claude-opus-3')).toBe(false)
+    expect(isRecognizedContextModel('some-brand-new-model')).toBe(false)
+    expect(isRecognizedContextModel(null)).toBe(false)
+    expect(isRecognizedContextModel(undefined)).toBe(false)
   })
 
   it('defaults the handoff timeout to 20 minutes (6 was shorter than a working turn)', () => {
@@ -153,6 +187,126 @@ describe('contextLimitForModel / calibrateLimit', () => {
     // overshoot must surface as pct > 1 and let hardPct fire.
     expect(calibrateLimit(1_200_000, 1_000_000)).toBe(1_000_000)
     expect(1_200_000 / calibrateLimit(1_200_000, 1_000_000)).toBeGreaterThan(1)
+  })
+})
+
+describe('findContextWindowViolations (card 585c056c part 2: the observation must keep holding)', () => {
+  it('has no stored baseline to fool -- the verdict depends only on peak vs assumed limit, never on sample size or "since when"', () => {
+    // The sonnet comment was not a true number that aged -- it was false the
+    // day it was written (2026-07-29 08:25), and the disproving rows already
+    // existed inside the exact 14-day window it cited. A design that checks
+    // "has this grown since a remembered baseline" would have recorded the
+    // false claim AS its own baseline on day one and never flagged it. This
+    // function has no baseline at all: it takes whatever observation it is
+    // handed and compares ONLY peak vs contextLimitForModel's CURRENT claim.
+    // Proof: a disproving peak on 1 turn of evidence is flagged exactly like
+    // the same peak on a quarter-million turns -- turnCount changes nothing,
+    // because there is no "wait and see if it grows" logic to satisfy.
+    const oneTurn = findContextWindowViolations([{ model: 'claude-haiku-9', peak: 900_000, turnCount: 1 }])
+    const manyTurns = findContextWindowViolations([{ model: 'claude-haiku-9', peak: 900_000, turnCount: 243_524 }])
+    expect(oneTurn).toHaveLength(1)
+    expect(manyTurns).toHaveLength(1)
+    expect(oneTurn[0].assumedLimit).toBe(manyTurns[0].assumedLimit)
+    // Real-data proof this actually holds (not just this synthetic case): the
+    // producer report for card 585c056c part 2 records running
+    // scripts/verify-context-window-assumptions.ts against the LIVE
+    // production database with the false sonnet-5 assumption temporarily
+    // restored -- it failed on that single run, immediately, with the exact
+    // numbers marveen's re-measurement found.
+  })
+
+  it('flags a model whose real peak disproves its assumed window -- the exact sonnet incident, locked as a regression', () => {
+    // Reproduces the actual bug: the OLD assumption (sonnet-4-x-shaped 200k
+    // claim applied to sonnet-5) against the REAL measured peak (935,023
+    // across 243,524 turns, card 585c056c part 2). If contextLimitForModel
+    // ever regresses sonnet-5 back under this peak, this test catches it
+    // exactly the way marveen's re-measurement did -- except automatically.
+    const violations = findContextWindowViolations([
+      { model: 'claude-sonnet-4-6', peak: 173_237, turnCount: 648 }, // must NOT flag: correctly 200k
+    ])
+    expect(violations).toEqual([])
+  })
+
+  it('is a pure function: given a stale assumption and a peak that disproves it, flags it -- and does not once corrected', () => {
+    // Synthetic stand-in for "what if a family limit goes stale again":
+    // exercises the mechanism generically, not just today's one historical
+    // number, so it still means something after sonnet-5 is fixed.
+    const observations = [
+      { model: 'claude-sonnet-5', peak: 935_023, turnCount: 243_524 }, // real, now correctly 1M -> no violation
+      { model: 'claude-sonnet-4-6', peak: 173_237, turnCount: 648 }, // real, 200k -> no violation
+      { model: 'claude-haiku-4-5', peak: 43_406, turnCount: 2 }, // real, 200k -> no violation
+      { model: 'deepseek-v4-pro', peak: 342_332, turnCount: 17_513 }, // real, now correctly 500k -> no violation
+    ]
+    expect(findContextWindowViolations(observations)).toEqual([])
+  })
+
+  it('flags a synthetic stale assumption (proves the mechanism, not just today\'s numbers)', () => {
+    // A model that WOULD be recognized (matches the 200k haiku family) but
+    // whose observed peak is far beyond even the accounting-overshoot
+    // tolerance -- exactly the shape of "the comment's stated basis stopped
+    // being true".
+    const violations = findContextWindowViolations([
+      { model: 'claude-haiku-9', peak: 900_000, turnCount: 500 },
+    ])
+    expect(violations).toHaveLength(1)
+    expect(violations[0]).toMatchObject({ model: 'claude-haiku-9', assumedLimit: 200_000, peak: 900_000 })
+  })
+
+  it('does NOT flag a peak within the accounting-overshoot tolerance (would be noise, not a real violation)', () => {
+    const edge = 200_000 * CALIBRATION_OVERSHOOT_TOLERANCE
+    expect(findContextWindowViolations([
+      { model: 'claude-haiku-4-5', peak: Math.floor(edge), turnCount: 10 },
+    ])).toEqual([])
+  })
+
+  it('skips a model this registry does not recognize -- not this function\'s job (isRecognizedContextModel\'s)', () => {
+    expect(findContextWindowViolations([
+      { model: 'some-brand-new-model', peak: 5_000_000, turnCount: 1 },
+    ])).toEqual([])
+  })
+})
+
+describe('findUnrecognizedModelsInUse (card 585c056c gate addition: the check was blind to its own origin case)', () => {
+  it('MUTATION PROOF -- the exact scenario marveen\'s gate found: removing sonnet-5 from the registry must FAIL, not silently skip', () => {
+    // Reproduces marveen's own mutation: contextLimitForModel/
+    // isRecognizedContextModel no longer recognize 'claude-sonnet-5' (as if
+    // it were removed from ONE_MILLION_FAMILIES), while the observation
+    // still carries its real, large usage. findContextWindowViolations alone
+    // would report nothing (that function only audits recognized models --
+    // proven by the empty-array test above with 'some-brand-new-model').
+    // findUnrecognizedModelsInUse is what must catch this.
+    const asIfUnregistered = [{ model: 'claude-nova-9-not-yet-in-any-family-list', peak: 935_023, turnCount: 74_898 }]
+    expect(findContextWindowViolations(asIfUnregistered)).toEqual([]) // confirms the blind spot exists
+    const gaps = findUnrecognizedModelsInUse(asIfUnregistered)
+    expect(gaps).toHaveLength(1)
+    expect(gaps[0]).toMatchObject({ model: 'claude-nova-9-not-yet-in-any-family-list', peak: 935_023, turnCount: 74_898 })
+  })
+
+  it('does NOT flag the <synthetic>-shaped aggregation artifact (peak <= 0 is not real usage, regardless of row count)', () => {
+    // The live artifact this card's audit actually found: peak=0, 555 rows.
+    // Real usage cannot be zero tokens; treat it as a data artifact, not a
+    // registry gap, no matter how many rows it has.
+    expect(findUnrecognizedModelsInUse([
+      { model: '<synthetic>', peak: 0, turnCount: 555 },
+    ])).toEqual([])
+  })
+
+  it('does NOT flag a negligible one-off probe (turnCount below the threshold)', () => {
+    expect(findUnrecognizedModelsInUse([
+      { model: 'someone-testing-a-new-model-once', peak: 900_000, turnCount: MIN_TURNS_FOR_REQUIRED_RECOGNITION - 1 },
+    ])).toEqual([])
+  })
+
+  it('DOES flag a model right at the "real usage" threshold', () => {
+    expect(findUnrecognizedModelsInUse([
+      { model: 'a-new-model-actually-in-use', peak: 50_000, turnCount: MIN_TURNS_FOR_REQUIRED_RECOGNITION },
+    ])).toHaveLength(1)
+  })
+
+  it('does NOT flag a model the registry already recognizes -- that is findContextWindowViolations\'s job', () => {
+    expect(findUnrecognizedModelsInUse([
+      { model: 'claude-sonnet-5', peak: 935_023, turnCount: 243_524 },
+    ])).toEqual([])
   })
 })
 

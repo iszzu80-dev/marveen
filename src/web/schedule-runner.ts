@@ -21,7 +21,10 @@ import {
   markPendingTaskRetryAlert,
   clearPendingTaskRetryAlert,
   markScheduledTaskKanbanWaiting,
+  getDb,
 } from '../db.js'
+import { createDispatchSafe } from '../costops/dispatch.js'
+import { resolveDispatchIdentitySafe } from '../costops/dispatch-identity.js'
 import { toPendingRetryView, classifyTelegramSendError, type PendingRetryView } from '../pending-retries.js'
 import {
   SCHEDULED_TASK_PREAMBLE,
@@ -34,6 +37,7 @@ import {
   type ScheduledTask,
 } from './scheduled-tasks-io.js'
 import { listAgentNames, readFileOr, readAgentRemoteHost, agentDir } from './agent-config.js'
+import { resolveCurrentSessionId } from './transcript-sources.js'
 import { channelStateDir } from '../channel-provider.js'
 import {
   agentSessionName,
@@ -664,12 +668,27 @@ async function attemptFireTask(
       SCHEDULED_TASK_PREAMBLE + '\n' +
       prefix.trimEnd() + '\n\n' +
       wrapScheduledTask(`scheduled-task:${task.name}`, taskBody)
+    // P2-A: mint a scheduler-source dispatch_id for this task and thread it to
+    // the funnel. The SAME id is reused on any swallowed-Enter reinjection below
+    // (it is the same work-package, not a new one). Best-effort: never blocks.
+    // session_id resolves from the agent's newest LOCAL transcript so the window
+    // correlation can attribute this run's token rows to this dispatch. Two
+    // cases stay NULL rather than guess: a REMOTE agent (transcripts live on the
+    // other host) and a task with a targetSession override (an arbitrary tmux
+    // session has no derivable transcript dir).
+    // P2-C: stamp the identity columns for this run. The reinjection path below
+    // reuses the SAME dispatch row, so it needs no second stamp.
+    const dispatchId = createDispatchSafe(getDb(), {
+      source: 'scheduler', agent: agentName, taskType: task.type,
+      sessionId: (host || task.targetSession) ? null : resolveCurrentSessionId(agentName),
+      ...resolveDispatchIdentitySafe(agentName),
+    })
     // forceSend skips the busy-state check above; it must also skip the
     // pre-flight wait-until-idle gate inside sendPromptToSession, otherwise a
     // task aimed at a long-busy session would block on the 12s idle wait every
     // tick -- defeating the very purpose of forceSend (inject regardless, let
     // Claude Code queue it). All non-forceSend tasks keep the gate ON.
-    await sendPromptToSession(session, fullPrompt, host, { waitForIdle: !task.forceSend })
+    await sendPromptToSession(session, fullPrompt, host, { waitForIdle: !task.forceSend, dispatchId })
     scheduleLastRun.set(task.name, now)
     persistScheduleLastRun()
     // A lateCatchUpMs value means this tick only matched because of the
@@ -759,9 +778,11 @@ async function attemptFireTask(
             // is off because the box is 'typing', not idle -- the pre-flight gate
             // would otherwise burn its whole budget and time out every attempt.
             // lockMode 'held': we are already inside this pane's lane; taking
-            // the lock again would deadlock the promise-chain mutex.
+            // the lock again would deadlock the promise-chain mutex. P2-A: reuse
+            // the SAME dispatchId -- a swallowed-Enter re-type is the same
+            // work-package, not a new dispatch.
             if (await clearStaleParkedInput(session, host)) {
-              await sendPromptToSession(session, fullPrompt, host, { waitForIdle: false, lockMode: 'held' })
+              await sendPromptToSession(session, fullPrompt, host, { waitForIdle: false, lockMode: 'held', dispatchId })
               logger.info({ task: task.name, session, attempt }, 'Scheduled prompt re-injected after swallowed Enter')
             } else {
               sendEnterToSession(session, host)

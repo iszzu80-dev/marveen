@@ -26,5 +26,6 @@ Minden lap két szemszögből mutatja be a funkciót:
 | [Dream-engine](dream-engine.md) | Éjszakai tudás-konszolidáció + reggeli prioritás-javaslatok |
 | [Proaktív hírszerző (intel registry)](intel-registry.md) | Óránkénti gyűjtő + napi brief közös SQLite tény-registry-vel, dedup + tény-életciklus |
 | [Háttér-feladatok](background-tasks.md) | Leválasztott, hosszú feladatok futtatása + értesítés |
+| [Testing](testing.md) | Két teszt-felület: `npm test` (vitest, TS) + `npm run test:scripts` (shell/Python contract-tesztek scripts/__tests__/-ben, futtató nélkül állt sokáig) |
 
 *A dokumentáció él; javításokat/bővítéseket szívesen fogadunk.*

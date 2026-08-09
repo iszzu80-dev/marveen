@@ -1,0 +1,114 @@
+/* Optimization dashboard -- page-scoped shell and shared view utilities.
+   Colors reuse the dashboard tokens from web/style.css so the existing
+   [data-theme="light"] / [data-theme="dark"] mechanism applies automatically. */
+
+#optimizationPage .opt-shell { display: flex; flex-direction: column; gap: 16px; }
+
+#optimizationPage .opt-status-header {
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  padding: 18px 20px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-card);
+}
+#optimizationPage .opt-status-header h1 { margin: 0; font-size: 28px; font-weight: 600; letter-spacing: -0.02em; }
+#optimizationPage .opt-page-subtitle { margin: 4px 0 0; color: var(--text-muted); font-size: 14px; }
+#optimizationPage .opt-status-line { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 0.85em; }
+#optimizationPage .opt-status-badge,
+#optimizationPage .opt-badge {
+  display: inline-flex; align-items: center; width: fit-content; white-space: nowrap;
+  border: 1px solid transparent; border-radius: 999px; padding: 3px 9px;
+  font-size: 0.72em; font-weight: 600; line-height: 1.35;
+}
+#optimizationPage .opt-status-ok { color: var(--success); background: var(--success-soft); border-color: var(--success); }
+#optimizationPage .opt-status-warning { color: var(--accent); background: var(--accent-soft); border-color: var(--accent); }
+#optimizationPage .opt-status-critical { color: var(--danger); background: var(--danger-soft); border-color: var(--danger); }
+#optimizationPage .opt-status-disabled { color: var(--text-muted); background: var(--bg-input); border-color: var(--border); }
+
+#optimizationPage .opt-tabs { display: flex; gap: 4px; overflow-x: auto; }
+#optimizationPage .opt-tab {
+  background: none; border: 1px solid var(--border); border-radius: 8px;
+  padding: 7px 14px; cursor: pointer; color: var(--text); font-size: 0.9em; white-space: nowrap;
+}
+#optimizationPage .opt-tab:hover { border-color: var(--accent); }
+#optimizationPage .opt-tab:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 2px; }
+#optimizationPage .opt-tab.active { background: var(--accent); border-color: var(--accent); color: var(--bg-card); }
+
+#optimizationPage .opt-body-row { display: flex; gap: 20px; align-items: flex-start; min-width: 0; }
+#optimizationPage .opt-view { flex: 1; min-width: 0; }
+
+#optimizationPage .opt-kpi-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px;
+}
+#optimizationPage .opt-kpi-card {
+  padding: 18px 20px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-card); min-width: 0;
+}
+/* The big metric font is a shared global (.overview-stat-value, 32px bold). A KPI
+   whose figure is unavailable puts a disabled-reason SENTENCE in that slot, which
+   in the giant font wraps to 4 lines and blows the card height out, colliding with
+   neighbours. Page-scoped only: render those muted+small (a caption, not a number),
+   and keep the numeric variant from ever overflowing its card. */
+#optimizationPage .overview-stat-value { overflow-wrap: anywhere; }
+#optimizationPage .overview-stat-value.is-muted {
+  font-size: 14px; font-weight: 500; line-height: 1.4; color: var(--text-muted);
+  letter-spacing: 0; margin-top: 2px;
+}
+
+#optimizationPage .opt-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+#optimizationPage .opt-table th {
+  padding: 8px 10px; border-bottom: 1px solid var(--border); color: var(--text-muted);
+  font-weight: 600; text-align: left; white-space: nowrap;
+}
+#optimizationPage .opt-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+#optimizationPage .opt-table tbody tr:hover { background: var(--bg-input); }
+
+#optimizationPage .opt-badge-measured,
+#optimizationPage .opt-badge-available,
+#optimizationPage .opt-badge-ok {
+  color: var(--success); background: var(--success-soft); border-color: var(--success);
+}
+#optimizationPage .opt-badge-estimated,
+#optimizationPage .opt-badge-limited {
+  color: var(--info); background: var(--info-soft); border-color: var(--info);
+}
+#optimizationPage .opt-badge-unknown {
+  color: var(--text-muted); background: var(--bg-input); border-color: var(--border);
+}
+#optimizationPage .opt-badge-degraded,
+#optimizationPage .opt-badge-warning {
+  color: var(--accent); background: var(--accent-soft); border-color: var(--accent);
+}
+#optimizationPage .opt-badge-blocked,
+#optimizationPage .opt-badge-critical {
+  color: var(--danger); background: var(--danger-soft); border-color: var(--danger);
+}
+#optimizationPage .opt-badge-available,
+#optimizationPage .opt-badge-degraded,
+#optimizationPage .opt-badge-limited,
+#optimizationPage .opt-badge-blocked { border-style: dashed; }
+#optimizationPage .opt-badge-ok,
+#optimizationPage .opt-badge-warning,
+#optimizationPage .opt-badge-critical { letter-spacing: 0.04em; text-transform: uppercase; }
+
+#optimizationPage .opt-empty-state p { margin: 0; color: var(--text-muted); }
+
+#optimizationPage .opt-drawer { width: 0; overflow: hidden; }
+#optimizationPage .opt-drawer.opt-drawer-open {
+  width: 340px; flex: none; padding-left: 20px; border-left: 1px solid var(--border);
+}
+#optimizationPage .opt-drawer-backdrop { display: none; }
+
+@media (max-width: 700px) {
+  #optimizationPage .opt-status-header { align-items: flex-start; }
+  #optimizationPage .opt-status-line { width: 100%; flex-wrap: wrap; }
+  #optimizationPage .opt-table { min-width: 640px; }
+  #optimizationPage .opt-view { overflow-x: auto; }
+  #optimizationPage .opt-drawer.opt-drawer-open {
+    width: auto; position: fixed; inset: auto 0 0; z-index: 51; max-height: 80vh;
+    overflow-y: auto; padding: 16px; border: 1px solid var(--border);
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0; background: var(--bg-card);
+    box-shadow: var(--shadow-lg);
+  }
+  #optimizationPage .opt-drawer-backdrop.opt-drawer-backdrop-open {
+    display: block; position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, 0.4);
+  }
+}

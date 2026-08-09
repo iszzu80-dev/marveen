@@ -142,6 +142,29 @@ function measurePct(name: string, cfgLimit: number | null): number | null {
   return tokens / limit
 }
 
+/**
+ * P2-B: the live saturation signals for one agent, taken from the SAME
+ * implementation the guard sweep uses -- measurePct (with its per-(agent,model)
+ * highwater calibration) and paneShowsContextSaturation on a fresh pane capture.
+ * Exported so the dispatch admission gate (web/dispatch-admission.ts) does not
+ * grow a second, drifting context measurement.
+ *
+ * Read-only and best-effort: a remote agent's transcripts are not local and a
+ * pane capture can fail, so both signals fall back to "unknown" (pct null,
+ * paneSaturated false) rather than to a value that would refuse a dispatch.
+ */
+export function readLiveSaturationSignals(name: string): { pct: number | null; paneSaturated: boolean } {
+  if (name !== MAIN_AGENT_ID && readAgentRemoteHost(name)) return { pct: null, paneSaturated: false }
+  let pct: number | null = null
+  try { pct = measurePct(name, readContextGuardConfig(name).limitTokens) } catch { pct = null }
+  let paneSaturated = false
+  try {
+    const pane = capturePane(sessionFor(name))
+    paneSaturated = pane !== null ? paneShowsContextSaturation(pane) : false
+  } catch { paneSaturated = false }
+  return { pct, paneSaturated }
+}
+
 function performRestart(name: string): void {
   if (name === MAIN_AGENT_ID) {
     // Platform-correct main-session restart. This was a hardcoded

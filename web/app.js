@@ -360,6 +360,9 @@ function switchPage(pageId) {
   openSidebarGroupForPage(pageId)
   // Kanban needs full-width layout (overrides main's max-width: 1200px)
   document.querySelector('main').classList.toggle('kanban-active', pageId === 'kanban')
+  // CostOps Command Center wide-workspace (UI-0 doc section 11.3); Costops.mount() itself
+  // re-adds the class (costops-shell.js), this only removes it when navigating away.
+  if (pageId !== 'costs-cc') document.querySelector('main').classList.remove('costs-cc-active')
   // Activity page runs a live poll; stop it whenever we navigate away.
   if (pageId !== 'activity') stopActivityPoll()
   if (pageId === 'activity') startActivityPoll()
@@ -389,6 +392,9 @@ function switchPage(pageId) {
   if (pageId === 'messages') loadMessagesPage()
   if (pageId === 'tokenUsage') loadTokenUsage()
   if (pageId === 'costs') loadCosts()
+  if (pageId === 'costs-cc') window.Costops.mount()
+  if (pageId === 'cos' && window.CosControl) window.CosControl.mount()  // LOCAL-FORK: cos seam (keep on rebase)
+  if (pageId === 'optimization') window.Optimization.mount()
   if (pageId === 'ideas') loadIdeasPage()
   if (pageId === 'archived') loadArchivedPage()
   if (pageId === 'naplo') loadNaplo()
@@ -431,9 +437,15 @@ const SIDEBAR_GROUPS_LS_KEY = 'marveen.sidebarGroups'
 // into their group containers per this map, so regrouping a page (say, moving
 // naplo under system) or relabeling a group is a one-line change right here.
 const SIDEBAR_GROUPS = [
-  { key: 'team',        labelKey: 'nav.group.team',        pages: ['agents', 'activity', 'messages', 'tasks', 'bgTasks'] },
+  // LOCAL-FORK entries in this map: 'team' (fork-only org-chart page) and
+  // 'costs-cc' (the CostOps Command Center, which this fork links INSTEAD of
+  // upstream's older 'costs' page -- see the marker in web/index.html and
+  // Istvan's 2026-07-19 ruling in commit 96b4d4b). A page missing from this map
+  // is never re-parented, so it silently drifts out of its group on the next
+  // upstream nav change; keep them listed here, not only in the HTML.
+  { key: 'team',        labelKey: 'nav.group.team',        pages: ['agents', 'activity', 'team', 'messages', 'tasks', 'bgTasks'] },
   { key: 'knowledge',   labelKey: 'nav.group.knowledge',   pages: ['memories', 'skills', 'research', 'ideas'] },
-  { key: 'stats',       labelKey: 'nav.group.stats',       pages: ['costs', 'tokenUsage'] },
+  { key: 'stats',       labelKey: 'nav.group.stats',       pages: ['costs-cc', 'tokenUsage', 'optimization'] },
   { key: 'system',      labelKey: 'nav.group.system',      pages: ['status', 'naplo', 'updates', 'settings', 'vault'] },
   { key: 'connections', labelKey: 'nav.group.connections', pages: ['connectors', 'federation', 'migrate'] },
 ]
@@ -513,6 +525,11 @@ const NAV_I18N = {
   docs: 'nav.docs', research: 'nav.research', status: 'nav.status',
   settings: 'nav.settings', vault: 'nav.vault', tokenUsage: 'nav.tokenUsage',
   ideas: 'nav.ideas', federation: 'nav.federation', updates: 'nav.updates', costs: 'nav.costs',
+  // LOCAL-FORK: the Command Center reuses the same nav label as upstream's
+  // 'costs' page. Without this entry renderNav() leaves the hardcoded Hungarian
+  // label in place and the sidebar stays untranslated in English.
+  'costs-cc': 'nav.costs',
+  optimization: 'nav.optimization',
 }
 
 function renderNav() {
@@ -671,6 +688,7 @@ if (document.readyState !== 'loading') {
   renderNav()
   renderStaticI18n()
 }
+if (window.Apg && typeof window.Apg.mount === 'function') window.Apg.mount()
 
 // ============================================================
 // === Activity (live agent status) ===
@@ -779,6 +797,7 @@ function renderActivity(entries) {
       '</div>'
     )
   }).join('')
+  document.dispatchEvent(new CustomEvent('marveen:activity-rendered'))
 }
 
 // Event delegation: clicking a running activity-card opens the terminal modal
@@ -1207,6 +1226,7 @@ function renderKanban() {
     swimlaneBoard.hidden = false
     renderSwimlaneBoard(grouped, embeddedSubtaskIds)
   }
+  document.dispatchEvent(new CustomEvent('marveen:kanban-rendered'))
 }
 
 const KANBAN_STATUS_DEFS = [
@@ -2233,6 +2253,16 @@ async function showCardDetail(card) {
 
   // Archive
   document.getElementById('cardArchiveBtn').onclick = async () => {
+    // APG enforcement gate (APG_BLOCK_UNACCEPTED_ARCHIVE): a cancelable
+    // CustomEvent lets apg.js block archiving without scraping DOM or
+    // importing APG-specific logic into the generic kanban flow.
+    const gateEvent = new CustomEvent('marveen:kanban-archive-attempt', {
+      cancelable: true,
+      detail: { cardId: card.id },
+    })
+    document.dispatchEvent(gateEvent)
+    if (gateEvent.defaultPrevented) return
+
     try {
       await fetch(`/api/kanban/${encodeURIComponent(card.id)}/archive`, { method: 'POST' })
       closeModal(cardDetailOverlay)
@@ -2355,6 +2385,7 @@ async function showCardDetail(card) {
     }
   }
 
+  document.dispatchEvent(new CustomEvent('marveen:kanban-card-opened', { detail: { cardId: card.id } }))
   openModal(cardDetailOverlay)
 }
 
@@ -11506,6 +11537,7 @@ async function loadOverview() {
         act.appendChild(item)
       }
     }
+    document.dispatchEvent(new CustomEvent('marveen:overview-rendered'))
   } catch (err) {
     document.getElementById('overviewActivity').innerHTML = '<div style="color:var(--text-muted);font-size:13px">' + t('overview.error', { msg: escapeHtml(String(err.message || err)) }) + '</div>'
   }
@@ -12888,6 +12920,7 @@ function _renderApprovalsTable() {
   tbody.querySelectorAll('.approvals-decide').forEach(btn => {
     btn.addEventListener('click', () => _resolveApproval(btn.dataset.id, btn.dataset.decision))
   })
+  document.dispatchEvent(new CustomEvent('marveen:approvals-rendered'))
 }
 
 function _approvalBadge(status) {
@@ -12969,7 +13002,7 @@ window.addEventListener('beforeunload', (e) => {
 // entry never requires a frontend change just to render a sane heading.
 function settingsModuleLabel(mod) {
   const key = `settings.module.${mod}`
-  const known = { kanban: true, system: true, heartbeat: true, audit: true, ideabox: true, channels: true, security: true, autonomy: true }
+  const known = { kanban: true, system: true, heartbeat: true, audit: true, ideabox: true, channels: true, security: true, autonomy: true, apg: true }
   return known[mod] ? t(key) : (mod.charAt(0).toUpperCase() + mod.slice(1))
 }
 
@@ -13419,8 +13452,19 @@ async function loadSettings() {
         group.appendChild(buildSettingRow(def))
       }
       panel.appendChild(group)
+
+      // APG scope-override widget container (spec 14.5). The table + add-form
+      // is rendered by apg.js, not the generic toggle renderer.
+      if (mod === 'apg') {
+        const scopeContainer = document.createElement('div')
+        scopeContainer.id = 'apgScopeOverrideWidget'
+        panel.appendChild(scopeContainer)
+      }
+
       tabPanels.appendChild(panel)
     }
+    // Dispatch after all panels are built so apg.js can populate its widget.
+    document.dispatchEvent(new CustomEvent('marveen:settings-rendered'))
 
     // Security tab (synthetic, like autonomy: exists even with zero registry
     // entries). Hosts the auth card -- browser login, password change, device
@@ -13543,7 +13587,9 @@ function buildSettingRow(def) {
 
   const desc = document.createElement('div')
   desc.className = 'settings-row-desc'
-  desc.textContent = t('settings.desc.' + def.key) || def.description
+  const descKey = 'settings.desc.' + def.key
+  const translated = t(descKey)
+  desc.textContent = translated !== descKey ? translated : def.description || descKey
   info.appendChild(desc)
 
   const meta = document.createElement('div')

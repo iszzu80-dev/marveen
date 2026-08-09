@@ -1,0 +1,35 @@
+=== DATE ===
+Thu Jul  2 07:34:21 CEST 2026
+
+=== AHEAD / BEHIND ===
+1	0
+
+=== LOG ===
+ca63681 (HEAD -> main) dispatch: block context-saturated agents before prompt injection
+f35dd40 (tag: v1.18.5, origin/main) chore(release): v1.18.5 -- main-agent inbox PULL model (#506)
+fd8a3f0 feat(delivery): main-agent inbox PULL model (drain-inbox hook + endpoint) (#506)
+5584cb9 (tag: v1.18.4) chore(release): v1.18.4 -- parked-input dim-text guard (#503)
+855e77d fix(parked-input): dim-text guard -- ghost/phantom lines are not real parked input (#503)
+56ced98 fix(channels): disable Claude Code prompt-suggestions for agent sessions
+f5793e8 (tag: v1.18.3) fix(parked-input): mute main-agent escalation -- false-positive on dim ghost frames (v1.18.3 hotfix)
+391afb1 (tag: v1.18.2) chore(release): v1.18.2 -- parked-input main-agent escalation (#500)
+
+=== STATUS ===
+ M package-lock.json
+?? .env.backup-20260630-1947
+?? .env.backup-max-20260630-215248
+?? audits/
+?? scripts/inter-agent-evidence-gate.py
+?? scripts/inter-agent-evidence-gate.sh
+?? scripts/stale-instructions-detect.sh
+?? scripts/stale-instructions-guard.sh
+?? shared-dev/
+
+=== HEAD COMMIT ===
+ca63681 dispatch: block context-saturated agents before prompt injection
+ scripts/dispatch-guard.sh        | 147 +++++++++++++++++++++++++++++++++++++++
+ src/__tests__/pane-state.test.ts |  58 +++++++++++++++
+ src/pane-state.ts                |  25 +++++++
+ src/web/agent-process.ts         |  59 +++++++++++++++-
+ src/web/schedule-runner.ts       |  17 ++++-
+ 5 files changed, 303 insertions(+), 3 deletions(-)

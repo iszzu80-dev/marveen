@@ -68,6 +68,13 @@ export function isFederationWireEndpoint(path: string, method: string): boolean 
 export function requiresAuth(path: string, method: string): boolean {
   if (path === '/api/auth/status' && method === 'GET') return false
   if (path === '/api/auth/login' && method === 'POST') return false
+  // LOCAL-FORK: keep on merge. GET /api/settings is public on this fork (commit
+  // 75d88f7, card cc054ef4): the dashboard fetches it before/without auth, and
+  // gating it produced a 401 in the console on every page load. Secrets are
+  // already filtered out inside the handler, so the response carries nothing
+  // sensitive. This exemption predates upstream's auth-gate extraction and was
+  // an inline `isPublicApi` entry in web.ts before the gate moved here.
+  if (path === '/api/settings' && method === 'GET') return false
   if (method === 'GET' && (path === '/api/marveen/avatar' || /^\/api\/agents\/[^/]+\/avatar$/.test(path))) return false
   if (path === '/.well-known/fleetq' && method === 'GET') return true
   return path.startsWith('/api/')

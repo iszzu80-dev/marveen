@@ -12,8 +12,11 @@ import {
   createAgentMessage,
   stampMessageTrace,
   upsertOtelSpan,
+  getDb,
   type AgentMessage,
 } from '../db.js'
+import { createDispatchSafe, recordOutcomeSafe, type OutcomeKind } from '../costops/dispatch.js'
+import { resolveDispatchIdentitySafe } from '../costops/dispatch-identity.js'
 import { isQualifiedId } from './federation/address.js'
 import { sendFederatedMessage } from './federation/bridge.js'
 import { getFederationConfig, abandonWindowMsForPeer } from './federation/config.js'
@@ -25,9 +28,11 @@ import {
   sendPromptToSession,
   sessionExistsOnHost,
 } from './agent-process.js'
+import { resolveCurrentSessionId } from './transcript-sources.js'
 import { setLastInboundModality } from './voice-modality.js'
 import { classifyAgentMessage, wrapAgentMessageForDelivery } from './agent-message-wrap.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
+import { checkDispatchGate, checkGateLiveness } from './data-sensitivity-gate-runner.js'
 import { maybeWakeSubAgentsForTelegram } from './telegram-inbox-wake.js'
 
 // A message that cannot be delivered within this window (target session never
@@ -54,6 +59,13 @@ const routerLoggedMisses: Set<number> = new Set()
 // the orchestrator, so a handoff failure is never silent.
 const routerInjectFailures: Map<number, number> = new Map()
 const MAX_INJECT_FAILURES = 3
+
+// P2-A: msg.id -> the dispatch_id of that message's PREVIOUS (failed) delivery
+// attempt, so a `retry` outcome can carry retry_of instead of leaving the chain
+// of attempts unlinkable. Same lifecycle as routerInjectFailures above: written
+// only on a non-terminal inject failure, cleared on delivery / abandon / give-up
+// / poison-row, so it cannot outlive the message it describes.
+const routerRetryOfDispatch: Map<number, string> = new Map()
 
 /**
  * Pure decision: has a message exhausted its tmux-inject retries?
@@ -274,7 +286,17 @@ export async function deliverFederatedBatch(federated: AgentMessage[], now: numb
   }
 }
 
+// Gate liveness: checked once at boot, then every N ticks (~30 min at 5s/tick).
+let _gateLivenessTickCounter = 0;
+const GATE_LIVENESS_CHECK_INTERVAL_TICKS = 360; // every ~30 min
+
 export function startMessageRouter(): NodeJS.Timeout {
+  // Boot-time gate liveness check: catches a gate that was unwired by a merge
+  // that dropped the checkDispatchGate call site (card aaabd99c). This check
+  // queries the AUDIT LOG directly — it does NOT depend on checkDispatchGate
+  // being called, so it survives the exact failure mode it detects.
+  checkGateLiveness();
+
   return setInterval(async () => {
     // Re-entrancy guard: STT can hold a tick for up to 65s; skip new ticks
     // while the previous one is still in flight to prevent double-delivery.
@@ -284,6 +306,15 @@ export function startMessageRouter(): NodeJS.Timeout {
       await runMessageRouterTick()
     } finally {
       _tickRunning = false
+    }
+
+    // Periodic gate liveness re-check: audit log going silent mid-run (e.g.
+    // after a hot-reload or config change that drops the gate) should surface
+    // in the logs within ~30 min rather than days later.
+    _gateLivenessTickCounter++;
+    if (_gateLivenessTickCounter >= GATE_LIVENESS_CHECK_INTERVAL_TICKS) {
+      _gateLivenessTickCounter = 0;
+      checkGateLiveness();
     }
   }, 5000)
 }
@@ -435,6 +466,27 @@ export async function runMessageRouterTick(): Promise<void> {
       // Skip messages already batched by the reconnect pre-pass: they are
       // 'done' in the DB now but still appear in our snapshot slice.
       if (batchedMsgIdsThisTick.has(msg.id)) continue
+      // ---- P2-A outcome writing (measurement only) ------------------------
+      // dispatchId is declared HERE, outside BOTH try blocks below, so every
+      // terminal/retry branch can record an outcome for the dispatch that was
+      // actually minted for this delivery attempt. Declared inside the try it
+      // was invisible to the catch clauses, which is exactly why `failed` had
+      // no live writer at all.
+      let dispatchId: string | null = msg.dispatch_id ?? null
+      // At most ONE outcome row per message per tick: the outer catch also fires
+      // for a throw raised INSIDE the inner catch, and that must not append a
+      // second `failed` row for the same failure. A later tick gets a fresh
+      // flag, so retry(tick 1..n-1) -> failed(tick n) is still recorded in full.
+      let dispatchOutcomeWrittenThisTick = false
+      const recordDispatchOutcome = (
+        outcome: OutcomeKind,
+        evidence: string,
+        retryOf: string | null = null,
+      ): void => {
+        if (!dispatchId || dispatchOutcomeWrittenThisTick) return
+        dispatchOutcomeWrittenThisTick = true
+        recordOutcomeSafe(getDb(), { dispatchId, outcome, evidence, retryOf })
+      }
       // Per-message fault isolation: a throw from any helper (e.g. safeJoin
       // on a '..'-bearing to_agent) previously escaped the whole tick through
       // the catch-less try/finally, aborting delivery for every younger
@@ -484,8 +536,15 @@ export async function runMessageRouterTick(): Promise<void> {
         if (!markMessageFailed(msg.id, 'Abandoned: target session absent for full retry window')) {
           logger.warn({ id: msg.id }, 'markMessageFailed affected 0 rows (deleted concurrently?)')
         }
+        // P2-A `failed`: also a terminal markMessageFailed. Only fires when the
+        // message CARRIES an upstream dispatch_id (kanban/scheduler/worker
+        // origin) -- this branch runs before the router mints its own, so a bare
+        // inter-agent message that is abandoned here has no dispatch and stays
+        // `unknown`, which is the honest result.
+        recordDispatchOutcome('failed', 'message-router:abandoned-session-absent-full-window:markMessageFailed')
         notifyOrchestratorOfFailedHandoff(msg, 'target session was absent for the entire retry window')
         routerInjectFailures.delete(msg.id)
+        routerRetryOfDispatch.delete(msg.id)
         routerLoggedMisses.delete(msg.id)
         continue
       }
@@ -604,9 +663,53 @@ export async function runMessageRouterTick(): Promise<void> {
         // msgId passed so receiving agents can write back via PUT /api/messages/:id.
         const content = isChannelInbound ? deliveryContent : msg.content
         const { prefix, wrapped } = wrapAgentMessageForDelivery(category, safeFromAgent, msg.from_agent, content, msg.id, msg.origin_note)
+
+        // ---- data-sensitivity dispatch gate (card 6bf535bf) -----------------
+        // Check before tmux injection: is restricted content heading to a
+        // non-trusted provider? Observe-only for now (never blocks, only logs).
+        const gateCheck = checkDispatchGate({
+          content: prefix + wrapped,
+          targetAgent: msg.to_agent,
+          messageId: msg.id,
+        })
+        if (gateCheck.shouldBlock) {
+          // Enforce mode — block delivery entirely.
+          logger.warn({ id: msg.id, to: msg.to_agent, audit: gateCheck.auditEntry },
+            'data-sensitivity-gate: BLOCKED restricted content to non-trusted provider')
+          if (!markMessageFailed(msg.id, `Blocked by data-sensitivity gate: ${gateCheck.result.reason}`)) {
+            logger.warn({ id: msg.id }, 'markMessageFailed affected 0 rows (deleted concurrently?)')
+          }
+          routerLoggedMisses.delete(msg.id)
+          continue
+        }
+        // Observe-only: gateCheck.auditEntry already logged by checkDispatchGate.
+        // Delivery proceeds normally.
+
+        // P2-A dispatch threading: reuse the dispatch_id an upstream origin
+        // (kanban/scheduler/worker) already minted and carried on the message;
+        // otherwise this is a bare inter-agent message with no upstream dispatch,
+        // so mint a 'message'-source one here. Channel-inbound (user -> agent)
+        // messages are below the work-package threshold and are NOT instrumented
+        // (documented threshold). Best-effort: never blocks the send.
+        // session_id: the target's newest LOCAL transcript at send time, so the
+        // window correlation can attribute this session's token rows to this
+        // dispatch. Remote-host targets keep it NULL (their transcripts are not
+        // on this host) -- never a stale local guess.
+        // dispatchId was seeded from msg.dispatch_id at the top of this loop
+        // iteration (outside the try, so the failure branches can see it).
+        if (!dispatchId && !isChannelInbound) {
+          // P2-C: stamp the identity columns from the TARGET agent's config
+          // (it is the agent that will burn the tokens). Best-effort: a resolver
+          // fault stamps un-attributed rather than blocking the delivery.
+          dispatchId = createDispatchSafe(getDb(), {
+            source: 'message', agent: msg.to_agent,
+            sessionId: host ? null : resolveCurrentSessionId(msg.to_agent),
+            ...resolveDispatchIdentitySafe(msg.to_agent),
+          })
+        }
         // Inline preamble so a fresh session (post hard-restart) doesn't miss
         // the context that explains the tag semantics.
-        await sendPromptToSession(session, prefix + wrapped, host)
+        await sendPromptToSession(session, prefix + wrapped, host, { dispatchId })
         if (!markMessageDelivered(msg.id)) {
           logger.warn({ id: msg.id }, 'markMessageDelivered affected 0 rows (deleted concurrently?)')
         }
@@ -616,6 +719,11 @@ export async function runMessageRouterTick(): Promise<void> {
           deliveredTraceCtx.set(msg.to_agent, traceCtx)
         }
         routerInjectFailures.delete(msg.id)
+        // Delivered: no outcome row is written here. Successful DELIVERY is not
+        // evidence that the work package was accepted -- acceptance comes from
+        // kanban status->done. Writing anything here would be inventing an
+        // outcome, so a delivered-but-unjudged dispatch stays `unknown` (spec 7.2).
+        routerRetryOfDispatch.delete(msg.id)
         routerLoggedMisses.delete(msg.id)
         logger.info({ id: msg.id, from: msg.from_agent, to: msg.to_agent, category, traceId: traceCtx?.trace_id }, 'Agent message delivered')
       } catch (err) {
@@ -627,14 +735,36 @@ export async function runMessageRouterTick(): Promise<void> {
         routerInjectFailures.set(msg.id, failCount)
         if (!shouldGiveUpOnInject(failCount, MAX_INJECT_FAILURES)) {
           logger.warn({ err, id: msg.id, failCount }, 'Failed to inject agent message, will retry next tick')
+          // P2-A `retry`: this attempt's dispatch did NOT deliver and the
+          // message stays pending for another tick -- a deterministic,
+          // already-decided fact, not a prediction about the outcome. retry_of
+          // points at the PREVIOUS attempt's dispatch when the message carries
+          // no upstream dispatch_id (a fresh one is minted per tick); when the
+          // same id is reused across attempts there is no distinct prior
+          // dispatch, so retry_of stays NULL rather than self-referential.
+          // 'retry' is deliberately NOT in TERMINAL_OUTCOMES, so writing it
+          // does not close the dispatch's token-attribution window.
+          const priorAttempt = routerRetryOfDispatch.get(msg.id) ?? null
+          recordDispatchOutcome(
+            'retry',
+            `message-router:inject-threw-attempt-${failCount}-of-${MAX_INJECT_FAILURES}-will-retry`,
+            priorAttempt && priorAttempt !== dispatchId ? priorAttempt : null,
+          )
+          if (dispatchId) routerRetryOfDispatch.set(msg.id, dispatchId)
           continue
         }
         logger.error({ err, id: msg.id, failCount }, 'Failed to inject agent message after retries, giving up')
         if (!markMessageFailed(msg.id, `Failed to inject into tmux session after ${failCount} attempts`)) {
           logger.warn({ id: msg.id }, 'markMessageFailed affected 0 rows (deleted concurrently?)')
         }
+        // P2-A `failed`: the give-up path. Evidence names the MECHANISM (tmux
+        // inject threw N consecutive times and the message was marked failed),
+        // so the row is traceable to real evidence and is not an inferred
+        // verdict. This is the branch that gave `failed` its first live writer.
+        recordDispatchOutcome('failed', `message-router:inject-giveup-after-${failCount}-attempts:markMessageFailed`)
         notifyOrchestratorOfFailedHandoff(msg, `tmux inject failed ${failCount}x`)
         routerInjectFailures.delete(msg.id)
+        routerRetryOfDispatch.delete(msg.id)
         routerLoggedMisses.delete(msg.id)
       }
       } catch (err) {
@@ -642,6 +772,13 @@ export async function runMessageRouterTick(): Promise<void> {
         if (!markMessageFailed(msg.id, `Delivery error: ${String(err).slice(0, 200)}`)) {
           logger.warn({ id: msg.id }, 'markMessageFailed affected 0 rows (deleted concurrently?)')
         }
+        // P2-A `failed`: the per-message poison-row branch is ALSO a terminal
+        // markMessageFailed, so a dispatch minted for this attempt genuinely
+        // failed. Same mechanism class as the give-up branch above; the evidence
+        // string distinguishes which one fired. No-op when the inner catch
+        // already wrote this tick's outcome.
+        recordDispatchOutcome('failed', 'message-router:delivery-error:markMessageFailed')
+        routerRetryOfDispatch.delete(msg.id)
         routerLoggedMisses.delete(msg.id)
       }
     }

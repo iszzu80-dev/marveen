@@ -1,0 +1,27 @@
+ .gitignore                                         |   2 +
+ src/__tests__/costops-api.test.ts                  |  62 +++
+ src/__tests__/costops-collectors-dryrun.test.ts    | 116 +++++
+ src/__tests__/costops-collectors.test.ts           | 139 ++++++
+ src/__tests__/costops-ledger.test.ts               | 204 ++++++++
+ src/__tests__/costops-operational.test.ts          |  88 ++++
+ src/__tests__/costops-pricing.test.ts              | 120 +++++
+ src/__tests__/costops-render.test.ts               | 132 +++++
+ src/__tests__/costops-sync.test.ts                 |  71 +++
+ src/costops/README.md                              | 185 +++++++
+ src/costops/collectors/anthropic.ts                | 115 +++++
+ .../collectors/collectors-config.example.json      |  13 +
+ src/costops/collectors/config.ts                   |  69 +++
+ src/costops/collectors/render-pricing.example.json |  15 +
+ src/costops/collectors/render.ts                   | 277 +++++++++++
+ src/costops/collectors/runner.ts                   | 202 ++++++++
+ src/costops/collectors/types.ts                    |  83 ++++
+ src/costops/config.ts                              | 182 +++++++
+ src/costops/ledger.ts                              | 549 +++++++++++++++++++++
+ src/costops/pricing.ts                             | 222 +++++++++
+ src/db.ts                                          |  85 ++++
+ src/web.ts                                         |   2 +
+ src/web/routes/costs.ts                            |  77 +++
+ src/web/token-usage.ts                             |  13 +-
+ web/app.js                                         | 169 +++++++
+ web/index.html                                     |  13 +
+ 26 files changed, 3203 insertions(+), 2 deletions(-)

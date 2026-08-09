@@ -1,0 +1,63 @@
+{
+  "_comment": [
+    "EXAMPLE ONLY. Copy to store/session-efficiency.json and edit for THIS deployment.",
+    "store/ is gitignored, so concrete thresholds and label conventions never leave the machine.",
+    "Every field is OPTIONAL: a missing file, a missing key, or an out-of-range value falls back",
+    "to the built-in default, and the built-in defaults reproduce today's live context-guard",
+    "behaviour (src/context-guard.ts:54-55 actPct 0.90 / hardPct 0.97 plus the always-on",
+    "pane-saturation net at :53,83). Deleting this file therefore leaves the fleet exactly as it",
+    "behaves without P2-B.",
+    "",
+    "saturation: the four P2-B tiers, as fractions of the CALIBRATED per-(agent,model) context",
+    "limit (NOT a static 200k -- see context-guard.ts:104-142).",
+    "  warningPct            -- advisory only, gates nothing.",
+    "  noNewLargeTaskPct     -- from here up a `large` package is REFUSED. This is the only",
+    "                           behaviour this config can add.",
+    "  checkpointRequiredPct -- keep equal to the live context-guard actPct unless you are",
+    "                           deliberately re-tuning both; a test asserts the default match.",
+    "  hardStopPct           -- keep equal to the live context-guard hardPct, same reason.",
+    "  paneSaturationIsHardStop -- mirror of the always-on net. Only an explicit false disarms it.",
+    "",
+    "taskSizePolicy: DETERMINISTIC size lookup. A kanban label name or card/task type maps to a",
+    "size; anything unlisted contributes nothing. There is no pattern inference and NO model call",
+    "on this path -- if you want a card treated as large, label it. The shipped default tables are",
+    "EMPTY and agentDefault is 'normal', so out of the box nothing is ever refused.",
+    "  agentDefault -- what an UNMARKED task is treated as. Do NOT set this to 'large' unless you",
+    "                  intend every unlabelled dispatch to be refused into a busy session.",
+    "",
+    "agents: per-agent overrides. A block that omits `saturation` inherits the fleet values above",
+    "(not the built-in defaults), so adding a per-agent task-size default cannot silently reset",
+    "that agent's thresholds."
+  ],
+  "version": "example-1",
+  "saturation": {
+    "warningPct": 0.8,
+    "noNewLargeTaskPct": 0.85,
+    "checkpointRequiredPct": 0.9,
+    "hardStopPct": 0.97,
+    "paneSaturationIsHardStop": true
+  },
+  "taskSizePolicy": {
+    "labels": {
+      "size:small": "small",
+      "size:normal": "normal",
+      "size:large": "large",
+      "epic": "large"
+    },
+    "cardTypes": {
+      "chore": "small",
+      "feature": "normal",
+      "epic": "large"
+    },
+    "agentDefault": "normal"
+  },
+  "agents": {
+    "example-agent": {
+      "saturation": {
+        "warningPct": 0.7,
+        "noNewLargeTaskPct": 0.75
+      },
+      "agentDefaultTaskSize": "normal"
+    }
+  }
+}

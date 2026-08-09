@@ -22,7 +22,7 @@ if (!agentName) {
 }
 
 try {
-  const result = attemptChannelMcpReconnect(agentName)
+  const result = await attemptChannelMcpReconnect(agentName)
   logger.info(
     { agentName, ok: result.ok, message: result.message },
     'reconnect-cli: reconnect attempt finished',

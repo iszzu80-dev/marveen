@@ -5,6 +5,8 @@ import { STORE_DIR, DB_FILENAME, ALLOWED_CHAT_ID, OLLAMA_URL, APP_TZ } from './c
 import { getEffectiveSettingValue } from './settings-store.js'
 import { logger } from './logger.js'
 import { TOOL_TIMEOUTS } from './tool-timeouts.js'
+import { initCostOpsSchema } from './costops/schema.js'
+import { initCosSchema } from './cos/schema.js'
 
 let db: Database.Database
 
@@ -455,6 +457,11 @@ export function initDatabase(dbPathOverride?: string): void {
   try { db.exec('ALTER TABLE agent_messages ADD COLUMN trace_id TEXT') } catch { /* exists */ }
   try { db.exec('ALTER TABLE agent_messages ADD COLUMN span_id TEXT') } catch { /* exists */ }
   try { db.exec('ALTER TABLE agent_messages ADD COLUMN parent_span_id TEXT') } catch { /* exists */ }
+  // P2-A (CostOps Dispatch & Outcome Attribution): the opaque dispatch_id a
+  // kanban/scheduler/worker origin minted, carried on the queued message so the
+  // router can thread it to sendPromptToSession. Nullable, forward-only; a
+  // message enqueued without one (channel-inbound, un-instrumented) stays NULL.
+  try { db.exec('ALTER TABLE agent_messages ADD COLUMN dispatch_id TEXT') } catch { /* exists */ }
 
   // INVARIANT: a row that says 'delivered' must carry a delivered_at.
   //
@@ -742,6 +749,30 @@ export function initDatabase(dbPathOverride?: string): void {
   // Migration: add agent column to installs that created the table before this column existed.
   try { db.exec(`ALTER TABLE store_file_audit ADD COLUMN agent TEXT`) } catch { /* column already exists */ }
 
+  // --- Data-sensitivity audit log (card 6bf535bf) ---
+  // Gate observe/enforce events persisted to SQLite so a daily false-positive
+  // sample is durable across restarts and the 48h observation window can start
+  // from when this table lands, not from gate activation.
+  // content_hash = SHA-256 of the message body (irreversible, for correlation).
+  // Raw content is NEVER stored.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sensitivity_audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      content_hash TEXT NOT NULL,
+      verdict TEXT NOT NULL CHECK(verdict IN ('allow','would_block','block')),
+      category TEXT NOT NULL CHECK(category IN ('public','internal','restricted')),
+      matched_patterns TEXT NOT NULL DEFAULT '[]',
+      target_agent TEXT NOT NULL,
+      target_model TEXT NOT NULL,
+      message_id INTEGER,
+      mode TEXT NOT NULL CHECK(mode IN ('off','observe-only','enforce')),
+      reason TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_sensitivity_audit_ts ON sensitivity_audit_log(created_at)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_sensitivity_audit_verdict ON sensitivity_audit_log(verdict, created_at)`)
+
   // --- CostOps (local cost ledger) ---
   // Read-mostly, FOCUS-inspired. cost_sources = provider/subscription origin,
   // cost_line_items = individual charge rows (estimate or provider-sourced).
@@ -789,6 +820,18 @@ export function initDatabase(dbPathOverride?: string): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cost_line_items_period ON cost_line_items(charge_period_start, charge_period_end)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cost_line_items_source ON cost_line_items(source_id)`)
+
+  // LOCAL-FORK: costops seam (keep on rebase). All ADDITIONAL CostOps tables
+  // (forecast, fx, alerts, period-close, budgets, optimization, invoice) live
+  // in src/costops/schema.ts. The base tables (cost_sources, cost_line_items)
+  // are in the upstream now — initCostOpsSchema() adds the extended schema on top.
+  initCostOpsSchema(db)
+
+  // LOCAL-FORK: cos seam (keep on rebase). The Personal Chief of Staff (COS)
+  // case store -- personal_cases (+version), personal_case_events (append-only),
+  // case_claims (fencing token) -- lives in src/cos/schema.ts. Greenfield: no
+  // upstream table is touched. See docs/cos-slice0-schema.sql for the design.
+  initCosSchema(db)
 
   // --- Vault SSH Keys (shared pool) ---
   db.exec(`
@@ -1910,6 +1953,12 @@ export function getLabel(id: string): Label | undefined {
 
 export function createLabel(label: { id: string; name: string; color: string }): Label {
   const now = Math.floor(Date.now() / 1000)
+  // Check for existing label with same name first (UNIQUE index on name is the
+  // safety net, but the app-level check avoids needless constraint violations).
+  const existing = db.prepare(
+    'SELECT id, name, color, created_at FROM labels WHERE name = ?'
+  ).get(label.name) as Label | undefined
+  if (existing) return existing
   db.prepare(
     'INSERT INTO labels (id, name, color, created_at) VALUES (?, ?, ?, ?)'
   ).run(label.id, label.name, label.color, now)
@@ -2039,6 +2088,9 @@ export interface AgentMessage {
   trace_id: string | null
   span_id: string | null
   parent_span_id: string | null
+  // P2-A: opaque CostOps dispatch_id carried from the origin (null when the
+  // message was enqueued without an instrumented dispatch).
+  dispatch_id: string | null
 }
 
 export function createAgentMessage(
@@ -2047,11 +2099,12 @@ export function createAgentMessage(
   content: string,
   originNote?: string | null,
   traceCtx?: { trace_id: string; span_id: string; parent_span_id: string | null } | null,
+  dispatchId?: string | null,
 ): AgentMessage {
   const now = Math.floor(Date.now() / 1000)
   const info = db.prepare(
-    'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, origin_note, trace_id, span_id, parent_span_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-  ).run(from, to, content, 'pending', now, originNote ?? null, traceCtx?.trace_id ?? null, traceCtx?.span_id ?? null, traceCtx?.parent_span_id ?? null)
+    'INSERT INTO agent_messages (from_agent, to_agent, content, status, created_at, origin_note, trace_id, span_id, parent_span_id, dispatch_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(from, to, content, 'pending', now, originNote ?? null, traceCtx?.trace_id ?? null, traceCtx?.span_id ?? null, traceCtx?.parent_span_id ?? null, dispatchId ?? null)
   return {
     id: Number(info.lastInsertRowid),
     from_agent: from, to_agent: to, content, status: 'pending',
@@ -2060,6 +2113,7 @@ export function createAgentMessage(
     trace_id: traceCtx?.trace_id ?? null,
     span_id: traceCtx?.span_id ?? null,
     parent_span_id: traceCtx?.parent_span_id ?? null,
+    dispatch_id: dispatchId ?? null,
   }
 }
 
@@ -3289,6 +3343,38 @@ export function expireTimedOutApprovals(): number {
   `).run(now, now).changes
 }
 
+// --- Data-sensitivity audit log persistence (card 6bf535bf) ---
+
+export interface SensitivityAuditEntry {
+  content_hash: string
+  verdict: string
+  category: string
+  matched_patterns: string[]
+  target_agent: string
+  target_model: string
+  message_id?: number | null
+  mode: string
+  reason: string
+}
+
+export function saveSensitivityAuditEntry(entry: SensitivityAuditEntry): void {
+  db.prepare(`
+    INSERT INTO sensitivity_audit_log
+      (content_hash, verdict, category, matched_patterns, target_agent, target_model, message_id, mode, reason, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    entry.content_hash,
+    entry.verdict,
+    entry.category,
+    JSON.stringify(entry.matched_patterns),
+    entry.target_agent,
+    entry.target_model,
+    entry.message_id ?? null,
+    entry.mode,
+    entry.reason,
+    Math.floor(Date.now() / 1000),
+  )
+}
 // --- OTel Distributed Tracing (card def5a189) ---
 
 export interface OtelSpan {

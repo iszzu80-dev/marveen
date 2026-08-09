@@ -53,6 +53,15 @@ vi.mock('../web/voice-directive.js', () => ({
 vi.mock('../web/agent-config.js', () => ({
   readAgentRemoteHost: () => null,
   readAgentVoiceConfig: () => ({ responseMode: 'text' }),
+  // P2-C: the router now stamps the dispatch identity columns, which reads the
+  // agent's model + login binding through these. Doubled explicitly so the tick
+  // exercises the REAL stamping path rather than silently falling into
+  // resolveDispatchIdentitySafe's fault branch.
+  resolveAgentModelDetailed: () => ({ model: 'claude-sonnet-5', source: 'explicit_model' }),
+  readAgentModelProfile: () => null,
+  readAgentClaudePlan: () => null,
+  readAgentClaudeConfigDir: () => null,
+  expandAndValidateConfigDir: () => null,
 }))
 
 vi.mock('../web/agent-process.js', () => ({

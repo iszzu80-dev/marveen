@@ -1,0 +1,152 @@
+# APG v0.4-lean Pilot Kernel — Work Items (dependency-ordered)
+# 2026-07-16. READ-ONLY design artifact. Each item: goal/input/output/done_when/tests/complexity/agent_budget/cost.
+# Token/runtime cost estimates are ESTIMATED (no kernel instrumentation exists yet — that is W4 itself).
+
+version: 0.4.0-pilot-kernel
+ordering: strict dependency order; a later item never precedes its dependency.
+
+work_items:
+
+  - id: W1
+    name: minimal-sidecar-store
+    goal: Create the sidecar SQLite store + append-only access module. Foundation for everything.
+    depends_on: []
+    input: store-schema.sql
+    output: apg-kernel/store.py (or .ts) — init + typed insert/upsert with dedup keys; store/apg-kernel.db
+    done_when:
+      - all tables from store-schema.sql created idempotently (CREATE TABLE IF NOT EXISTS)
+      - append-only enforced for receipts/evidence/measurements (no update/delete API)
+      - dedup upsert proven idempotent (insert twice -> one row)
+      - zero writes to store/claudeclaw.db (assert in test)
+    deterministic_tests: [ schema-init idempotent, dedup-upsert no-dup, core-db untouched ]
+    complexity_class: S1
+    agent_budget: 1
+    cost_estimate: { tokens: ESTIMATED ~2k, runtime: low }
+
+  - id: W2
+    name: profile-registry
+    goal: Config-driven profile loader (base/ui-fullstack/identity-test-data/product-surface-launch/safe-release).
+    depends_on: []
+    input: profiles/<name>/profile.yaml (already in the methodology pack)
+    output: apg-kernel/profiles.py — load(name), active_for(class, signals); NO if/else per profile
+    done_when:
+      - all 5 profiles load from yaml
+      - adding a 6th profile is a config edit only (test: drop a fixture profile, it loads with no code change)
+      - active_for returns the correct overlay set for S1 vs S2 signal sets
+    deterministic_tests: [ all-5-load, config-only-extend, active_for-s1, active_for-s2 ]
+    complexity_class: S1
+    agent_budget: 1
+    cost_estimate: { tokens: ESTIMATED ~2k, runtime: low }
+
+  - id: W3
+    name: execution-receipt-chain-adapter
+    goal: Reconstruct + link the 7-link chain into an append-only receipt; missing link -> UNKNOWN/MISSING.
+    depends_on: [ W1 ]
+    input: change_ref (kanban/git); DeploymentEvidenceSource adapters (git/Render/health, read-only)
+    output: apg-kernel/receipt_chain.py — reconstruct(change_ref, mode); writes execution_receipts + evidence_references
+    done_when:
+      - given a real historical change, produces a receipt with per-link PRESENT/UNKNOWN/MISSING
+      - commit_chain_status computed by comparing tested/built/deployed commit shas
+      - NO invented evidence (a missing deploy record -> MISSING, asserted)
+      - shadow mode does zero external writes
+      - git/Render/health are behind an interface (no provider hardcode in the core)
+    deterministic_tests: [ full-chain-present, missing-deploy->MISSING, commit-mismatch->MISMATCH, shadow-no-write ]
+    complexity_class: S2   # multi-source, evidence-integrity
+    agent_budget: 2        # 1 producer + 1 verifier (evidence integrity is the risk)
+    cost_estimate: { tokens: ESTIMATED ~5k, runtime: medium }
+
+  - id: W4
+    name: token-origin-instrumentation-adapter
+    goal: Decompose token usage into APG origins, each MEASURED/ESTIMATED/UNKNOWN; unattributed != inherited.
+    depends_on: [ W1 ]
+    input: turn_usage (raw provider aggregate), apg_context_plan (kernel's own prefix/fresh/on-demand record)
+    output: apg-kernel/token_origin.py — attribute(); writes token_measurements
+    done_when:
+      - the kernel's own controllable fields (stable_prefix, apg_packet_fresh, on_demand, failed_gate_feedback, output) are MEASURED
+      - the non-separable remainder is written as 'unattributed_input' with label UNKNOWN (NOT inherited)
+      - no fresh-input-reduction value is emitted unless a MEASURED baseline row exists for the change
+      - cost_amount and occupied_context_estimate are separate fields
+    deterministic_tests: [ controllable-measured, remainder-is-unattributed, no-baseline-no-savings, cost-vs-occupied-separate ]
+    complexity_class: S2   # measurement correctness is the whole point of the pilot
+    agent_budget: 2
+    cost_estimate: { tokens: ESTIMATED ~4k, runtime: low }
+
+  - id: W5
+    name: test-identity-contract-adapter
+    goal: Generic test-identity contract + one LumaSeat/Eskuvo product-local adapter; 6 mandatory checks.
+    depends_on: [ W1 ]
+    input: subject_ref (a tenant/actor from the replayed change); product-local mapping
+    output: apg-kernel/test_identity.py (generic) + apg-kernel/adapters/lumaseat_identity.py
+    done_when:
+      - the 6 checks each return PASS/FAIL/UNKNOWN/MISSING
+      - a historical change that cannot prove a field yields MISSING/UNKNOWN (asserted, no invention)
+      - the generic contract has zero product hardcode; the mapping lives only in the product-local adapter
+    deterministic_tests: [ 6-checks-emit, historical-missing->MISSING, generic-has-no-product-ref ]
+    complexity_class: S2   # this is exactly what the S2 replay exercises (auth/tenant)
+    agent_budget: 2
+    cost_estimate: { tokens: ESTIMATED ~4k, runtime: low }
+
+  - id: W6
+    name: deterministic-checkpoint-evaluator
+    goal: Evaluate spec_ready/verification_ready/release_ready/runtime_acceptance; PASS/FAIL/UNKNOWN/NOT_APPLICABLE; NO LLM.
+    depends_on: [ W1, W2, W3, W5 ]
+    input: checkpoint, receipt (W3), active_profiles (W2), identity assertion (W5)
+    output: apg-kernel/checkpoints.py — evaluate(); writes checkpoint_results
+    done_when:
+      - schema+reference validation + evidence-chain completeness implemented per gate-profiles.yaml
+      - profile overlays activate the risk-tier checks (low/standard/high/critical)
+      - missing evidence -> UNKNOWN (never FAIL, never invented PASS)
+      - zero LLM calls (asserted); shadow mode no external state change
+      - implementation_ready included ONLY if a replay demonstrably needs it (decided in W7/W8, else deferred)
+    deterministic_tests: [ 4-checkpoints-evaluate, missing->UNKNOWN, no-llm, profile-tier-applies, shadow-no-write ]
+    complexity_class: S2
+    agent_budget: 2
+    cost_estimate: { tokens: ESTIMATED ~5k, runtime: low }
+
+  - id: W7
+    name: shadow-replay-s1-landing
+    goal: Run the LumaSeat couple-facing landing (S1) end-to-end through the kernel, read-only.
+    depends_on: [ W1, W2, W3, W4, W5, W6 ]
+    input: the S1 change refs; profiles ui-fullstack + product-surface-launch + safe-release(low)
+    output: a replay_run row + receipt + checkpoint_results + token_measurements for S1
+    done_when:
+      - S1 runs with agent_budget 1, produces a verdict (PASS/UNKNOWN)
+      - checkpoints spec_ready/verification_ready/release_ready/runtime_acceptance each have a result
+      - token fields recorded with labels; no invented savings
+    deterministic_tests: [ s1-runs-budget-1, s1-checkpoints-present, s1-tokens-labelled ]
+    complexity_class: S1
+    agent_budget: 1
+    cost_estimate: { tokens: ESTIMATED ~3k, runtime: low }
+
+  - id: W8
+    name: shadow-replay-s2-jwt-migration
+    goal: Run the Eskuvo JWT-tenant migration + stale-session fix (S2) through the kernel, read-only.
+    depends_on: [ W1, W2, W3, W4, W5, W6 ]
+    input: commits 2dcd216c/e292a853/edf55863; profiles ui-fullstack + identity-test-data + safe-release
+    output: a replay_run row + receipt + checkpoint_results + token_measurements for S2
+    done_when:
+      - S2 runs with agent_budget 2 (producer + verifier), produces a verdict
+      - identity-isolation checks (W5) exercised (this is the point of S2); MISSING where historically unprovable
+      - execution-receipt chain reconstructed incl. the migration + smoke evidence, gaps explicit
+    deterministic_tests: [ s2-runs-budget-2, s2-identity-checks-run, s2-receipt-gaps-explicit ]
+    complexity_class: S2
+    agent_budget: 2
+    cost_estimate: { tokens: ESTIMATED ~5k, runtime: medium }
+
+  - id: W9
+    name: acceptance-and-measurement-harness
+    goal: Produce the pilot acceptance report comparing the two replays vs the acceptance criteria.
+    depends_on: [ W7, W8 ]
+    input: the two replay_run outputs
+    output: a report (per design/apg-v0.4-pilot-acceptance-and-measurement-plan.md); ceremony-overhead measured per replay
+    done_when:
+      - the 5 pilot goals (evidence chain / test-identity / token-context measurement / deterministic checkpoints / ceremony<=benefit) each get MET/UNMET/UNKNOWN
+      - ceremony overhead (records+tokens the kernel added) reported per replay with its consumer
+      - go/no-go for a later LIVE pilot stated
+    deterministic_tests: [ report-covers-5-goals, ceremony-overhead-per-replay, go-no-go-stated ]
+    complexity_class: S1
+    agent_budget: 1
+    cost_estimate: { tokens: ESTIMATED ~3k, runtime: low }
+
+# Total P0 work items: 9. Critical path: W1 -> W3 -> W6 -> W8 -> W9 (the S2 chain is the longest).
+# W2/W4/W5 parallelize off W1. No item requires a Marveen core-DB write or a live dispatch.

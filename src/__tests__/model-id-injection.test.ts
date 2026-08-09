@@ -77,31 +77,16 @@ describe('the writer chokepoint refuses a bad id before touching disk', () => {
     expect(() => writeAgentModel('nonexistent-agent', 'a $(id)')).toThrow(InvalidModelIdError)
   })
 
-  // Card 6610edff (Cybered 7139): writeMainModel is the MAIN-agent sibling of writeAgentModel and a
-  // persisted-model writer that skipped the allowlist. It is a private, IO-side-effecting fn in the
-  // heavy model-fallback-runner module (never imported by a test), so we pin the guard at the source:
-  // it must call isValidModelId(model) BEFORE it ever writes .claude/settings.json.
-  it('writeMainModel validates the id BEFORE the write chokepoint', () => {
-    const runnerSrc = readFileSync(
-      join(dirname(fileURLToPath(import.meta.url)), '..', 'web', 'model-fallback-runner.ts'),
-      'utf8',
-    )
-    const m = /function writeMainModel\s*\([^)]*\)[^{]*\{/.exec(runnerSrc)
-    expect(m, 'writeMainModel not found').not.toBeNull()
-    // Brace-match the function body so the assertions cannot be satisfied by code elsewhere.
-    let depth = 0
-    let end = runnerSrc.length
-    for (let i = runnerSrc.indexOf('{', m!.index); i < runnerSrc.length; i++) {
-      if (runnerSrc[i] === '{') depth++
-      else if (runnerSrc[i] === '}' && --depth === 0) { end = i; break }
-    }
-    const body = runnerSrc.slice(m!.index, end + 1)
-    const guardAt = body.indexOf('if (!isValidModelId(model)) throw new InvalidModelIdError(model)')
-    const writeAt = body.indexOf('atomicWriteFileSync')
-    expect(guardAt, 'writeMainModel missing the isValidModelId guard').toBeGreaterThan(0)
-    expect(writeAt, 'writeMainModel no longer writes via atomicWriteFileSync').toBeGreaterThan(0)
-    expect(guardAt).toBeLessThan(writeAt) // validate before persisting
-  })
+  // FORK DIVERGENCE (upstream v1.30 test): upstream's writeMainModel (MAIN-agent
+  // model -> .claude/settings.json) does NOT exist in this fork. Card 59b383a9 /
+  // 8261: the main session is service-managed and the `claude` binary reads
+  // .claude/settings.json directly, so the capacity-routing phase that superseded
+  // model-fallback-runner.ts MUST NOT write the main model from TS -- there is no
+  // writeMainModel chokepoint to guard here. The model-id-injection guard on the
+  // path this fork DOES write (the agent model) is covered by the writeAgentModel
+  // + shSingleQuote tests in this file, which pass. Skipped, not deleted, so the
+  // divergence stays visible against upstream.
+  it.skip('writeMainModel validates the id BEFORE the write chokepoint (N/A: this fork does not write the main model from TS)', () => {})
 })
 
 describe('layer 2 -- shSingleQuote makes ANY value one inert shell word', () => {

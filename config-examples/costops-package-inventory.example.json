@@ -1,0 +1,60 @@
+{
+  "_doc": "ILLUSTRATIVE ONLY. Copy to store/costops-package-inventory.json (gitignored) and put the real packages there -- no concrete plan name, price, account or quota belongs in this tracked file. Consumed by src/costops/package-inventory.ts and the Phase 4 recommendation engine (src/costops/portfolio-recommendation.ts).",
+  "version": 1,
+  "_fields": {
+    "kind": "held | external_market_reference -- external_market_reference is comparison-only; enabled_for_routing is FORCED false for it regardless of what this file says",
+    "price/quota_limit/overage_rate": "a ProvenancedNumber: { value, currency, provenance, as_of, source_note }. value is null (never 0) when not published/not entered -- provenance and as_of travel WITH the number.",
+    "provenance": "invoice | manual | aggregator | not_published",
+    "contract_granularity": "monthly | annual | usage_based | one_time | unknown",
+    "quota_shape": "unlimited | session_and_weekly_pct | token_ceiling | seat_count | usage_metered | unknown",
+    "subscription_id": "optional cross-reference to costops-subscriptions.json's entry id for a held package that also has a lifecycle fact there"
+  },
+  "packages": [
+    {
+      "id": "example-held-package",
+      "kind": "held",
+      "provider": "example-provider",
+      "name": "Example Plan",
+      "subscription_id": "example-subscription-entry-id",
+      "price": { "value": 20.00, "currency": "USD", "provenance": "invoice", "as_of": "2026-07-01", "source_note": "read off the provider invoice" },
+      "contract_granularity": "monthly",
+      "renewal_date": "2026-08-01",
+      "quota_shape": "usage_metered",
+      "quota_limit": null,
+      "overage_available": true,
+      "overage_rate": { "value": 0.002, "currency": "USD", "provenance": "manual", "as_of": "2026-07-01", "source_note": "per-token overage, read off pricing page" },
+      "usage_credit_available": false,
+      "enabled_for_routing": true
+    },
+    {
+      "id": "example-unpublished-price",
+      "kind": "held",
+      "provider": "example-provider-2",
+      "name": "Example Plan With No Confirmed Price",
+      "price": { "value": null, "currency": null, "provenance": "not_published", "as_of": null, "source_note": "no invoice located yet" },
+      "contract_granularity": "unknown",
+      "renewal_date": null,
+      "quota_shape": "unknown",
+      "quota_limit": null,
+      "overage_available": null,
+      "overage_rate": null,
+      "usage_credit_available": null,
+      "enabled_for_routing": true
+    },
+    {
+      "id": "example-market-reference",
+      "kind": "external_market_reference",
+      "provider": "example-competitor",
+      "name": "Example Competitor Plan",
+      "price": { "value": 15.00, "currency": "USD", "provenance": "aggregator", "as_of": "2026-07-30", "source_note": "aggregator-derived, NOT vendor-confirmed -- see the market snapshot doc's own gate notes before treating this as fact" },
+      "contract_granularity": "monthly",
+      "renewal_date": null,
+      "quota_shape": "unknown",
+      "quota_limit": null,
+      "overage_available": null,
+      "overage_rate": null,
+      "usage_credit_available": null,
+      "enabled_for_routing": false
+    }
+  ]
+}

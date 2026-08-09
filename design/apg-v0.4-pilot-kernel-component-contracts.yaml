@@ -1,0 +1,150 @@
+# APG v0.4-lean Pilot Kernel — Component Contracts
+# 2026-07-16. READ-ONLY design artifact. Adapter interfaces + I/O contracts for the 6 P0 components.
+# Principle: every adapter is an INTERFACE with a provider/product-agnostic core and a thin,
+# swappable concrete adapter. No provider hardcode in the generic layer. Sidecar-only writes.
+
+version: 0.4.0-pilot-kernel
+location: apg-kernel/            # sidecar dir, NOT Marveen core src/
+store: store/apg-kernel.db       # gitignored; see store-schema.sql
+core_db_writes: NONE             # kernel never writes store/claudeclaw.db
+
+components:
+
+  # ---------------------------------------------------------------- 1
+  execution_receipt_chain_adapter:
+    purpose: Reconstruct + link change -> work_item -> impl_commit -> test_evidence -> build -> deployment -> runtime_evidence into one append-only receipt.
+    interface:
+      reconstruct(change_ref, mode) -> ExecutionReceipt
+    inputs:
+      change_ref: { logical_id: str, source: "kanban|git|manual" }
+      mode: "shadow" | "live"
+    output: ExecutionReceipt
+    ExecutionReceipt:
+      change_logical_id: str
+      links:                       # each link: {locator?, digest?, status: PRESENT|UNKNOWN|MISSING}
+        change: LinkEvidence
+        work_item: LinkEvidence
+        implementation: LinkEvidence     # commit sha
+        test: LinkEvidence               # test-run evidence
+        build: LinkEvidence              # build digest
+        deployment: LinkEvidence         # deploy id/digest
+        runtime: LinkEvidence            # /health snapshot
+      commit_chain_status: CONSISTENT | MISMATCH | UNKNOWN | MISSING   # tested vs built vs deployed commit
+      runtime_status: OBSERVED | UNKNOWN | MISSING
+    rules:
+      - append_only: true
+      - immutable_refs: "store digest, never raw payload; never a secret"
+      - missing_link_is_explicit: "UNKNOWN or MISSING, never invented"
+      - shadow_mode: "read-only reconstruction from git log + Render deploy-history read + /health; no writes to any external system"
+      - live_mode_future: "same interface, backed by authenticated API/event adapter"
+      - no_provider_hardcode: "git/Render/health are concrete adapters behind a DeploymentEvidenceSource interface"
+    reads_marveen: [ git(read), render_deploy_history(read), health_endpoint(read), kanban(read) ]
+
+  # ---------------------------------------------------------------- 2
+  token_origin_instrumentation_adapter:
+    purpose: Decompose token usage into APG-controlled origins, each labelled MEASURED/ESTIMATED/UNKNOWN.
+    interface:
+      attribute(turn_usage, apg_context_plan) -> TokenMeasurement[]
+    inputs:
+      turn_usage: { input, output, cache_creation, cache_read }   # raw provider aggregate (MEASURED)
+      apg_context_plan: "the kernel's own record of what it put in the stable prefix vs fresh packet vs on-demand pull"
+    output: TokenMeasurement[]     # one per field
+    fields:
+      - stable_prefix
+      - apg_packet_fresh
+      - on_demand_retrieval
+      - failed_gate_feedback
+      - output
+      - cache_creation
+      - cache_read
+      - provider_aggregate_input
+      - provider_aggregate_output
+      - unattributed_input          # the remainder the kernel CANNOT attribute
+    labels: [ MEASURED, ESTIMATED, UNKNOWN ]
+    rules:
+      - unattributed_input_is_not_inherited: "the non-separable remainder is 'unattributed_input', NEVER auto-called inherited_context"
+      - no_savings_claim_without_baseline: "a fresh-input reduction may only be reported if a MEASURED baseline exists for the same change"
+      - cost_and_occupied_context_separate: "cost_amount and occupied_context_estimate are distinct fields"
+      - system_tool_split_optional: "if the provider does not expose system/tool separately, that stays UNKNOWN and does NOT block the pilot"
+    reads_marveen: [ token_usage_table(read), claude_api_usage(read) ]
+
+  # ---------------------------------------------------------------- 3
+  apg_test_identity_contract_adapter:
+    purpose: Generic test-identity contract + one product-local (LumaSeat/Eskuvo) adapter.
+    interface:
+      resolve(subject_ref, mode) -> TestIdentityAssertion
+    generic_contract:                # the fields the kernel reasons over
+      actor_class: str
+      tenant_class: str
+      data_class: str
+      test_run_id: str
+      environment: str
+      analytics_treatment: INCLUDE | EXCLUDE | UNKNOWN
+      billing_treatment: CHARGE | SUPPRESS | UNKNOWN
+      communication_treatment: SEND | SUPPRESS | SANDBOX | UNKNOWN
+      cleanup_state: CLEAN | PENDING | CONTAMINATED | UNKNOWN
+    product_local_adapter:
+      name: lumaseat-eskuvo-identity-adapter
+      maps: "Eskuvo JWT tenant + demo/test markers -> the generic contract fields"
+    mandatory_checks:                # each -> PASS | FAIL | UNKNOWN | MISSING
+      - test_user_identifiable
+      - excludable_from_business_kpi
+      - billing_suppressible
+      - external_comms_blockable_or_sandboxable
+      - test_data_isolated
+      - cleanup_and_contamination_verifiable
+    rules:
+      - historical_non_reconstructable_is_missing: "if a past change cannot prove a field, result is MISSING/UNKNOWN, never invented evidence"
+    reads_marveen: [ product_auth_tenant(read, product-local) ]
+
+  # ---------------------------------------------------------------- 4
+  minimal_sidecar_store:
+    purpose: Smallest append-only store for the kernel state.
+    backing: sqlite(store/apg-kernel.db)     # NOT a general graph DB
+    tables: see design/apg-v0.4-pilot-kernel-store-schema.sql
+    rules:
+      - append_only_for_integrity: "receipts/evidence/measurements are append-only; heads/edges upsert by dedup key"
+      - idempotent_replay: "deterministic dedup keys let a shadow replay re-run without duplication"
+      - uninstall: "delete the .db file; no core-DB residue"
+
+  # ---------------------------------------------------------------- 5
+  deterministic_checkpoint_evaluator:
+    purpose: Evaluate checkpoints deterministically (NO LLM), emit PASS/FAIL/UNKNOWN/NOT_APPLICABLE.
+    interface:
+      evaluate(checkpoint, receipt, active_profiles) -> CheckpointResult
+    checkpoints_p0: [ spec_ready, verification_ready, release_ready, runtime_acceptance ]
+    implementation_ready: "P0 ONLY IF a replay needs it for authentic execution; otherwise deferred"
+    does:
+      - schema_and_reference_validation
+      - evidence_chain_completeness_check
+      - profile_overlay_activation
+    output:
+      result: PASS | FAIL | UNKNOWN | NOT_APPLICABLE
+      failed_checks: [ deterministic_check_id ]
+    rules:
+      - no_llm: "deterministic checks only"
+      - shadow_no_external_state_change: true
+      - unknown_is_first_class: "missing evidence -> UNKNOWN, not FAIL and not invented PASS"
+
+  # ---------------------------------------------------------------- 6
+  profile_registry:
+    purpose: Load profiles from config, apply as overlays. NOT if/else branches.
+    source: profiles/<name>/profile.yaml     # config-driven
+    profiles: [ base, ui-fullstack, identity-test-data, product-surface-launch, safe-release ]
+    interface:
+      load(profile_name) -> ProfileOverlay
+      active_for(change_class, signals) -> ProfileOverlay[]
+    rules:
+      - config_loaded_not_hardcoded: "adding/removing a profile is a config edit, no code change"
+
+# Extension points for v0.5 (DESIGN-ONLY, no runtime code now — proven additively insertable):
+extension_points_v0_5:
+  - execution_policy_registry: "future: per-change execution policy; slots beside profile_registry"
+  - delivery_lane_metadata: "future: frontend/backend lanes; a metadata field on work_items, no routing yet"
+  - context_query_plan_registry: "future: bounded dependency-query plans; slots beside token instrumentation"
+  - gate_overlay_registry: "future: extra gate overlays; slots beside checkpoint evaluator"
+  note: "each is a registry slot the current design leaves open; NO unused runtime code is built for them."
+
+# Staging/canary correction (per Istvan):
+upstream_candidate_generic: release-strategy-and-deployment-evidence-adapter-interface
+product_or_provider_local: [ concrete staging, hosting, feature-flags, canary, rollout infra ]

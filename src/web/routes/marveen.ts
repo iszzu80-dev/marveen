@@ -3,6 +3,12 @@ import { join, extname } from 'node:path'
 import {
   PROJECT_ROOT, MAIN_AGENT_ID, CHANNEL_PROVIDER,
   currentBotName, currentBrandName, currentOwnerName,
+  // LOCAL-FORK: keep on merge. Boot-time defaults for the brand chrome this
+  // fork adds (logo + accent). Upstream's current*() accessors cover the three
+  // display NAMES; these two are read through getEffectiveSettingValue below
+  // with these constants as the fallback, which is the same hot-reload idea
+  // applied to the fields upstream does not have.
+  BRAND_LOGO_URL, BRAND_ACCENT,
   KANBAN_LABEL_COLORS,
 } from '../../config.js'
 import { getEffectiveSettingValue } from '../../settings-store.js'
@@ -69,12 +75,22 @@ export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promi
     // legacy backend), `agentId` = canonical MAIN_AGENT_ID so the dashboard can
     // hit /api/agents/<id>/skills for the main agent.
     const idCore = buildMarveenIdentityCore(currentBotName(), currentBrandName(), MAIN_AGENT_ID)
+    // LOCAL-FORK: keep on merge. Brand accent and logo resolved through settings
+    // overrides so the Settings page can hot-reload them, with the boot-time env
+    // as fallback. Same intent as upstream's current*() name accessors.
+    const brandAccent = String(getEffectiveSettingValue('BRAND_ACCENT') ?? BRAND_ACCENT)
+    const brandLogoUrl = String(getEffectiveSettingValue('BRAND_LOGO_URL') ?? BRAND_LOGO_URL)
     json(res, {
       ...idCore,
       // Configured owner display name (OWNER_NAME). The dashboard chat view uses
       // this to pin/label the owner's own message thread instead of a hardcoded
       // literal, so a renamed install recognizes its real owner.
       ownerName: currentOwnerName(),
+      // LOCAL-FORK: keep on merge. Brand chrome: logo URL (empty = monogram
+      // fallback) and accent colour applied as --qq-accent / --qq-accent-dark /
+      // --qq-accent-light on :root.
+      brandLogoUrl,
+      brandAccent,
       description,
       model: getActiveMarveenModel(),
       tmuxSession: MAIN_CHANNELS_SESSION,
@@ -147,7 +163,7 @@ export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promi
   }
 
   if (path === '/api/marveen/restart' && method === 'POST') {
-    const result = hardRestartMarveenChannels()
+    const result = await hardRestartMarveenChannels()
     if (!result.ok) { json(res, { error: result.error || 'Restart failed' }, 500); return true }
     json(res, { ok: true })
     return true

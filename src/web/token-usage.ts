@@ -1,50 +1,24 @@
 import { statSync, readdirSync, existsSync } from 'node:fs'
 import { join, basename } from 'node:path'
-import { homedir } from 'node:os'
 import { createReadStream } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { getDb } from '../db.js'
 import { logger } from '../logger.js'
-import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
-
-const PROJECTS_DIR = join(homedir(), '.claude', 'projects')
-
-// Claude Code encodes a project's absolute path into a directory name by
-// replacing every non-alphanumeric/non-dash character with `-`. The main
-// agent's transcripts live under that exact directory, regardless of what
-// the agent calls itself.
-function encodeProjectPath(p: string): string {
-  return p.replace(/[^a-zA-Z0-9-]/g, '-')
-}
-
-interface AgentTranscriptSource {
-  agent: string
-  projectDir: string
-}
-
-function discoverAgentSources(): AgentTranscriptSource[] {
-  const sources: AgentTranscriptSource[] = []
-  if (!existsSync(PROJECTS_DIR)) return sources
-  const mainDirName = encodeProjectPath(PROJECT_ROOT)
-  for (const entry of readdirSync(PROJECTS_DIR)) {
-    const full = join(PROJECTS_DIR, entry)
-    let stat
-    try { stat = statSync(full) } catch { continue }
-    if (!stat.isDirectory()) continue
-
-    // sanitizeAgentName() allows [a-z0-9-], so the old /([a-z]+)$/ silently
-    // skipped every agent with a digit or a hyphen in its name -- the whole
-    // per-project worker fleet (davinci-ocura, vermeer-fressa, ...) never
-    // appeared in the token monitor at all. Not zero usage: no rows.
-    const agentMatch = entry.match(/-agents-([a-z0-9-]+)$/)
-    if (agentMatch) {
-      sources.push({ agent: agentMatch[1], projectDir: full })
-    } else if (entry === mainDirName) {
-      sources.push({ agent: MAIN_AGENT_ID, projectDir: full })
-    }
-  }
-  return sources
-}
+import { deriveProvider } from '../costops/pricing.js'
+// The transcript-dir -> agent mapping rule lives in ONE place (see
+// transcript-sources.ts); P2-A's resolveCurrentSessionId() reuses the very same
+// helper, so the `-agents-<name>` regex is not duplicated across the two
+// consumers.
+import { discoverAgentSources } from './transcript-sources.js'
+// P2-A: collection is what CREATES the token_usage rows the dispatch window
+// correlation attributes, so the correlation is chained to the end of
+// collectTokenUsage() itself -- the ONE place every collection path goes
+// through (the hourly interval, the startup pass, and POST
+// /api/token-usage/collect). Wiring it here instead of at each of those three
+// call sites makes it structurally impossible for a collection path to exist
+// that does not correlate. The _Safe variant is used because a measurement
+// fault must never break a collection that already wrote real rows.
+import { correlateTokenUsageToDispatchesSafe } from '../costops/dispatch.js'
 
 function findJsonlFiles(dir: string): string[] {
   const files: string[] = []
@@ -81,7 +55,9 @@ interface ParsedCall {
   cacheCreationTokens: number
   /** Tokens in thinking content blocks (estimated from char length / 4). */
   thinkingTokens: number
-  /** Model identifier from the API response, e.g. "claude-sonnet-5". */
+  /** Model identifier from the API response, e.g. "claude-sonnet-5". CostOps
+   *  v0.2 also reads this (message.model); null on older transcripts without it,
+   *  never fabricated. */
   model: string | null
   contentPreview: string
   toolName: string | null
@@ -208,7 +184,14 @@ async function parseJsonlFile(
   return { calls: collapseByMessageId(calls), linesRead: lineNum }
 }
 
-export async function collectTokenUsage(): Promise<{ inserted: number; files: number }> {
+/**
+ * `dispatchAttributed` = token_usage rows this pass linked to a dispatch by the
+ * P2-A window correlation (0 when nothing matched, or when the correlation
+ * faulted and was isolated). Returned so the wiring is OBSERVABLE from the
+ * outside -- POST /api/token-usage/collect reports it -- rather than being an
+ * invisible side effect.
+ */
+export async function collectTokenUsage(): Promise<{ inserted: number; files: number; dispatchAttributed: number }> {
   const db = getDb()
   const sources = discoverAgentSources()
   let totalInserted = 0
@@ -216,13 +199,21 @@ export async function collectTokenUsage(): Promise<{ inserted: number; files: nu
 
   const getCursor = db.prepare('SELECT last_line, last_size FROM token_usage_cursors WHERE file_path = ?')
   const setCursor = db.prepare('INSERT OR REPLACE INTO token_usage_cursors (file_path, last_line, last_size) VALUES (?, ?, ?)')
+  // Reconciled with upstream #573/#583 (per-model cost accuracy): ON CONFLICT DO UPDATE
+  // backfills columns that were NULL/0 on the first (partial-transcript) write once a
+  // later pass sees the real value, instead of INSERT OR IGNORE silently keeping the gap
+  // forever. Extended to our own enrichment columns (provider, model_source) so they get
+  // the same backfill treatment as upstream's model/thinking_tokens.
   const insertCall = db.prepare(`
     INSERT INTO token_usage (agent, session_id, timestamp, input_tokens, output_tokens,
-      cache_read_tokens, cache_creation_tokens, thinking_tokens, model, content_preview, tool_name)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      cache_read_tokens, cache_creation_tokens, thinking_tokens, model, content_preview, tool_name,
+      provider, model_source)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(agent, session_id, timestamp, input_tokens, output_tokens) DO UPDATE SET
       model = CASE WHEN token_usage.model IS NULL AND excluded.model IS NOT NULL THEN excluded.model ELSE token_usage.model END,
-      thinking_tokens = CASE WHEN (token_usage.thinking_tokens IS NULL OR token_usage.thinking_tokens = 0) AND excluded.thinking_tokens > 0 THEN excluded.thinking_tokens ELSE token_usage.thinking_tokens END
+      thinking_tokens = CASE WHEN (token_usage.thinking_tokens IS NULL OR token_usage.thinking_tokens = 0) AND excluded.thinking_tokens > 0 THEN excluded.thinking_tokens ELSE token_usage.thinking_tokens END,
+      provider = CASE WHEN token_usage.provider IS NULL AND excluded.provider IS NOT NULL THEN excluded.provider ELSE token_usage.provider END,
+      model_source = CASE WHEN token_usage.model_source IS NULL AND excluded.model_source IS NOT NULL THEN excluded.model_source ELSE token_usage.model_source END
   `)
 
   for (const source of sources) {
@@ -246,8 +237,10 @@ export async function collectTokenUsage(): Promise<{ inserted: number; files: nu
                 c.agent, c.sessionId, c.timestamp,
                 c.inputTokens, c.outputTokens,
                 c.cacheReadTokens, c.cacheCreationTokens,
-                c.thinkingTokens, c.model,
+                c.thinkingTokens, c.model || null,
                 c.contentPreview || null, c.toolName,
+                c.model ? deriveProvider(c.model) : null,
+                c.model ? 'transcript' : null,
               )
             }
             setCursor.run(file, linesRead, fileSize)
@@ -264,7 +257,17 @@ export async function collectTokenUsage(): Promise<{ inserted: number; files: nu
     }
   }
 
-  return { inserted: totalInserted, files: totalFiles }
+  // P2-A: attribute the rows we just wrote to their dispatches. Runs on EVERY
+  // collection (hourly interval, startup, manual route) because it hangs off
+  // collectTokenUsage itself. One bounded SQL UPDATE per dispatch window, only
+  // over `dispatch_id IS NULL` rows, so re-running is idempotent and cheap.
+  // Fault-isolated: never throws into the collection above.
+  const dispatchAttributed = correlateTokenUsageToDispatchesSafe(db)
+  if (dispatchAttributed > 0) {
+    logger.info({ dispatchAttributed }, 'P2-A: token_usage rows attributed to dispatches')
+  }
+
+  return { inserted: totalInserted, files: totalFiles, dispatchAttributed }
 }
 
 export interface TokenSummaryModelRow {

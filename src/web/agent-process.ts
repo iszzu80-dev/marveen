@@ -24,6 +24,7 @@ import {
   type FirstRunGateKind,
 } from '../pane-state.js'
 import { agentDir, listAgentNames, readAgentModel, readAgentClaudeConfigDir, readAgentClaudePlan, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName, readAgentRemoteConfig, readAgentRemoteHost, readAgentMemoryIsolation } from './agent-config.js'
+import { resolveRuntimeModel } from './capacity-routing-store.js'
 import { resolveAgentConfigDir } from './claude-plans.js'
 import { provisionMemoryBoundaryDir } from './memory-boundary.js'
 import { renameSharedCredentialsIfSafe } from './claude-credentials-guard.js'
@@ -54,6 +55,7 @@ import { resolveOpenRouterModel } from './openrouter-models.js'
 import { reapChannelOrphans, reapDetachedChannelClaudes } from './channel-poller-reap.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { notifyChannel } from '../notify.js'
+import { memoryPressureGate } from './memory-pressure-gate.js'
 
 // Lazy so a transient PATH gap at import time (e.g. the 04:00 auto-update
 // restart, where the finalizer omits the bin dir from PATH) cannot hard-crash
@@ -910,7 +912,11 @@ function startRemoteAgentProcess(
     }
   }
 
-  const model = readAgentModel(name)
+  // Phase 3 (card 59b383a9): resolveRuntimeModel is the choke point. It reads
+  // the runtime overlay (if any, and only if still trust-enabled), else falls
+  // straight through to the configured model -- readAgentModel/agent config
+  // itself is never touched here.
+  const model = resolveRuntimeModel(name, readAgentModel(name))
   const cmd = buildRemoteLaunchCommand({ workdir, model, continue: hasPriorSession })
 
   try {
@@ -956,6 +962,17 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
 
 
   if (isAgentRunning(name)) return { ok: false, error: 'Agent is already running' }
+
+  // P0 MEMORY-PRESSURE GATE (component B, card Istvan-approved plan 2026-07-20).
+  // Fail-closed: a broken gate blocks non-core starts, opposite of the existing
+  // fail-open memGate (fleet-memory-gate.sh). Core agents (explicit config) pass
+  // through; non-core starts are forbidden during warning/critical/emergency.
+  // This single gate covers all 12 start/restart paths through startAgentProcess.
+  const pressureGate = memoryPressureGate(name)
+  if (!pressureGate.allowed) {
+    logger.warn({ name, reason: pressureGate.reason }, 'Memory-pressure gate BLOCKED agent start')
+    return { ok: false, error: `Memory pressure: ${pressureGate.reason}` }
+  }
 
   const agentProvider = resolveAgentProvider(name)
   const provider = getProvider(agentProvider)
@@ -1025,7 +1042,9 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
 
     // `openrouter-auto:<tier>` resolves to the tier's current recommended model
     // (weekly-refreshed); a concrete OpenRouter id (contains '/') passes through.
-    const model = resolveOpenRouterModel(readAgentModel(name))
+    // Phase 3 (card 59b383a9): resolveRuntimeModel is the choke point (see the
+    // remote-launch call site above for the full note).
+    const model = resolveOpenRouterModel(resolveRuntimeModel(name, readAgentModel(name)))
     const authMode = readAgentAuthMode(name)
     const isClaude = model.startsWith('claude-')
     const isDeepseek = model.startsWith('deepseek-')
@@ -1733,8 +1752,16 @@ export async function sendPromptToSession(
   session: string,
   text: string,
   host: string | null = null,
-  opts: { waitForIdle?: boolean; onBusyTimeout?: 'send' | 'abort'; idleTimeoutMs?: number; lockMode?: SendLockMode } = {},
+  opts: { waitForIdle?: boolean; onBusyTimeout?: 'send' | 'abort'; idleTimeoutMs?: number; lockMode?: SendLockMode; dispatchId?: string | null } = {},
 ): Promise<'sent' | 'aborted-busy' | 'skipped-locked'> {
+  // P2-A: measurement-only delivery receipt. The dispatch ROW is written at the
+  // origin (kanban/message/scheduler/worker), never here -- this funnel only
+  // logs that an instrumented dispatch is being delivered. It deliberately does
+  // NOT import the db / costops modules, so a measurement bug can never block or
+  // slow a real send (additive constraint).
+  if (opts.dispatchId) {
+    logger.debug({ dispatchId: opts.dispatchId, session }, 'delivering instrumented dispatch')
+  }
   const lockMode: SendLockMode = opts.lockMode ?? 'deliver'
   // PANEWRITERS805: the three modal dismissals are probe+act keystroke writers
   // that ran BEFORE the lane lock -- so they could press Escape/Enter into a

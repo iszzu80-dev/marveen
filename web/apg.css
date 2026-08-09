@@ -1,0 +1,436 @@
+/* APG 0.4 Lean UI -- page-scoped, additive dashboard components. */
+
+.apg-overview-section,
+.apg-approvals-block,
+.apg-activity-block,
+.apg-card-detail-section {
+  min-width: 0;
+  color: var(--text);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.apg-overview-section {
+  padding: 18px 20px;
+  margin-bottom: 20px;
+}
+
+.apg-section-heading,
+.apg-card-detail-heading,
+.apg-detail-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.apg-section-heading h2,
+.apg-approvals-block h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.apg-section-heading p {
+  margin: 3px 0 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.apg-subheading {
+  margin: 18px 0 8px;
+  font-size: 14px;
+}
+
+.apg-mode-chip,
+.apg-state-pill {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.apg-mode-chip {
+  color: var(--text-muted);
+  background: var(--bg-input);
+  border-color: var(--border);
+}
+
+.apg-severity-info { color: var(--info); }
+.apg-severity-warning { color: var(--accent); }
+.apg-severity-danger { color: var(--danger); }
+.apg-severity-success { color: var(--success); }
+.apg-severity-muted { color: var(--text-muted); }
+
+.apg-stat-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.apg-stat-chip {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+}
+
+.apg-stat-value,
+.apg-stat-label {
+  display: block;
+}
+
+.apg-stat-value {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.apg-stat-label {
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+
+.apg-attention-list,
+.apg-decision-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.apg-attention-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 12px;
+  width: 100%;
+  padding: 10px 12px;
+  color: var(--text);
+  text-align: left;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.apg-attention-row:hover,
+.apg-attention-row:focus-visible {
+  border-color: var(--accent);
+}
+
+.apg-attention-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.apg-attention-title {
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.apg-attention-reason,
+.apg-attention-next {
+  grid-column: 1;
+  color: var(--text-muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.apg-attention-next { color: var(--text-secondary); }
+.apg-attention-age {
+  grid-column: 2;
+  grid-row: 1 / span 3;
+  align-self: center;
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.apg-empty,
+.apg-loading,
+.apg-activity-note {
+  margin: 8px 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.apg-degraded {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  color: var(--danger);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.apg-retry-btn,
+.apg-quick-filter,
+.apg-kanban-badge {
+  color: inherit;
+  background: var(--bg-card);
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.apg-retry-btn {
+  padding: 4px 9px;
+  white-space: nowrap;
+}
+
+.apg-kanban-badge {
+  display: flex;
+  flex: 1 0 100%;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  margin-top: 4px;
+  padding: 4px 7px;
+  border-radius: var(--radius-sm);
+  text-align: left;
+}
+
+.apg-kanban-badge-state {
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.apg-kanban-badge-next {
+  display: block;
+  max-width: 100%;
+  color: var(--text-muted);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.apg-quick-filter {
+  flex: 0 0 auto;
+  padding: 5px 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.apg-quick-filter.active {
+  color: var(--info);
+  background: var(--info-soft);
+}
+
+.apg-kanban-unavailable {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 0 auto;
+  font-size: 11px;
+}
+
+#cardDetailApgPanel { margin-top: 14px; }
+.apg-card-detail-section { padding: 13px 14px; }
+.apg-card-detail-heading { justify-content: flex-start; }
+.apg-risk {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.apg-next-action {
+  margin: 9px 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.apg-card-detail-section details {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  padding-top: 9px;
+}
+
+.apg-card-detail-section summary,
+.apg-activity-block > summary {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.apg-technical-grid,
+.apg-detail-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  min-width: 0;
+  margin-top: 10px;
+}
+
+.apg-technical-grid h5,
+.apg-detail-columns h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+}
+
+.apg-technical-grid ul,
+.apg-detail-list,
+.apg-activity-list,
+.apg-source-ids {
+  min-width: 0;
+  margin: 0;
+  padding-left: 18px;
+  font-size: 11px;
+}
+
+.apg-technical-grid li,
+.apg-detail-list li,
+.apg-activity-list li {
+  margin-bottom: 6px;
+  overflow-wrap: anywhere;
+}
+
+.apg-technical-grid li {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.apg-event-error { color: var(--danger); }
+.apg-source-ids {
+  font-family: monospace;
+  overflow-wrap: anywhere;
+}
+
+.apg-approvals-block {
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+
+.apg-approvals-block h2 { margin-bottom: 10px; }
+
+.apg-decision-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 16px;
+  padding: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.apg-decision-card h3 {
+  margin: 6px 0 3px;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.apg-decision-card p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.apg-decision-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+  max-width: 34rem;
+}
+
+.apg-decision-message {
+  grid-column: 1 / -1;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.apg-activity-block {
+  display: block;
+  margin-top: 16px;
+  padding: 12px 14px;
+}
+
+.apg-activity-block > summary { font-size: 14px; }
+
+.apg-activity-list li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px 8px;
+  margin-top: 8px;
+}
+
+.apg-activity-list li > span:not(.apg-state-pill) {
+  grid-column: 2;
+  color: var(--text-muted);
+}
+
+.apg-activity-list time {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.apg-work-item-overlay .modal { max-width: 680px; }
+.apg-detail-summary { justify-content: flex-start; }
+.apg-definition-list {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 5px 10px;
+  margin: 12px 0;
+  font-size: 13px;
+}
+
+.apg-definition-list dt { color: var(--text-muted); }
+.apg-definition-list dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.apg-detail-list li small {
+  display: block;
+  color: var(--text-muted);
+}
+
+@media (max-width: 520px) {
+  .apg-overview-section { padding: 14px; }
+  .apg-attention-row { grid-template-columns: minmax(0, 1fr); }
+  .apg-attention-age {
+    grid-column: 1;
+    grid-row: auto;
+  }
+  .apg-decision-card { grid-template-columns: minmax(0, 1fr); }
+  .apg-decision-actions {
+    justify-content: flex-start;
+    max-width: 100%;
+  }
+  .apg-decision-actions button { flex: 1 1 150px; }
+  .apg-activity-list li { grid-template-columns: minmax(0, 1fr); }
+  .apg-activity-list li > *,
+  .apg-activity-list li > span:not(.apg-state-pill),
+  .apg-activity-list time {
+    grid-column: 1;
+    grid-row: auto;
+  }
+  .apg-definition-list { grid-template-columns: minmax(0, 1fr); }
+}

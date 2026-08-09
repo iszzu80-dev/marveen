@@ -156,14 +156,20 @@ export function getClaudePlan(id: string | null | undefined): ClaudePlan | null 
 // when the agent has a claudePlan set that no longer resolves (registry entry
 // removed/renamed) -- callers that launch should surface it rather than
 // silently fall back to the host login.
+//
+// `planId` reports WHICH plan produced the dir (null when the agent has no plan
+// set, or when it has one that no longer resolves -- see planUnresolved).
+// Additive: it lets a caller that needs the operator-facing login IDENTITY --
+// CostOps P2-C stamps it as a dispatch's auth_profile -- read it from this same
+// single decision point instead of re-deciding the plan-vs-raw-dir precedence.
 export function resolveAgentConfigDir(
   name: string,
-): { configDir: string | null; planUnresolved: boolean } {
+): { configDir: string | null; planId: string | null; planUnresolved: boolean } {
   const planId = readAgentClaudePlan(name)
   if (planId) {
     const plan = getClaudePlan(planId)
-    if (plan) return { configDir: plan.configDir, planUnresolved: false }
-    return { configDir: readAgentClaudeConfigDir(name), planUnresolved: true }
+    if (plan) return { configDir: plan.configDir, planId, planUnresolved: false }
+    return { configDir: readAgentClaudeConfigDir(name), planId: null, planUnresolved: true }
   }
-  return { configDir: readAgentClaudeConfigDir(name), planUnresolved: false }
+  return { configDir: readAgentClaudeConfigDir(name), planId: null, planUnresolved: false }
 }

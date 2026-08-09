@@ -6,7 +6,10 @@ import { defineConfig, configDefaults } from 'vitest/config'
 // defaults; only carve out the e2e directory.
 export default defineConfig({
   test: {
-    exclude: [...configDefaults.exclude, 'tests/smoke/**'],
+    // '.claude/**' is ours: agent worktrees under .claude/worktrees/ carry their
+    // own copies of the test files, and without this exclude vitest collects
+    // them and runs each suite several times over stale trees.
+    exclude: [...configDefaults.exclude, 'tests/smoke/**', '.claude/**'],
     // Hard gate: refuse to run inside a live install (see the setup file header
     // for the 2026-07-27 incident this prevents). Runs in every worker before
     // any test module is imported.

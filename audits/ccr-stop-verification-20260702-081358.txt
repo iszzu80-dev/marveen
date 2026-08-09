@@ -1,0 +1,36 @@
+=== BEFORE CCR PROCESSES ===
+3539247 node /home/iszzu/.npm-global/bin/ccr start
+
+=== STOP CCR ===
+Killing CCR PID(s): 3539247
+
+=== AFTER CCR PROCESSES ===
+No CCR process running
+
+=== DASHBOARD STATUS ===
+● marveen-dashboard.service - Marveen Dashboard
+     Loaded: loaded (/home/iszzu/.config/systemd/user/marveen-dashboard.service; enabled; preset: enabled)
+     Active: active (running) since Thu 2026-07-02 07:54:43 CEST; 19min ago
+ Invocation: b210ab0eae2845e2b3929f733a113965
+   Main PID: 2743807 (node)
+      Tasks: 13 (limit: 9056)
+     Memory: 158.7M (peak: 292.8M, swap: 444K, swap peak: 4.9M)
+        CPU: 1min 27.855s
+     CGroup: /user.slice/user-1000.slice/user@1000.service/app.slice/marveen-dashboard.service
+             ├─2309021 /usr/bin/tmux new-session -d -s marveen-worker -c /home/iszzu/.marveen-worker bash -lc "export CLAUDE_CONFIG_DIR='/home/iszzu/.marveen-worker/.claude-config'; cd '/home/iszzu/.marveen-worker' && claude --dangerously-skip-permissions --model 'claude-opus-4-8[1m]'"
+             └─2743807 /usr/bin/node /home/iszzu/marveen/dist/index.js
+
+Jul 02 07:54:43 LAPTOP-9GEEIM7F systemd[332]: Started marveen-dashboard.service - Marveen Dashboard.
+
+=== API /api/agents HTTP ===
+/api/agents => 200
+
+=== GIT STATUS ===
+?? .env.backup-20260630-1947
+?? .env.backup-max-20260630-215248
+?? audits/
+?? scripts/inter-agent-evidence-gate.py
+?? scripts/inter-agent-evidence-gate.sh
+?? scripts/stale-instructions-detect.sh
+?? scripts/stale-instructions-guard.sh
+?? shared-dev/

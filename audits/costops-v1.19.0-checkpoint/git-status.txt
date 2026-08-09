@@ -1,0 +1,6 @@
+?? audits/
+?? scripts/inter-agent-evidence-gate.py
+?? scripts/inter-agent-evidence-gate.sh
+?? scripts/stale-instructions-detect.sh
+?? scripts/stale-instructions-guard.sh
+?? shared-dev/

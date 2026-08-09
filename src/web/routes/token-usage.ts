@@ -16,9 +16,13 @@ export async function tryHandleTokenUsage(ctx: RouteContext): Promise<boolean> {
 
   if (path === '/api/token-usage/collect' && method === 'POST') {
     try {
-      const result = await collectTokenUsage()
+      const { inserted, files, dispatchAttributed } = await collectTokenUsage()
       correlateWithKanban()
-      json(res, { ok: true, ...result })
+      // P2-A: `dispatchAttributed` is the number of token_usage rows the
+      // post-collection dispatch correlation just linked. Reported explicitly
+      // (not folded into a spread) so the wiring is observable from the outside
+      // instead of being an invisible side effect of the collection.
+      json(res, { ok: true, inserted, files, dispatchAttributed })
     } catch (err) {
       logger.error({ err }, 'Token usage collection failed')
       json(res, { error: 'Collection failed' }, 500)

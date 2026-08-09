@@ -113,6 +113,7 @@ import { detectReauthNeeded } from '../reauth-detect.js'
 import { readAutoRestartConfig, writeAutoRestartConfig } from '../auto-restart-store.js'
 import { readContextGuardConfig, writeContextGuardConfig } from '../context-guard-store.js'
 import { getContextGuardStatus } from '../context-guard-runner.js'
+import { contextLimitForModel, isRecognizedContextModel } from '../../context-guard.js'
 import type { AutoRestartConfig } from '../../auto-restart.js'
 import { setStoreWriteActor } from '../../store-watcher.js'
 import { attemptChannelMcpReconnect } from '../channel-mcp-reconnect.js'
@@ -415,6 +416,23 @@ interface AgentSummary {
   /** Live context size in tokens (input+cache_read+cache_creation of the last
    *  turn), or null when not running / no transcript yet. */
   contextTokens: number | null
+  /**
+   * The context window this agent's model resolves to per the single
+   * canonical registry (src/context-guard.ts) -- card 585c056c. Any consumer
+   * that wants a token/window percentage (e.g. scripts/fleet-context-guard.sh)
+   * should read THIS instead of maintaining its own model->window map, which
+   * is exactly how that script silently gave claude-opus-5 a 200k window
+   * instead of its real ~1M one.
+   */
+  contextLimit: number
+  /**
+   * False when `model` fell through to contextLimitForModel's conservative
+   * DEFAULT rather than being matched by an evidenced family -- i.e. a model
+   * this registry has never seen. A consumer with no calibration/self-
+   * correction (a one-shot cron check) must treat this as "no reading", not
+   * silently trust the default the way the same card's incident did.
+   */
+  contextLimitKnown: boolean
   /** True when the running session's pane shows a login/401 auth failure --
    *  drives the dashboard "reauth needed" badge + one-click /login button. */
   needsReauth: boolean
@@ -490,6 +508,8 @@ function getAgentSummary(name: string): AgentSummary {
     hasAvatar: findAvatarForAgent(name) !== null,
     autoRestart: readAutoRestartConfig(name),
     contextTokens: running ? readContextTokensFromProjectDir(dir, resolveAgentConfigDir(name).configDir ?? undefined) : null,
+    contextLimit: contextLimitForModel(modelResolution.model),
+    contextLimitKnown: isRecognizedContextModel(modelResolution.model),
     needsReauth: reauth.needsReauth,
     reauthReason: reauth.reason,
   }

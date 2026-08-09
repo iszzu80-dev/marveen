@@ -8,7 +8,10 @@ __pycache__/
 
 # Secrets & personal data
 .env
+.env.backup*
+.env.*.backup
 store/
+releases/
 workspace/
 agents/
 reports/
@@ -88,6 +91,7 @@ marveen-mail-ugyfelkod
 # Python bytecode cache
 __pycache__/
 *.pyc
+store/.github-classic-token
 
 # Claude Code Channels runtime config/session dir (sessions, history, tokens,
 # plugins, skills). Per-install runtime state -- never source, never commit.

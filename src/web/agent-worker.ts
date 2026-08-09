@@ -16,6 +16,10 @@ import {
 } from './agent-process.js'
 import { withSessionSendLock } from './session-send-lock.js'
 import { readClaudeCodeOauthJson } from './claude-credentials.js'
+import { getDb } from '../db.js'
+import { createDispatchSafe, recordOutcomeSafe } from '../costops/dispatch.js'
+import { resolveDispatchIdentitySafe } from '../costops/dispatch-identity.js'
+import { resolveSessionIdForCwd } from './transcript-sources.js'
 import { detectPaneState } from '../pane-state.js'
 import { notifyChannel } from '../notify.js'
 
@@ -663,14 +667,40 @@ async function runWorkerAttempt(ctx: WorkerCtx, message: string, timeoutMs: numb
   const donePath = join(ctx.scratchDir, `${reqId}.done`)
   for (const p of [outPath, donePath]) { try { rmSync(p, { force: true }) } catch { /* none */ } }
 
+  // P2-A: mint a worker-source dispatch_id and thread it to the funnel.
+  // Best-effort: a measurement failure never blocks the worker send.
+  //
+  // session_id comes from the WORKER's own cwd (~/.<id>-worker), NOT from the
+  // agent-id resolver: the worker is a separate Claude Code session outside
+  // PROJECT_ROOT, so resolving it by the main agent id would stamp this dispatch
+  // with the MAIN pane's session -- attributing the main agent's own tokens to a
+  // worker request. The worker's project dir is currently outside
+  // the token_usage collection mapping, so this link stays inert until that
+  // changes; inert is correct, mis-attributed would not be.
+  //
+  // P2-C identity: the worker launches with a LITERAL --model (WORKER_MODEL) and
+  // its OWN isolated CLAUDE_CONFIG_DIR (ctx.configDir), so both are passed as
+  // overrides. Resolving them from MAIN_AGENT_ID would stamp the main pane's
+  // model and login onto worker requests -- the same mis-attribution the
+  // session_id note above avoids.
+  const dispatchId = createDispatchSafe(getDb(), {
+    source: 'worker', agent: MAIN_AGENT_ID, taskType: 'worker',
+    sessionId: resolveSessionIdForCwd(ctx.home),
+    ...resolveDispatchIdentitySafe(MAIN_AGENT_ID, {
+      configuredModel: WORKER_MODEL,
+      configDir: ctx.configDir,
+    }),
+  })
   // PANEWRITERS805: /clear + prompt-send is ONE atomic delivery. Unlocked, the
   // /clear could eat another writer's in-flight text, and a writer slipping in
   // between the clear and our send would land its text into the freshly
   // cleared context ahead of ours. Deliver mode (not recover): a dispatch must
-  // deliver; on a wedged holder we fail open past the budget, logged.
+  // deliver; on a wedged holder we fail open past the budget, logged. The
+  // dispatchId (P2-A) rides through so the worker delivery still gets its
+  // measurement receipt inside the lane.
   const sendRes = await withSessionSendLock(ctx.session, null, 'deliver', async () => {
     clearWorkerContext(ctx)
-    await sendPromptToSession(ctx.session, buildWorkerPrompt(message, outPath, donePath), null, { lockMode: 'held' })
+    await sendPromptToSession(ctx.session, buildWorkerPrompt(message, outPath, donePath), null, { lockMode: 'held', dispatchId })
   })
   if (sendRes.failedOpen) {
     logger.warn({ session: ctx.session, reqId }, 'agent-worker: dispatch ran without the send lane (fail-open past wait budget)')
@@ -698,10 +728,17 @@ async function runWorkerAttempt(ctx: WorkerCtx, message: string, timeoutMs: numb
       }
       if (decision === 'timeout') {
         logger.warn({ reqId, timeoutMs, session: ctx.session }, 'agent-worker: request timed out')
+        // P2-A `failed`: deterministic evidence -- the worker never wrote its
+        // done-file within the request timeout, so this dispatch produced no
+        // result. Best-effort measurement; it cannot affect the return below.
+        if (dispatchId) recordOutcomeSafe(getDb(), { dispatchId, outcome: 'failed', evidence: 'agent-worker:request-timeout' })
         return { kind: 'fail', error: `worker timeout after ${Math.round(timeoutMs / 1000)}s` }
       }
       if (decision === 'dead') {
         logger.warn({ reqId, session: ctx.session }, 'agent-worker: session died mid-request, restarting (fail-fast)')
+        // P2-A `failed`: deterministic evidence -- the tmux session hosting this
+        // dispatch is gone mid-request, so it cannot ever complete.
+        if (dispatchId) recordOutcomeSafe(getDb(), { dispatchId, outcome: 'failed', evidence: 'agent-worker:session-died-mid-request' })
         restartWorkerSession(ctx)
         return { kind: 'fail', error: 'worker session died mid-request' }
       }

@@ -1,0 +1,566 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://marveen.local/schemas/product-graph/2026-07-13/artifact-schema-draft.json",
+  "title": "Marveen Autonomous Product Graph — Canonical Artifact Schema (draft)",
+  "description": "AI-first, structured, schema-validated canonical objects for the Marveen Autonomous Product Graph. Long Markdown/HTML docs are ONLY projections generated from these objects and are NEVER authoritative. This schema is the shared foundation referenced by the lifecycle transition-table and the context-packet-contract authored by a peer agent; object-type names, edge `rel` names, and envelope field names are load-bearing and must stay stable across all three documents. Persisted in the SQLite sidecar store/product-graph.db, one row per object (envelope columns) + payload JSON blob; NEVER inside store/claudeclaw.db.",
+
+  "type": "object",
+  "$comment": "The root of a validated instance is exactly ONE canonical object. Validate every object against #/$defs/artifact then against the type-specific $def selected by `type` (see #/$defs/typeDispatch).",
+  "$ref": "#/$defs/artifact",
+
+  "$defs": {
+
+    "objectType": {
+      "type": "string",
+      "description": "The 19 canonical object types. Every node in the Product Graph is exactly one of these.",
+      "enum": [
+        "product", "opportunity", "market_fact", "hypothesis", "business_definition",
+        "change", "requirement", "scenario", "decision", "design_node",
+        "task", "test", "build", "deployment", "runtime_evidence",
+        "metric_definition", "metric_observation", "product_review", "approval"
+      ]
+    },
+
+    "lifecyclePhase": {
+      "type": "string",
+      "description": "The Product LCM phase. Carried authoritatively by `product` and by `change` (the delta unit). NEVER derived from kanban status (principle 6).",
+      "enum": [
+        "market_scouting", "opportunity", "business_definition", "product_definition",
+        "design", "implementation", "verification", "build", "deploy",
+        "runtime_evidence", "measurement", "optimization",
+        "repricing", "scaling", "pivot", "sunset"
+      ]
+    },
+
+    "edgeRel": {
+      "type": "string",
+      "description": "Typed, directional edge relation (from THIS object -> the referenced object). The (rel, from-type, to_type) triples that are legal are enumerated in #/$defs/legalEdges and MUST be honored by writers; the peer agent's transition-table keys transitions off these same rel names.",
+      "enum": [
+        "belongs_to", "derives_from", "about", "supported_by", "contradicted_by",
+        "for", "justified_by", "advances", "realizes",
+        "part_of", "traces_to", "specifies", "resolves", "triggers",
+        "designs", "implements", "verifies", "covers",
+        "builds", "deploys", "observed_on", "evidences",
+        "measures", "instance_of", "on",
+        "reviews", "cites", "gates", "steps_back_to", "supersedes"
+      ]
+    },
+
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rel", "to_type", "to_id"],
+      "properties": {
+        "rel": { "$ref": "#/$defs/edgeRel" },
+        "to_type": { "$ref": "#/$defs/objectType" },
+        "to_id": { "type": "string", "description": "id of the referenced canonical object. Must resolve to a live (non-invalidated unless rel=supersedes) object of `to_type`." },
+        "note": { "type": "string", "description": "Optional human note; NOT authoritative, projection-only." }
+      }
+    },
+
+    "objectStatus": {
+      "type": "string",
+      "description": "Object-scoped status. This is the artifact's OWN production/acceptance state and is DISTINCT from (a) kanban task-status, (b) lifecycle_phase, (c) gate_status, (d) decision_status (principle 6 separation).",
+      "enum": ["draft", "proposed", "active", "accepted", "rejected", "superseded", "invalidated", "archived"]
+    },
+
+    "gateStatus": {
+      "type": "object",
+      "description": "Three-layer gate outcome for a gated object. Ordering is enforced by the Gate Engine: deterministic ALWAYS runs and must pass before the semantic (LLM verifier) runs (principle 1); the producing agent's execution_id may NEVER appear as the accepting actor (principle 2); human is only present for owner-decision phases (principle 9).",
+      "additionalProperties": false,
+      "properties": {
+        "deterministic": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": {
+            "state": { "type": "string", "enum": ["pending", "pass", "fail", "not_applicable"] },
+            "checks": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["check_id", "result"],
+                "properties": {
+                  "check_id": { "type": "string", "description": "e.g. tsc_build, test_exit_code, route_reachable_200, fe_be_wired, artifact_hash_present, schema_valid" },
+                  "result": { "type": "string", "enum": ["pass", "fail"] },
+                  "detail": { "type": "string" },
+                  "evidence_ref": { "type": "string", "description": "id of a build/test/runtime_evidence object or a ledger event_id" }
+                }
+              }
+            },
+            "ran_at": { "type": "integer" },
+            "execution_id": { "type": "string" }
+          }
+        },
+        "semantic": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": {
+            "state": { "type": "string", "enum": ["pending", "pass", "fail", "not_applicable", "skipped_hash_unchanged"] },
+            "verifier_agent": { "type": "string", "description": "role of the LLM verifier; MUST differ from provenance.created_by (principle 2)" },
+            "verifier_execution_id": { "type": "string" },
+            "model_tier": { "$ref": "#/$defs/modelTier" },
+            "verified_hash": { "type": "string", "description": "content_hash the verifier saw; if equal to current content_hash on a later pass, re-verification is skipped (principle 3)" },
+            "rationale_ref": { "type": "string", "description": "ledger event_id holding the verifier rationale (projection-only)" },
+            "ran_at": { "type": "integer" }
+          }
+        },
+        "human": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["state"],
+          "properties": {
+            "state": { "type": "string", "enum": ["not_required", "pending", "approved", "rejected"] },
+            "approval_id": { "type": "string", "description": "id of the `approval` object carrying the owner decision" }
+          }
+        }
+      }
+    },
+
+    "modelTier": {
+      "type": "string",
+      "description": "Which model class produced/verified this artifact. Drives cost accounting and the autonomy of self-check. deepseek NEVER carries sensitive data-in-context (see architecture doc, model-tiering).",
+      "enum": ["deterministic_no_llm", "cheap_deepseek", "mid_sonnet", "high_opus"]
+    },
+
+    "provenance": {
+      "type": "object",
+      "description": "WHO/HOW this object was produced. The append-only ledger is the fuller trail; this is the inline, queryable summary. Memory/conversation-summary is NEVER cited here (principle 4).",
+      "additionalProperties": false,
+      "required": ["created_by", "execution_id", "created_at"],
+      "properties": {
+        "created_by": {
+          "type": "string",
+          "description": "Fleet agent role that produced the object.",
+          "enum": ["marveen", "deliverylead", "architect", "ba", "business", "research", "marketing", "uxuidesigner", "jogasz", "frontend", "frontend2", "fullstack", "build", "qa", "uat", "devops", "system", "human_owner"]
+        },
+        "execution_id": {
+          "type": "string",
+          "description": "Idempotent execution ID (principle 7). Every side effect that produced this object ran under this ID; replaying the same execution_id is a no-op. Format: <phase>-<lineage_id>-<attempt>-<ulid>."
+        },
+        "created_at": { "type": "integer", "description": "unix epoch seconds (UTC)" },
+        "source_refs": {
+          "type": "array",
+          "description": "ids of upstream canonical objects this artifact was derived from (redundant-but-queryable mirror of derives_from/traces_to/supported_by edges).",
+          "items": { "type": "string" }
+        },
+        "model_tier": { "$ref": "#/$defs/modelTier" },
+        "tokens": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Per-object token accounting, fed by the Context Router / token-measurement methodology.",
+          "properties": {
+            "fresh_input": { "type": "integer" },
+            "cache_read": { "type": "integer" },
+            "output": { "type": "integer" },
+            "total": { "type": "integer" }
+          }
+        }
+      }
+    },
+
+    "artifact": {
+      "type": "object",
+      "description": "Common envelope shared by ALL 19 object types. Type-specific fields live under `payload` and are validated by the matching $def.",
+      "required": ["id", "type", "schema_version", "version", "lineage_id", "content_hash", "status", "provenance", "payload"],
+      "properties": {
+        "id": { "type": "string", "description": "Globally unique object id (ULID). Immutable; a new version gets a NEW id and a supersedes edge to the old one." },
+        "type": { "$ref": "#/$defs/objectType" },
+        "schema_version": { "type": "string", "const": "2026-07-13" },
+        "version": { "type": "integer", "minimum": 1, "description": "Monotonic within a lineage_id." },
+        "lineage_id": { "type": "string", "description": "Stable identity across versions/supersede. version=1 sets lineage_id=id by convention." },
+        "content_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "sha256 over the canonical (sorted-key, edges included, provenance/gate excluded) serialization of `payload` + `edges`. The invalidation/re-verification engine keys off this: unchanged hash => no re-read/re-verify (principle 3)."
+        },
+        "status": { "$ref": "#/$defs/objectStatus" },
+        "lifecycle_phase": { "$ref": "#/$defs/lifecyclePhase", "description": "Authoritative ONLY on product and change; advisory/absent elsewhere." },
+        "provenance": { "$ref": "#/$defs/provenance" },
+        "edges": { "type": "array", "items": { "$ref": "#/$defs/edge" } },
+        "gate_status": { "$ref": "#/$defs/gateStatus" },
+        "supersedes": { "type": ["string", "null"], "description": "id of the object this one replaces (same lineage_id, version-1)." },
+        "superseded_by": { "type": ["string", "null"], "description": "id of the object that replaced this one; set when this object is retired." },
+        "invalidated": { "type": "boolean", "default": false, "description": "Set true when an upstream source_ref hash changed (cascade invalidation). Invalidated objects are excluded from context packets and gates until re-derived." },
+        "invalidation_reason": { "type": ["string", "null"], "description": "e.g. 'upstream requirement <id> content_hash changed', 'runtime_evidence contradicted'." },
+        "payload": { "type": "object" }
+      }
+    },
+
+    "typeDispatch": {
+      "$comment": "Applicators: pick the payload $def by `type`. Kept as documentation of the intended dispatch; a validator implementation applies the matching payload $def after #/$defs/artifact.",
+      "allOf": [
+        { "if": { "properties": { "type": { "const": "product" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payload_product" } } } },
+        { "if": { "properties": { "type": { "const": "opportunity" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payload_opportunity" } } } },
+        { "if": { "properties": { "type": { "const": "market_fact" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payload_market_fact" } } } },
+        { "if": { "properties": { "type": { "const": "hypothesis" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payload_hypothesis" } } } },
+        { "if": { "properties": { "type": { "const": "business_definition" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payload_business_definition" } } } },
+        { "if": { "properties": { "type": { "const": "change" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payload_change" } } } },
+        { "if": { "properties": { "type": { "const": "requirement" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payload_requirement" } } } },
+        { "if": { "properties": { "type": { "const": "scenario" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payload_scenario" } } } },
+        { "if": { "properties": { "type": { "const": "decision" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payload_decision" } } } },
+        { "if": { "properties": { "type": { "const": "design_node" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payload_design_node" } } } },
+        { "if": { "properties": { "type": { "const": "task" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payload_task" } } } },
+        { "if": { "properties": { "type": { "const": "test" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payload_test" } } } },
+        { "if": { "properties": { "type": { "const": "build" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payload_build" } } } },
+        { "if": { "properties": { "type": { "const": "deployment" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payload_deployment" } } } },
+        { "if": { "properties": { "type": { "const": "runtime_evidence" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payload_runtime_evidence" } } } },
+        { "if": { "properties": { "type": { "const": "metric_definition" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payload_metric_definition" } } } },
+        { "if": { "properties": { "type": { "const": "metric_observation" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payload_metric_observation" } } } },
+        { "if": { "properties": { "type": { "const": "product_review" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payload_product_review" } } } },
+        { "if": { "properties": { "type": { "const": "approval" } } }, "then": { "properties": { "payload": { "$ref": "#/$defs/payload_approval" } } } }
+      ]
+    },
+
+    "legalEdges": {
+      "$comment": "Reference table (not an enforced schema) of the legal (from_type, rel, to_type) triples. Writers and the Gate Engine enforce these; the peer transition-table and context-packet-contract MUST use identical rel names.",
+      "type": "array",
+      "const": [
+        "opportunity -belongs_to-> product",
+        "opportunity -derives_from-> market_fact",
+        "hypothesis -about-> product",
+        "hypothesis -about-> opportunity",
+        "hypothesis -supported_by-> market_fact",
+        "hypothesis -contradicted_by-> runtime_evidence",
+        "hypothesis -contradicted_by-> metric_observation",
+        "business_definition -for-> product",
+        "business_definition -justified_by-> opportunity",
+        "change -advances-> product",
+        "change -realizes-> business_definition",
+        "requirement -part_of-> change",
+        "requirement -traces_to-> business_definition",
+        "scenario -specifies-> requirement",
+        "decision -resolves-> change",
+        "decision -resolves-> requirement",
+        "decision -triggers-> change",
+        "decision -steps_back_to-> business_definition",
+        "decision -steps_back_to-> design_node",
+        "design_node -designs-> requirement",
+        "task -implements-> requirement",
+        "test -verifies-> requirement",
+        "test -covers-> scenario",
+        "build -builds-> change",
+        "deployment -deploys-> build",
+        "runtime_evidence -observed_on-> deployment",
+        "runtime_evidence -evidences-> requirement",
+        "metric_definition -measures-> product",
+        "metric_definition -measures-> business_definition",
+        "metric_observation -instance_of-> metric_definition",
+        "metric_observation -on-> deployment",
+        "product_review -reviews-> product",
+        "product_review -cites-> metric_observation",
+        "approval -gates-> change",
+        "approval -gates-> decision",
+        "approval -gates-> deployment",
+        "<any> -supersedes-> <same-type>"
+      ]
+    },
+
+    "payload_product": {
+      "type": "object",
+      "description": "Root product node (e.g. LumaSeat, MikroKonyv, QuickQuote, Zsibongo, DORA). One live per product lineage.",
+      "required": ["name", "slug", "lifecycle_phase"],
+      "properties": {
+        "name": { "type": "string" },
+        "slug": { "type": "string", "description": "stable key, matches kanban `project` and marveen-suite app dir, e.g. 'lumaseat'" },
+        "lifecycle_phase": { "$ref": "#/$defs/lifecyclePhase" },
+        "one_liner": { "type": "string" },
+        "repo": { "type": "string", "description": "e.g. iszzu80-dev/marveen-suite or standalone repo" },
+        "deploy_target": { "type": "string", "description": "pre-approved Render service id/name; deploys here are AUTOMATIC" },
+        "kanban_project": { "type": "string" },
+        "current_business_definition": { "type": ["string", "null"], "description": "id of the live business_definition" },
+        "kill_criteria_ref": { "type": ["string", "null"], "description": "id of the metric_definition whose breach proposes sunset" }
+      }
+    },
+
+    "payload_opportunity": {
+      "type": "object",
+      "description": "A scored market opportunity derived from market_facts. Maintained pipeline, revisited go/no-go (fixes AS-IS FM: June-only one-shot).",
+      "required": ["statement", "state"],
+      "properties": {
+        "statement": { "type": "string" },
+        "state": { "type": "string", "enum": ["candidate", "shortlisted", "go", "no_go", "parked"] },
+        "tam_estimate": { "type": ["number", "null"] },
+        "tam_currency": { "type": "string", "default": "HUF" },
+        "score": { "type": ["number", "null"], "description": "0-100 composite" },
+        "score_factors": { "type": "object", "description": "named sub-scores {reach, wtp, fit, effort}" },
+        "revisit_at": { "type": ["integer", "null"], "description": "when the go/no-go should be re-evaluated" }
+      }
+    },
+
+    "payload_market_fact": {
+      "type": "object",
+      "description": "One atomic, sourced market/competitor claim. Delta-based (OpenSpec pattern): each fact is a discrete node so competitor knowledge accretes instead of full re-research. Links to the intel registry (idea_box/research deliverables/memories) via source_uri.",
+      "required": ["claim", "observed_at", "source_kind"],
+      "properties": {
+        "claim": { "type": "string" },
+        "observed_at": { "type": "integer" },
+        "source_kind": { "type": "string", "enum": ["web", "competitor_page", "pricing_page", "review_site", "owner_input", "intel_registry", "runtime"] },
+        "source_uri": { "type": ["string", "null"] },
+        "subject": { "type": "string", "description": "competitor/segment/product slug the fact is about" },
+        "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
+        "numeric_value": { "type": ["number", "null"], "description": "e.g. competitor price" },
+        "unit": { "type": ["string", "null"] },
+        "stale_after": { "type": ["integer", "null"], "description": "epoch after which the fact must be re-scouted" }
+      }
+    },
+
+    "payload_hypothesis": {
+      "type": "object",
+      "description": "A falsifiable belief about a product/opportunity, tested against runtime_evidence + metric_observations. Closes the AS-IS 'feedback loop runs on qualitative signals not measured ones' gap.",
+      "required": ["statement", "state"],
+      "properties": {
+        "statement": { "type": "string" },
+        "state": { "type": "string", "enum": ["open", "supported", "refuted", "inconclusive", "retired"] },
+        "predicted_metric": { "type": ["string", "null"], "description": "id of a metric_definition" },
+        "predicted_direction": { "type": ["string", "null"], "enum": ["increase", "decrease", "threshold", null] },
+        "predicted_value": { "type": ["number", "null"] },
+        "evaluated_at": { "type": ["integer", "null"] }
+      }
+    },
+
+    "payload_business_definition": {
+      "type": "object",
+      "description": "The single LIVE authoritative business brief per product (value-prop + unit-economics + GTM + success/kill criteria). Superseded, never edited-in-place; staleness is a first-class supersede, fixing AS-IS FM-22.",
+      "required": ["value_proposition", "target_segment", "state"],
+      "properties": {
+        "value_proposition": { "type": "string" },
+        "target_segment": { "type": "string" },
+        "state": { "type": "string", "enum": ["draft", "accepted", "stale", "superseded"] },
+        "pricing": {
+          "type": "object",
+          "properties": {
+            "amount": { "type": ["number", "null"] },
+            "currency": { "type": "string", "default": "HUF" },
+            "model": { "type": "string", "enum": ["one_time", "subscription", "usage", "freemium", "unset"] },
+            "cogs_ref": { "type": ["string", "null"], "description": "CostOps per-product cost handle for margin awareness (fixes FM-24)" }
+          }
+        },
+        "success_criteria": { "type": "array", "items": { "type": "string", "description": "id of a metric_definition + target" } },
+        "kill_criteria": { "type": "array", "items": { "type": "string", "description": "id of a metric_definition + breach threshold" } },
+        "gtm_summary": { "type": "string" },
+        "accepted_intent_hash": { "type": ["string", "null"], "description": "content_hash of the owner-accepted intent; a material change to this requires an approval (autonomy matrix)" }
+      }
+    },
+
+    "payload_change": {
+      "type": "object",
+      "description": "The DELTA unit (OpenSpec pattern): a single coherent product change that flows through the lifecycle. Carries its own lifecycle_phase (envelope). Kanban epic mirrors this 1:1 but is NOT authoritative (principle 6).",
+      "required": ["title", "intent", "lifecycle_phase", "gate_profile"],
+      "properties": {
+        "title": { "type": "string" },
+        "intent": { "type": "string", "description": "what user/business outcome this change delivers" },
+        "lifecycle_phase": { "$ref": "#/$defs/lifecyclePhase" },
+        "kind": { "type": "string", "enum": ["feature", "fix", "repricing", "scaling", "pivot", "sunset", "experiment"] },
+        "gate_profile": { "type": "string", "description": "named profile selecting which deterministic+semantic checks apply, e.g. 'ui_backend_integration_full'" },
+        "kanban_epic_id": { "type": ["string", "null"], "description": "mirror kanban_cards.id (external); provenance link only, not source of truth" },
+        "blocked_on_approval": { "type": ["string", "null"], "description": "id of a pending approval when the phase is a human-gated one" },
+        "rollback_ref": { "type": ["string", "null"], "description": "id of the deployment to roll back to; required before deploy phase" }
+      }
+    },
+
+    "payload_requirement": {
+      "type": "object",
+      "description": "One testable requirement of a change. traces_to a business_definition; verified by tests + runtime_evidence. The 'AC field' the AS-IS audit found missing.",
+      "required": ["statement", "acceptance", "state"],
+      "properties": {
+        "statement": { "type": "string" },
+        "acceptance": { "type": "array", "items": { "type": "string" }, "description": "machine-checkable acceptance criteria" },
+        "state": { "type": "string", "enum": ["draft", "accepted", "implemented", "verified", "reachable", "superseded"] },
+        "surface": { "type": "array", "items": { "type": "string", "enum": ["ui", "backend", "integration", "data", "build", "deploy"] }, "description": "which surfaces the requirement touches; drives the fe_be_wired deterministic check (fixes FM-06 implemented-not-integrated)" },
+        "priority": { "type": "string", "enum": ["must", "should", "could"] }
+      }
+    },
+
+    "payload_scenario": {
+      "type": "object",
+      "description": "Concrete given/when/then scenario specifying a requirement (Spec Kit progressive disclosure: scenarios expand requirements only when needed).",
+      "required": ["given", "when", "then"],
+      "properties": {
+        "given": { "type": "string" },
+        "when": { "type": "string" },
+        "then": { "type": "string" },
+        "persona": { "type": ["string", "null"] }
+      }
+    },
+
+    "payload_decision": {
+      "type": "object",
+      "description": "A recorded decision (design choice, phase step-back, go/no-go). decision_status is a SEPARATE axis from object status (principle 6). Fixes AS-IS FM-01 (agreed-not-recorded, e.g. nav sidebar->top-tabs).",
+      "required": ["question", "decision_status"],
+      "properties": {
+        "question": { "type": "string" },
+        "chosen_option": { "type": ["string", "null"] },
+        "options": { "type": "array", "items": { "type": "string" } },
+        "decision_status": { "type": "string", "enum": ["open", "decided_auto", "decided_owner", "deferred", "reversed"] },
+        "rationale_ref": { "type": ["string", "null"], "description": "ledger event_id (projection-only rationale)" },
+        "requires_owner": { "type": "boolean", "description": "true when it falls in the human-approval autonomy bucket" }
+      }
+    },
+
+    "payload_design_node": {
+      "type": "object",
+      "description": "A UX/UI design artifact (screen/flow/component/graphics-parity note) designing a requirement. Graphics-parity is measured against the thick proto (the product-truth), not a landing.",
+      "required": ["kind", "state"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["screen", "flow", "component", "graphics_parity", "interaction"] },
+        "state": { "type": "string", "enum": ["draft", "accepted", "superseded"] },
+        "proto_ref": { "type": ["string", "null"], "description": "path/handle to the thick proto this parity-checks against" },
+        "artifact_uri": { "type": ["string", "null"], "description": "generated design projection location" }
+      }
+    },
+
+    "payload_task": {
+      "type": "object",
+      "description": "An implementation unit implementing a requirement. Mirrors a kanban_cards row for dispatch/visualization; the kanban STATUS is work-tracking, NEVER lifecycle (principle 6). Carries the task lease + idempotency for the duplication-guard.",
+      "required": ["title", "state", "lease"],
+      "properties": {
+        "title": { "type": "string" },
+        "state": { "type": "string", "enum": ["created", "dispatched", "in_progress", "produced", "accepted", "returned", "abandoned"] },
+        "assignee_role": { "type": "string", "enum": ["architect", "ba", "business", "research", "marketing", "uxuidesigner", "jogasz", "frontend", "frontend2", "fullstack", "build", "qa", "uat", "devops"] },
+        "kanban_card_id": { "type": ["string", "null"], "description": "mirror kanban_cards.id via POST /api/kanban; provenance link only" },
+        "lease": {
+          "type": "object",
+          "description": "Task lease + duplication-guard (LangGraph idempotency): only the holder of a live lease may transition the task; expiry allows safe re-dispatch without double-work.",
+          "additionalProperties": false,
+          "properties": {
+            "holder_execution_id": { "type": ["string", "null"] },
+            "leased_at": { "type": ["integer", "null"] },
+            "lease_expires_at": { "type": ["integer", "null"] },
+            "attempt": { "type": "integer", "default": 0 },
+            "dedup_key": { "type": "string", "description": "stable key = <change_lineage>:<requirement_lineage>:<task_kind>; a second create with the same dedup_key is rejected" }
+          }
+        },
+        "output_refs": { "type": "array", "items": { "type": "string" }, "description": "ids of produced objects (build/test/design_node/etc.)" }
+      }
+    },
+
+    "payload_test": {
+      "type": "object",
+      "description": "A test verifying a requirement / covering a scenario. Its RESULT is a deterministic gate input (principle 1); a test authored by the implementing agent may not by itself accept the requirement (principle 2).",
+      "required": ["kind", "result"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["unit", "integration", "e2e", "runtime_smoke", "regression", "security"] },
+        "result": { "type": "string", "enum": ["not_run", "pass", "fail", "error", "skipped"] },
+        "harness": { "type": "string", "description": "e.g. vitest, playwright, curl-smoke" },
+        "command": { "type": ["string", "null"] },
+        "exit_code": { "type": ["integer", "null"] },
+        "evidence_uri": { "type": ["string", "null"], "description": "log/report path or ledger event_id" },
+        "authored_by_role": { "type": "string", "description": "must differ from the accepting verifier (principle 2)" }
+      }
+    },
+
+    "payload_build": {
+      "type": "object",
+      "description": "A build of a change. Source->build provenance: commit sha + build command + artifact digest, so 'the running bundle contains the merged change' is checkable (fixes AS-IS FM-07/08 gaps).",
+      "required": ["state", "commit_sha"],
+      "properties": {
+        "state": { "type": "string", "enum": ["queued", "building", "success", "failed"] },
+        "commit_sha": { "type": "string" },
+        "branch": { "type": "string" },
+        "build_command": { "type": "string", "description": "e.g. pnpm --filter @suite/web build" },
+        "artifact_digest": { "type": ["string", "null"], "description": "hash of the produced bundle/dist for source-vs-build verify" },
+        "log_uri": { "type": ["string", "null"] },
+        "built_at": { "type": ["integer", "null"] }
+      }
+    },
+
+    "payload_deployment": {
+      "type": "object",
+      "description": "A deployment of a build to an environment. Deploy to a PRE-APPROVED env is AUTOMATIC; any other target needs an approval. Provenance ties env+service+commit for reachability checks.",
+      "required": ["state", "environment", "build_ref"],
+      "properties": {
+        "state": { "type": "string", "enum": ["queued", "deploying", "live", "failed", "rolled_back"] },
+        "environment": { "type": "string", "enum": ["preapproved_render", "staging", "production_public"] },
+        "service_ref": { "type": "string", "description": "Render service id/name" },
+        "build_ref": { "type": "string", "description": "id of the build object deployed" },
+        "commit_sha": { "type": "string" },
+        "deployed_at": { "type": ["integer", "null"] },
+        "rolled_back_from": { "type": ["string", "null"] }
+      }
+    },
+
+    "payload_runtime_evidence": {
+      "type": "object",
+      "description": "Observed runtime fact about a deployment: feature reachability, smoke result, health. The keystone the AS-IS chain was missing (FM-09 deployed-not-reachable). evidences a requirement => flips it to 'reachable'.",
+      "required": ["kind", "result", "observed_at"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["health", "route_reachable", "feature_reachable", "smoke", "error_rate", "screenshot"] },
+        "result": { "type": "string", "enum": ["pass", "fail", "degraded"] },
+        "observed_at": { "type": "integer" },
+        "target_url": { "type": ["string", "null"] },
+        "http_status": { "type": ["integer", "null"] },
+        "detail": { "type": ["string", "null"] },
+        "evidence_uri": { "type": ["string", "null"], "description": "screenshot path / response capture / ledger event_id" }
+      }
+    },
+
+    "payload_metric_definition": {
+      "type": "object",
+      "description": "Defines a business KPI (signups/activation/conversion/retention/revenue/margin) with baseline+target+threshold. The measurement layer the AS-IS audit calls the keystone gap (section 14).",
+      "required": ["key", "unit", "direction"],
+      "properties": {
+        "key": { "type": "string", "enum": ["visits", "signups", "activation_rate", "conversion_rate", "retention_d7", "retention_d30", "churn", "revenue", "mrr", "cac", "ltv", "gross_margin", "feature_adoption", "cost_per_month"] },
+        "unit": { "type": "string" },
+        "direction": { "type": "string", "enum": ["higher_better", "lower_better"] },
+        "adapter": { "type": "string", "enum": ["posthog", "revenue_ledger", "costops", "manual", "runtime"] },
+        "baseline": { "type": ["number", "null"] },
+        "target": { "type": ["number", "null"] },
+        "threshold": { "type": ["number", "null"], "description": "gap-analysis alarm level; breach can auto-propose optimization/repricing/sunset changes" },
+        "window": { "type": "string", "enum": ["daily", "weekly", "monthly", "rolling_7d", "rolling_30d"] }
+      }
+    },
+
+    "payload_metric_observation": {
+      "type": "object",
+      "description": "One measured value for a metric_definition at a time, on a deployment. instance_of a metric_definition. Feeds KPI-gap analysis + hypothesis evaluation.",
+      "required": ["value", "observed_at"],
+      "properties": {
+        "value": { "type": "number" },
+        "observed_at": { "type": "integer" },
+        "window_start": { "type": ["integer", "null"] },
+        "window_end": { "type": ["integer", "null"] },
+        "adapter_run_id": { "type": ["string", "null"], "description": "idempotent adapter execution id; dedup by (metric_definition, window_start, window_end)" },
+        "gap_vs_target": { "type": ["number", "null"] }
+      }
+    },
+
+    "payload_product_review": {
+      "type": "object",
+      "description": "Periodic product health review aggregating metric_observations into a verdict + proposed next-lifecycle action (repricing|scaling|pivot|sunset). The PROPOSAL is automatic; enacting a pivot/sunset/repricing-go-live needs an approval.",
+      "required": ["period_start", "period_end", "verdict"],
+      "properties": {
+        "period_start": { "type": "integer" },
+        "period_end": { "type": "integer" },
+        "verdict": { "type": "string", "enum": ["healthy", "underperforming", "zombie", "growing", "at_risk"] },
+        "proposed_action": { "type": "string", "enum": ["none", "optimize", "reprice", "scale", "pivot", "sunset"] },
+        "proposal_change_ref": { "type": ["string", "null"], "description": "id of the auto-created change carrying the proposal" },
+        "kpi_summary": { "type": "array", "items": { "type": "string", "description": "metric_observation ids cited" } }
+      }
+    },
+
+    "payload_approval": {
+      "type": "object",
+      "description": "The ONLY human interrupt point (principle 9). Records an owner decision for an autonomy-matrix gated action. Created by the Approval Broker; resolved by Istvan via Telegram/dashboard. No side effect in the gated bucket proceeds without a resolved approval.",
+      "required": ["reason", "state", "gated_bucket"],
+      "properties": {
+        "reason": { "type": "string" },
+        "state": { "type": "string", "enum": ["pending", "approved", "rejected", "expired"] },
+        "gated_bucket": {
+          "type": "string",
+          "description": "which USER-APPROVAL-REQUIRED bucket triggered this",
+          "enum": ["new_or_increased_recurring_cost", "pricing_go_live", "external_publish", "legal_privacy_commitment", "destructive_prod_data_deletion", "product_pivot", "product_sunset", "material_business_intent_change"]
+        },
+        "requested_by_role": { "type": "string" },
+        "requested_at": { "type": "integer" },
+        "resolved_at": { "type": ["integer", "null"] },
+        "resolved_by": { "type": ["string", "null"], "const": "human_owner", "description": "only the owner may resolve; bus 'from' is not trusted (AS-IS: no sender-auth)" },
+        "escalation_channel": { "type": "string", "enum": ["telegram", "dashboard"], "default": "telegram" },
+        "escalation_deadline": { "type": ["integer", "null"], "description": "deterministic escalation-clock; on expiry the gated action stays blocked and re-pings (fixes AS-IS FM-15 no escalation-clock)" }
+      }
+    }
+
+  }
+}

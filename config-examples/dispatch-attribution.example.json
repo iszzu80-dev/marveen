@@ -1,0 +1,5 @@
+{
+  "_comment": "P2-A dispatch attribution bounds. Copy to store/dispatch-attribution.json (gitignored) to override for THIS deployment. 'max_window_seconds' is the hard cap on how long after a dispatch's created_at its token_usage rows may still be attributed to it. Without it the LAST dispatch of a session would be open-ended and would absorb every later row in that session forever (a human typing in the pane hours later, unrelated self-initiated work), inflating cost_per_accepted_task. The other bound is not configurable: a terminal outcome (accepted | failed | cancelled) always closes the window at its created_at; 'retry' and 'unknown' do NOT. A missing file, invalid JSON, or a non-positive value falls back to the committed default of 21600 (6 hours) -- there is NO unbounded mode.",
+  "version": 1,
+  "max_window_seconds": 21600
+}

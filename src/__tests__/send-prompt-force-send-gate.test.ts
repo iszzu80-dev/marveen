@@ -24,8 +24,9 @@ describe('sendPromptToSession waitForIdle gate', () => {
     // The opts bag grew onBusyTimeout/idleTimeoutMs for the inbox-nudge
     // watcher (an OPTIONAL prompt aborts instead of best-effort-typing into a
     // busy pane); waitForIdle stays the first, default-ON member. DELIVLOCK805
-    // added lockMode (per-pane delivery mutex: deliver/recover/held).
-    expect(sig).toMatch(/opts:\s*\{\s*waitForIdle\?:\s*boolean;\s*onBusyTimeout\?:\s*'send'\s*\|\s*'abort';\s*idleTimeoutMs\?:\s*number;\s*lockMode\?:\s*SendLockMode\s*\}/)
+    // added lockMode (per-pane delivery mutex: deliver/recover/held); P2-A keeps
+    // dispatchId (measurement receipt) as the trailing member.
+    expect(sig).toMatch(/opts:\s*\{\s*waitForIdle\?:\s*boolean;\s*onBusyTimeout\?:\s*'send'\s*\|\s*'abort';\s*idleTimeoutMs\?:\s*number;\s*lockMode\?:\s*SendLockMode;\s*dispatchId\?:\s*string\s*\|\s*null\s*\}/)
   })
 
   it('the gate defaults ON (waitForIdle !== false) so all other callers keep it', () => {
@@ -52,8 +53,9 @@ describe('sendPromptToSession waitForIdle gate', () => {
     expect(callIdx).toBeGreaterThan(0)
     const call = SCHEDULE_RUNNER.slice(callIdx, callIdx + 120)
     // waitForIdle is the negation of forceSend: ON for normal tasks, OFF for
-    // forceSend so a long-busy session is not blocked on the 12s gate.
-    expect(call).toMatch(/\{\s*waitForIdle:\s*!task\.forceSend\s*\}/)
+    // forceSend so a long-busy session is not blocked on the 12s gate. The
+    // P2-A dispatchId rides alongside without changing the gate semantics.
+    expect(call).toMatch(/\{\s*waitForIdle:\s*!task\.forceSend, dispatchId\s*\}/)
   })
 
   it('documents WHY forceSend skips the gate', () => {

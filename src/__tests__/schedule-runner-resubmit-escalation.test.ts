@@ -49,8 +49,10 @@ describe('schedule-runner: resubmit wiring uses the real clear + re-inject', () 
   it('re-injects the full prompt with the idle gate off and the lane already held', () => {
     // lockMode 'held' is load-bearing: the re-inject runs INSIDE the recover
     // critical section below; re-acquiring the promise-chain mutex would
-    // deadlock the lane.
-    expect(SRC).toMatch(/sendPromptToSession\(session, fullPrompt, host, \{ waitForIdle: false, lockMode: 'held' \}\)/)
+    // deadlock the lane. P2-A: it also reuses the SAME scheduler dispatchId (a
+    // swallowed-Enter re-type is the same work-package), so dispatchId rides
+    // along with the lockMode + idle-gate-off flags.
+    expect(SRC).toMatch(/sendPromptToSession\(session, fullPrompt, host, \{ waitForIdle: false, lockMode: 'held', dispatchId \}\)/)
   })
 
   it('routes the resubmit action through the pure decision function', () => {

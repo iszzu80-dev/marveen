@@ -125,12 +125,56 @@ export async function tryHandleStatic(ctx: RouteContext, webDir: string): Promis
     return true
   }
   if (path === '/sw.js') { serveFile(req, res, join(webDir, 'sw.js')); return true }
+  // APG Lean UI page assets (top-level, same shape as /app.js). The page's
+  // shell references these directly; without them the APG view hangs on
+  // "Betoltes..." forever.
+  if (path === '/coscontrol.js') { serveFile(req, res, join(webDir, 'coscontrol.js'), { cacheSeconds: 86400 }); return true }  // LOCAL-FORK: cos seam (keep on rebase)
+  if (path === '/apg.js') { serveFile(req, res, join(webDir, 'apg.js'), { cacheSeconds: 86400 }); return true }
+  if (path === '/apg.css') { serveFile(req, res, join(webDir, 'apg.css'), { cacheSeconds: 86400 }); return true }
 
   if (path.startsWith('/lang/')) {
     const langFile = path.replace('/lang/', '')
     // Allowlist: only the two known language files (no path traversal).
     if (langFile === 'hu.js' || langFile === 'en.js') {
       serveFile(req, res, join(webDir, 'lang', langFile))
+      return true
+    }
+    res.writeHead(404); res.end()
+    return true
+  }
+
+  if (path.startsWith('/costops/')) {
+    // CostOps Command Center module (UI-1, docs/costops/ui-0-audit-and-plan.md file plan).
+    // Allowlist by exact filename (same no-path-traversal shape as /lang/ above), not a
+    // startsWith/existsSync directory serve -- this is a small, fixed set of static assets, not
+    // user-uploaded content like /avatars/.
+    const costopsFile = path.replace('/costops/', '')
+    const COSTOPS_FILES = new Set([
+      'costops-state.js', 'costops-api.js', 'costops-charts.js',
+      'costops-shell.js', 'costops-overview.js', 'costops-analysis.js',
+      'costops-drawer.js', 'costops-close.js', 'costops.css',
+    ])
+    if (COSTOPS_FILES.has(costopsFile)) {
+      serveFile(req, res, join(webDir, 'costops', costopsFile))
+      return true
+    }
+    res.writeHead(404); res.end()
+    return true
+  }
+
+  if (path.startsWith('/optimization/')) {
+    // Optimization dashboard module assets. Same exact-filename allowlist shape
+    // as /costops/ above (no directory serve, no path traversal) -- a small fixed
+    // set of static assets. Without these the Optimization page hangs on
+    // "Betoltes..." because its shell/state/api/view modules 404.
+    const optFile = path.replace('/optimization/', '')
+    const OPTIMIZATION_FILES = new Set([
+      'optimization-state.js', 'optimization-api.js', 'optimization-shell.js',
+      'optimization-overview.js', 'optimization-routing.js', 'optimization-decisions.js',
+      'optimization-controls.js', 'optimization-render-helpers.js', 'optimization.css',
+    ])
+    if (OPTIMIZATION_FILES.has(optFile)) {
+      serveFile(req, res, join(webDir, 'optimization', optFile), { cacheSeconds: 86400 })
       return true
     }
     res.writeHead(404); res.end()

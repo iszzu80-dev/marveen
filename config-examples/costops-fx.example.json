@@ -1,0 +1,15 @@
+{
+  "_comment": [
+    "EXAMPLE ONLY (card 23912ca4). Copy to store/costops-fx.json and edit for THIS deployment.",
+    "store/ is gitignored, so the real rate never enters a tracked file.",
+    "HUF per 1 unit of the key currency. A currency absent from rates, or a non-positive value,",
+    "is UNSET -- resolveFxRate() (src/costops/fx.ts) refuses to convert against it rather than",
+    "treating it as a rate of zero. This file is auto-seeded once from a legacy",
+    "costops-render-pricing.json fx_usd_huf/fx_eur_huf if one exists and this file does not yet."
+  ],
+  "version": 1,
+  "rates": {
+    "USD": 0,
+    "EUR": 0
+  }
+}

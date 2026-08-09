@@ -241,3 +241,35 @@ megosztott/publikus helyre, és ne tartsd cloud-sync mappában. Emlékeztető:
 **egy bot = egy poller** -- ha az importált ügynököt egy második gépen is
 elindítod ugyanazzal a tokennel, a Telegram/Slack 409-cel elhasítja a bejövő
 üzeneteket. Régi gép le, új gép fel -- soha ne fusson a kettő egyszerre.
+
+## MCP server sources: untracked by owner decision, pinned for durability
+
+`mcp-servers/` is fully gitignored and stays that way (owner decision, 2026-07-30, card `d95ac444`).
+The credentials are NOT in there — they live in `store/.google-private-creds.json` (gitignored,
+mode 600); the server sources only reference those field names. The blanket ignore is
+defense-in-depth: it makes it impossible to ever commit a token pasted into a server file.
+
+The cost of that is real: a fix to an MCP server is otherwise lost on reinstall, with no diff
+history. `scripts/sync-mcp-servers.sh` closes that without tracking anything: it pins the sources into
+`$HOME/.marveen-mcp-pin/mcp-servers-<stamp>/` (override with `MARVEEN_MCP_PIN_ROOT`) with a
+`release.json` recording each file's sha256, and symlinks `.../mcp-servers-current`.
+
+**The pin lives OUTSIDE the repo on purpose, and the first version got this wrong.** It originally
+pinned into `releases/`, which is also gitignored -- so a fresh clone had neither the servers nor
+the pin, and `--restore` reported "no current release" and restored nothing. A durability
+mechanism that could not survive the event it existed for. Caught by simulating an actual reinstall
+rather than reasoning about one. **Limit, stated rather than implied: `$HOME` survives a repo
+re-clone, which is the real reinstall case here; it does NOT survive a new machine.**
+
+    scripts/sync-mcp-servers.sh              # pin the current sources as a new release
+    scripts/sync-mcp-servers.sh --status     # hashes + DRIFT vs the working tree
+    scripts/sync-mcp-servers.sh --list       # installed releases
+    scripts/sync-mcp-servers.sh --restore    # AFTER A REINSTALL: copy the pin back
+
+**Reinstall runbook step:** run `--restore` after re-cloning, then re-verify both servers
+self-identify distinctly (`google-private` vs `google-zst`) with a live stdio `initialize`
+handshake — a wrong `SERVER_INFO.name` is a real bug that shipped once (card `4c147e1c`).
+
+Two safety properties, both proven rather than assumed: the installer **refuses** to pin a file
+carrying a credential-shaped value (not merely a field name), and `--restore` **refuses** to
+overwrite a working-tree file that differs from the pin unless `--force` is passed.

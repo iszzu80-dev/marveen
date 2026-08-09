@@ -37,6 +37,7 @@ import { resolveFromPath } from '../platform.js'
 import { logger } from '../logger.js'
 import type { ChannelProviderType } from '../channel-provider.js'
 import { tryAcquireSessionSendLane } from './session-send-lock.js'
+import { delay } from './delay.js'
 
 const TMUX = resolveFromPath('tmux')
 
@@ -158,12 +159,12 @@ function isSessionReadyForUnlock(session: string): boolean {
   }
 }
 
-function sendUnlockKeystrokes(session: string, provider: ChannelProviderType): void {
+async function sendUnlockKeystrokes(session: string, provider: ChannelProviderType): Promise<void> {
   try {
     // Open the MCP dialog. Claude renders the server list within ~2s; the
     // 3s settle ensures the cursor is on the first item before we move.
     execFileSync(TMUX, ['send-keys', '-t', session, '/mcp', 'Enter'], { timeout: 5000 })
-    execFileSync('/bin/sleep', [String(MCP_OPEN_SETTLE_MS / 1000)], { timeout: MCP_OPEN_SETTLE_MS + 2000 })
+    await delay(MCP_OPEN_SETTLE_MS)
 
     // Safety gate: check whether the channel plugin appears in the /mcp list
     // before navigating to it. When the CC regression prevents the plugin from
@@ -196,10 +197,10 @@ function sendUnlockKeystrokes(session: string, provider: ChannelProviderType): v
     // (claude lists them last). Built-in MCPs are above Plugin MCPs in the
     // sort order, so the bottommost entry is the channel plugin we want.
     execFileSync(TMUX, ['send-keys', '-t', session, 'Up'], { timeout: 5000 })
-    execFileSync('/bin/sleep', [String(KEYSTROKE_SETTLE_MS / 1000)], { timeout: KEYSTROKE_SETTLE_MS + 2000 })
+    await delay(KEYSTROKE_SETTLE_MS)
     // First Enter opens the action menu for the selected MCP server.
     execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
-    execFileSync('/bin/sleep', [String(KEYSTROKE_SETTLE_MS / 1000)], { timeout: KEYSTROKE_SETTLE_MS + 2000 })
+    await delay(KEYSTROKE_SETTLE_MS)
     // Second Enter activates the first action - "Enable" for disabled,
     // "Reconnect" for failed. Both revive the plugin.
     execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
@@ -213,9 +214,9 @@ function sendUnlockKeystrokes(session: string, provider: ChannelProviderType): v
     // back out of both menu levels (action menu -> server list -> idle
     // prompt), with a settle between so the first Escape lands before
     // the second arrives.
-    execFileSync('/bin/sleep', [String(POST_UNLOCK_SETTLE_MS / 1000)], { timeout: POST_UNLOCK_SETTLE_MS + 2000 })
+    await delay(POST_UNLOCK_SETTLE_MS)
     execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 5000 })
-    execFileSync('/bin/sleep', [String(KEYSTROKE_SETTLE_MS / 1000)], { timeout: KEYSTROKE_SETTLE_MS + 2000 })
+    await delay(KEYSTROKE_SETTLE_MS)
     execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 5000 })
     logger.warn({ session }, 'channel-plugin-unlock: sent /mcp+Up+Enter+Enter+Esc+Esc unlock sequence')
   } catch (err) {
@@ -229,7 +230,7 @@ interface UnlockProbeState {
   retriesLeft: number
 }
 
-function runUnlockProbe(state: UnlockProbeState): void {
+async function runUnlockProbe(state: UnlockProbeState): Promise<void> {
   const claudePid = getSessionClaudePid(state.session)
   if (!claudePid) {
     logger.warn({ session: state.session }, 'channel-plugin-unlock: no claude pid; skipping unlock probe')
@@ -253,7 +254,7 @@ function runUnlockProbe(state: UnlockProbeState): void {
         { session: state.session, retriesLeft: state.retriesLeft },
         'channel-plugin-unlock: pane not idle yet, retrying',
       )
-      setTimeout(() => runUnlockProbe({ ...state, retriesLeft: state.retriesLeft - 1 }), UNLOCK_PROBE_RETRY_DELAY_MS)
+      setTimeout(() => { void runUnlockProbe({ ...state, retriesLeft: state.retriesLeft - 1 }) }, UNLOCK_PROBE_RETRY_DELAY_MS)
       return
     }
     logger.warn({ session: state.session }, 'channel-plugin-unlock: pane never reached idle state, abandoning')
@@ -309,7 +310,7 @@ function runUnlockProbe(state: UnlockProbeState): void {
  */
 export function schedulePluginUnlockAfterRespawn(session: string, provider: ChannelProviderType): void {
   setTimeout(
-    () => runUnlockProbe({ session, provider, retriesLeft: UNLOCK_PROBE_MAX_RETRIES }),
+    () => { void runUnlockProbe({ session, provider, retriesLeft: UNLOCK_PROBE_MAX_RETRIES }) },
     UNLOCK_PROBE_DELAY_MS,
   )
   logger.info(

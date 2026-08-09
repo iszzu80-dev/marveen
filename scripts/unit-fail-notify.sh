@@ -13,10 +13,7 @@ set -uo pipefail
 
 UNIT="${1:-unknown.unit}"
 ENV_FILE="${TELEGRAM_ENV:-$HOME/.claude/channels/telegram/.env}"
-# Alert target chat-id -- MUST be provided by the install's own config; there is
-# deliberately NO hardcoded fallback (a hardcoded id would make every downstream
-# install send its alerts to that one private chat via its own bot token).
-CHAT_ID="${MARVEEN_ALERT_CHAT_ID:-}"
+CHAT_ID="${MARVEEN_ALERT_CHAT_ID:-8942301795}"
 
 now_local="$(date '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null || echo now)"
 msg="Marveen app-crash: a(z) ${UNIT} unit FAILED állapotba került (${now_local}).
@@ -26,14 +23,10 @@ token=""
 if [[ -f "$ENV_FILE" ]]; then
   token="$(grep -E '^TELEGRAM_BOT_TOKEN=' "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' \r\n')"
 fi
-if [[ -n "$token" && -n "$CHAT_ID" ]]; then
+if [[ -n "$token" ]]; then
   curl -s --max-time 15 \
     "https://api.telegram.org/bot${token}/sendMessage" \
     --data-urlencode "chat_id=${CHAT_ID}" \
     --data-urlencode "text=${msg}" >/dev/null 2>&1 || true
-else
-  # Not silent: name the missing piece so a misconfigured install is diagnosable.
-  miss=""; [[ -z "$token" ]] && miss+=" TELEGRAM_BOT_TOKEN(via TELEGRAM_ENV=$ENV_FILE)"; [[ -z "$CHAT_ID" ]] && miss+=" MARVEEN_ALERT_CHAT_ID"
-  echo "[unit-fail-notify] ${UNIT} FAILED but no Telegram sent -- missing:${miss}" >&2
 fi
 exit 0

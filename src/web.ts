@@ -27,9 +27,11 @@ import { startInboxNudgeWatcher } from './web/inbox-nudge-watcher.js'
 import { startStuckToolCallWatcher } from './web/stuck-tool-call-watcher.js'
 import { startReauthHealer } from './web/reauth-healer.js'
 import { startAutoRestartRunner } from './web/auto-restart-runner.js'
-import { startModelFallbackRunner } from './web/model-fallback-runner.js'
+import { startCapacityRoutingRunner } from './web/capacity-routing-runner.js'
 import { startContextGuardRunner } from './web/context-guard-runner.js'
 import { collectTokenUsage } from './web/token-usage.js'
+import { startCostOpsBackgroundTasks } from './costops/reliability-observation.js'  // LOCAL-FORK: costops seam (keep on rebase)
+import { startCosBackgroundTasks } from './cos/runtime.js'  // LOCAL-FORK: cos seam (keep on rebase)
 import { logger } from './logger.js'
 import { tryHandleAuth } from './web/routes/auth.js'
 import { tryHandleSecurity } from './web/routes/security.js'
@@ -65,7 +67,10 @@ import { tryHandleStatus } from './web/routes/status.js'
 import { tryHandleAutonomy } from './web/routes/autonomy.js'
 import { tryHandleApprovals, startApprovalTimeoutSweeper } from './web/routes/approvals.js'
 import { tryHandleTokenUsage } from './web/routes/token-usage.js'
-import { tryHandleCosts, startCostsSyncTask } from './web/routes/costs.js'
+import { tryHandleCostOps } from './web/routes/costs.js'  // LOCAL-FORK: costops seam (keep on rebase)
+import { tryHandleCos } from './web/routes/cos.js'  // LOCAL-FORK: cos seam (keep on rebase)
+import { tryHandleOptimization } from './web/routes/optimization.js'
+import { tryHandleApg } from './web/routes/apg.js'
 import { tryHandleIdeas } from './web/routes/ideas.js'
 import { tryHandleToolLog } from './web/routes/tool-log.js'
 import { tryHandleSpans } from './web/routes/spans.js'
@@ -201,7 +206,10 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleAutonomy(routeCtx)) return
       if (await tryHandleApprovals(routeCtx)) return
       if (await tryHandleTokenUsage(routeCtx)) return
-      if (await tryHandleCosts(routeCtx)) return
+      if (await tryHandleCostOps(routeCtx)) return  // LOCAL-FORK: costops seam (keep on rebase)
+      if (await tryHandleCos(routeCtx)) return  // LOCAL-FORK: cos seam (keep on rebase)
+      if (await tryHandleOptimization(routeCtx)) return
+      if (await tryHandleApg(routeCtx)) return
       if (await tryHandleIdeas(routeCtx)) return
       if (await tryHandleSpans(routeCtx)) return
       if (await tryHandleToolLog(routeCtx)) return
@@ -381,12 +389,6 @@ export function startWebServer(port = 3420): http.Server {
   const channelHealthInterval = webOnly ? undefined : startChannelHealthMonitor()
   if (!webOnly) logger.info('Channel MCP health monitor started (60s poll, 45s offset)')
 
-  // CostOps: reflect the local config's fixed costs into the ledger once at boot + every
-  // 10 minutes. Deliberately NOT done inside the GET /api/costs/summary handler -- a read
-  // endpoint must not write (was flagged in review); this is the one place that does.
-  const costsSyncInterval = webOnly ? undefined : startCostsSyncTask()
-  if (!webOnly) logger.info('CostOps fixed-cost sync started (10min poll + startup)')
-
   const stuckInputInterval = webOnly ? undefined : startStuckInputWatcher()
   if (!webOnly) logger.info('Stuck-input watcher started (15s poll, 20s offset)')
 
@@ -402,8 +404,12 @@ export function startWebServer(port = 3420): http.Server {
   const autoRestartInterval = webOnly ? undefined : startAutoRestartRunner()
   if (!webOnly) logger.info('Auto-restart runner started (60s poll, 40s offset)')
 
-  const modelFallbackInterval = webOnly ? undefined : startModelFallbackRunner()
-  if (!webOnly) logger.info('Model-fallback runner started (60s poll, 50s offset)')
+  // Phase 3 (card 59b383a9) supersedes the old model-fallback-on-limit runner:
+  // that runner's action was a config write (writeModelFor/writeMainModel),
+  // exactly the violation this phase forbids. capacity-routing-runner applies
+  // a runtime overlay instead -- see src/web/capacity-routing-runner.ts.
+  const capacityRoutingInterval = webOnly ? undefined : startCapacityRoutingRunner()
+  if (!webOnly) logger.info('Capacity-routing runner started (60s poll, 55s offset)')
 
   const contextGuardInterval = webOnly ? undefined : startContextGuardRunner()
   if (!webOnly) logger.info('Context-guard runner started (5min poll, 4.5min initial delay)')
@@ -436,13 +442,34 @@ export function startWebServer(port = 3420): http.Server {
     }
   }, 60 * 60 * 1000)
 
+  // P2-A: both collection paths below also run the dispatch<->token_usage
+  // window correlation, because collectTokenUsage() chains it internally (see
+  // src/web/token-usage.ts) -- collection is what creates the rows the
+  // correlation attributes, so the two are one operation and no collection path
+  // can skip it. The correlation is fault-isolated inside collectTokenUsage, so
+  // a measurement fault cannot turn either of these into a rejected promise.
   const tokenCollectInterval = webOnly ? undefined : setInterval(() => {
     collectTokenUsage().catch(err => logger.warn({ err }, 'Periodic token usage collection failed'))
   }, 60 * 60 * 1000)
   if (!webOnly) {
     collectTokenUsage().catch(err => logger.warn({ err }, 'Startup token usage collection failed'))
-    logger.info('Token usage auto-collect started (1h poll + startup)')
+    logger.info('Token usage auto-collect started (1h poll + startup; each pass also attributes rows to dispatches)')
   }
+
+  // LOCAL-FORK: costops seam (keep on rebase). ALL CostOps background tasks
+  // (currently: the Phase 0 reliability-snapshot capture + the P2-C provider
+  // collector sync) are owned by this one call -- see
+  // src/costops/reliability-observation.ts. P2-C: this is the ONLY in-process
+  // caller of the provider collectors; without it they are dead code that a
+  // dashboard read cannot distinguish from a working measurement path.
+  const costOpsBackgroundIntervals = webOnly ? [] : startCostOpsBackgroundTasks()
+  if (!webOnly) logger.info('CostOps background tasks started (reliability-snapshot: 24h poll + startup; collector sync: 15min due-check + startup)')
+
+  // LOCAL-FORK: cos seam (keep on rebase). The autonomous COS loop (cosTick every
+  // 6h). safeCosDeps() wires ONLY the rental adapter — radar price checks — and
+  // NO outbound adapter, so nothing sends/buys autonomously until a real Gmail
+  // connector + write-scope consent are added. See src/cos/runtime.ts.
+  if (!webOnly) { startCosBackgroundTasks(); logger.info('COS autonomous loop started (radar checks every 6h; no outbound adapter → no autonomous send)') }
 
   // NOTE: startMcpListChecker() is intentionally NOT called here.
   //
@@ -545,13 +572,12 @@ export function startWebServer(port = 3420): http.Server {
     workerLivenessCancelled = true
     if (workerLivenessInterval) clearInterval(workerLivenessInterval)
     clearInterval(channelHealthInterval)
-    if (costsSyncInterval) clearInterval(costsSyncInterval)
     clearInterval(stuckInputInterval)
     clearInterval(stuckToolCallInterval)
     if (inboxNudgeInterval) clearInterval(inboxNudgeInterval)
     if (reauthHealerInterval) clearInterval(reauthHealerInterval)
     clearInterval(autoRestartInterval)
-    clearInterval(modelFallbackInterval)
+    clearInterval(capacityRoutingInterval)
     clearInterval(contextGuardInterval)
     clearInterval(approvalTimeoutInterval)
     clearInterval(authSessionSweepInterval)
@@ -559,6 +585,7 @@ export function startWebServer(port = 3420): http.Server {
     if (federationPollerInterval) clearInterval(federationPollerInterval)
     if (capabilityRunnerInterval) clearInterval(capabilityRunnerInterval)
     clearInterval(tokenCollectInterval)
+    costOpsBackgroundIntervals.forEach(clearInterval)
     return origClose(cb)
   }
 

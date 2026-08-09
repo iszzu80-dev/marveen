@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Marveen</title>
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/costops/costops.css">
+  <link rel="stylesheet" href="/optimization/optimization.css">
+  <link rel="stylesheet" href="/apg.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.css">
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10/lib/addon-fit.js"></script>
@@ -77,6 +80,18 @@
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="5" height="16" rx="1"/><rect x="10" y="4" width="5" height="10" rx="1"/><rect x="17" y="4" width="4" height="13" rx="1"/></svg>
         <span class="sb-label">Kanban</span>
       </a>
+      <!-- LOCAL-FORK: cos seam (keep on rebase). Personal Chief of Staff Mission Control (Ma / Ügyek). -->
+      <a href="#" class="sb-link" data-page="cos">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></svg>
+        <span class="sb-label">Mission Control</span>
+      </a>
+      <!-- LOCAL-FORK: keep on merge. Upstream ships #archivedPage but no nav link
+           to it, so on upstream the page is unreachable from the sidebar. This
+           fork links it next to Kanban, where it belongs (archived cards). -->
+      <a href="#" class="sb-link" data-page="archived">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5" rx="1"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+        <span class="sb-label">Archivált</span>
+      </a>
       <a href="#" class="sb-link" data-page="approvals">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
         <span class="sb-label">Jóváhagyások</span>
@@ -95,6 +110,12 @@
           <a href="#" class="sb-link" data-page="activity">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/></svg>
             <span class="sb-label">Aktivitás</span>
+          </a>
+          <!-- LOCAL-FORK: keep on merge. #teamPage (fleet org chart) exists only
+               on this fork; upstream has neither the page nor the link. -->
+          <a href="#" class="sb-link" data-page="team">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="5" r="3"/><path d="M12 8v4"/><circle cx="5" cy="18" r="3"/><circle cx="19" cy="18" r="3"/><path d="M12 12l-7 6M12 12l7 6"/></svg>
+            <span class="sb-label">Csapat</span>
           </a>
           <a href="#" class="sb-link" data-page="messages">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
@@ -144,13 +165,24 @@
           <svg class="sb-group-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>
         </button>
         <div class="sb-group-items" id="sbGroupStats">
-          <a href="#" class="sb-link" data-page="costs">
+          <!-- LOCAL-FORK: keep on merge. This links the CostOps Command Center
+               (#costs-ccPage), NOT upstream's older #costsPage summary. Istvan's
+               ruling 2026-07-19 (commit 96b4d4b, card 5c9a8d20): only the newest
+               CostOps UI is exposed; the v1 costsBody and "Koltsegek v2" pages
+               are deliberately not linked. Merge 14023f0 already dropped this
+               link once by taking upstream's index.html wholesale, which is why
+               it carries a marker now. -->
+          <a href="#" class="sb-link" data-page="costs-cc">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
             <span class="sb-label">Költségek</span>
           </a>
           <a href="#" class="sb-link" data-page="tokenUsage">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>
             <span class="sb-label">Token Monitor</span>
+          </a>
+          <a href="#" class="sb-link" data-page="optimization">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+            <span class="sb-label">Optimalizálás</span>
           </a>
         </div>
       </div>
@@ -249,6 +281,7 @@
 
     <!-- === Overview Page (default) === -->
     <div class="page" id="overviewPage">
+      <div id="apgOverviewSection" class="apg-overview-section" hidden></div>
       <div class="overview-stats">
         <div class="overview-stat">
           <div class="overview-stat-label" data-i18n="overview.stat.agents">Aktív ügynökök</div>
@@ -285,6 +318,14 @@
           </div>
           <div class="overview-activity" id="overviewActivity"></div>
         </div>
+      </div>
+    </div>
+
+    <!-- LOCAL-FORK: cos seam (keep on rebase). === Mission Control Page === -->
+    <div class="page" id="cosPage" hidden>
+      <div class="page-header"><h1>Mission Control</h1></div>
+      <div id="cosBody" style="padding:16px 0;">
+        <p style="color:var(--text-muted,#888);">Betöltés...</p>
       </div>
     </div>
 
@@ -458,6 +499,7 @@
       <div class="activity-list" id="activityList">
         <p class="activity-empty" data-i18n="activity.loading">Betöltés…</p>
       </div>
+      <div id="apgActivitySection" hidden></div>
     </div>
 
     <!-- === Tasks (Schedules) Page === -->
@@ -1127,6 +1169,7 @@
 
 <!-- === Approvals Page === -->
     <div class="page" id="approvalsPage" hidden>
+      <div id="apgApprovalsSection" hidden></div>
       <div class="page-header">
         <div class="page-header-row">
           <div>
@@ -1881,7 +1924,35 @@
       </div>
     </div>
 
-    <!-- Costs page (CostOps v0.1, PR #524) -->
+    <!-- CostOps Command Center (UI-1, spec docs/costops/command-center-ui-spec-v1.0.md).
+         Restored 2026-07-19 after merge 14023f09 took upstream web/index.html wholesale
+         and dropped the mount point. The web/costops/ module itself survived intact --
+         only this page div, the css/js includes and the app.js routing were lost.
+         Only the newest CostOps UI is restored (Istvan, 2026-07-19): the v1 costsBody
+         and the "Koltsegek v2" costsV2Body pages are deliberately NOT brought back. -->
+    <div class="page" id="costs-ccPage" hidden>
+      <div class="page-header">
+        <h1>Költségek</h1>
+      </div>
+      <div id="costsCcBody" style="padding:16px 0;">
+        <p style="color:var(--text-muted,#888);">Betöltés...</p>
+      </div>
+    </div>
+
+    <!-- Optimization dashboard (card 12d5c98d, spec
+         docs/optimization/optimization-dashboard-implementation-spec.md).
+         Aggregates the existing Phase 1-4 Lean Optimization capabilities into
+         one control-plane page; content is entirely built by
+         web/optimization/optimization-shell.js, this div is only the mount
+         point. -->
+    <div class="page" id="optimizationPage" hidden>
+      <div id="optimizationBody" style="padding:16px 0;">
+        <p style="color:var(--text-muted,#888);">Betöltés...</p>
+      </div>
+    </div>
+
+    <!-- Costs page (CostOps v0.1, PR #524) -- superseded by the Command Center above,
+         kept only as an unreferenced rollback target; no sidebar entry points here. -->
     <div class="page" id="costsPage" hidden>
       <div class="page-header">
         <div class="page-header-row">
@@ -2108,6 +2179,7 @@
             </div>
           </div>
         </div>
+        <div id="cardDetailApgPanel" hidden></div>
         <div class="detail-actions" style="gap:8px">
           <button class="btn-secondary" id="cardBreakdownBtn">⚡ <span data-i18n="kanban.modal.breakdown_btn">AI szétbont</span></button>
           <button class="btn-secondary" id="cardEditBtn" data-i18n="common.btn.edit">Szerkesztés</button>
@@ -3252,6 +3324,24 @@
     </div>
   </div>
 
+  <script src="/costops/costops-state.js"></script>
+  <script src="/costops/costops-api.js"></script>
+  <script src="/costops/costops-charts.js"></script>
+  <script src="/costops/costops-overview.js"></script>
+  <script src="/costops/costops-analysis.js"></script>
+  <script src="/costops/costops-drawer.js"></script>
+  <script src="/costops/costops-close.js"></script>
+  <script src="/costops/costops-shell.js"></script>
+  <script src="/optimization/optimization-state.js"></script>
+  <script src="/optimization/optimization-api.js"></script>
+  <script src="/optimization/optimization-render-helpers.js"></script>
+  <script src="/optimization/optimization-overview.js"></script>
+  <script src="/optimization/optimization-routing.js"></script>
+  <script src="/optimization/optimization-decisions.js"></script>
+  <script src="/optimization/optimization-controls.js"></script>
+  <script src="/optimization/optimization-shell.js"></script>
+  <script src="/apg.js"></script>
+  <script src="/coscontrol.js"></script><!-- LOCAL-FORK: cos seam (keep on rebase) -->
   <script src="/app.js"></script>
 </body>
 </html>
