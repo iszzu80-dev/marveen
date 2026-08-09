@@ -77,6 +77,25 @@ export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now:
     return { outcome: 'EXCLUDED_SELF_SEND', messageStatus: 'EXCLUDED' }
   }
 
+  // The same check without headers (2026-08-10, live): the triage feeder reads
+  // Gmail via search and does not carry headers, so a letter the COS itself sent
+  // came back through the Sent folder as an ordinary candidate — and would have
+  // opened a SECOND case for a matter that was already waiting. The ledger knows
+  // its own message ids, so ask it.
+  //
+  // Linked to the originating case rather than merely excluded: the sent letter
+  // IS part of that case's history, and dropping it would lose the record of
+  // what went out.
+  const ownSend = db.prepare(
+    `SELECT case_id FROM outbound_ledger WHERE external_ref = ? LIMIT 1`
+  ).get(input.messageId) as { case_id: string | null } | undefined
+  if (ownSend?.case_id) {
+    markDuplicate(db, input.accountId, input.messageId, now)
+    db.prepare(`UPDATE email_processing SET case_id=@c WHERE gmail_account_id=@a AND message_id=@m`)
+      .run({ c: ownSend.case_id, a: input.accountId, m: input.messageId })
+    return { outcome: 'LINKED_DUPLICATE', caseId: ownSend.case_id, messageStatus: 'DUPLICATE' }
+  }
+
   if (!input.actionable) {
     excludeMessage(db, input.accountId, input.messageId, now)
     return { outcome: 'EXCLUDED', messageStatus: 'EXCLUDED' }

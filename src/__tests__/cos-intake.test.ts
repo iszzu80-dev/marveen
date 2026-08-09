@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
-import { getCase } from '../cos/case-store.js'
+import { getCase, createCase } from '../cos/case-store.js'
 import { openBatch } from '../cos/email-ingest.js'
 import { ingestEmail } from '../cos/intake.js'
 import { IDEMPOTENCY_HEADER } from '../cos/adapters/gmail-send.js'
@@ -84,5 +84,45 @@ describe('COS email intake', () => {
     expect(c.description).toMatch(/Sent to: vendor@example.com/)
     expect(c.waiting_on).toMatch(/reply from vendor@example.com/)
     expect(c.follow_up_at).toBe(NOW + 259200)
+  })
+})
+
+describe('recognising our own sent letter (2026-08-10)', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('a message the COS sent does NOT open a second case — it links to the original', () => {
+    // The triage feeder reads Gmail by search and carries no headers, so the
+    // header-based self-event filter never fires on it. A letter the system sent
+    // came back through Sent as an ordinary candidate and would have opened a
+    // second case for a matter already waiting.
+    const db = getDb()
+    createCase(db, { caseId: 'PRI-CLAIM-1', title: 'Reklamáció', caseType: 'ADMIN' }, NOW - 100)
+    db.prepare(
+      `INSERT INTO outbound_ledger (ledger_id, case_id, action_type, sequence_number,
+         internal_idempotency_key, status, external_ref, created_at, updated_at)
+       VALUES ('l1','PRI-CLAIM-1','EMAIL_SEND',1,'k1','APPLIED_UNVERIFIED','msg-sajat',?,?)`
+    ).run(NOW, NOW)
+    discover('msg-sajat')
+
+    const r = ingestEmail(getDb(), {
+      accountId: ACC, messageId: 'msg-sajat', subject: 'Re: Reklamáció',
+      from: 'iszzu80@gmail.com', snippet: 'A csomagot feladtam', actionable: true,
+      caseType: 'ADMIN', title: 'Saját levél', direction: 'OUTBOUND',
+    }, NOW)
+
+    expect(r.outcome).toBe('LINKED_DUPLICATE')
+    expect(r.caseId).toBe('PRI-CLAIM-1')
+    // and no new case was created
+    expect(db.prepare(`SELECT COUNT(*) AS n FROM personal_cases`).get()).toMatchObject({ n: 1 })
+  })
+
+  it('an ordinary inbound message is unaffected', () => {
+    discover('msg-kulso')
+    const r = ingestEmail(getDb(), {
+      accountId: ACC, messageId: 'msg-kulso', subject: 'Árajánlat',
+      from: 'valaki@mas.hu', snippet: 'Küldöm az árat', actionable: true,
+      caseType: 'QUOTE', title: 'Árajánlat', direction: 'INBOUND',
+    }, NOW)
+    expect(r.outcome).toBe('CASE_CREATED')
   })
 })
