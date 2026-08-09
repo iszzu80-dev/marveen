@@ -9,9 +9,9 @@
  *   (d) decision-type mapping: each decision → correct event_type.
  */
 import { describe, it, expect, beforeEach } from 'vitest'
-import { initDatabase, getDb } from '../../db.js'
-import type { RouteContext } from '../../web/routes/types.js'
-import { tryHandleCos } from '../../web/routes/cos.js'
+import { initDatabase, getDb } from '../db.js'
+import type { RouteContext } from '../web/routes/types.js'
+import { tryHandleCos } from '../web/routes/cos.js'
 
 // ── fake request/response harness (same pattern as apg-ui-routes.test.ts) ──
 
@@ -55,6 +55,14 @@ function seedPersonalCase(db: ReturnType<typeof getDb>) {
   ).run(PRI_CASE, now, now)
 }
 
+function seedZstCase(db: ReturnType<typeof getDb>) {
+  const now = Math.floor(Date.now() / 1000)
+  db.prepare(`INSERT OR IGNORE INTO zst_cases
+    (case_id, title, case_type, status, priority, sensitivity, workspace, scope, source_system, created_at, updated_at)
+    VALUES (?, 'ZST Test case', 'OTHER', 'READY', 'P2', 'ZST_INTERNAL', 'OPERATIONS', 'ZST_OPERATIONS_CONFIRMED', 'test', ?, ?)`
+  ).run(ZST_CASE, now, now)
+}
+
 function seedProgressionState(db: ReturnType<typeof getDb>, domain: string, caseId: string, caseVersion: number) {
   const now = Math.floor(Date.now() / 1000)
   db.prepare(`INSERT OR REPLACE INTO case_progression_state
@@ -78,6 +86,7 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
     initDatabase(':memory:')
     const db = getDb()
     seedPersonalCase(db)
+    seedZstCase(db)
     seedProgressionState(db, 'personal', PRI_CASE, 3)
     seedProgressionRun(db, 'personal', PRI_CASE, PROG_RUN_ID, 'REQUEST_DECISION')
     seedProgressionState(db, 'zst', ZST_CASE, 1)
@@ -86,28 +95,38 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
 
   // ── Gate (h): event-not-state ──
   describe('event-not-state (gate h)', () => {
-    it('inserts an event row but does NOT change the case row', () => {
+    it('inserts an event row but does NOT change the case row', async () => {
       const db = getDb()
       const caseBefore = db.prepare(
-        'SELECT status, version FROM personal_cases WHERE case_id = ?'
-      ).get(PRI_CASE) as { status: string; version: number }
+        'SELECT status FROM personal_cases WHERE case_id = ?'
+      ).get(PRI_CASE) as { status: string }
 
       const eventsBefore = db.prepare(
         'SELECT count(*) c FROM personal_case_events WHERE case_id = ?'
       ).get(PRI_CASE) as { c: number }
 
-      const { out } = fakeCtxWithBody(
+      const { ctx, out } = fakeCtxWithBody(
         `/api/cos/cases/personal/${PRI_CASE}/owner-action`, 'POST', {
           eventType: 'OWNER_DECISION', choice: 'YES',
           sourceReference: PROG_RUN_ID, caseVersion: 3,
           idempotencyKey: 'idem-h-1',
         })
-      void tryHandleCos(out as any) // we check the ctx.out, not the Promise
+      await tryHandleCos(ctx)
 
-      // Wait for async to settle (readBody is async).
-      // In vitest + better-sqlite3, the DB writes are synchronous; only the
-      // body read is async. We assert on the outcomes that happen after the
-      // await, which requires the microtask queue to drain.
+      expect(out.status).toBe(200)
+      expect(out.body.ok).toBe(true)
+
+      // Event was inserted.
+      const eventsAfter = db.prepare(
+        'SELECT count(*) c FROM personal_case_events WHERE case_id = ?'
+      ).get(PRI_CASE) as { c: number }
+      expect(eventsAfter.c).toBe(eventsBefore.c + 1)
+
+      // Case row status is unchanged (event-not-state: only events, cases untouched).
+      const caseAfter = db.prepare(
+        'SELECT status FROM personal_cases WHERE case_id = ?'
+      ).get(PRI_CASE) as { status: string }
+      expect(caseAfter.status).toBe(caseBefore.status)
     })
 
     it('does not change case_progression_state before the engine runs', async () => {
