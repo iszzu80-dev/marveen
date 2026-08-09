@@ -19,6 +19,7 @@ import { getMissionControlProgressionView, runProgressionCycle } from '../../cos
 import { storeDocument, documentsForCase, readDocumentBytes } from '../../cos/cos-documents.js'
 import { evaluateOutputFloors, breachedFloors } from '../../cos/output-floor.js'
 import { runDailyReconcile } from '../../cos/reconcile.js'
+import { linkCases, suggestLinks, linkedCases } from '../../cos/case-link.js'
 import { APP_TZ } from '../../config.js'
 import type { RouteContext } from './types.js'
 
@@ -74,6 +75,39 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
       ? ingestTriagedZstEmail(getDb(), input as unknown as ZstTriagedEmail, now)
       : ingestTriagedEmail(getDb(), input, now)
     json(res, result)
+    return true
+  }
+
+  // Case linking (2026-08-09). Until now there was NO way to connect two cases:
+  // related_case_ids existed as a column and nothing could write it — not the
+  // engine (it is not among transitionCase's patch keys) and not the API. So the
+  // GLS pickup notice sat beside the eCipő claim it belonged to, with no means
+  // of joining them short of editing the database by hand.
+  if (path === '/api/cos/cases/link' && method === 'POST') {
+    let b: { caseA?: string; caseB?: string; reason?: string; namespace?: string }
+    try { b = JSON.parse((await readBody(req)).toString()) }
+    catch { json(res, { error: 'invalid JSON' }, 400); return true }
+    if (!b.caseA || !b.caseB) { json(res, { error: 'caseA and caseB required' }, 400); return true }
+    const zst = b.namespace === 'zst'
+    const now = Math.floor(Date.now() / 1000)
+    try {
+      const r = linkCases(getDb(), b.caseA, b.caseB, b.reason ?? 'kézi összekötés', now,
+        zst ? 'zst_cases' : 'personal_cases', zst ? 'zst_case_events' : 'personal_case_events')
+      json(res, r)
+    } catch (e) {
+      json(res, { error: String((e as Error).message) }, 400)
+    }
+    return true
+  }
+
+  // What would link to this text? Suggestions only — the caller decides.
+  if (path === '/api/cos/cases/link-suggestions' && method === 'POST') {
+    let b: { text?: string; excludeCaseId?: string; namespace?: string }
+    try { b = JSON.parse((await readBody(req)).toString()) }
+    catch { json(res, { error: 'invalid JSON' }, 400); return true }
+    if (!b.text) { json(res, { error: 'text required' }, 400); return true }
+    json(res, { suggestions: suggestLinks(getDb(), b.text, b.excludeCaseId,
+      b.namespace === 'zst' ? 'zst_cases' : 'personal_cases') })
     return true
   }
 

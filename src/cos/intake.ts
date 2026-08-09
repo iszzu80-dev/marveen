@@ -18,6 +18,7 @@ import type Database from 'better-sqlite3'
 import { createCase } from './case-store.js'
 import { claimMessage, localApply, excludeMessage, markDuplicate } from './email-ingest.js'
 import { effectiveSensitivity } from './sensitivity.js'
+import { suggestLinks, linkCases } from './case-link.js'
 import { IDEMPOTENCY_HEADER } from './adapters/gmail-send.js'
 import type { CaseSensitivity } from './schema.js'
 
@@ -119,6 +120,20 @@ export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now:
       db.prepare(`UPDATE personal_cases SET ${keys.map((k) => `${k}=@${k}`).join(', ')} WHERE case_id=@id`)
         .run({ ...patch, id: caseId })
     }
+    // Cross-thread linking (2026-08-09). Thread matching above only catches a
+    // reply on a conversation we already know; a courier or a merchant writes on
+    // its own thread about the same matter. A STRONG match — a shared long
+    // identifier such as an order number — is linked automatically: it is
+    // deterministic, reversible, and acts on nothing outside the store. A WEAK
+    // match (merchant name only) is NOT linked here; two cases mentioning the
+    // same shop are often unrelated, and a wrong link costs more than a missing
+    // one because it has to be disproved.
+    const strong = suggestLinks(db, `${input.subject}\n${input.snippet}`, caseId)
+      .filter((c) => c.strength === 'STRONG')
+    for (const c of strong) {
+      linkCases(db, caseId, c.caseId, c.evidence, now)
+    }
+
     localApply(db, input.accountId, input.messageId, caseId, now)
     // Seed progression state for the new case so it doesn't stagnate at NEW.
     // Guarded by table existence — if the progression schema hasn't been deployed
