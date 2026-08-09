@@ -17,8 +17,11 @@ SERVERS = {
     "zst": os.path.join(REPO, "mcp-servers", "google-zst-mcp.py"),
 }
 
-# High-confidence noise: sender substrings. Anything NOT matched stays a candidate,
-# so a false negative here costs tokens, never a missed action item.
+# Sender substrings that SUGGEST noise. A sender match alone is NEVER a drop
+# reason (2026-08-09): most real transactional mail (courier, webshop, airline,
+# bank, cloud provider) is sent from a machine address, so the technical sender
+# says nothing about whether the content matters. A sender match only drops when
+# the subject/snippet is not transactional -- see is_noise().
 NOISE_SENDERS = [
     "no-reply@accounts.google.com", "noreply-accounts@google.com",
     "marketing@", "newsletter", "no-reply@", "noreply@", "donotreply@",
@@ -44,6 +47,27 @@ ALWAYS_KEEP = [
     "tarhely.gov.hu", "nav.gov.hu", "@nav.", "dap.gov", "digitalis allampolgar", "ugyfelkapu",
     "barion", "invoice", "szamla", "fizetesi", "felszolitas", "hatarido",
     "arajanlat", "foglalas", "visszaigazolas", "szerzodes", "megrendeles",
+]
+# Transactional content markers. These OVERRIDE a NOISE_SENDERS match (but not a
+# NOISE_SUBJECTS match): a machine sender carrying transactional content is the
+# normal shape of a courier/order/credit confirmation, not noise.
+TRANSACTIONAL = [
+    # HU -- logistics / order / money
+    "csomag", "szallit", "kiszallit", "futar", "csomagpont", "atvevo", "atvetel",
+    "nyomkovet", "rendeles", "megrendel", "visszakuld", "visszaru", "reklamacio",
+    "garancia", "csereutalvany", "utalas", "fizetes", "befizet", "szamla",
+    "jegy", "beszallas", "utazas", "jarat", "azonosito", "ugyszam", "iktat",
+    "igenyles", "palyazat", "jovahagy", "elutasit", "elfogadva", "lejar",
+    "hatarido", "szerzodes", "felmond", "elomerite", "keszen all",
+    # EN -- logistics / order / money
+    "order", "shipment", "shipping", "delivery", "dispatch", "parcel", "waybill",
+    "tracking", "pickup", "return label", "collection", "courier",
+    "invoice", "receipt", "payment", "refund", "statement",
+    "booking", "reservation", "itinerary", "boarding", "check-in",
+    # EN -- account / application lifecycle (cloud credits, programs)
+    "application", "your request", "next steps", "action required", "activate",
+    "activation", "credits", "credit program", "approved", "accepted",
+    "under review", "case ", "ticket ", "contract", "renewal", "expires",
 ]
 
 _ACC = str.maketrans("áéíóöőúüűÁÉÍÓÖŐÚÜŰ", "aeiooouuuAEIOOOUUU")
@@ -93,14 +117,50 @@ def call_mcp(server_path, query, max_results=25):
 def is_noise(m):
     frm = _norm(m.get("from"))
     subj = _norm(m.get("subject"))
-    blob = frm + " " + subj
-    if any(k in blob for k in ALWAYS_KEEP):
+    snip = _norm(m.get("snippet"))
+    if any(k in frm + " " + subj + " " + snip for k in ALWAYS_KEEP):
         return False
-    if any(s in frm for s in NOISE_SENDERS):
-        return True
+    # Marketing shapes in the SUBJECT still drop, whoever sent them.
     if any(s in subj for s in NOISE_SUBJECTS):
         return True
+    if any(s in frm for s in NOISE_SENDERS):
+        # Sender alone is not a drop reason: rescue anything whose subject or
+        # body reads transactional (GLS parcel, AWS Activate, order receipts).
+        if any(t in subj + " " + snip for t in TRANSACTIONAL):
+            return False
+        return True
     return False
+
+
+SELFTEST = [
+    # (should_be_noise, message) -- the first four are the 2026-08-09 misses.
+    (False, {"from": "noreply@gls-group.eu", "subject": "GLS csomagfeladas visszaigazolas",
+             "snippet": "A csomagszam: 12345. A futar erkezik."}),
+    (False, {"from": "no-reply@startups.aws", "subject": "Your AWS Activate application",
+             "snippet": "We received your application. Next steps below."}),
+    (False, {"from": "noreply@oracle-cloud.com", "subject": "Your Oracle Cloud account is ready",
+             "snippet": "Trial credits have been applied to your account."}),
+    (False, {"from": "no-reply@wizzair.com", "subject": "Booking confirmation",
+             "snippet": "Your itinerary and invoice are attached."}),
+    # ...and these must STILL be dropped, or the fix is just an off switch.
+    (True, {"from": "newsletter@temu.com", "subject": "50% kedvezmeny ma",
+            "snippet": "Akcio minden termekre."}),
+    (True, {"from": "noreply@shop.example.com", "subject": "Learazas: last minute deal",
+            "snippet": "Rendeles most, szallitas ingyen."}),
+    (True, {"from": "no-reply@accounts.google.com", "subject": "Security alert",
+            "snippet": "New sign-in on your device."}),
+    (True, {"from": "marketing@hellonancy.com", "subject": "Weekly digest",
+            "snippet": "Read what happened this week."}),
+]
+
+
+def selftest():
+    bad = [(want, m) for want, m in SELFTEST if is_noise(m) != want]
+    for want, m in bad:
+        print("FAIL want_noise=%s got=%s :: %s | %s" % (want, not want, m["from"], m["subject"]))
+    print(json.dumps({"selftest": "FAIL" if bad else "PASS",
+                      "cases": len(SELFTEST), "failed": len(bad)}))
+    sys.exit(1 if bad else 0)
 
 
 def load_state():
@@ -125,6 +185,9 @@ def save_state(ids, prev):
 
 def main():
     args = sys.argv[1:]
+    if "--selftest" in args:
+        selftest()
+        return
     if "--mark" in args:
         new = args[args.index("--mark") + 1].split(",")
         seen, prev = load_state()
