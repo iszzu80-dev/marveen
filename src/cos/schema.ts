@@ -1234,6 +1234,7 @@ export function initProgressionSchema(db: Database.Database): void {
       waiting_on          TEXT,
       interruption_count  INTEGER NOT NULL DEFAULT 0,
       no_progress_run_count INTEGER NOT NULL DEFAULT 0,
+      completed_plan_step INTEGER NOT NULL DEFAULT 0,
       goal_version        INTEGER NOT NULL DEFAULT 0,
       case_version        INTEGER NOT NULL DEFAULT 0,
       created_at          INTEGER NOT NULL,
@@ -1290,4 +1291,9 @@ export function initProgressionSchema(db: Database.Database): void {
     summary: 'TEXT',
     dod_verification_json: 'TEXT',
   })
+  // Migration: completed_plan_step added post-GATE-2 (card 52250c7f follow-up).
+  // ALTER TABLE ADD COLUMN with NOT NULL needs an explicit DEFAULT in SQLite.
+  try {
+    db.exec("ALTER TABLE case_progression_state ADD COLUMN completed_plan_step INTEGER NOT NULL DEFAULT 0")
+  } catch { /* column already exists */ }
 }
