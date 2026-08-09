@@ -13,7 +13,9 @@
 //   6. Progression Run    — record in case_progression_runs (GATE 0 ledger)
 //
 // HARD INVARIANTS (Checkpoint B/C/D scope):
-//   - ZERO side effects: no email send, no status mutation on personal_cases/zst_cases
+//   - ZERO side effects EXCEPT for COMPLETED transition: when all plan steps
+//     are done AND all DoD criteria are met, the pipeline transitions the case
+//     to COMPLETED and removes it from the scheduler.
 //   - Write ONLY to case_progression_state + case_progression_runs
 //   - progression_enabled stays false, progression_mode stays 'shadow'
 //   - external_reference and action_ids_json are ALWAYS null — nothing was sent or called
@@ -24,6 +26,9 @@ import { HARD_SAFETY_ASSERTIONS, type SafetyViolation } from './progression-eval
 import { resolveContextDeep, CrossDomainReadError, domainGuard, type DeepResolvedContext } from './progression-resolver.js'
 import { interpretGoal, type LlmClient, type GoalInterpretation } from './progression-interpreter.js'
 import { initializeDoDVerification, autoSatisfyNextDoDCriterion, canCompleteCase } from './progression-completion.js'
+import { transitionCase } from './case-store.js'
+import { transitionZstCase } from './zst-case-store.js'
+import { scheduleNextProgression } from './progression-scheduler.js'
 
 // ── Valid progression decisions (plan §13) ──────────────────────────────
 
@@ -289,6 +294,115 @@ export function determineNextBestAction(
     kind: chosen.kind,
     canProceedAutonomously: canProceed,
     estimatedEffortMinutes: chosen.kind === 'EXECUTE' ? 15 : 5,
+  }
+}
+
+// ── Owner answer consumption ─────────────────────────────────────────────
+//
+// When the pipeline returns REQUEST_DECISION / REQUEST_APPROVAL, Mission
+// Control shows a button to the owner. The owner's answer arrives as an
+// event in personal_case_events (or zst_case_events) with:
+//   event_type      = OWNER_DECISION | OWNER_INFORMATION | OWNER_CONFIRMATION
+//   source_system   = mission_control
+//   source_reference = the progression_run_id that was current when they pressed
+//   payload         = { choice: "YES" | "NO" } (for OWNER_DECISION)
+//
+// A question is identified by its CONTENT — (decision, nbaStep) — not by the
+// run that asked it. Heartbeat runs re-ask the same question every 5 minutes
+// with a new run ID, so matching by run ID would permanently strand answers
+// written between heartbeats. An answer is valid while the question is
+// unchanged; it becomes stale only when the case genuinely asks something
+// different (e.g. status changed, plan step advanced).
+
+interface OwnerAnswer {
+  /** The event type that was matched. */
+  eventType: string
+  /** For OWNER_DECISION: the owner's choice (YES/NO). null for INFO/CONFIRMATION. */
+  choice: string | null
+  /** The progression_run_id that the answer event references. */
+  answeredRunId: string
+  /** The NBA step that was being asked about (from the referenced run). */
+  answeredNbaStep: number
+}
+
+/** Check whether the owner has answered the CURRENT question. A question is
+ *  defined by (decision, nbaStep) — two questions are the same iff both
+ *  fields match, regardless of which heartbeat run emitted them.
+ *
+ *  Returns the answer if the latest owner event matches the current question;
+ *  null if there is no answer, or the question has changed since the answer
+ *  was recorded (stale). */
+function consumeOwnerAnswer(
+  db: Database.Database,
+  domain: 'personal' | 'zst',
+  caseId: string,
+  currentDecision: ProgressionDecision,
+  currentNbaStep: number,
+): OwnerAnswer | null {
+  // 1. Find the latest owner answer event for this case (any type).
+  const eventsTable = domain === 'personal' ? 'personal_case_events' : 'zst_case_events'
+  const answerEvent = db.prepare(
+    `SELECT event_id, event_type, payload, source_reference
+     FROM ${eventsTable}
+     WHERE case_id = ?
+       AND event_type IN ('OWNER_DECISION', 'OWNER_INFORMATION', 'OWNER_CONFIRMATION')
+     ORDER BY created_at DESC LIMIT 1`,
+  ).get(caseId) as {
+    event_id: number
+    event_type: string
+    payload: string | null
+    source_reference: string | null
+  } | undefined
+
+  if (!answerEvent) return null
+
+  // 2. Look up the run that the answer references (source_reference = run ID).
+  //    If source_reference is missing or the run is gone, we cannot verify
+  //    question identity — treat as stale.
+  if (!answerEvent.source_reference) return null
+
+  const referencedRun = db.prepare(
+    `SELECT decision, progress_delta_json
+     FROM case_progression_runs
+     WHERE progression_run_id = ? AND domain = ? AND case_id = ?`,
+  ).get(answerEvent.source_reference, domain, caseId) as {
+    decision: string | null
+    progress_delta_json: string | null
+  } | undefined
+
+  if (!referencedRun) return null
+
+  // 3. Extract the question that was asked in the referenced run.
+  const referencedDecision = referencedRun.decision
+  let referencedNbaStep = 0
+  if (referencedRun.progress_delta_json) {
+    try {
+      const delta = JSON.parse(referencedRun.progress_delta_json) as { nbaStep?: number }
+      referencedNbaStep = delta.nbaStep ?? 0
+    } catch { /* ignore */ }
+  }
+
+  // 4. Does the referenced question match the CURRENT question?
+  //    Same decision + same nbaStep → same question → answer is valid.
+  //    Different → question has genuinely changed → answer is stale.
+  if (referencedDecision !== currentDecision || referencedNbaStep !== currentNbaStep) {
+    return null
+  }
+
+  // 5. Parse the payload for a choice.
+  let choice: string | null = null
+  if (answerEvent.payload) {
+    try {
+      const parsed = JSON.parse(answerEvent.payload) as { choice?: string }
+      choice = parsed.choice ?? null
+    } catch { /* ignore */ }
+  }
+
+  return {
+    eventType: answerEvent.event_type,
+    choice,
+    answeredRunId: answerEvent.source_reference,
+    answeredNbaStep: referencedNbaStep,
   }
 }
 
@@ -566,8 +680,8 @@ export function runProgressionCycle(
 
   // 1. Read the case
   const caseRow = db.prepare(
-    `SELECT title, case_type, status, sensitivity, created_at FROM ${tableName} WHERE case_id = ?`,
-  ).get(caseId) as { title: string; case_type: string; status: string; sensitivity: string; created_at: number } | undefined
+    `SELECT title, case_type, status, sensitivity, version, created_at FROM ${tableName} WHERE case_id = ?`,
+  ).get(caseId) as { title: string; case_type: string; status: string; sensitivity: string; version: number; created_at: number } | undefined
 
   if (!caseRow) {
     // Domain-scoped guard: if the case exists in the OTHER domain, this is
@@ -633,14 +747,15 @@ export function runProgressionCycle(
   }
 
   // 4. Rolling plan
-  const plan = buildRollingPlan(contract, context, caseRow.status)
-  const planJson = JSON.stringify(plan)
+  let plan = buildRollingPlan(contract, context, caseRow.status)
+  let planJson = JSON.stringify(plan)
+  let storedPlanJson = existing?.rolling_plan_json ?? null
+  let planChanged = storedPlanJson !== planJson
+  let completedPlanStep = planChanged ? 0 : (existing?.completed_plan_step ?? 0)
+  // Effective status/version — may diverge from caseRow after answer consumption
+  let currentStatus = caseRow.status
+  let currentVersion = caseRow.version
 
-  // Has the plan changed since last run? If yes, we are on a fresh plan and
-  // completed_plan_step must reset to 0. If no, we continue from where we left off.
-  const storedPlanJson = existing?.rolling_plan_json ?? null
-  const planChanged = storedPlanJson !== planJson
-  const completedPlanStep = planChanged ? 0 : (existing?.completed_plan_step ?? 0)
   const previousNbaStep = planChanged
     ? 0
     : ((): number => {
@@ -654,10 +769,76 @@ export function runProgressionCycle(
       })()
 
   // 5. Next Best Action — skip steps already completed in a previous run
-  const nba = determineNextBestAction(plan, context, completedPlanStep)
+  let nba = determineNextBestAction(plan, context, completedPlanStep)
 
-  // 6. Decision
-  let { decision, reason } = decide(nba, context, caseRow.status)
+  // 6. Decision (tentative — may be overridden by answer consumption below)
+  let { decision, reason } = decide(nba, context, currentStatus)
+
+  // ── Owner answer consumption (card 52250c7f Phase C) ───────────────
+  //
+  // Match by question CONTENT (decision + nbaStep), not by run ID.
+  // Heartbeat runs re-ask the same question every 5 minutes with new run IDs;
+  // an answer remains valid while the question is unchanged, and becomes
+  // stale only when the case genuinely asks something different.
+  const ownerAnswer = consumeOwnerAnswer(db, domain, caseId, decision, nba.planStep)
+  if (ownerAnswer) {
+    if (ownerAnswer.eventType === 'OWNER_DECISION' && ownerAnswer.choice === 'NO') {
+      // Owner explicitly rejected → escalate to BLOCKED for replanning.
+      const transitionFn = domain === 'personal' ? transitionCase : transitionZstCase
+      transitionFn(db, {
+        caseId,
+        newStatus: 'BLOCKED' as const,
+        actor: 'progression-engine',
+        seenVersion: currentVersion,
+        reason: 'Owner rejected the proposed action',
+      }, now)
+      currentStatus = 'BLOCKED'
+      currentVersion += 1
+
+      // Rebuild for the new status and re-determine
+      plan = buildRollingPlan(contract, context, currentStatus)
+      planJson = JSON.stringify(plan)
+      storedPlanJson = null
+      planChanged = true
+      completedPlanStep = 0
+      nba = determineNextBestAction(plan, context, 0)
+      const redone = decide(nba, context, currentStatus)
+      decision = redone.decision
+      reason = redone.reason
+    } else if (currentStatus === 'AWAITING_APPROVAL') {
+      // Status-driven: decide() returns REQUEST_APPROVAL for AWAITING_APPROVAL
+      // regardless of step. Owner YES → approve → transition to READY.
+      const transitionFn = domain === 'personal' ? transitionCase : transitionZstCase
+      transitionFn(db, {
+        caseId,
+        newStatus: 'READY' as const,
+        actor: 'progression-engine',
+        seenVersion: currentVersion,
+        reason: 'Owner approved the request',
+      }, now)
+      currentStatus = 'READY'
+      currentVersion += 1
+
+      // Rebuild for the new status and re-determine
+      plan = buildRollingPlan(contract, context, currentStatus)
+      planJson = JSON.stringify(plan)
+      storedPlanJson = null
+      planChanged = true
+      completedPlanStep = 0
+      nba = determineNextBestAction(plan, context, 0)
+      const redone = decide(nba, context, currentStatus)
+      decision = redone.decision
+      reason = redone.reason
+    } else {
+      // YES / OWNER_INFORMATION / OWNER_CONFIRMATION → advance past the
+      // answered step so the NBA picks the FOLLOWING step.
+      completedPlanStep = ownerAnswer.answeredNbaStep
+      nba = determineNextBestAction(plan, context, completedPlanStep)
+      const redone = decide(nba, context, currentStatus)
+      decision = redone.decision
+      reason = redone.reason
+    }
+  }
 
   // 7. Upsert progression state
   // Only bump plan_version if the plan actually changed (status transition, etc.).
@@ -684,7 +865,7 @@ export function runProgressionCycle(
       contract.goal,
       JSON.stringify(contract.definitionOfDone),
       JSON.stringify(contract.successEvidenceRequirements),
-      caseRow.status === 'COMPLETED' ? 'PROPOSED' : 'IN_PROGRESS',
+      currentStatus === 'COMPLETED' ? 'PROPOSED' : 'IN_PROGRESS',
       planJson,
       planVersion,
       JSON.stringify(nba),
@@ -710,7 +891,7 @@ export function runProgressionCycle(
       domain, caseId, contract.goal, enrichedSummary,
       JSON.stringify(contract.definitionOfDone),
       JSON.stringify(contract.successEvidenceRequirements),
-      caseRow.status === 'COMPLETED' ? 'PROPOSED' : 'IN_PROGRESS',
+      currentStatus === 'COMPLETED' ? 'PROPOSED' : 'IN_PROGRESS',
       JSON.stringify(plan), planVersion, JSON.stringify(nba),
       auditJson,
       now, now, now,
@@ -810,11 +991,26 @@ export function runProgressionCycle(
   if (runStatus === 'COMPLETED' && nba.canProceedAutonomously) {
     // Mark this NBA step as completed for the next run
     newCompletedPlanStep = nba.planStep
-    // If all plan steps are now completed, reset to 0 — the next run will
-    // rebuild the plan (plan_version bump means planChanged=true above).
+    // If all plan steps are now completed, check whether the case can
+    // actually finish. If all DoD criteria are met → upgrade decision to
+    // COMPLETE (the pipeline's own trigger, not just the guard). If DoD
+    // is unmet → reset to 0 to start a fresh plan cycle (wrap-around).
     const maxStep = plan.length > 0 ? plan[plan.length - 1].step : 0
     if (newCompletedPlanStep >= maxStep) {
-      newCompletedPlanStep = 0
+      const gate = canCompleteCase(db, domain, caseId)
+      if (gate.allowed) {
+        // All plan steps done + all DoD criteria met → COMPLETE.
+        decision = 'COMPLETE'
+        reason = `All ${plan.length} plan steps completed and DoD criteria satisfied`
+        // Update the run row (already INSERTed with the original decision)
+        db.prepare(
+          `UPDATE case_progression_runs SET decision = ?, reason = ? WHERE progression_run_id = ?`,
+        ).run(decision, reason, runId)
+        // Keep newCompletedPlanStep at maxStep — the case IS done
+      } else {
+        // DoD not yet met — reset to 0 for a fresh plan cycle
+        newCompletedPlanStep = 0
+      }
     }
   }
 
@@ -856,6 +1052,27 @@ export function runProgressionCycle(
         ).run(decision, reason, runId)
       }
     }
+  }
+
+  // When the pipeline decides COMPLETE (either via decide() for an
+  // already-COMPLETED case, or via plan-exhaustion trigger above), actually
+  // transition the case and remove it from the scheduler. This is the ONE
+  // status mutation the progression pipeline is permitted: completion of
+  // its own supervised work.
+  if (decision === 'COMPLETE' && currentStatus !== 'COMPLETED') {
+    const transitionFn = domain === 'personal' ? transitionCase : transitionZstCase
+    transitionFn(db, {
+      caseId,
+      newStatus: 'COMPLETED' as const,
+      actor: 'progression-engine',
+      seenVersion: currentVersion,
+      reason,
+    }, now)
+    // Remove from heartbeat scheduler — no more polling for this case
+    scheduleNextProgression(db, domain, caseId, null, now)
+    db.prepare(
+      `UPDATE case_progression_state SET progression_enabled = 0, updated_at = ? WHERE domain = ? AND case_id = ?`,
+    ).run(now, domain, caseId)
   }
 
   return {
