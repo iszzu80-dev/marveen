@@ -395,15 +395,25 @@ def _lv1():
     return (PASS if not dead else FAIL), "hívó nélkül: %s" % (", ".join(dead) or "-")
 
 
-@crit("LV-2", "liveness", "§9, AC-13", "az éles út ténylegesen szerez claimet")
+@crit("LV-2", "liveness", "§9, AC-13", "az éles út fence-elt claimet szerez")
 def _lv2():
-    n = one("SELECT COUNT(*) FROM case_claims")
-    ever = one("SELECT COUNT(*) FROM personal_case_events WHERE event_type LIKE '%CLAIM%'")
-    if n and n > 0:
-        return PASS, "%d aktív claim" % n
-    if ever:
-        return PASS, "claim-esemény a naplóban"
-    return FAIL, "0 claim a case_claims táblában, és nincs claim-esemény"
+    # A kriterium elso valtozata a case_claims SORSZAMAT nezte. Ez rossz meres:
+    # egy jol viselkedo futas ELENGEDI a claimjet, tehat a nulla sor a HELYES
+    # allapot, a nem-nulla pedig szivargas. A sorszamra allitott kriterium egy
+    # szivargo rendszert dicsert volna meg, es egy tisztat buktatott volna el.
+    # Amit merni kell: van-e ELES HIVO, es epul-e mogotte fence.
+    ok, detail = has_prod_caller("acquireClaim", "case-store.ts")
+    if ok is None:
+        return ERROR, detail
+    if not ok:
+        return FAIL, "az acquireClaim-nek nincs éles hívója"
+    sql = table_sql("case_claims")
+    if not sql or "claim_fence" not in sql:
+        return FAIL, "a case_claims táblán nincs fence oszlop"
+    leaked = one("SELECT COUNT(*) FROM case_claims WHERE claim_expires_at < strftime('%s','now') - 3600")
+    if leaked:
+        return FAIL, "%d régen lejárt claim maradt bent (szivárgás)" % leaked
+    return PASS, "éles hívó: %s; fence megvan; nincs bent felejtett claim" % detail
 
 
 @crit("LV-3", "liveness", "§25/(3)", "a haladás-motor nem árnyék módban fut")
