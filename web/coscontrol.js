@@ -822,8 +822,23 @@
       var zstTodayCases = zstToday.cases || []
       var zstAllCases = zstAll.cases || []
 
+      // Ami a TE dontesedre var, az legyen legfelul. 2026-08-10: a jovahagyando
+      // levelet a Kimeno szekcio tartalmazta, ami 41 ugy ALATT ult -- Istvan
+      // megnyitotta a lapot es nem talalta. Egy dontes, ami gorgetesre var, a
+      // gyakorlatban nem var senkire.
+      var pendingApproval = (out.outbound || []).filter(function (o) { return o.status === 'PLANNED' })
+      var pendingHtml = pendingApproval.length
+        ? '<section style="margin-bottom:24px;border:2px solid #f59e0b;padding:14px;">' +
+            '<h2 style="font-size:16px;margin:0 0 4px;">⏳ A jóváhagyásodra vár (' + pendingApproval.length + ')</h2>' +
+            '<div style="font-size:12px;color:var(--text-muted,#888);margin-bottom:10px;">' +
+              'Amíg nem nyomsz gombot, semmi nem megy ki.</div>' +
+            pendingApproval.map(outboundItem).join('') +
+          '</section>'
+        : ''
+
       // Personal namespace (személyes) — full panel including outbound etc.
       var personalHtml =
+        pendingHtml +
         caseSection('📌 Ma', personalTodayCases, 'personal', 'Ma nincs esedékes ügy.', personalProgMap) +
         caseSection('🗂 Ügyek', personalAllCases, 'personal', 'Nincs aktív ügy. A COS case-store üres vagy minden ügy lezárt.', personalProgMap) +
         genericSection('📤 Kimenő', out.outbound || [], 'Nincs kimenő művelet.', outboundItem) +
