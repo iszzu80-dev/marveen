@@ -29,6 +29,23 @@
     BLOCKED: 'Blokkolva', RECOVERY_REQUIRED: 'Helyreállítás kell',
   }
 
+  // ---- Progression labels (card 969e5c3b) ----
+  var COMPLETION_LABEL = {
+    NOT_STARTED: 'Nincs elkezdve', IN_PROGRESS: 'Folyamatban',
+    COMPLETED: 'Kész', BLOCKED: 'Blokkolva', STALLED: 'Elakadt',
+  }
+  var DECISION_LABEL = {
+    COMPLETE: 'Lezárás', RECOVERY_REQUIRED: 'Helyreállítás kell',
+    WAIT_EXTERNAL: 'Külső félre vár', ASK_INFORMATION: 'Infó kell',
+    REQUEST_APPROVAL: 'Jóváhagyás kell', CALL_REQUIRED: 'Hívni kell',
+    CONTINUE_AUTONOMOUSLY: 'Folytatás önállóan',
+    REQUEST_DECISION: 'Döntés kell', MANUAL_ACTION_REQUIRED: 'Kézi művelet kell',
+  }
+  var COMPLETION_COLOR = {
+    NOT_STARTED: '#9ca3af', IN_PROGRESS: '#60a5fa',
+    COMPLETED: '#22c55e', BLOCKED: '#ef4444', STALLED: '#f59e0b',
+  }
+
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
@@ -102,15 +119,46 @@
     return parts.join('')
   }
 
-  // ---- Case tile (closed) + expand handler (card 3d9d62b1) ----
-  function caseTile(c, namespace, nowSec) {
+  // ---- Case tile (closed) + expand handler (card 3d9d62b1, 969e5c3b) ----
+  function caseTile(c, namespace, nowSec, prog) {
     var prio = PRIO_COLOR[c.priority] || '#9ca3af'
     var sens = SENS_COLOR[c.sensitivity] || '#9ca3af'
     var caseId = esc(c.case_id)
     var ns = esc(namespace)
 
+    // Progression badge (card 969e5c3b): only when progression data exists.
+    var progBadgeHtml = ''
+    var progNbaHtml = ''
+    var progMetaData = ''
+    if (prog) {
+      var compLabel = COMPLETION_LABEL[prog.semanticCompletionStatus] || prog.semanticCompletionStatus || '—'
+      var compColor = COMPLETION_COLOR[prog.semanticCompletionStatus] || '#9ca3af'
+      progBadgeHtml = '<span class="cos-prog-badge" style="background:' + compColor + '22;color:' + compColor +
+        ';border:1px solid ' + compColor + '55;" title="Progression állapot: ' + esc(compLabel) + '">' +
+        esc(compLabel) + '</span>'
+      // Next-best-action line: parse JSON description, truncate to ~60 chars.
+      var nbaText = ''
+      try {
+        if (prog.nbaDescription) {
+          var nba = JSON.parse(prog.nbaDescription)
+          nbaText = nba.description || ''
+        }
+      } catch (e) { /* leave empty */ }
+      if (nbaText) {
+        progNbaHtml = '<div class="cos-tile-nba">' + esc(nbaText) + '</div>'
+      }
+      // Metadata string for data passing (used in detail panel).
+      progMetaData = ' data-prog-goal="' + esc(prog.goal || '') + '"' +
+        ' data-prog-status="' + esc(prog.semanticCompletionStatus || '') + '"' +
+        ' data-prog-decision="' + esc(prog.lastDecision || '') + '"' +
+        ' data-prog-decision-reason="' + esc(prog.lastDecisionReason || '') + '"' +
+        ' data-prog-plan-version="' + esc(prog.planVersion) + '"' +
+        ' data-prog-run-count="' + esc(prog.totalRunCount) + '"' +
+        ' data-prog-last-progressed="' + esc(prog.lastProgressedAt) + '"'
+    }
+
     return '<div class="cos-case-tile" data-case-id="' + caseId + '" data-ns="' + ns + '"' +
-      ' style="border-left:3px solid ' + prio + ';">' +
+      ' style="border-left:3px solid ' + prio + ';"' + progMetaData + '>' +
       '<div class="cos-tile-top">' +
         '<strong class="cos-tile-title" title="' + esc(c.title) + '">' + esc(c.title) + '</strong>' +
         '<span class="cos-tile-pills">' +
@@ -119,6 +167,8 @@
         '</span>' +
       '</div>' +
       '<div class="cos-tile-status">' + ballHolderHtml(c, nowSec) + '</div>' +
+      (progBadgeHtml ? '<div class="cos-prog-row">' + progBadgeHtml + '</div>' : '') +
+      progNbaHtml +
       // Expanded detail placeholder — populated on first expand.
       '<div class="cos-case-detail" hidden></div>' +
     '</div>'
@@ -129,7 +179,7 @@
     return '<div class="cos-detail-loading">Betöltés...</div>'
   }
 
-  function renderDetail(c, events, docs, nowSec) {
+  function renderDetail(c, events, docs, nowSec, prog) {
     var parts = []
 
     // 1) Next action + owner (largest, top).
@@ -139,6 +189,39 @@
           (c.next_action_owner ? ' &mdash; ' + esc(c.next_action_owner) : '') + '</div>' +
         '<div class="cos-detail-action-text">' + esc(c.next_action) + '</div>' +
       '</div>')
+    }
+
+    // 1b) Progression info (card 969e5c3b): goal, status, last decision.
+    if (prog) {
+      var progParts = []
+      if (prog.goal) {
+        progParts.push('<div class="cos-detail-prog-goal">' +
+          '<div class="cos-detail-label">Cél</div>' +
+          '<div class="cos-detail-prog-goal-text">' + esc(prog.goal) + '</div>' +
+        '</div>')
+      }
+      var compLabel = COMPLETION_LABEL[prog.semanticCompletionStatus] || prog.semanticCompletionStatus || '—'
+      var compColor = COMPLETION_COLOR[prog.semanticCompletionStatus] || '#9ca3af'
+      var statusLine = '<span class="cos-detail-prog-status" style="color:' + compColor + ';">' +
+        esc(compLabel) + '</span>'
+      if (prog.planVersion != null) {
+        statusLine += ' <span class="cos-detail-prog-meta">· terv v' + esc(prog.planVersion) + '</span>'
+      }
+      if (prog.totalRunCount != null && prog.totalRunCount > 0) {
+        statusLine += ' <span class="cos-detail-prog-meta">· ' + esc(prog.totalRunCount) + ' futtatás</span>'
+      }
+      if (prog.lastProgressedAt) {
+        statusLine += ' <span class="cos-detail-prog-meta">· utoljára ' + fmtDate(prog.lastProgressedAt) + '</span>'
+      }
+      if (prog.lastDecision) {
+        var decLabel = DECISION_LABEL[prog.lastDecision] || prog.lastDecision
+        statusLine += ' <span class="cos-detail-prog-decision">· Utolsó döntés: ' + esc(decLabel) + '</span>'
+      }
+      progParts.push('<div class="cos-detail-prog-status-line">' + statusLine + '</div>')
+      if (prog.lastDecisionReason) {
+        progParts.push('<div class="cos-detail-prog-reason">' + esc(prog.lastDecisionReason) + '</div>')
+      }
+      parts.push('<div class="cos-detail-progression">' + progParts.join('') + '</div>')
     }
 
     // 2) Deadline / waiting-on with elapsed days.
@@ -220,7 +303,7 @@
   }
 
   // ---- Fetch events + documents for a case, then render detail. ----
-  function loadDetail(tile, c, namespace, nowSec) {
+  function loadDetail(tile, c, namespace, nowSec, prog) {
     var detailEl = tile.querySelector('.cos-case-detail')
     if (!detailEl) return
 
@@ -238,16 +321,16 @@
     ]).then(function (res) {
       var events = (res[0] && res[0].events) || []
       var docs = (res[1] && res[1].documents) || []
-      detailEl.innerHTML = renderDetail(c, events, docs, nowSec)
+      detailEl.innerHTML = renderDetail(c, events, docs, nowSec, prog)
       detailEl.dataset.loaded = '1'
     }).catch(function () {
       detailEl.innerHTML = '<div class="cos-detail-loading" style="color:#ef4444;">Hiba a betöltéskor.</div>'
     })
   }
 
-  // ---- Single-open accordion handler (card 3d9d62b1) ----
+  // ---- Single-open accordion handler (card 3d9d62b1, 969e5c3b) ----
   // Opening one tile closes the previously open one. Clicking an open tile closes it.
-  function installAccordion(container, cases, namespace) {
+  function installAccordion(container, cases, namespace, progMap) {
     var nowSec = Math.floor(Date.now() / 1000)
     var openTile = null
 
@@ -264,6 +347,9 @@
         if (cases[i].case_id === caseId) { c = cases[i]; break }
       }
       if (!c) return
+
+      // Look up progression data (card 969e5c3b).
+      var prog = (progMap && progMap[caseId]) || null
 
       var isOpen = !detailEl.hidden
 
@@ -288,19 +374,22 @@
       openTile = tile
 
       // Lazy-load detail content (no-op if already loaded).
-      loadDetail(tile, c, namespace, nowSec)
+      loadDetail(tile, c, namespace, nowSec, prog)
     })
   }
 
   // ---- Section builder ----
-  function caseSection(title, cases, namespace, emptyMsg) {
+  function caseSection(title, cases, namespace, emptyMsg, progMap) {
     var inner
     if (!cases || cases.length === 0) {
       inner = '<p style="color:var(--text-muted,#888);font-size:13px;">' + esc(emptyMsg) + '</p>'
     } else {
       var nowSec = Math.floor(Date.now() / 1000)
       inner = '<div class="cos-case-list" data-ns="' + esc(namespace) + '">' +
-        cases.map(function (c) { return caseTile(c, namespace, nowSec) }).join('') +
+        cases.map(function (c) {
+          var prog = (progMap && progMap[c.case_id]) || null
+          return caseTile(c, namespace, nowSec, prog)
+        }).join('') +
       '</div>'
     }
     return '<section style="margin-bottom:24px;">' +
@@ -442,6 +531,19 @@
       '  font-size:12px;margin-top:4px;color:var(--text-muted,#888);',
       '  display:flex;align-items:center;gap:4px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;',
       '}',
+      // Progression badge row — its own line so it never overflows at narrow widths (card 969e5c3b)
+      '.cos-prog-row {',
+      '  display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-top:4px;',
+      '}',
+      '.cos-prog-badge {',
+      '  display:inline-block;padding:1px 8px;border-radius:10px;font-size:10px;white-space:nowrap;',
+      '  font-weight:500;',
+      '}',
+      // Next-best-action line on closed tile
+      '.cos-tile-nba {',
+      '  font-size:11px;margin-top:2px;color:var(--text-muted,#888);',
+      '  overflow:hidden;white-space:nowrap;text-overflow:ellipsis;',
+      '}',
       '.cos-ball-who { font-weight:500;color:var(--text,#ddd); }',
       '.cos-ball-when { color:var(--text-muted,#888); }',
       '.cos-ball-sub { color:var(--text-muted,#888);overflow:hidden;text-overflow:ellipsis; }',
@@ -484,6 +586,26 @@
       '  border-top:1px solid var(--border,#2a2a2a);display:flex;gap:8px;flex-wrap:wrap;',
       '}',
       '.cos-footer-id { font-family:monospace; }',
+      // Progression detail panel (card 969e5c3b)
+      '.cos-detail-progression {',
+      '  margin-bottom:10px;padding:8px 10px;',
+      '  border:1px solid var(--border,#2a2a2a);border-radius:6px;',
+      '  background:var(--accent-soft,rgba(96,165,250,0.03));',
+      '}',
+      '.cos-detail-prog-goal { margin-bottom:6px; }',
+      '.cos-detail-prog-goal-text {',
+      '  font-size:13px;line-height:1.4;color:var(--text,#ddd);',
+      '}',
+      '.cos-detail-prog-status-line {',
+      '  font-size:12px;line-height:1.5;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px;',
+      '}',
+      '.cos-detail-prog-status { font-weight:500; }',
+      '.cos-detail-prog-meta { color:var(--text-muted,#888);font-size:11px; }',
+      '.cos-detail-prog-decision { color:var(--text-muted,#888);font-size:11px; }',
+      '.cos-detail-prog-reason {',
+      '  font-size:12px;color:var(--text-muted,#888);margin-top:4px;',
+      '  font-style:italic;',
+      '}',
     ].join('\n')
     document.head.appendChild(style)
   }
@@ -498,9 +620,26 @@
     Promise.all([
       j('/api/cos/today'), j('/api/cos/cases'), j('/api/cos/outbound'), j('/api/cos/campaigns'), j('/api/cos/radar'), j('/api/cos/monitoring'), j('/api/cos/analytics'),
       j('/api/cos/zst-today'), j('/api/cos/zst-cases'),
+      // Card 969e5c3b: progression views for both domains.
+      j('/api/cos/progression?domain=personal'), j('/api/cos/progression?domain=zst'),
     ]).then(function (res) {
       var today = res[0] || {}, all = res[1] || {}, out = res[2] || {}, camp = res[3] || {}, rad = res[4] || {}, mon = res[5] || {}, an = res[6] || {}
       var zstToday = res[7] || {}, zstAll = res[8] || {}
+      // Card 969e5c3b: progression views. The endpoint returns an array — .catch
+      // returns {} for fetch errors, so normalize to [].
+      var personalProg = Array.isArray(res[9]) ? res[9] : []
+      var zstProg = Array.isArray(res[10]) ? res[10] : []
+
+      // Build progression lookup maps keyed by caseId for O(1) tile lookup.
+      function buildProgMap(progList) {
+        var map = {}
+        for (var i = 0; i < progList.length; i++) {
+          map[progList[i].caseId] = progList[i]
+        }
+        return map
+      }
+      var personalProgMap = buildProgMap(personalProg)
+      var zstProgMap = buildProgMap(zstProg)
 
       var personalTodayCases = today.cases || []
       var personalAllCases = all.cases || []
@@ -509,8 +648,8 @@
 
       // Personal namespace (személyes) — full panel including outbound etc.
       var personalHtml =
-        caseSection('📌 Ma', personalTodayCases, 'personal', 'Ma nincs esedékes ügy.') +
-        caseSection('🗂 Ügyek', personalAllCases, 'personal', 'Nincs aktív ügy. A COS case-store üres vagy minden ügy lezárt.') +
+        caseSection('📌 Ma', personalTodayCases, 'personal', 'Ma nincs esedékes ügy.', personalProgMap) +
+        caseSection('🗂 Ügyek', personalAllCases, 'personal', 'Nincs aktív ügy. A COS case-store üres vagy minden ügy lezárt.', personalProgMap) +
         genericSection('📤 Kimenő', out.outbound || [], 'Nincs kimenő művelet.', outboundItem) +
         genericSection('📣 Kampányok', camp.campaigns || [], 'Nincs kampány.', campaignItem) +
         genericSection('🎯 Radar', rad.radar || [], 'Nincs figyelt ár-radar.', radarItem) +
@@ -524,8 +663,8 @@
       // enforces this at the UI layer: only one namespace is visible at
       // a time; the two lists are never shown together.
       var zstHtml =
-        caseSection('📌 Ma — ZST', zstTodayCases, 'zst', 'Ma nincs esedékes céges ügy.') +
-        caseSection('🗂 Ügyek — ZST', zstAllCases, 'zst', 'Nincs aktív céges ügy.')
+        caseSection('📌 Ma — ZST', zstTodayCases, 'zst', 'Ma nincs esedékes céges ügy.', zstProgMap) +
+        caseSection('🗂 Ügyek — ZST', zstAllCases, 'zst', 'Nincs aktív céges ügy.', zstProgMap)
 
       body.innerHTML =
         '<nav class="tab-nav" id="cosTabNav" style="padding:0;margin-bottom:16px;">' +
@@ -551,7 +690,7 @@
       if (personalPanel) {
         var personalLists = personalPanel.querySelectorAll('.cos-case-list[data-ns="personal"]')
         personalLists.forEach(function (list) {
-          installAccordion(list, personalMerged, 'personal')
+          installAccordion(list, personalMerged, 'personal', personalProgMap)
         })
       }
 
@@ -560,7 +699,7 @@
       if (zstPanel) {
         var zstLists = zstPanel.querySelectorAll('.cos-case-list[data-ns="zst"]')
         zstLists.forEach(function (list) {
-          installAccordion(list, zstMerged, 'zst')
+          installAccordion(list, zstMerged, 'zst', zstProgMap)
         })
       }
 
