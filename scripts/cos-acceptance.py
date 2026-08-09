@@ -145,6 +145,24 @@ def task_config(name):
         return None
 
 
+def task_declared_name(dirname):
+    """The name the SCHEDULER uses — the SKILL.md frontmatter, not the directory.
+    2026-08-09: renaming the directory and the config left the frontmatter saying
+    `cos-progression-heartbeat`, so the running scheduler kept firing under the
+    old name while a directory-based check reported the rename as complete. A
+    criterion that reads a different field than the system reads is measuring a
+    file, not a behaviour."""
+    p = os.path.join(TASKS, dirname, "SKILL.md")
+    try:
+        with open(p, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("name:"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        return None
+    return None
+
+
 # --- criteria ----------------------------------------------------------------
 # Each: (id, group, spec reference, title, fn) where fn -> (status, evidence)
 
@@ -408,9 +426,15 @@ def _sd1():
         cfg = task_config(t)
         if cfg is None:
             bad.append("%s: nincs" % t)
-        elif not cfg.get("enabled"):
+            continue
+        if not cfg.get("enabled"):
             bad.append("%s: kikapcsolva" % t)
-    return (PASS if not bad else FAIL), "; ".join(bad) or "mind a négy él"
+        declared = task_declared_name(t)
+        # A SKILL.md-ben deklarált név az, amit az ütemező használ. Ha az eltér a
+        # könyvtártól, a rendszer más néven fut, mint amit itt ellenőrzünk.
+        if declared is not None and declared != t:
+            bad.append("%s: az ütemező szerint '%s'" % (t, declared))
+    return (PASS if not bad else FAIL), "; ".join(bad) or "mind a négy él, egyező néven"
 
 
 @crit("SD-2", "scheduler", "audit 2026-08-09", "a haladás-motor ütemezése engedélyezett")
