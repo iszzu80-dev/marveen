@@ -566,6 +566,34 @@ def _wf3():
     return (PASS if not missing else FAIL), "hiányzó: %s" % (", ".join(missing) or "-")
 
 
+@crit("LK-1", "linking", "kartya 4c6695d9", "ket ugy ossze TUD kotni (entitas-alapon, szalon tulmutatoan)")
+def _lk1():
+    # A kepesseg NEM LETEZETT: a related_case_ids oszlop ott volt, es semmi nem
+    # tudta irni. A kriterium azt meri, hogy van-e iro ut, nem azt hogy van-e mezo.
+    ok, detail = has_prod_caller("linkCases", "case-link.ts")
+    if ok is None:
+        return ERROR, detail
+    return (PASS if ok else FAIL), detail
+
+
+@crit("LK-2", "linking", "kartya 4c6695d9", "a futarcegek NEM szamitanak kereskedonek az illesztesben")
+def _lk2():
+    # Ha egy futar kereskedokent illeszkedne, a shopping ugyek fele osszedrotozodna.
+    # Ez a kriterium a HAMIS KAPCSOLAT ellen ved, nem a hianyzo ellen.
+    f = os.path.join(SRC, "cos", "case-link.ts")
+    if not os.path.exists(f):
+        return FAIL, "nincs case-link modul"
+    try:
+        body = open(f, encoding="utf-8", errors="replace").read()
+    except OSError as e:
+        return ERROR, str(e)
+    if "CARRIERS" not in body:
+        return FAIL, "nincs futar-kizaras"
+    merch = body.split("export const MERCHANTS")[1].split("]")[0].lower() if "export const MERCHANTS" in body else ""
+    leaked = [c for c in ("gls", "foxpost", "dpd", "posta") if "'%s'" % c in merch]
+    return (PASS if not leaked else FAIL), ("futar a kereskedo-listaban: %s" % ", ".join(leaked)) if leaked else "futarok kizarva"
+
+
 # ---- group: ui (a v4.2-n KIVULI, owner-jovahagyott UI-munka) ----
 # Istvan 2026-08-09: "ez a funkcio bar nem volt benne az eredeti speckoban".
 # Pontosan ezert kell ide: aminek nincs kriteriuma, az nem tud elkeszulni a kapu
@@ -630,7 +658,7 @@ def _ts1():
 # --- runner ------------------------------------------------------------------
 
 GROUP_ORDER = ["intake", "scope", "approval", "outbound", "liveness", "scheduler",
-               "monitoring", "migration", "workflow", "ui", "testing"]
+               "monitoring", "migration", "workflow", "linking", "ui", "testing"]
 GROUP_LABEL = {
     "intake": "Bejövő lánc (§6.3, §8)",
     "scope": "Hatókör (§2, AC-17)",
@@ -641,6 +669,7 @@ GROUP_LABEL = {
     "monitoring": "Monitorozás (§19)",
     "migration": "Migráció (§17)",
     "workflow": "Workflow és autonómia (§13, §21, §22)",
+    "linking": "Ügy-összekötés (spec-en kívüli, owner-jóváhagyott)",
     "ui": "Mission Control válaszút (spec-en kívüli, owner-jóváhagyott)",
     "testing": "Tesztfedés",
 }
