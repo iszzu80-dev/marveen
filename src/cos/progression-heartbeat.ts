@@ -25,6 +25,7 @@ import {
   releaseProgressionClaim,
 } from './progression-scheduler.js'
 import { runProgressionCycle, type PipelineOptions } from './progression-pipeline.js'
+import { acquireClaim, releaseClaim } from './case-store.js'
 
 export interface HeartbeatResult {
   personal: number
@@ -69,6 +70,27 @@ export function runProgressionHeartbeat(
 
       const runId = randomUUID()
       const claimed = tryClaimProgression(db, domain, dc.case_id, runId, 300, now)
+      if (claimed) {
+        // Mirror the claim into case_claims, WITH a fence (§6.6 / A.2).
+        //
+        // Two claim mechanisms existed side by side: the progression lease,
+        // which the live path actually uses, and case_claims, which the spec
+        // specifies and which had zero rows. The difference is not cosmetic —
+        // case_claims carries a monotonic fence token and the lease does not.
+        // Without a fence, a worker whose lease expired mid-run can still write
+        // when it wakes: its row no longer matches, and nothing in its own path
+        // notices. A.2 exists for exactly that late write, and the live path sat
+        // outside its protection.
+        //
+        // Done HERE and not in the scheduler because that module documents a
+        // hard invariant of zero side effects beyond case_progression_state. An
+        // invariant worth writing down is worth not quietly breaking.
+        try {
+          acquireClaim(db, {
+            claimKey: `progression:${domain}:${dc.case_id}`, ownerRunId: runId, ttlSeconds: 300,
+          }, now)
+        } catch { /* the progression lease already provides exclusion; the fence is the extra */ }
+      }
 
       if (!claimed) {
         // Lost the race to another runner — skip
@@ -92,6 +114,15 @@ export function runProgressionHeartbeat(
         )
       } finally {
         releaseProgressionClaim(db, domain, dc.case_id, runId, now)
+        // A tukrozott claim elengedese: egy ott felejtett sor a kovetkezo
+        // egyeztetesben "lejart foglalas"-kent jelenne meg, ami zaj, es a zaj
+        // megtanitja az embert atugrani a jelentest.
+        try {
+          const key = `progression:${domain}:${dc.case_id}`
+          const held = db.prepare(`SELECT claim_fence FROM case_claims WHERE claim_key=? AND owner_run_id=?`)
+            .get(key, runId) as { claim_fence: number } | undefined
+          if (held) releaseClaim(db, { claimKey: key, ownerRunId: runId, fence: held.claim_fence })
+        } catch { /* a lease lejarata amugy is felszabaditja */ }
       }
     }
   }
