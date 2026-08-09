@@ -542,7 +542,17 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(yes ? { ledgerId: ledger } : { ledgerId: ledger, reason: 'Istvan elvetette a felületen' })
     }).then(function (r) { return r.json() }).then(function (j) {
-      msg.textContent = j.ok ? (yes ? 'Jóváhagyva' : 'Elvetve') : ('Nem ment: ' + (j.reason || j.error || '?'))
+      if (!j.ok) {
+        msg.textContent = 'Nem ment: ' + (j.reason || j.error || '?')
+      } else if (!yes) {
+        msg.textContent = 'Elvetve'
+      } else if (j.sent) {
+        // A gomb "Elkuldom"-ot igert; a visszajelzes mondja meg, hogy TENYLEG
+        // kiment-e, ne csak azt hogy a jovahagyas rogzult.
+        msg.textContent = 'Elküldve' + (j.externalRef ? ' (' + j.externalRef + ')' : '')
+      } else {
+        msg.textContent = 'Jóváhagyva, de NEM ment ki: ' + ((j.reasons || []).join('; ') || 'ismeretlen ok')
+      }
       if (!j.ok) for (var i = 0; i < btns.length; i++) btns[i].disabled = false
     }).catch(function (e) {
       msg.textContent = 'Hiba: ' + e
