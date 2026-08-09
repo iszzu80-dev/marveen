@@ -3,6 +3,7 @@ import { initDatabase, getDb } from '../db.js'
 import { createCase } from '../cos/case-store.js'
 import {
   decodeMessage, renderThread, storeCaseThread, casesMissingThreadText,
+  recordThreadFetchFailure, abandonedThreadFetches, THREAD_FETCH_MAX_ATTEMPTS,
   type ThreadMessage,
 } from '../cos/gmail-thread-read.js'
 
@@ -134,6 +135,43 @@ describe('full thread read', () => {
       const db = getDb()
       createCase(db, { caseId: 'c2', title: 'B', caseType: 'ADMIN' }, NOW)
       expect(casesMissingThreadText(db).map((r) => r.case_id)).not.toContain('c2')
+    })
+  })
+
+  describe('giving up on a broken thread', () => {
+    it('stops offering a thread after the attempt limit', () => {
+      // A runner that retries a permanently-broken id every ten minutes emits a
+      // failure line every ten minutes, and a line that always appears stops
+      // being read — which is how the real failure gets missed.
+      const db = getDb()
+      createCase(db, { caseId: 'c1', title: 'A', caseType: 'ADMIN' }, NOW)
+      db.prepare(`UPDATE personal_cases SET gmail_thread_ids='["thr-broken"]' WHERE case_id='c1'`).run()
+      expect(casesMissingThreadText(db).map((r) => r.case_id)).toContain('c1')
+
+      for (let i = 0; i < THREAD_FETCH_MAX_ATTEMPTS; i++) {
+        recordThreadFetchFailure(db, 'c1', 'thr-broken', 'thread fetch failed: 400', NOW + i)
+      }
+      expect(casesMissingThreadText(db).map((r) => r.case_id)).not.toContain('c1')
+    })
+
+    it('one failure is not enough to give up', () => {
+      const db = getDb()
+      createCase(db, { caseId: 'c1', title: 'A', caseType: 'ADMIN' }, NOW)
+      db.prepare(`UPDATE personal_cases SET gmail_thread_ids='["t"]' WHERE case_id='c1'`).run()
+      recordThreadFetchFailure(db, 'c1', 't', 'timeout', NOW)
+      expect(casesMissingThreadText(db).map((r) => r.case_id)).toContain('c1')
+    })
+
+    it('what we gave up on stays listable — an absence is not a report', () => {
+      const db = getDb()
+      createCase(db, { caseId: 'c1', title: 'A', caseType: 'ADMIN' }, NOW)
+      for (let i = 0; i < THREAD_FETCH_MAX_ATTEMPTS; i++) {
+        recordThreadFetchFailure(db, 'c1', 'thr-broken', 'HTTP 400', NOW + i)
+      }
+      const a = abandonedThreadFetches(db)
+      expect(a).toHaveLength(1)
+      expect(a[0].attempts).toBeGreaterThanOrEqual(THREAD_FETCH_MAX_ATTEMPTS)
+      expect(a[0].last_error).toContain('400')
     })
   })
 })

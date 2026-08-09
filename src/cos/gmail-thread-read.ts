@@ -118,6 +118,34 @@ export function renderThread(messages: ThreadMessage[]): string {
   ].join('\n')).join('\n\n')
 }
 
+/** Records a failed fetch so it is not retried forever. A runner that retries a
+ *  permanently-broken id every ten minutes produces a failure line every ten
+ *  minutes, and a failure line that always appears stops being read — which is
+ *  how the real one gets missed. */
+export function recordThreadFetchFailure(
+  db: Database.Database, caseId: string, threadId: string, reason: string, now: number,
+): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cos_thread_fetch_failures (
+      case_id    TEXT NOT NULL,
+      thread_id  TEXT NOT NULL,
+      attempts   INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (case_id, thread_id)
+    )
+  `)
+  db.prepare(
+    `INSERT INTO cos_thread_fetch_failures (case_id, thread_id, attempts, last_error, updated_at)
+     VALUES (@c, @t, 1, @e, @now)
+     ON CONFLICT(case_id, thread_id) DO UPDATE SET
+       attempts = attempts + 1, last_error = @e, updated_at = @now`
+  ).run({ c: caseId, t: threadId, e: reason.slice(0, 300), now })
+}
+
+/** Attempts after which a thread is left alone. */
+export const THREAD_FETCH_MAX_ATTEMPTS = 3
+
 export interface StoreThreadResult {
   stored: boolean
   messages: number
@@ -172,9 +200,39 @@ export function casesMissingThreadText(
          AND NOT EXISTS (
            SELECT 1 FROM cos_documents d
            WHERE d.case_id = c.case_id AND d.doc_kind = 'email_thread')
+         -- and not one we have already given up on
+         AND NOT EXISTS (
+           SELECT 1 FROM cos_thread_fetch_failures f
+           WHERE f.case_id = c.case_id AND f.attempts >= ${THREAD_FETCH_MAX_ATTEMPTS})
        ORDER BY c.updated_at DESC LIMIT ?`
     ).all(limit) as never
   } catch {
-    return []
+    // The failures table may not exist yet on a fresh install; fall back to the
+    // unfiltered query rather than returning nothing, because "no candidates"
+    // and "cannot tell" must not look the same.
+    try {
+      return db.prepare(
+        `SELECT c.case_id, json_extract(c.gmail_thread_ids, '$[0]') AS thread_id
+         FROM personal_cases c
+         WHERE c.gmail_thread_ids IS NOT NULL AND c.archived_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM cos_documents d
+             WHERE d.case_id = c.case_id AND d.doc_kind = 'email_thread')
+         ORDER BY c.updated_at DESC LIMIT ?`
+      ).all(limit) as never
+    } catch { return [] }
   }
+}
+
+/** Threads we stopped trying to fetch, so the give-up is inspectable rather
+ *  than just an absence. */
+export function abandonedThreadFetches(
+  db: Database.Database,
+): Array<{ case_id: string; thread_id: string; attempts: number; last_error: string }> {
+  try {
+    return db.prepare(
+      `SELECT case_id, thread_id, attempts, last_error FROM cos_thread_fetch_failures
+       WHERE attempts >= ? ORDER BY updated_at DESC`
+    ).all(THREAD_FETCH_MAX_ATTEMPTS) as never
+  } catch { return [] }
 }
