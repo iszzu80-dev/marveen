@@ -45,20 +45,48 @@ async function getAnthropicConstructor(): Promise<any> {
   return _AnthropicConstructor
 }
 
-/** Real Anthropic API client implementing the LlmClient interface.
- *  Lazily imports @anthropic-ai/sdk on first use. */
+/** Default when the caller names no model: Haiku is the cheapest Claude that
+ *  reliably returns the strict JSON this interpreter validates. */
+export const DEFAULT_INTERPRETER_MODEL = 'claude-haiku-4-5-20251001'
+
+export interface LlmClientOptions {
+  apiKey?: string
+  /** Anthropic-compatible endpoint. DeepSeek serves one at
+   *  https://api.deepseek.com/anthropic, which is how the whole fleet already
+   *  runs non-Claude models (see agent-process.ts). Omit for Anthropic itself. */
+  baseURL?: string
+  /** Model id. Must match the provider the baseURL points at. */
+  model?: string
+}
+
+/** Anthropic-protocol LLM client implementing the LlmClient interface.
+ *  Lazily imports @anthropic-ai/sdk on first use.
+ *
+ *  Not Anthropic-only despite the name: the SDK speaks a protocol, and DeepSeek
+ *  (and OpenRouter, and Ollama) serve that protocol. Keeping one client and
+ *  swapping the endpoint is what the fleet already does for its agents; a second
+ *  client per provider would be a second place for the prompt-injection guard to
+ *  be forgotten. */
 export class AnthropicLlmClient implements LlmClient {
   private clientPromise: Promise<any> | null = null
-  private apiKey: string | undefined
+  private readonly apiKey: string | undefined
+  private readonly baseURL: string | undefined
+  readonly model: string
 
-  constructor(apiKey?: string) {
-    this.apiKey = apiKey
+  constructor(apiKeyOrOpts?: string | LlmClientOptions) {
+    const o: LlmClientOptions = typeof apiKeyOrOpts === 'string' ? { apiKey: apiKeyOrOpts } : (apiKeyOrOpts ?? {})
+    this.apiKey = o.apiKey
+    this.baseURL = o.baseURL
+    this.model = o.model ?? DEFAULT_INTERPRETER_MODEL
   }
 
   private async getClient(): Promise<any> {
     if (!this.clientPromise) {
       this.clientPromise = getAnthropicConstructor().then(Cls => {
-        return new Cls({ apiKey: this.apiKey || process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN })
+        return new Cls({
+          apiKey: this.apiKey || process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN,
+          ...(this.baseURL ? { baseURL: this.baseURL } : {}),
+        })
       })
     }
     return this.clientPromise
@@ -67,7 +95,7 @@ export class AnthropicLlmClient implements LlmClient {
   async complete(systemPrompt: string, userMessage: string): Promise<string> {
     const client = await this.getClient()
     const resp = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
+      model: this.model,
       max_tokens: 1024,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMessage }],

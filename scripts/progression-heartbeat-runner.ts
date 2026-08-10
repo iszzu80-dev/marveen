@@ -56,12 +56,20 @@ const ENRICH_PER_CYCLE = Number(process.env.COS_ENRICH_PER_CYCLE ?? 5)
 if (ENRICH_PER_CYCLE > 0) {
   try {
     const { enrichPendingGoals } = await import('../src/cos/goal-enrichment.js')
-    const { AnthropicLlmClient } = await import('../src/cos/progression-interpreter.js')
-    const enrich = await enrichPendingGoals(db, new AnthropicLlmClient(), ENRICH_PER_CYCLE)
-    console.log('GoalEnrichment:', JSON.stringify(enrich))
+    const { resolveInterpreter } = await import('../src/cos/interpreter-provider.js')
+    const { getSecret } = await import('../src/web/vault.js')
+    const interp = resolveInterpreter(getSecret)
+    if (!interp) {
+      // No key anywhere. Say so every cycle rather than logging a quiet zero:
+      // "nothing to interpret" and "nothing can interpret" are different facts.
+      console.log('GoalEnrichment:', JSON.stringify({
+        enriched: 0, failed: true, error: 'no interpreter configured (no ANTHROPIC key in env, no DEEPSEEK_API_KEY in vault)',
+      }))
+    } else {
+      const enrich = await enrichPendingGoals(db, interp.client, ENRICH_PER_CYCLE)
+      console.log('GoalEnrichment:', JSON.stringify({ provider: interp.provider, model: interp.model, ...enrich }))
+    }
   } catch (e) {
-    // Reported, not silent: "0 enriched" and "the enricher could not run" are
-    // different facts, and only one of them means the goals are fine.
     console.log('GoalEnrichment:', JSON.stringify({
       enriched: 0, failed: true, error: String((e as Error)?.message ?? e),
     }))
