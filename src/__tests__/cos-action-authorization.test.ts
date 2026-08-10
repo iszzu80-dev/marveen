@@ -27,7 +27,12 @@ function ctx(over: Partial<AuthorizationContext> = {}): AuthorizationContext {
     domain: 'personal', caseId: 'c1', caseVersion: 1, goalVersion: null,
     actionId: 'ob-1', actionType: 'EMAIL_SEND', intent: 'SEND_APPROVED_EMAIL',
     targetReference: 'camp-1', recipient: EMAIL.to, payloadHash: 'hash-1',
-    approvalId: 'appr-1', ...over,
+    // approvalId is null by DEFAULT because these tests are about the ticket
+    // mechanics. Consumption now re-checks a named approval's live validity and
+    // fails CLOSED when it cannot verify one — so a made-up id like 'appr-1'
+    // would refuse every test here for the right reason but the wrong subject.
+    // The approval-specific tests below use real, approved rows.
+    approvalId: null, ...over,
   }
 }
 
@@ -107,12 +112,66 @@ describe('§22.2 authorization ticket — adversarial', () => {
     expect(consumeAuthorization(db, authorizationId, ctx({ caseVersion: 2 }), T0 + 1).ok).toBe(false)
   })
 
-  it('approval withdrawn after issuance → BLOCK', () => {
-    // Modelled as the approval id no longer matching: a different approval, or
-    // none, cannot consume a ticket bound to the original.
+  it('approval withdrawn after issuance → BLOCK (REAL revocation, same id)', async () => {
+    // CHANGED 2026-08-10 22:56. This test used to model withdrawal as the
+    // approval ID no longer matching — which the policy hash already caught, so
+    // it was green while proving the EASIER half. The case the spec names is the
+    // same approval, revoked: identical id, identical hash, and until the fix
+    // nothing looked at whether it was still valid. Found by auditing the
+    // implementation against §22.2's TOCTOU list instead of against my own tests.
     const db = getDb()
-    const { authorizationId } = issueAuthorization(db, ctx({ approvalId: 'appr-1' }), T0)
-    expect(consumeAuthorization(db, authorizationId, ctx({ approvalId: null }), T0 + 1).ok).toBe(false)
+    registerConnector(db, 'gmail', 'email', 'READ_WRITE', T0)
+    setLadder(db, 'QUOTE', { rung: 'EXECUTE_WITH_APPROVAL' }, T0 - 1000)
+    const d = draftSend(db, { caseId: 'c1', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
+    approveSend(db, {
+      campaignId: d.campaignId, templateHash: d.templateHash,
+      renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to,
+      approvalId: 'appr-live',
+    }, T0)
+
+    const c = ctx({ actionId: d.ledgerId, approvalId: 'appr-live', payloadHash: d.renderedPayloadHash, targetReference: d.campaignId })
+    const { authorizationId } = issueAuthorization(db, c, T0)
+
+    // revoked through the real mechanism, id unchanged
+    db.prepare("UPDATE campaign_approvals SET status='REVOKED' WHERE approval_id='appr-live'").run()
+
+    const r = consumeAuthorization(db, authorizationId, c, T0 + 1)
+    expect(r.ok).toBe(false)
+    expect(r.ok === false && r.reason).toContain('REVOKED')
+  })
+
+  it('a stop condition tripped after issuance → BLOCK', () => {
+    // §3.4's other withdrawal route, same shape: id unchanged, authority gone.
+    const db = getDb()
+    registerConnector(db, 'gmail', 'email', 'READ_WRITE', T0)
+    const d = draftSend(db, { caseId: 'c1', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
+    approveSend(db, {
+      campaignId: d.campaignId, templateHash: d.templateHash,
+      renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to,
+      approvalId: 'appr-stop',
+    }, T0)
+    const c = ctx({ actionId: d.ledgerId, approvalId: 'appr-stop', payloadHash: d.renderedPayloadHash, targetReference: d.campaignId })
+    const { authorizationId } = issueAuthorization(db, c, T0)
+    db.prepare("UPDATE campaign_approvals SET stopped_reason='előleget kértek' WHERE approval_id='appr-stop'").run()
+    const r = consumeAuthorization(db, authorizationId, c, T0 + 1)
+    expect(r.ok).toBe(false)
+    expect(r.ok === false && r.reason).toContain('stopped')
+  })
+
+  it('CONTROL: an untouched approval still lets the ticket through', () => {
+    // Without this the previous two could pass by refusing everything with an
+    // approval id attached.
+    const db = getDb()
+    registerConnector(db, 'gmail', 'email', 'READ_WRITE', T0)
+    const d = draftSend(db, { caseId: 'c1', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
+    approveSend(db, {
+      campaignId: d.campaignId, templateHash: d.templateHash,
+      renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to,
+      approvalId: 'appr-ok',
+    }, T0)
+    const c = ctx({ actionId: d.ledgerId, approvalId: 'appr-ok', payloadHash: d.renderedPayloadHash, targetReference: d.campaignId })
+    const { authorizationId } = issueAuthorization(db, c, T0)
+    expect(consumeAuthorization(db, authorizationId, c, T0 + 1).ok).toBe(true)
   })
 
   it('authority revoked after issuance → BLOCK, without waiting for expiry', () => {
