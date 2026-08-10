@@ -1040,12 +1040,23 @@ export async function approveAndDispatchZst(
 
 export async function dispatchApproved(
   db: ReturnType<typeof getDb>, ledgerId: string, now: number,
-): Promise<{ sent: boolean; status?: string; externalRef?: string; reasons?: string[] }> {
+): Promise<{ sent: boolean; status?: string; externalRef?: string; reasons?: string[]; sensitivityTier?: string }> {
+  // F-6: the case's own sensitivity has to come along. It used to be hardcoded
+  // PERSONAL below, which silently downgraded every HIGHLY_SENSITIVE case on the
+  // only live personal send path — the thing §10 forbids by name. The ZST query
+  // three functions up already joins its case table for exactly this column; the
+  // asymmetry was the tell that this was an omission, not a decision.
   const row = db.prepare(
-    `SELECT l.payload, l.campaign_id, k.template_hash
-     FROM outbound_ledger l LEFT JOIN campaigns k ON k.campaign_id = l.campaign_id
+    `SELECT l.payload AS payload, l.campaign_id AS campaign_id, l.case_id AS case_id,
+            k.template_hash AS template_hash, c.sensitivity AS sensitivity
+     FROM outbound_ledger l
+     LEFT JOIN campaigns      k ON k.campaign_id = l.campaign_id
+     LEFT JOIN personal_cases c ON c.case_id     = l.case_id
      WHERE l.ledger_id = ?`
-  ).get(ledgerId) as { payload: string | null; campaign_id: string | null; template_hash: string | null } | undefined
+  ).get(ledgerId) as {
+    payload: string | null; campaign_id: string | null; case_id: string | null
+    template_hash: string | null; sensitivity: string | null
+  } | undefined
   if (!row?.payload || !row.campaign_id || !row.template_hash) {
     return { sent: false, reasons: ['a küldéshez hiányzik a tartalom vagy a kampány'] }
   }
@@ -1054,10 +1065,20 @@ export async function dispatchApproved(
   const r = await dispatchApprovedSend(db, new GmailSendAdapter(transport, ids => resolveShareableAttachments(db, ids)), {
     ledgerId, connectorId: 'gmail', campaignId: row.campaign_id,
     templateHash: row.template_hash, renderedPayloadHash: renderedPayloadHash(email),
-    email, declaredSensitivity: 'PERSONAL', targetProfile: 'premium_reasoning',
+    email,
+    // No fallback to 'PERSONAL' here on purpose: an absent value must stay
+    // absent so coerceSensitivity() can do its job and fail closed to
+    // HIGHLY_SENSITIVE. Defaulting to PERSONAL would reintroduce the downgrade
+    // through the back door.
+    declaredSensitivity: row.sensitivity ?? undefined,
+    targetProfile: 'premium_reasoning',
   }, now)
   return {
     sent: r.sent, status: r.action?.status, externalRef: r.action?.externalRef ?? undefined,
     reasons: r.decision.allowed ? undefined : r.decision.reasons,
+    // Surfaced so the tier the gate actually decided on is observable from
+    // outside — the ZST door already returns it. An unobservable tier is how a
+    // hardcoded one survived this long.
+    sensitivityTier: r.decision.sensitivityTier,
   }
 }
