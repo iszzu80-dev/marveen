@@ -14,6 +14,10 @@ import { listActiveZstCases, listTodayZstCases } from '../../cos/zst-case-store.
 import { dueZstItems } from '../../cos/zst-watch.js'
 import { ingestTriagedEmail, type TriagedEmail } from '../../cos/triage-bridge.js'
 import { ingestTriagedZstEmail, type ZstTriagedEmail } from '../../cos/zst-intake.js'
+import {
+  draftZstSend, approveZstSend, rejectZstSend, dispatchZstSend,
+  renderedPayloadHash as zstPayloadHash,
+} from '../../cos/zst-send.js'
 import { validateSkillMd, validateSkillPermissions } from '../../cos/skill-permission-validator.js'
 import { getMissionControlProgressionView, runProgressionCycle } from '../../cos/progression-pipeline.js'
 import { storeDocument, documentsForCase, readDocumentBytes } from '../../cos/cos-documents.js'
@@ -264,6 +268,75 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     const horizon = endOfTodaySec(new Date())
     const cases = listTodayZstCases(getDb(), horizon)
     json(res, { cases, count: cases.length, horizon })
+    return true
+  }
+
+  // ── The corporate outbound door (§7.3, AT-ZA, card f832abf3) ──────────────
+  //
+  // Until now every corporate endpoint was a GET. draftZstSend, approveZstSend,
+  // rejectZstSend, evaluateZstSendGate and dispatchZstSend were complete,
+  // unit-tested, and unreachable: no non-test file imported any of them, and
+  // zst_outbound_ledger held zero rows. The audit called that "Slice 1
+  // write-half DONE". The module was done; the capability did not exist,
+  // because it had no door.
+  //
+  // Real company email leaves through here, so the gates stand BEFORE the door
+  // rather than behind it. evaluateZstSendGate is fail-closed on four layers at
+  // once (write-usable connector, ZST sensitivity vs target profile, an
+  // APPROVED approval at the campaign's current version bound to this exact
+  // template + rendered payload, and the recipient present in that approval's
+  // allowed list). Nothing here weakens any of them; the door only supplies
+  // what the gate needs to judge.
+  //
+  // Three endpoints, deliberately separate. Drafting writes a ledger row and
+  // sends nothing. Approving is the owner's YES to THIS text and THESE
+  // recipients. Only approve dispatches, and only through the gate.
+
+  if (path === '/api/cos/zst-outbound/draft' && method === 'POST') {
+    let b: { caseId?: string; templateId?: string; to?: string; subject?: string; body?: string; campaignId?: string }
+    try { b = JSON.parse((await readBody(req)).toString()) }
+    catch { json(res, { error: 'invalid JSON' }, 400); return true }
+    if (!b.caseId || !b.to || !b.subject || !b.body) {
+      json(res, { error: 'caseId, to, subject, body required' }, 400); return true
+    }
+    try {
+      const r = draftZstSend(getDb(), {
+        caseId: b.caseId,
+        templateId: b.templateId ?? 'zst-freeform-v1',
+        email: { to: b.to, subject: b.subject, body: b.body },
+        campaignId: b.campaignId,
+      }, Math.floor(Date.now() / 1000))
+      json(res, r)
+    } catch (e) { json(res, { error: String((e as Error).message) }, 400) }
+    return true
+  }
+
+  if (path === '/api/cos/zst-outbound/approve' && method === 'POST') {
+    let b: {
+      ledgerId?: string; renderedPayloadHash?: string
+      approvedBy?: string; allowedRecipients?: string[]
+    }
+    try { b = JSON.parse((await readBody(req)).toString()) }
+    catch { json(res, { error: 'invalid JSON' }, 400); return true }
+    if (!b.ledgerId) { json(res, { error: 'ledgerId required' }, 400); return true }
+    try {
+      json(res, await approveAndDispatchZst(
+        getDb(), b.ledgerId, b.renderedPayloadHash, b.approvedBy ?? 'istvan',
+        b.allowedRecipients, Math.floor(Date.now() / 1000),
+      ))
+    } catch (e) { json(res, { error: String((e as Error).message) }, 400) }
+    return true
+  }
+
+  if (path === '/api/cos/zst-outbound/reject' && method === 'POST') {
+    let b: { ledgerId?: string; reason?: string }
+    try { b = JSON.parse((await readBody(req)).toString()) }
+    catch { json(res, { error: 'invalid JSON' }, 400); return true }
+    if (!b.ledgerId) { json(res, { error: 'ledgerId required' }, 400); return true }
+    try {
+      const action = rejectZstSend(getDb(), b.ledgerId, b.reason ?? 'Istvan elvetette', Math.floor(Date.now() / 1000))
+      json(res, { ok: true, status: action.status })
+    } catch (e) { json(res, { error: String((e as Error).message) }, 400) }
     return true
   }
 
@@ -757,6 +830,102 @@ export function approveOutbound(
  *  APPLIED_UNVERIFIED (provider accepted, own marker not searchable), which the
  *  daily reconcile watches. Trading the owner's exact words for a tidier status
  *  would be the wrong way round. */
+/** The corporate approve-and-send, mirroring dispatchApproved() on the personal
+ *  side. Card f832abf3.
+ *
+ *  Three things it does NOT take from the request body, on purpose:
+ *
+ *  The template hash comes from the campaign row, not the caller. The gate's
+ *  whole job is to check that the approval matches the campaign; letting the
+ *  caller supply both sides of that comparison would make it agree with itself.
+ *
+ *  The sensitivity comes from the CASE, not from a constant. The personal side
+ *  can hardcode 'PERSONAL' because everything in that store is; a corporate case
+ *  can be ZST_INTERNAL, ZST_LEGAL or stricter, and the effective tier is
+ *  escalated further by the content itself.
+ *
+ *  Be precise about what that buys TODAY, because it is less than it looks.
+ *  targetProfile is fixed at 'premium_reasoning', and PROFILE_ALLOWLIST permits
+ *  premium_reasoning for every tier including UNKNOWN. So the profile layer of
+ *  evaluateZstSendGate cannot refuse anything this door sends, whatever the
+ *  case's sensitivity says. That layer constrains which MODEL may process
+ *  content; an owner-approved verbatim email is not processed by a model, so it
+ *  has nothing to bite on here. The layers that actually bind this door are the
+ *  write-usable connector and the approval binding (exact payload hash, exact
+ *  recipient, current campaign version).
+ *
+ *  The tier is passed and returned anyway, for two reasons: the recorded
+ *  decision should say what class of content left the company, and if the
+ *  allowlist is ever tightened the door starts refusing without anyone having
+ *  to remember to wire it. Returning it is what makes it checkable at all --
+ *  an input nobody can observe is an input nobody can verify. Card d7e5df01.
+ *
+ *  The recipient list defaults to exactly the addressee of the drafted mail. An
+ *  approval authorises the people the owner saw; an empty or wider list would
+ *  turn one YES into a standing permission.
+ *
+ *  And the payload hash is compared before anything is recorded: approving a
+ *  message means approving THAT text. If the draft changed since it was shown,
+ *  the approval refers to a message that no longer exists. */
+export async function approveAndDispatchZst(
+  db: ReturnType<typeof getDb>,
+  ledgerId: string,
+  seenPayloadHash: string | undefined,
+  approvedBy: string,
+  allowedRecipients: string[] | undefined,
+  now: number,
+): Promise<{ sent: boolean; status?: string; externalRef?: string; reasons?: string[]; sensitivityTier?: string }> {
+  const row = db.prepare(
+    `SELECT l.payload AS payload, l.campaign_id AS campaign_id, l.case_id AS case_id,
+            k.template_hash AS template_hash, c.sensitivity AS sensitivity
+     FROM zst_outbound_ledger l
+     LEFT JOIN zst_campaigns k ON k.campaign_id = l.campaign_id
+     LEFT JOIN zst_cases     c ON c.case_id     = l.case_id
+     WHERE l.ledger_id = ?`,
+  ).get(ledgerId) as {
+    payload: string | null; campaign_id: string | null; case_id: string | null
+    template_hash: string | null; sensitivity: string | null
+  } | undefined
+
+  if (!row?.payload || !row.campaign_id || !row.template_hash) {
+    return { sent: false, reasons: ['a küldéshez hiányzik a tartalom vagy a kampány'] }
+  }
+
+  const email = JSON.parse(row.payload) as EmailDraft
+  const hash = zstPayloadHash(email)
+  if (seenPayloadHash && seenPayloadHash !== hash) {
+    return { sent: false, reasons: ['a jóváhagyott szöveg azóta megváltozott — a jóváhagyás nem erre a levélre vonatkozik'] }
+  }
+
+  const recipients = allowedRecipients?.length ? allowedRecipients : [email.to]
+  if (!recipients.includes(email.to)) {
+    return { sent: false, reasons: [`a címzett (${email.to}) nincs a jóváhagyott listán`] }
+  }
+
+  approveZstSend(db, {
+    campaignId: row.campaign_id, templateHash: row.template_hash,
+    renderedPayloadHash: hash, approvedBy, allowedRecipients: recipients,
+  }, now)
+
+  // The corporate mailbox, not the private one. Sending company mail from
+  // iszzu80@gmail.com would pass every gate in this file and still be wrong.
+  const transport = new GmailApiTransport({
+    credsPath: 'store/.google-zst-creds.json', embedBodyMarker: false,
+  })
+  const r = await dispatchZstSend(db, new GmailSendAdapter(transport), {
+    ledgerId, campaignId: row.campaign_id, connectorId: 'gmail-zst',
+    email, templateHash: row.template_hash, renderedPayloadHash: hash,
+    declaredSensitivity: row.sensitivity ?? undefined,
+    targetProfile: 'premium_reasoning',
+  }, now)
+
+  return {
+    sent: r.sent, status: r.action?.status, externalRef: r.action?.externalRef ?? undefined,
+    reasons: r.decision.allowed ? undefined : r.decision.reasons,
+    sensitivityTier: r.decision.sensitivityTier,
+  }
+}
+
 export async function dispatchApproved(
   db: ReturnType<typeof getDb>, ledgerId: string, now: number,
 ): Promise<{ sent: boolean; status?: string; externalRef?: string; reasons?: string[] }> {

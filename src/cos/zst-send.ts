@@ -64,6 +64,20 @@ export function draftZstSend(db: Database.Database, input: DraftZstSendInput, no
     `SELECT COUNT(*) AS n FROM zst_outbound_ledger WHERE case_id=? AND action_type='EMAIL_SEND'`
   ).get(input.caseId) as { n: number }).n) + 1
   const planned = zstExecutor.planAction(db, { caseId: input.caseId, actionType: 'EMAIL_SEND', sequenceNumber: seq, payload: input.email }, now)
+  // Link the ledger row to its campaign. The personal draft has always done
+  // this and says why in a comment; the corporate draft did not, and that one
+  // missing UPDATE is a large part of why the corporate send chain could not be
+  // reached. planAction leaves campaign_id NULL, so the approval door -- which
+  // has to look up the template hash the approval must bind to -- finds nothing
+  // and refuses every send with "missing content or campaign". A row that does
+  // not say which campaign authorises it is also unauditable.
+  const version = (db.prepare(
+    `SELECT version FROM zst_campaigns WHERE campaign_id = ?`,
+  ).get(campaignId) as { version: number } | undefined)?.version ?? 1
+  db.prepare(
+    `UPDATE zst_outbound_ledger SET campaign_id = @c, campaign_version = @v, updated_at = @now
+     WHERE ledger_id = @id`,
+  ).run({ c: campaignId, v: version, now, id: planned.ledgerId })
   return { campaignId, ledgerId: planned.ledgerId, sequenceNumber: seq, templateHash, renderedPayloadHash: rHash, email: input.email, status: 'AWAITING_APPROVAL' }
 }
 
