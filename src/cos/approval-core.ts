@@ -89,6 +89,12 @@ export interface SendAuthResult {
   /** Machine-readable refusal, one of REFUSAL_CODES. 'ok' when authorized. */
   code: string
   reason: string
+  /** F-2 / AC-21: present only when authorized — the versions and approval this
+   *  authorisation was granted at, for the ledger row. Read here rather than
+   *  recomputed at the call site, where a second read could disagree. */
+  campaignVersion?: number
+  approvalVersion?: number
+  approvalId?: string
 }
 
 export const REFUSAL_CODES = [
@@ -323,7 +329,14 @@ export function makeApprovalEngine(T: ApprovalTables) {
       }
     }
 
-    return { authorized: true, code: 'ok', reason: 'ok' }
+    // F-2 / AC-21: hand back the versions this authorisation was granted at, so
+    // the caller can record them on the ledger row. Recomputing them at the
+    // call site would be a second read that could disagree with this one.
+    return {
+      authorized: true, code: 'ok', reason: 'ok',
+      campaignVersion: c.version, approvalVersion: appr.campaign_version,
+      approvalId: appr.approval_id,
+    }
   }
 
   return { getCampaign, recordApproval, tripStopCondition, authorizeSend, tables: T }

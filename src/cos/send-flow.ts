@@ -107,6 +107,9 @@ export function draftSend(db: Database.Database, input: DraftSendInput, now: num
         // F-1 / §7.1: the key binds campaign + recipient + rendered payload, so
         // they have to be known at plan time rather than patched in afterwards.
         campaignId, recipient: input.email.to, renderedPayloadHash: rHash,
+        // F-2 / AC-21: which version of the case this was planned against.
+        caseVersion: (db.prepare('SELECT version FROM personal_cases WHERE case_id = ?')
+          .get(input.caseId) as { version: number } | undefined)?.version ?? null,
       }, now)
     } catch (err) {
       if (!String((err as Error)?.message ?? '').includes('UNIQUE')) throw err
@@ -117,11 +120,13 @@ export function draftSend(db: Database.Database, input: DraftSendInput, now: num
   // quota has nothing to count without them, and the approval door cannot find
   // the campaign whose template it must bind to — a ledger row that does not say
   // which campaign it belongs to is unauditable by AC-21.
+  // campaign_id and recipient are written by planAction now (F-2) — in the same
+  // INSERT as the row, so no window exists where the row is unattributable.
   db.prepare(
-    `UPDATE outbound_ledger SET campaign_id=@c, recipient=@r, channel='EMAIL',
+    `UPDATE outbound_ledger SET channel='EMAIL',
        outbound_kind=COALESCE(outbound_kind, @k), first_attempt_at=COALESCE(first_attempt_at, @now)
      WHERE ledger_id=@id`
-  ).run({ c: campaignId, r: input.email.to, k: seq === 1 ? 'INITIAL' : 'FOLLOW_UP', now, id: planned.ledgerId })
+  ).run({ k: seq === 1 ? 'INITIAL' : 'FOLLOW_UP', now, id: planned.ledgerId })
   return {
     campaignId, ledgerId: planned.ledgerId, sequenceNumber: seq,
     templateHash, renderedPayloadHash: rHash, email: input.email, status: 'AWAITING_APPROVAL',
@@ -168,6 +173,9 @@ export interface DispatchSendInput {
   renderedPayloadHash: string
   declaredSensitivity?: unknown
   targetProfile: string
+  /** F-2 / AC-21: which run drove this send. Optional because a send triggered
+   *  by the owner from the UI belongs to no run. */
+  runId?: string
 }
 export interface DispatchSendResult {
   sent: boolean
@@ -209,7 +217,17 @@ export async function dispatchApprovedSend(
   })
   if (!decision.allowed) return { sent: false, decision }
   // The gate ran and allowed it three lines up — that is the assertion F-7 asks
-  // this call site to make explicit.
-  const action = await executeAction(db, adapter, input.ledgerId, now, { ...opts, authorizedByDispatchGate: true })
+  // this call site to make explicit. The versions come from the same evaluation
+  // (F-2), not from a fresh read that could have moved.
+  const action = await executeAction(db, adapter, input.ledgerId, now, {
+    ...opts,
+    authorizedByDispatchGate: true,
+    audit: {
+      ...opts.audit,
+      runId: opts.audit?.runId ?? input.runId,
+      campaignVersion: decision.campaignVersion ?? null,
+      approvalVersion: decision.approvalVersion ?? null,
+    },
+  })
   return { sent: action.status === 'VERIFIED' || action.status === 'APPLIED_UNVERIFIED', decision, action }
 }

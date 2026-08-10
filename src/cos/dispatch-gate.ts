@@ -54,6 +54,11 @@ export interface DispatchDecision {
    *  is the profile the caller SHOULD use instead. Scoped to the COS gate — it
    *  does not change fleet-wide model resolution. */
   recommendedProfile: string | null
+  /** F-2 / AC-21: the versions the send authorisation was granted at, carried
+   *  out of the gate so the ledger row can record what allowed it. Undefined
+   *  when the campaign check refused. */
+  campaignVersion?: number
+  approvalVersion?: number
 }
 
 /** Evaluate the full send gate. Fail-closed: every layer must pass. */
@@ -82,5 +87,8 @@ export function evaluateDispatch(db: Database.Database, req: DispatchRequest): D
   if (!auth.authorized) reasons.push(`campaign not authorized: ${auth.reason}`)
 
   const routed = routeModelForSensitivity(tier, { strategy: req.routingStrategy ?? 'capability' })
-  return { allowed: reasons.length === 0, reasons, sensitivityTier: tier, recommendedProfile: routed.profile }
+  return {
+    allowed: reasons.length === 0, reasons, sensitivityTier: tier, recommendedProfile: routed.profile,
+    campaignVersion: auth.campaignVersion, approvalVersion: auth.approvalVersion,
+  }
 }

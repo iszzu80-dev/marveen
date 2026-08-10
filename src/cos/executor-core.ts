@@ -131,6 +131,10 @@ export interface PlanInput {
   campaignId?: string | null
   recipient?: string | null
   renderedPayloadHash?: string | null
+  /** F-2 / AC-21: the case version this action was planned against. Passed in
+   *  rather than queried, because the executor is bound to a ledger table and
+   *  does not know which case table (personal_cases / zst_cases) to read. */
+  caseVersion?: number | null
 }
 
 export interface ExecuteOpts {
@@ -148,6 +152,17 @@ export interface ExecuteOpts {
    *  refuses instead of sending. The gate itself stays where it belongs, in
    *  dispatchApprovedSend / dispatchZstSend. */
   authorizedByDispatchGate?: boolean
+  /** F-2 / AC-21: "every outbound action is traceable to an approval, a
+   *  campaign, a case+version, a run and a source". These are the run-time half
+   *  — the plan-time half (payload hash, case version, campaign, recipient) is
+   *  written by planAction. The columns existed and nothing on the personal
+   *  branch ever wrote them, which reads as though the trail were being kept. */
+  audit?: {
+    runId?: string
+    campaignVersion?: number | null
+    approvalVersion?: number | null
+    renderedVariablesHash?: string | null
+  }
 }
 
 export interface Executor {
@@ -172,7 +187,9 @@ export function makeExecutor(ledgerTable: string): Executor {
 
   function setStatus(
     db: Database.Database, ledgerId: string, status: OutboundStatus,
-    fields: Partial<Record<'external_ref' | 'last_error' | 'sending_at' | 'applied_at' | 'verified_at' | 'attempt', unknown>>,
+    fields: Partial<Record<'external_ref' | 'last_error' | 'sending_at' | 'applied_at' | 'verified_at' | 'attempt'
+      | 'run_id' | 'campaign_version' | 'approval_version' | 'rendered_variables_hash'
+      | 'provider_message_id' | 'rfc_message_id', unknown>>,
     now: number,
   ): void {
     const cols = ['status = @status', 'updated_at = @now']
@@ -196,15 +213,24 @@ export function makeExecutor(ledgerTable: string): Executor {
     })
     const ledgerId = `ob-${key}`
     const marker = input.externalMarker ?? key
+    // F-2: the plan-time half of the audit trail is written HERE, in the same
+    // INSERT as the row itself. Filling it in with a later UPDATE (which is how
+    // campaign_id and recipient used to arrive) leaves a window where the row
+    // exists and is unattributable, and a crash inside that window leaves it
+    // unattributable for good.
     db.prepare(
       `INSERT INTO ${T}
          (ledger_id, case_id, action_type, sequence_number, internal_idempotency_key,
-          external_idempotency_marker, status, payload, attempt, created_at, updated_at)
+          external_idempotency_marker, status, payload, attempt, created_at, updated_at,
+          campaign_id, recipient, rendered_payload_hash, case_version)
        VALUES (@ledgerId, @caseId, @actionType, @sequenceNumber, @key,
-          @marker, 'PLANNED', @payload, 0, @now, @now)`
+          @marker, 'PLANNED', @payload, 0, @now, @now,
+          @campaignId, @recipient, @payloadHash, @caseVersion)`
     ).run({
       ledgerId, caseId: input.caseId, actionType: input.actionType, sequenceNumber: input.sequenceNumber,
       key, marker, payload: input.payload === undefined ? null : JSON.stringify(input.payload), now,
+      campaignId: input.campaignId ?? null, recipient: input.recipient ?? null,
+      payloadHash, caseVersion: input.caseVersion ?? null,
     })
     return loadOrThrow(db, ledgerId)
   }
@@ -236,7 +262,16 @@ export function makeExecutor(ledgerTable: string): Executor {
         return loadOrThrow(db, ledgerId)
       }
     }
-    setStatus(db, ledgerId, 'SENDING', { sending_at: now, attempt: a.attempt + 1 }, now)
+    setStatus(db, ledgerId, 'SENDING', {
+      sending_at: now, attempt: a.attempt + 1,
+      // F-2: written BEFORE the call, with the same reasoning that puts SENDING
+      // before the call — if the process dies mid-send, the row still says which
+      // run and which approved versions authorised it.
+      ...(opts.audit?.runId !== undefined ? { run_id: opts.audit.runId } : {}),
+      ...(opts.audit?.campaignVersion !== undefined ? { campaign_version: opts.audit.campaignVersion } : {}),
+      ...(opts.audit?.approvalVersion !== undefined ? { approval_version: opts.audit.approvalVersion } : {}),
+      ...(opts.audit?.renderedVariablesHash !== undefined ? { rendered_variables_hash: opts.audit.renderedVariablesHash } : {}),
+    }, now)
     let externalRef: string
     try {
       const r = await adapter.send(loadOrThrow(db, ledgerId))
@@ -251,7 +286,13 @@ export function makeExecutor(ledgerTable: string): Executor {
       }
       return loadOrThrow(db, ledgerId)
     }
-    setStatus(db, ledgerId, 'APPLIED_UNVERIFIED', { external_ref: externalRef, applied_at: now }, now)
+    // F-2: provider_message_id existed as a column and was never written, which
+    // is a trap — it looks like the provider's own id is on file. external_ref
+    // IS that id for every adapter we have; recording it under both names keeps
+    // the AC-21 query answerable without guessing which column is real.
+    setStatus(db, ledgerId, 'APPLIED_UNVERIFIED', {
+      external_ref: externalRef, applied_at: now, provider_message_id: externalRef,
+    }, now)
     return verifyAction(db, adapter, ledgerId, now)
   }
 

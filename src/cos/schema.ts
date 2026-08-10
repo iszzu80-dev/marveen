@@ -44,6 +44,22 @@ export type CaseSensitivity = (typeof CASE_SENSITIVITIES)[number]
 /** Add any missing columns to an existing table (nullable ADD COLUMN is safe and
  *  cheap). Used to evolve tables that predate a field without a table rebuild.
  *  `defs` maps column name → its SQL type/definition. */
+// F-2: this set has to hold for BOTH ledgers, because ONE executor
+// (makeExecutor) writes both, and the two schemas are initialised by two
+// different exported functions. Module scope, not a local inside one of them —
+// a local is exactly how the ZST half came to be skipped.
+const LEDGER_SHARED_COLUMNS: Record<string, string> = {
+  campaign_id:   'TEXT',
+  outbound_kind: 'TEXT',   // INITIAL | FOLLOW_UP | REPLY
+  recipient:     'TEXT',
+  rendered_payload_hash: 'TEXT',
+  case_version:  'INTEGER',
+  run_id:        'TEXT',
+  provider_message_id: 'TEXT',
+  rfc_message_id: 'TEXT',
+  rendered_variables_hash: 'TEXT',
+}
+
 function ensureColumns(db: Database.Database, table: string, defs: Record<string, string>): void {
   const have = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(c => c.name))
   for (const [name, def] of Object.entries(defs)) {
@@ -406,6 +422,10 @@ export function initCosSchema(db: Database.Database): void {
   // ── §6.2 / A.5: a ledger hordozza a cimzettet, a szolgaltatoi azonositokat
   //    es a verzio-kotest. Enelkul az AC-21 (minden kimeno visszavezetheto
   //    approvalhoz + case+version-hoz) technikailag nem ellenorizheto.
+  //    F-2 (2026-08-10): rendered_payload_hash, case_version and run_id were the
+  //    three the §6.2 list asked for and the table did not have at all. The
+  //    other columns here existed and were never written on the personal branch,
+  //    which is worse than absent: they read as if the trail were saved.
   ensureColumns(db, 'outbound_ledger', {
     channel:              'TEXT',
     provider_message_id:  'TEXT',
@@ -413,6 +433,9 @@ export function initCosSchema(db: Database.Database): void {
     campaign_version:     'INTEGER',
     approval_version:     'INTEGER',
     rendered_variables_hash: 'TEXT',
+    rendered_payload_hash: 'TEXT',
+    case_version:         'INTEGER',
+    run_id:               'TEXT',
     first_attempt_at:     'INTEGER',
     error_code:           'TEXT',
   })
@@ -476,15 +499,14 @@ export function initCosSchema(db: Database.Database): void {
 
   // The ledger needs to say WHICH campaign and WHICH kind of send it was, or the
   // per-kind and total quotas above have nothing to count.
-  const LEDGER_QUOTA_COLUMNS: Record<string, string> = {
-    campaign_id:   'TEXT',
-    outbound_kind: 'TEXT',   // INITIAL | FOLLOW_UP | REPLY
-    recipient:     'TEXT',
-  }
-  ensureColumns(db, 'outbound_ledger', LEDGER_QUOTA_COLUMNS)
-  if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='zst_outbound_ledger'").get()) {
-    ensureColumns(db, 'zst_outbound_ledger', LEDGER_QUOTA_COLUMNS)
-  }
+  ensureColumns(db, 'outbound_ledger', LEDGER_SHARED_COLUMNS)
+  // The ZST ledger is created LATER in this same function, so the guarded call
+  // that used to stand here was a no-op on every fresh database and only ever
+  // fired on one that already had the table. It has moved to just after the
+  // CREATE (search: ZST_LEDGER_COLUMNS_AFTER_CREATE). Found by F-2: the new
+  // columns landed on the personal ledger and every ZST send threw
+  // "no such column: recipient" — on a fresh db the ZST ledger had never been
+  // through ensureColumns at all.
 
   // ── connector_health (Slice 1 reliability; §20 connector matrix) ──────
   // One row per connector (gmail/calendar/shopping/rental/...). The preCheck
@@ -948,6 +970,11 @@ export function initZstSendSchema(db: Database.Database): void {
         'VERIFIED','FAILED_RETRYABLE','FAILED_TERMINAL','CANCELLED','RECOVERY_REQUIRED'))
     )
   `)
+  // ZST_LEDGER_COLUMNS_AFTER_CREATE — the table exists by now, on a fresh
+  // database as well as an existing one. One executor writes both ledgers, so
+  // the column set must be identical on both.
+  ensureColumns(db, 'zst_outbound_ledger', LEDGER_SHARED_COLUMNS)
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS zst_campaigns (
       campaign_id            TEXT PRIMARY KEY,
