@@ -123,18 +123,53 @@ function widenCheckConstraint(db: Database.Database, table: string, probeValue: 
 
   const cols = (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(c => c.name).join(', ')
   const before = (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n
-  // createSql is passed in, NOT read back from sqlite_master: the caller's
-  // CREATE TABLE IF NOT EXISTS was a no-op on this database, so sqlite_master
-  // still holds the NARROW definition. Re-executing that would rebuild the very
-  // constraint being widened and report success.
-  db.transaction(() => {
-    db.exec(`ALTER TABLE ${table} RENAME TO ${table}_pre_widen`)
-    db.exec(createSql)
-    db.exec(`INSERT INTO ${table} (${cols}) SELECT ${cols} FROM ${table}_pre_widen`)
-    const after = (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n
-    if (after !== before) throw new Error(`widenCheckConstraint(${table}): copied ${after} of ${before} rows — refusing to drop the original`)
-    db.exec(`DROP TABLE ${table}_pre_widen`)
-  })()
+
+  // Two pragmas, both load-bearing, both learned by running this against a copy
+  // of the live store and watching it throw FOREIGN KEY constraint failed:
+  //
+  //  legacy_alter_table=ON — without it, modern SQLite REWRITES other tables'
+  //    REFERENCES clauses to follow the rename, so email_processing's foreign
+  //    key would end up pointing at email_processing_batches_pre_widen and then
+  //    at nothing when that is dropped.
+  //  foreign_keys=OFF — during the window between the rename and the copy, child
+  //    rows reference a table that does not exist under that name.
+  //
+  // Both must be set OUTSIDE the transaction: SQLite silently ignores a
+  // foreign_keys change inside one, which would look like it worked.
+  // Baseline FIRST. `foreign_key_check` inspects the WHOLE database, and this
+  // store already carries 20 violations in tables this migration never touches
+  // (zst_email_processing, zst_case_events — measured 2026-08-10). Failing on the
+  // absolute count would abort every rebuild forever because of someone else's
+  // orphans; only NEW violations are this migration's business.
+  const fkKey = (v: unknown) => JSON.stringify(v)
+  const fkBefore = new Set((db.pragma('foreign_key_check') as unknown[]).map(fkKey))
+  const priorFk = (db.pragma('foreign_keys', { simple: true }) as number) === 1
+  const priorLegacy = (db.pragma('legacy_alter_table', { simple: true }) as number) === 1
+  db.pragma('foreign_keys = OFF')
+  db.pragma('legacy_alter_table = ON')
+  try {
+    // createSql is passed in, NOT read back from sqlite_master: the caller's
+    // CREATE TABLE IF NOT EXISTS was a no-op on this database, so sqlite_master
+    // still holds the NARROW definition. Re-executing that would rebuild the very
+    // constraint being widened and report success.
+    db.transaction(() => {
+      db.exec(`ALTER TABLE ${table} RENAME TO ${table}_pre_widen`)
+      db.exec(createSql)
+      db.exec(`INSERT INTO ${table} (${cols}) SELECT ${cols} FROM ${table}_pre_widen`)
+      const after = (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n
+      if (after !== before) throw new Error(`widenCheckConstraint(${table}): copied ${after} of ${before} rows — refusing to drop the original`)
+      db.exec(`DROP TABLE ${table}_pre_widen`)
+    })()
+    // Prove the references survived, rather than assuming the pragmas did their
+    // job. An orphaned child row here would be a silent corruption.
+    const introduced = (db.pragma('foreign_key_check') as unknown[]).filter(v => !fkBefore.has(fkKey(v)))
+    if (introduced.length) {
+      throw new Error(`widenCheckConstraint(${table}): the rebuild introduced ${introduced.length} foreign key violations`)
+    }
+  } finally {
+    if (!priorLegacy) db.pragma('legacy_alter_table = OFF')
+    if (priorFk) db.pragma('foreign_keys = ON')
+  }
 }
 
 function ensureColumns(db: Database.Database, table: string, defs: Record<string, string>): void {
