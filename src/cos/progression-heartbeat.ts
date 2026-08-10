@@ -26,6 +26,7 @@ import {
 } from './progression-scheduler.js'
 import { runProgressionCycle, type PipelineOptions } from './progression-pipeline.js'
 import { acquireClaim, releaseClaim } from './case-store.js'
+import { decideTrigger, recordProgressionState, dueDeadline } from './progression-trigger.js'
 
 export interface HeartbeatResult {
   personal: number
@@ -33,6 +34,8 @@ export interface HeartbeatResult {
   errors: string[]
   /** Cases that were claimed by another runner and skipped. */
   skippedClaimed: number
+  /** §10.8: due, but nothing about the case changed and no clock came round. */
+  skippedNoTrigger: number
   /** Cases that threw during the cycle. */
   cycleErrors: number
 }
@@ -55,6 +58,7 @@ export function runProgressionHeartbeat(
     zst: 0,
     errors: [],
     skippedClaimed: 0,
+    skippedNoTrigger: 0,
     cycleErrors: 0,
   }
 
@@ -98,12 +102,44 @@ export function runProgressionHeartbeat(
         continue
       }
 
+      // §10.8 trigger contract. Being DUE is not a reason; the clock coming
+      // round again says nothing about the case. Measured before this existed:
+      // 10 716 runs in 24 hours over 101 cases, 10 347 of them deciding
+      // CONTINUE_AUTONOMOUSLY and NONE starting an action. Harmless while the
+      // engine is deterministic, and one model call each the moment §10.2's
+      // Reader arrives — which is why this is the Reader's precondition rather
+      // than a later optimisation.
+      const trig = decideTrigger(db, domain, dc.case_id, now)
+      if (!trig.shouldRun) {
+        result.skippedNoTrigger++
+        // Push the next check out anyway, or the same case is re-examined every
+        // cycle for as long as it stays unchanged: cheaper than a run, still not
+        // free.
+        releaseProgressionClaim(db, domain, dc.case_id, runId, now)
+        continue
+      }
+
       try {
         const opts: PipelineOptions = {
-          triggerType: 'SCHEDULED',
-          triggerReference: `heartbeat-${runId.slice(0, 8)}`,
+          triggerType: trig.trigger ?? 'SCHEDULED',
+          triggerReference: trig.triggerReference ?? `heartbeat-${runId.slice(0, 8)}`,
         }
         runProgressionCycle(db, domain, dc.case_id, now, opts)
+        // Recorded AFTER the run, and RE-DERIVED after it — not the hash from
+        // before. The cycle mutates the case (version, goal version, wait), so
+        // the pre-run hash never matches the post-run state, and recording it
+        // meant every case looked changed on the next pass and ran again for
+        // ever. Measured: 30 cases still running every cycle with the pre-run
+        // hash recorded.
+        //
+        // Recording the POST-run state says the true thing: "this is the state I
+        // have already reasoned about, my own effects included". An external
+        // change after this point produces a different hash and earns a new run.
+        // The crash-safety property survives: a crash records nothing, so the
+        // case stays eligible.
+        recordProgressionState(db, domain, dc.case_id,
+          decideTrigger(db, domain, dc.case_id, now).effectiveStateHash, now,
+          dueDeadline(db, domain, dc.case_id, now))
 
         if (domain === 'personal') result.personal++
         else result.zst++

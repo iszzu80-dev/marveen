@@ -1627,11 +1627,28 @@ export function initProgressionSchema(db: Database.Database): void {
       CHECK (semantic_completion_status IN ('NOT_STARTED','IN_PROGRESS','PROPOSED','VERIFIED'))
     )
   `)
+  // ── §10.8 trigger contract ───────────────────────────────────────────
+  // HERE, not in initCosSchema. I put it there first and it threw
+  // "no such table: case_progression_state" on every fresh database, because
+  // that function runs BEFORE this one. Third time tonight in this same file —
+  // and the first time it was LOUD instead of silent, because ensureColumns on
+  // a missing table errors rather than quietly doing nothing. Loud is better.
+  //
+  // wait_version completes §10.8's dedup key: a wait re-armed with a new
+  // deadline is a NEW state even when nothing else about the case moved, and
+  // without it the re-armed wait looks identical to the one already reasoned
+  // over.
+  ensureColumns(db, 'case_progression_state', {
+    wait_version:         'INTEGER NOT NULL DEFAULT 0',
+    last_effective_state: 'TEXT',
+    last_event_seen:      'INTEGER',
+  })
+
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cps_next_prog ON case_progression_state(domain, next_progression_at) WHERE progression_enabled = 1`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cps_claimed ON case_progression_state(progression_claimed_by, progression_claim_expires_at)`)
 
   // ── case_progression_runs (plan §14 — audit/replay ledger) ─────────────
-  db.exec(`
+  const RUNS_DDL = `
     CREATE TABLE IF NOT EXISTS case_progression_runs (
       progression_run_id   TEXT PRIMARY KEY,
       domain               TEXT NOT NULL,
@@ -1658,9 +1675,18 @@ export function initProgressionSchema(db: Database.Database): void {
       safety_assertions_json TEXT,
       CHECK (domain IN ('personal','zst')),
       CHECK (status IN ('STARTED','COMPLETED','FAILED','RECOVERY_REQUIRED','CANCELLED')),
-      CHECK (trigger_type IN ('INTAKE','SCHEDULED','MANUAL','WAKE','ESCALATION_RESOLVED','RECOVERY'))
+      -- §10.8 named its own trigger vocabulary; the old six stay so existing
+      -- rows remain legal. SCHEDULED survives as a value but is no longer
+      -- WRITTEN by the heartbeat: "the clock came round" is not a reason.
+      CHECK (trigger_type IN ('INTAKE','SCHEDULED','MANUAL','WAKE','ESCALATION_RESOLVED','RECOVERY',
+        'NEW_RELEVANT_EVENT','WAIT_WAKE_DUE','FOLLOW_UP_DUE','APPROVAL_RESOLVED',
+        'DECISION_RESOLVED','USER_INPUT','CAPABILITY_RECOVERED','MANUAL_REVIEW_REQUEST'))
     )
-  `)
+  `
+  db.exec(RUNS_DDL)
+  // §10.8: existing stores carry the narrow six-value CHECK. Widened in place
+  // so a run triggered by NEW_RELEVANT_EVENT can actually be written.
+  widenCheckConstraint(db, 'case_progression_runs', 'NEW_RELEVANT_EVENT', RUNS_DDL)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cpruns_case ON case_progression_runs(domain, case_id, started_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cpruns_status ON case_progression_runs(status, started_at)`)
 

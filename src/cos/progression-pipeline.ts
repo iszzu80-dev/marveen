@@ -619,7 +619,11 @@ export async function enrichCaseGoal(
 
 export interface PipelineOptions {
   /** Caller-supplied trigger type for the progression run. */
+  /** The old six plus §10.8's vocabulary. SCHEDULED remains legal for callers
+   *  that genuinely mean "a periodic sweep"; the heartbeat no longer uses it. */
   triggerType?: 'SCHEDULED' | 'MANUAL' | 'WAKE' | 'INTAKE' | 'ESCALATION_RESOLVED' | 'RECOVERY'
+    | 'NEW_RELEVANT_EVENT' | 'WAIT_WAKE_DUE' | 'FOLLOW_UP_DUE' | 'APPROVAL_RESOLVED'
+    | 'DECISION_RESOLVED' | 'USER_INPUT' | 'CAPABILITY_RECOVERED' | 'MANUAL_REVIEW_REQUEST'
   /** Optional trigger reference (e.g. message ID, schedule name). */
   triggerReference?: string
 }
