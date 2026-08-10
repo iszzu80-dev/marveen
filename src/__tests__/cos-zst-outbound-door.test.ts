@@ -18,7 +18,7 @@ import { createZstCase } from '../cos/zst-case-store.js'
 import { registerConnector, setMode } from '../cos/connector-health.js'
 import { draftZstSend, renderedPayloadHash } from '../cos/zst-send.js'
 import { isProfileAllowedForZstSensitivity } from '../cos/zst-sensitivity.js'
-import { approveAndDispatchZst } from '../web/routes/cos.js'
+import { approveAndDispatchZst, escalationNeedsIstvanInPerson } from '../web/routes/cos.js'
 
 const T0 = 1_700_000_000
 const EMAIL = { to: 'zoltan@drvamosi.hu', subject: 'Üzletrész-adásvétel', body: 'Csatolva az igazolványok.' }
@@ -148,3 +148,34 @@ describe('the corporate outbound door', () => {
   })
 })
 
+
+// ── The Product Lab escalation door ───────────────────────────────────────
+//
+// zst-productlab.ts had the same problem as zst-send.ts: complete, tested, and
+// imported by nothing, so zst_product_escalations could never have a row. The
+// door is three endpoints; the part worth testing on its own is the one place
+// where opening a door could have weakened a rule.
+describe('the escalation door does not let HTTP spell its way past the hard gate', () => {
+  const HARD = { target_workspace: 'ZST', request_type: 'CONTRACT' }
+  const SOFT = { target_workspace: 'ZST', request_type: 'REVIEW' }
+
+  it('refuses ACCEPT on a commitment-bearing escalation', () => {
+    // transitionEscalation would allow this if the caller simply wrote
+    // actor: 'istvan' -- which anything holding the dashboard token can do.
+    expect(escalationNeedsIstvanInPerson(HARD, 'ACCEPTED')).toBe(true)
+  })
+
+  it('does not stand in the way of anything else', () => {
+    expect(escalationNeedsIstvanInPerson(HARD, 'ACKNOWLEDGED')).toBe(false)
+    expect(escalationNeedsIstvanInPerson(HARD, 'REJECTED')).toBe(false)
+    expect(escalationNeedsIstvanInPerson(SOFT, 'ACCEPTED')).toBe(false)
+    expect(escalationNeedsIstvanInPerson(undefined, 'ACCEPTED')).toBe(false)
+  })
+
+  it('every commitment-bearing request type is covered, not just the one I tested', () => {
+    for (const t of ['PAID_SERVICE', 'LICENSE', 'SUBCONTRACTOR', 'CONTRACT', 'SIGNIFICANT_COST']) {
+      expect(escalationNeedsIstvanInPerson({ target_workspace: 'ZST', request_type: t }, 'ACCEPTED'),
+        `${t} must need Istvan`).toBe(true)
+    }
+  })
+})

@@ -18,6 +18,9 @@ import {
   draftZstSend, approveZstSend, rejectZstSend, dispatchZstSend,
   renderedPayloadHash as zstPayloadHash,
 } from '../../cos/zst-send.js'
+import {
+  createEscalation, getEscalation, listOpenEscalations, transitionEscalation, isHardGated,
+} from '../../cos/zst-productlab.js'
 import { validateSkillMd, validateSkillPermissions } from '../../cos/skill-permission-validator.js'
 import { getMissionControlProgressionView, runProgressionCycle } from '../../cos/progression-pipeline.js'
 import { storeDocument, documentsForCase, readDocumentBytes } from '../../cos/cos-documents.js'
@@ -336,6 +339,79 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     try {
       const action = rejectZstSend(getDb(), b.ledgerId, b.reason ?? 'Istvan elvetette', Math.floor(Date.now() / 1000))
       json(res, { ok: true, status: action.status })
+    } catch (e) { json(res, { error: String((e as Error).message) }, 400) }
+    return true
+  }
+
+  // ── Product Lab ↔ ZST escalation bridge (§23, card f832abf3 sibling) ──────
+  //
+  // zst-productlab.ts is the state machine for items the Product Lab sends up
+  // for a business decision and answers ZST sends back down. It was complete
+  // and tested and nothing imported it, so no escalation could ever be raised:
+  // zst_product_escalations has zero rows for the same reason zst_outbound_ledger
+  // did.
+  //
+  // Only a projection crosses -- summary, decision needed, due date -- never the
+  // backlog (§23.4). Raising is all these endpoints do; a hard-gated request
+  // (cost, contract, licence, subcontractor) is marked as such and waits for
+  // Istvan, and this door does not offer a way to auto-accept one.
+  if (path === '/api/cos/zst-escalations' && method === 'GET') {
+    json(res, { escalations: listOpenEscalations(getDb()) })
+    return true
+  }
+
+  if (path === '/api/cos/zst-escalations' && method === 'POST') {
+    let b: {
+      escalationId?: string; sourceWorkspace?: 'PRODUCT_LAB' | 'ZST'
+      targetWorkspace?: 'PRODUCT_LAB' | 'ZST'; requestType?: string; summary?: string
+      zstCaseId?: string; productId?: string; requiredDecision?: string
+      requiredOutput?: string; dueAt?: number
+    }
+    try { b = JSON.parse((await readBody(req)).toString()) }
+    catch { json(res, { error: 'invalid JSON' }, 400); return true }
+    if (!b.escalationId || !b.sourceWorkspace || !b.targetWorkspace || !b.requestType || !b.summary) {
+      json(res, { error: 'escalationId, sourceWorkspace, targetWorkspace, requestType, summary required' }, 400)
+      return true
+    }
+    try {
+      const row = createEscalation(getDb(), {
+        escalationId: b.escalationId, sourceWorkspace: b.sourceWorkspace,
+        targetWorkspace: b.targetWorkspace, requestType: b.requestType, summary: b.summary,
+        zstCaseId: b.zstCaseId, productId: b.productId, requiredDecision: b.requiredDecision,
+        requiredOutput: b.requiredOutput, dueAt: b.dueAt,
+      }, Math.floor(Date.now() / 1000))
+      // The caller is told whether this one needs Istvan, so a Product Lab
+      // agent cannot mistake "recorded" for "approved".
+      json(res, { ...row, hardGated: isHardGated(row) })
+    } catch (e) { json(res, { error: String((e as Error).message) }, 400) }
+    return true
+  }
+
+  if (path === '/api/cos/zst-escalations/transition' && method === 'POST') {
+    let b: { escalationId?: string; status?: string; actor?: string }
+    try { b = JSON.parse((await readBody(req)).toString()) }
+    catch { json(res, { error: 'invalid JSON' }, 400); return true }
+    if (!b.escalationId || !b.status) { json(res, { error: 'escalationId, status required' }, 400); return true }
+    // transitionEscalation's hard gate is "only actor === 'istvan' may ACCEPT a
+    // commitment". Over HTTP the actor is whatever the body says, and anything
+    // holding the dashboard token can write 'istvan' — so passing it through
+    // would turn a hard gate into a spelling exercise. The same shape as the
+    // inter-agent bus having no sender authentication.
+    //
+    // So this door does not offer that move at all: a hard-gated ACCEPT is
+    // refused here regardless of who the caller claims to be, and Istvan
+    // accepts it where he actually is. Everything else transitions normally.
+    const esc = getEscalation(getDb(), b.escalationId)
+    if (escalationNeedsIstvanInPerson(esc, b.status)) {
+      json(res, {
+        error: 'hard-gated escalation: elfogadni csak Istvan tud, és nem ezen a végponton keresztül',
+        requestType: esc!.request_type, hardGated: true,
+      }, 403)
+      return true
+    }
+    try {
+      json(res, transitionEscalation(
+        getDb(), b.escalationId, b.status as never, b.actor ?? 'marveen', Math.floor(Date.now() / 1000)))
     } catch (e) { json(res, { error: String((e as Error).message) }, 400) }
     return true
   }
@@ -830,6 +906,29 @@ export function approveOutbound(
  *  APPLIED_UNVERIFIED (provider accepted, own marker not searchable), which the
  *  daily reconcile watches. Trading the owner's exact words for a tidier status
  *  would be the wrong way round. */
+/** Would accepting this escalation over HTTP bypass the hard gate?
+ *
+ *  zst-productlab's rule is "only actor === 'istvan' may ACCEPT a commitment".
+ *  That works when the actor is established by something other than the actor's
+ *  own claim. Over HTTP it is not: the body says who the caller is, anything
+ *  holding the dashboard token can write 'istvan', and the gate becomes a
+ *  spelling exercise. Same shape as the inter-agent bus having no sender
+ *  authentication -- the `from` field is self-declared there too.
+ *
+ *  So the door does not try to authenticate the claim; it removes the move. A
+ *  hard-gated ACCEPT is refused here no matter who the caller says they are, and
+ *  Istvan accepts it where he actually is. Everything else transitions normally.
+ *
+ *  Exported so it can be exercised directly: a guard that can only be reached by
+ *  standing up an HTTP server is a guard whose failure mode nobody has seen. */
+export function escalationNeedsIstvanInPerson(
+  esc: { request_type?: unknown; target_workspace?: string; hard_gate?: boolean } | undefined,
+  targetStatus: string | undefined,
+): boolean {
+  if (!esc || targetStatus !== 'ACCEPTED') return false
+  return isHardGated(esc as Parameters<typeof isHardGated>[0])
+}
+
 /** The corporate approve-and-send, mirroring dispatchApproved() on the personal
  *  side. Card f832abf3.
  *
