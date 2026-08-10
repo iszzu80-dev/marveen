@@ -146,7 +146,12 @@ RULES:
 1. Read the case metadata and email thread content.
 2. The original title may be cryptic (auto-generated, just a subject line). Produce a BETTER, human-readable title based on what the email is actually about.
 3. The summary should be 2-3 sentences: who, what, why, what needs to happen.
-4. The goal should be ONE concrete, actionable outcome statement in the user's language.
+4. The goal should be ONE concrete, actionable outcome statement.
+5. LANGUAGE — title, summary and goal MUST ALL be written in HUNGARIAN, whatever
+   language the email itself is in. These three fields are read by the owner on a
+   Hungarian dashboard. "the user's language" used to stand here and produced a
+   mix of Hungarian and English goals from Hungarian source mail, so state it
+   plainly: Hungarian, always, for all three fields.
 
 OUTPUT FORMAT — output ONLY a single JSON object, no other text before or after:
 {"title":"Short clear title here","summary":"2-3 sentence summary of the situation and what needs to happen.","goal":"One concrete actionable outcome statement."}`
