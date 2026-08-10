@@ -40,7 +40,10 @@ export interface ReadbackResult { found: boolean; available?: boolean; externalR
 export interface OutboundAdapter {
   readonly actionType: string
   send(action: OutboundAction): Promise<{ externalRef: string }>
-  readback(externalIdempotencyMarker: string): Promise<ReadbackResult>
+  /** F-12: `knownRef` is the provider id recorded when the send returned. An
+   *  adapter whose marker search is unavailable can use it as the fallback
+   *  evidence; one that has no such fallback ignores it. */
+  readback(externalIdempotencyMarker: string, knownRef?: string): Promise<ReadbackResult>
 }
 
 export interface SendErrorHints { reachedProvider?: boolean; terminal?: boolean }
@@ -412,7 +415,7 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
     const a = loadOrThrow(db, ledgerId)
     let rb: ReadbackResult
     try {
-      rb = await adapter.readback(a.externalIdempotencyMarker)
+      rb = await adapter.readback(a.externalIdempotencyMarker, a.externalRef ?? undefined)
     } catch (err) {
       setStatus(db, ledgerId, 'APPLIED_UNVERIFIED', { last_error: `readback unavailable: ${String((err as Error)?.message ?? err)}` }, now)
       return loadOrThrow(db, ledgerId)
@@ -433,7 +436,7 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
     const a = loadOrThrow(db, ledgerId)
     let rb: ReadbackResult
     try {
-      rb = await adapter.readback(a.externalIdempotencyMarker)
+      rb = await adapter.readback(a.externalIdempotencyMarker, a.externalRef ?? undefined)
     } catch (err) {
       setStatus(db, ledgerId, 'OUTCOME_UNKNOWN', { last_error: `readback unavailable: ${String((err as Error)?.message ?? err)}` }, now)
       return loadOrThrow(db, ledgerId)

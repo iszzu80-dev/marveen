@@ -206,6 +206,24 @@ export class GmailApiTransport implements MailTransport {
     return { messageId: j.id }
   }
 
+  /** F-12: does this provider message id still exist? The evidence of last
+   *  resort when no searchable marker was embedded, which is the live path's
+   *  normal state. `available:false` on a transport/auth failure, never
+   *  found:false — "we could not ask" and "it is not there" must stay
+   *  distinguishable, or a healthy send gets resent. */
+  async getById(messageId: string): Promise<{ found: boolean; available?: boolean }> {
+    try {
+      const token = await this.accessToken(Date.now())
+      const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}?format=minimal`
+      const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(this.readbackTimeoutMs) })
+      if (r.status === 404) return { found: false, available: true } // asked, and it is genuinely gone
+      if (!r.ok) return { found: false, available: false }
+      return { found: true, available: true }
+    } catch {
+      return { found: false, available: false }
+    }
+  }
+
   /** Find a sent message by the marker → full-text search the body ref in Sent.
    *  `available` is false only when the search itself could not run (network/
    *  auth), so a transient failure is never misread as "the message is absent". */

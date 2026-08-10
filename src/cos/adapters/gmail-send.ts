@@ -44,6 +44,14 @@ export interface MailTransport {
    *  be read as "absent" — the executor keeps the action unverified rather than
    *  resending. */
   findSentByHeader(name: string, value: string): Promise<{ found: boolean; messageId?: string; available?: boolean }>
+  /** F-12: confirm a message EXISTS by the provider id we were handed on send.
+   *  The body-marker search is unavailable whenever the marker is not embedded,
+   *  which is the case on the live path (the owner approved the text verbatim,
+   *  so nothing may be added to it). Without this, a send on that path can never
+   *  reach VERIFIED and a SENDING/OUTCOME_UNKNOWN row can never be resolved.
+   *  Optional: a transport that cannot do it simply does not implement it, and
+   *  the adapter falls back to the marker search. */
+  getById?(messageId: string): Promise<{ found: boolean; available?: boolean }>
 }
 
 interface EmailPayload {
@@ -118,8 +126,21 @@ export class GmailSendAdapter implements OutboundAdapter {
     return { externalRef: messageId }
   }
 
-  async readback(externalIdempotencyMarker: string): Promise<ReadbackResult> {
+  async readback(externalIdempotencyMarker: string, knownRef?: string): Promise<ReadbackResult> {
     const r = await this.transport.findSentByHeader(IDEMPOTENCY_HEADER, externalIdempotencyMarker)
+    // F-12. The marker search reports available:false when no marker was
+    // embedded — the live path's normal state, not an error. In that case the
+    // provider id recorded at send time (F-2) is the evidence that remains: ask
+    // the provider whether that message exists. Weaker than the marker
+    // round-trip, and honestly so: it proves the message is there, not that the
+    // body is the approved one. Weaker evidence beats a row that can never be
+    // resolved by anything.
+    if (r.available === false && knownRef && this.transport.getById) {
+      const byId = await this.transport.getById(knownRef)
+      if (byId.available !== false) {
+        return { found: byId.found, available: true, externalRef: knownRef }
+      }
+    }
     return { found: r.found, available: r.available, externalRef: r.messageId }
   }
 }

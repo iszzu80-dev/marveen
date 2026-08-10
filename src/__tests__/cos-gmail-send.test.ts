@@ -176,3 +176,62 @@ describe('GmailSendAdapter pre-flight failures are local, not unknown (F-3)', ()
     expect(r.status).toBe('OUTCOME_UNKNOWN')
   })
 })
+
+// F-12 (review 2026-08-10): on the live send path embedBodyMarker is false —
+// the owner approved the text verbatim, so nothing may be added to it — and the
+// marker search therefore reports available:false forever. A send on that path
+// could never reach VERIFIED, and a SENDING/OUTCOME_UNKNOWN row could never be
+// resolved by anything: §7.3's recovery arm simply did not work there.
+//
+// The fallback is the provider id recorded at send time (F-2). Weaker evidence,
+// and the code says so: it proves the message exists, not that its body is the
+// approved one. Weaker evidence beats a row nothing can ever resolve.
+describe('readback falls back to the provider id when no marker was embedded (F-12)', () => {
+  beforeEach(() => {
+    initDatabase(':memory:')
+    createCase(getDb(), { caseId: 'c1', title: 'T', caseType: 'X' }, 900)
+  })
+
+  /** A transport with no searchable marker, i.e. the live configuration. */
+  function markerless(exists: boolean, reachable = true) {
+    const sent: string[] = []
+    return {
+      sent,
+      transport: {
+        async send() { const id = `msg-${sent.length + 1}`; sent.push(id); return { messageId: id } },
+        async findSentByHeader() { return { found: false, available: false } }, // no marker to search for
+        async getById() { return reachable ? { found: exists, available: true } : { found: false, available: false } },
+      },
+    }
+  }
+
+  it('the message exists at the provider → VERIFIED instead of stuck', async () => {
+    const db = getDb()
+    const m = markerless(true)
+    const r = await exec(db, new GmailSendAdapter(m.transport as never), planAction(db, PLAN, 1000).ledgerId, 1001)
+    expect(r.status).toBe('VERIFIED')
+    expect(m.sent).toHaveLength(1)
+  })
+
+  it('CONTROL: with no fallback available the row stays unverified, never resent', async () => {
+    // Proves the fallback is what changed the outcome, not something else — and
+    // that removing it restores the old, safe-but-stuck behaviour.
+    const db = getDb()
+    const noFallback = {
+      async send() { return { messageId: 'msg-1' } },
+      async findSentByHeader() { return { found: false, available: false } },
+      // deliberately no getById
+    }
+    const r = await exec(db, new GmailSendAdapter(noFallback as never), planAction(db, PLAN, 1000).ledgerId, 1001)
+    expect(r.status).toBe('APPLIED_UNVERIFIED')
+  })
+
+  it('the provider is unreachable → unavailable, NOT "absent"', async () => {
+    // The distinction that stops a healthy send being resent.
+    const db = getDb()
+    const m = markerless(false, false)
+    const r = await exec(db, new GmailSendAdapter(m.transport as never), planAction(db, PLAN, 1000).ledgerId, 1001)
+    expect(r.status).toBe('APPLIED_UNVERIFIED')
+    expect(m.sent).toHaveLength(1) // exactly one delivery, no resend
+  })
+})
