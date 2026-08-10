@@ -40,3 +40,30 @@ console.log('Heartbeat:', JSON.stringify({
   cycleErrors: heartbeat.cycleErrors,
   errors: heartbeat.errors,
 }))
+
+// Step 3: Lazy LLM goal enrichment (card ca33eb4b, wired 2026-08-10).
+//
+// Until today the interpreter existed and nothing called it, so every case's
+// goal came from the per-status template and the engine could not say what any
+// case was FOR. Bounded to a few per cycle: each case is interpreted once, ever
+// -- it leaves the candidate set permanently -- so this is a one-time cost per
+// case, not a per-cycle one.
+//
+// Failure here must never take the heartbeat down with it. The engine's job is
+// to keep the cases moving; a missing API key or a model timeout degrades the
+// goals to the old template and nothing else.
+const ENRICH_PER_CYCLE = Number(process.env.COS_ENRICH_PER_CYCLE ?? 5)
+if (ENRICH_PER_CYCLE > 0) {
+  try {
+    const { enrichPendingGoals } = await import('../src/cos/goal-enrichment.js')
+    const { AnthropicLlmClient } = await import('../src/cos/progression-interpreter.js')
+    const enrich = await enrichPendingGoals(db, new AnthropicLlmClient(), ENRICH_PER_CYCLE)
+    console.log('GoalEnrichment:', JSON.stringify(enrich))
+  } catch (e) {
+    // Reported, not silent: "0 enriched" and "the enricher could not run" are
+    // different facts, and only one of them means the goals are fine.
+    console.log('GoalEnrichment:', JSON.stringify({
+      enriched: 0, failed: true, error: String((e as Error)?.message ?? e),
+    }))
+  }
+}
