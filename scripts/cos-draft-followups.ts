@@ -33,4 +33,17 @@ for (const c of eligible) {
 
 // Skips are printed with their reasons: a sweep that reports only what it did
 // cannot be told apart from one that looked at nothing.
-console.log(JSON.stringify({ drafted, skipped: skipped.length, skipReasons: skipped.slice(0, 5) }))
+//
+// Fixed 2026-08-10: it used to print `skipped.slice(0, 5)`, so a run that
+// skipped 17 cases for three different reasons showed five entries that all
+// happened to share one. I read that output every ten minutes for a night and
+// reported "all skipped for the same reason" — which was false, and false in
+// the direction that hides the other reasons entirely. A truncated sample IS
+// the thing the comment above warns about, one level down.
+//
+// The counts are what a reader needs; the sample is kept for the shape.
+const byCode: Record<string, number> = {}
+for (const s of skipped) byCode[s.code] = (byCode[s.code] ?? 0) + 1
+console.log(JSON.stringify({
+  drafted, skipped: skipped.length, skippedByCode: byCode, skipSample: skipped.slice(0, 5),
+}))
