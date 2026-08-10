@@ -23,7 +23,7 @@ import {
 } from '../../cos/zst-productlab.js'
 import { validateSkillMd, validateSkillPermissions } from '../../cos/skill-permission-validator.js'
 import { getMissionControlProgressionView, runProgressionCycle } from '../../cos/progression-pipeline.js'
-import { storeDocument, documentsForCase, readDocumentBytes } from '../../cos/cos-documents.js'
+import { storeDocument, documentsForCase, readDocumentBytes, resolveShareableAttachments } from '../../cos/cos-documents.js'
 import { evaluateOutputFloors, breachedFloors } from '../../cos/output-floor.js'
 import { runDailyReconcile } from '../../cos/reconcile.js'
 import { linkCases, suggestLinks, linkedCases } from '../../cos/case-link.js'
@@ -1024,7 +1024,7 @@ export async function approveAndDispatchZst(
   const transport = new GmailApiTransport({
     credsPath: 'store/.google-zst-creds.json', embedBodyMarker: false,
   })
-  const r = await dispatchZstSend(db, new GmailSendAdapter(transport), {
+  const r = await dispatchZstSend(db, new GmailSendAdapter(transport, ids => resolveShareableAttachments(db, ids)), {
     ledgerId, campaignId: row.campaign_id, connectorId: 'gmail-zst',
     email, templateHash: row.template_hash, renderedPayloadHash: hash,
     declaredSensitivity: row.sensitivity ?? undefined,
@@ -1051,7 +1051,7 @@ export async function dispatchApproved(
   }
   const email = JSON.parse(row.payload) as EmailDraft
   const transport = new GmailApiTransport({ from: COS_SEND_FROM, embedBodyMarker: false })
-  const r = await dispatchApprovedSend(db, new GmailSendAdapter(transport), {
+  const r = await dispatchApprovedSend(db, new GmailSendAdapter(transport, ids => resolveShareableAttachments(db, ids)), {
     ledgerId, connectorId: 'gmail', campaignId: row.campaign_id,
     templateHash: row.template_hash, renderedPayloadHash: renderedPayloadHash(email),
     email, declaredSensitivity: 'PERSONAL', targetProfile: 'premium_reasoning',

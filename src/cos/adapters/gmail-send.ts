@@ -14,6 +14,7 @@
 // before the write-scope consent + a live Gmail connector exist.
 
 import type { OutboundAdapter, OutboundAction, ReadbackResult } from '../executor.js'
+import { SendError } from '../executor.js'
 
 export const IDEMPOTENCY_HEADER = 'X-Marveen-Idempotency-Key'
 
@@ -70,16 +71,35 @@ export class GmailSendAdapter implements OutboundAdapter {
   ) {}
 
   async send(action: OutboundAction): Promise<{ externalRef: string }> {
+    // PRE-FLIGHT (F-3). Everything below this line and above the transport call
+    // fails BEFORE any byte leaves this process, so it must be reported as
+    // reachedProvider:false. A bare Error here made the executor fall through to
+    // OUTCOME_UNKNOWN, and an OUTCOME_UNKNOWN row on the live path can never be
+    // resolved (readback is disabled there), so a local typo poisoned the row
+    // permanently. These are also terminal: retrying an unchanged payload that
+    // is missing `to` reproduces the same failure forever.
     const p = action.payload as EmailPayload | null
-    if (!p?.to || !p.subject) throw new Error(`EMAIL_SEND payload missing to/subject (ledger ${action.ledgerId})`)
+    if (!p?.to || !p.subject) {
+      throw new SendError(`EMAIL_SEND payload missing to/subject (ledger ${action.ledgerId})`,
+        { reachedProvider: false, terminal: true })
+    }
     // P4: attachments only via the share gate. The document ids are part of the
     // approved payload, so approval already fixed exactly which documents go out.
     let attachments: OutboundAttachment[] | undefined
     if (p.attachmentDocumentIds && p.attachmentDocumentIds.length) {
       if (!this.attachmentResolver) {
-        throw new Error(`EMAIL_SEND requests attachments but no share-gated resolver is wired (ledger ${action.ledgerId})`)
+        throw new SendError(`EMAIL_SEND requests attachments but no share-gated resolver is wired (ledger ${action.ledgerId})`,
+          { reachedProvider: false, terminal: true })
       }
-      attachments = this.attachmentResolver(p.attachmentDocumentIds) // throws if any doc is not shareable
+      try {
+        attachments = this.attachmentResolver(p.attachmentDocumentIds) // throws if any doc is not shareable
+      } catch (err) {
+        // A refused document is a decision, not a transport failure. Terminal:
+        // the same payload will be refused again, and silently retrying a
+        // share-gate refusal is exactly what the gate exists to prevent.
+        throw new SendError(`EMAIL_SEND attachment refused by the share gate (ledger ${action.ledgerId}): ${String((err as Error)?.message ?? err)}`,
+          { reachedProvider: false, terminal: true })
+      }
     }
     const email: OutboundEmail = {
       to: p.to, subject: p.subject, body: p.body ?? '',
