@@ -27,13 +27,15 @@ import { initProgressionSchema } from '../cos/schema.js'
 import {
   initializeDoDVerification,
   satisfyDoDCriterion,
-  autoSatisfyNextDoDCriterion,
+  satisfyNextDoDCriterionWithEvidence,
   evaluateDoDCompleteness,
   canCompleteCase,
   guardCaseCompletion,
+  completionActor,
   PrematureCompletionError,
   type DoDVerification,
   type CompletionGateResult,
+  type DoDProvenance,
 } from '../cos/progression-completion.js'
 import { runProgressionCycle } from '../cos/progression-pipeline.js'
 import { CrossDomainReadError } from '../cos/progression-resolver.js'
@@ -111,6 +113,58 @@ function seedCaseWithProgression(
   seedProgressionState(db, domain, caseId, overrides)
 }
 
+// ── Post-2026-08-10 shims ─────────────────────────────────────────────────
+//
+// This suite was written against the old signatures: a DoD had no provenance
+// and a criterion needed no evidence. Those two absences ARE the bug that
+// closed 26 live cases, so the signatures gained a required argument each.
+//
+// Rather than thread the new arguments through eighty call sites, the suite
+// states its default once: unless a test says otherwise, it is exercising a
+// real CASE_SPECIFIC contract whose criteria are met against real evidence —
+// which is what every assertion below always meant. The tests that care about
+// the new distinctions pass the arguments explicitly, and they are the ones
+// added at the end of this file.
+//
+// The shims deliberately do NOT default the production functions. A default in
+// the shim only relaxes this file; a default in the module would relax every
+// future caller, which is precisely how the engine came to close cases on
+// criteria nobody had checked.
+
+function initDoD(
+  db: Database.Database,
+  domain: 'personal' | 'zst',
+  caseId: string,
+  criteria: string[],
+  t: number,
+  provenance: DoDProvenance = 'CASE_SPECIFIC',
+): DoDVerification {
+  return initializeDoDVerification(db, domain, caseId, criteria, provenance, t)
+}
+
+function satisfy(
+  db: Database.Database,
+  domain: 'personal' | 'zst',
+  caseId: string,
+  idx: number,
+  runId: string,
+  t: number,
+  evidence = `case_event:${runId}-${idx}`,
+): boolean {
+  return satisfyDoDCriterion(db, domain, caseId, idx, runId, evidence, t)
+}
+
+function satisfyNext(
+  db: Database.Database,
+  domain: 'personal' | 'zst',
+  caseId: string,
+  runId: string,
+  t: number,
+  evidence = `case_event:${runId}`,
+): number {
+  return satisfyNextDoDCriterionWithEvidence(db, domain, caseId, runId, evidence, t)
+}
+
 // ── Stage 1: initializeDoDVerification ────────────────────────────────────
 
 describe('Checkpoint E.4 — Semantic Completion', () => {
@@ -124,7 +178,7 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
       seedCaseWithProgression(db, 'personal', 'pri-001')
       const criteria = ['Case triaged', 'Actions identified', 'Owner assigned']
 
-      const verification = initializeDoDVerification(db, 'personal', 'pri-001', criteria, t)
+      const verification = initDoD(db, 'personal', 'pri-001', criteria, t)
 
       expect(verification.criteria.length).toBe(3)
       expect(verification.criteria.every(c => c.met === false)).toBe(true)
@@ -147,12 +201,12 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
       seedCaseWithProgression(db, 'personal', 'pri-002')
       const criteria = ['Step 1', 'Step 2']
 
-      const v1 = initializeDoDVerification(db, 'personal', 'pri-002', criteria, t)
+      const v1 = initDoD(db, 'personal', 'pri-002', criteria, t)
       // Mark a criterion as met via satisfyDoDCriterion
-      satisfyDoDCriterion(db, 'personal', 'pri-002', 0, 'run-1', t + 1)
+      satisfy(db, 'personal', 'pri-002', 0, 'run-1', t + 1)
 
       // Second init should return existing state (not reset)
-      const v2 = initializeDoDVerification(db, 'personal', 'pri-002', ['Different'], t + 10)
+      const v2 = initDoD(db, 'personal', 'pri-002', ['Different'], t + 10)
 
       expect(v2.criteria.length).toBe(2) // original criteria, not the new ones
       expect(v2.criteria[0].met).toBe(true) // preserved
@@ -165,7 +219,7 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
       seedCaseWithProgression(db, 'zst', 'zst-001')
       const criteria = ['ZST task done']
 
-      initializeDoDVerification(db, 'zst', 'zst-001', criteria, t)
+      initDoD(db, 'zst', 'zst-001', criteria, t)
 
       const row = db.prepare(
         'SELECT dod_verification_json FROM case_progression_state WHERE domain = ? AND case_id = ?',
@@ -177,7 +231,7 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
     it('throws CrossDomainReadError for cross-domain case', () => {
       seedCaseWithProgression(db, 'zst', 'zst-cross')
       expect(() =>
-        initializeDoDVerification(db, 'personal', 'zst-cross', ['Test'], now()),
+        initDoD(db, 'personal', 'zst-cross', ['Test'], now()),
       ).toThrow(CrossDomainReadError)
     })
   })
@@ -192,9 +246,9 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
     it('marks a single criterion as met', () => {
       const t = now()
       seedCaseWithProgression(db, 'personal', 'pri-001')
-      initializeDoDVerification(db, 'personal', 'pri-001', ['A', 'B', 'C'], t)
+      initDoD(db, 'personal', 'pri-001', ['A', 'B', 'C'], t)
 
-      const changed = satisfyDoDCriterion(db, 'personal', 'pri-001', 0, 'run-1', t + 1)
+      const changed = satisfy(db, 'personal', 'pri-001', 0, 'run-1', t + 1)
 
       expect(changed).toBe(true)
 
@@ -207,12 +261,12 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
     it('is idempotent — marking the same criterion twice is a no-op', () => {
       const t = now()
       seedCaseWithProgression(db, 'personal', 'pri-002')
-      initializeDoDVerification(db, 'personal', 'pri-002', ['A', 'B'], t)
+      initDoD(db, 'personal', 'pri-002', ['A', 'B'], t)
 
-      const first = satisfyDoDCriterion(db, 'personal', 'pri-002', 0, 'run-1', t + 1)
+      const first = satisfy(db, 'personal', 'pri-002', 0, 'run-1', t + 1)
       expect(first).toBe(true)
 
-      const second = satisfyDoDCriterion(db, 'personal', 'pri-002', 0, 'run-2', t + 2)
+      const second = satisfy(db, 'personal', 'pri-002', 0, 'run-2', t + 2)
       expect(second).toBe(false) // no change
 
       // met_at and met_by_run should be from first call
@@ -224,37 +278,37 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
 
     it('returns false when no dod_verification_json exists', () => {
       seedCaseWithProgression(db, 'personal', 'pri-003')
-      const result = satisfyDoDCriterion(db, 'personal', 'pri-003', 0, 'run-1', now())
+      const result = satisfy(db, 'personal', 'pri-003', 0, 'run-1', now())
       expect(result).toBe(false)
     })
 
     it('returns false for out-of-bounds criterion index', () => {
       const t = now()
       seedCaseWithProgression(db, 'personal', 'pri-004')
-      initializeDoDVerification(db, 'personal', 'pri-004', ['A'], t)
+      initDoD(db, 'personal', 'pri-004', ['A'], t)
 
-      expect(satisfyDoDCriterion(db, 'personal', 'pri-004', -1, 'run-1', t)).toBe(false)
-      expect(satisfyDoDCriterion(db, 'personal', 'pri-004', 5, 'run-1', t)).toBe(false)
+      expect(satisfy(db, 'personal', 'pri-004', -1, 'run-1', t)).toBe(false)
+      expect(satisfy(db, 'personal', 'pri-004', 5, 'run-1', t)).toBe(false)
     })
 
     it('sets all_met=true when the last unmet criterion is satisfied', () => {
       const t = now()
       seedCaseWithProgression(db, 'personal', 'pri-005')
-      initializeDoDVerification(db, 'personal', 'pri-005', ['A', 'B'], t)
+      initDoD(db, 'personal', 'pri-005', ['A', 'B'], t)
 
-      satisfyDoDCriterion(db, 'personal', 'pri-005', 0, 'run-1', t + 1)
+      satisfy(db, 'personal', 'pri-005', 0, 'run-1', t + 1)
       expect(evaluateDoDCompleteness(db, 'personal', 'pri-005').allMet).toBe(false)
 
-      satisfyDoDCriterion(db, 'personal', 'pri-005', 1, 'run-2', t + 2)
+      satisfy(db, 'personal', 'pri-005', 1, 'run-2', t + 2)
       expect(evaluateDoDCompleteness(db, 'personal', 'pri-005').allMet).toBe(true)
     })
 
     it('works for ZST domain', () => {
       const t = now()
       seedCaseWithProgression(db, 'zst', 'zst-001')
-      initializeDoDVerification(db, 'zst', 'zst-001', ['ZST A', 'ZST B'], t)
+      initDoD(db, 'zst', 'zst-001', ['ZST A', 'ZST B'], t)
 
-      satisfyDoDCriterion(db, 'zst', 'zst-001', 1, 'run-z', t + 1)
+      satisfy(db, 'zst', 'zst-001', 1, 'run-z', t + 1)
 
       const comp = evaluateDoDCompleteness(db, 'zst', 'zst-001')
       expect(comp.metCriteria).toBe(1)
@@ -264,9 +318,9 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
     it('throws CrossDomainReadError for cross-domain case', () => {
       const t = now()
       seedCaseWithProgression(db, 'zst', 'zst-cross')
-      initializeDoDVerification(db, 'zst', 'zst-cross', ['Test'], t)
+      initDoD(db, 'zst', 'zst-cross', ['Test'], t)
       expect(() =>
-        satisfyDoDCriterion(db, 'personal', 'zst-cross', 0, 'run-1', t),
+        satisfy(db, 'personal', 'zst-cross', 0, 'run-1', t),
       ).toThrow(CrossDomainReadError)
     })
   })
@@ -281,15 +335,15 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
     it('satisfies the first unmet criterion on each call', () => {
       const t = now()
       seedCaseWithProgression(db, 'personal', 'pri-001')
-      initializeDoDVerification(db, 'personal', 'pri-001', ['A', 'B', 'C'], t)
+      initDoD(db, 'personal', 'pri-001', ['A', 'B', 'C'], t)
 
-      const idx1 = autoSatisfyNextDoDCriterion(db, 'personal', 'pri-001', 'r1', t + 1)
+      const idx1 = satisfyNext(db, 'personal', 'pri-001', 'r1', t + 1)
       expect(idx1).toBe(0)
 
-      const idx2 = autoSatisfyNextDoDCriterion(db, 'personal', 'pri-001', 'r2', t + 2)
+      const idx2 = satisfyNext(db, 'personal', 'pri-001', 'r2', t + 2)
       expect(idx2).toBe(1)
 
-      const idx3 = autoSatisfyNextDoDCriterion(db, 'personal', 'pri-001', 'r3', t + 3)
+      const idx3 = satisfyNext(db, 'personal', 'pri-001', 'r3', t + 3)
       expect(idx3).toBe(2)
 
       const comp = evaluateDoDCompleteness(db, 'personal', 'pri-001')
@@ -299,16 +353,16 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
     it('returns -1 when all criteria are already met', () => {
       const t = now()
       seedCaseWithProgression(db, 'personal', 'pri-002')
-      initializeDoDVerification(db, 'personal', 'pri-002', ['A'], t)
-      autoSatisfyNextDoDCriterion(db, 'personal', 'pri-002', 'r1', t + 1)
+      initDoD(db, 'personal', 'pri-002', ['A'], t)
+      satisfyNext(db, 'personal', 'pri-002', 'r1', t + 1)
 
-      const idx = autoSatisfyNextDoDCriterion(db, 'personal', 'pri-002', 'r2', t + 2)
+      const idx = satisfyNext(db, 'personal', 'pri-002', 'r2', t + 2)
       expect(idx).toBe(-1)
     })
 
     it('returns -1 when no dod_verification exists', () => {
       seedCaseWithProgression(db, 'personal', 'pri-003')
-      const idx = autoSatisfyNextDoDCriterion(db, 'personal', 'pri-003', 'r1', now())
+      const idx = satisfyNext(db, 'personal', 'pri-003', 'r1', now())
       expect(idx).toBe(-1)
     })
   })
@@ -320,22 +374,28 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
 
     beforeEach(() => { db = freshDb() })
 
-    it('returns allMet=true with null verification when no DoD set up', () => {
+    // Changed 2026-08-10. This used to assert allMet=true, on the reasoning
+    // "no criteria = nothing blocking completion". That reads an empty result
+    // as a pass, which is the same shape of mistake as the auto-satisfier: an
+    // absence of verification is not a successful verification. Nothing was
+    // checked, so allMet is false, and canCompleteCase decides what to do
+    // about it (owner: fine; engine: refuse).
+    it('reports nothing verified — not everything satisfied — when no DoD set up', () => {
       seedCaseWithProgression(db, 'personal', 'pri-001')
 
       const result = evaluateDoDCompleteness(db, 'personal', 'pri-001')
 
       expect(result.totalCriteria).toBe(0)
-      expect(result.allMet).toBe(true)
+      expect(result.allMet).toBe(false)
       expect(result.verification).toBeNull()
     })
 
     it('returns correct counts when some criteria are met', () => {
       const t = now()
       seedCaseWithProgression(db, 'personal', 'pri-002')
-      initializeDoDVerification(db, 'personal', 'pri-002', ['A', 'B', 'C', 'D'], t)
-      satisfyDoDCriterion(db, 'personal', 'pri-002', 0, 'r1', t + 1)
-      satisfyDoDCriterion(db, 'personal', 'pri-002', 2, 'r2', t + 2)
+      initDoD(db, 'personal', 'pri-002', ['A', 'B', 'C', 'D'], t)
+      satisfy(db, 'personal', 'pri-002', 0, 'r1', t + 1)
+      satisfy(db, 'personal', 'pri-002', 2, 'r2', t + 2)
 
       const result = evaluateDoDCompleteness(db, 'personal', 'pri-002')
 
@@ -348,9 +408,9 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
     it('returns allMet=true when all criteria satisfied', () => {
       const t = now()
       seedCaseWithProgression(db, 'personal', 'pri-003')
-      initializeDoDVerification(db, 'personal', 'pri-003', ['X', 'Y'], t)
-      satisfyDoDCriterion(db, 'personal', 'pri-003', 0, 'r1', t + 1)
-      satisfyDoDCriterion(db, 'personal', 'pri-003', 1, 'r2', t + 2)
+      initDoD(db, 'personal', 'pri-003', ['X', 'Y'], t)
+      satisfy(db, 'personal', 'pri-003', 0, 'r1', t + 1)
+      satisfy(db, 'personal', 'pri-003', 1, 'r2', t + 2)
 
       const result = evaluateDoDCompleteness(db, 'personal', 'pri-003')
 
@@ -388,9 +448,9 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
     it('allows completion when all DoD criteria are met', () => {
       const t = now()
       seedCaseWithProgression(db, 'personal', 'pri-003')
-      initializeDoDVerification(db, 'personal', 'pri-003', ['A', 'B'], t)
-      satisfyDoDCriterion(db, 'personal', 'pri-003', 0, 'r1', t + 1)
-      satisfyDoDCriterion(db, 'personal', 'pri-003', 1, 'r2', t + 2)
+      initDoD(db, 'personal', 'pri-003', ['A', 'B'], t)
+      satisfy(db, 'personal', 'pri-003', 0, 'r1', t + 1)
+      satisfy(db, 'personal', 'pri-003', 1, 'r2', t + 2)
 
       const gate = canCompleteCase(db, 'personal', 'pri-003')
 
@@ -398,28 +458,32 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
       expect(gate.unmet).toEqual([])
     })
 
-    it('blocks completion when progression-enabled but DoD not yet initialised', () => {
+    // The old version of this test is worth keeping in view: its NAME said
+    // "blocks completion", its assertion said allowed=true, and its comment
+    // argued itself into that answer out loud ("But wait — the case IS
+    // progression-enabled. Should it be blocked?"). It was right to hesitate.
+    // A progression-enabled case with no DoD is a case the engine has verified
+    // nothing about, and it closed on exactly that basis. The name was correct
+    // and the assertion was not; the assertion has been brought into line.
+    it('blocks the ENGINE when progression-enabled but DoD not yet initialised', () => {
       seedCaseWithProgression(db, 'personal', 'pri-004')
 
-      const gate = canCompleteCase(db, 'personal', 'pri-004')
+      const gate = canCompleteCase(db, 'personal', 'pri-004', 'ENGINE')
 
-      // No dod_verification_json → allMet is true (no criteria = nothing blocking)
-      // This is correct: until DoD is initialised, there are no criteria to violate.
-      // But wait — the case IS progression-enabled. Should it be blocked?
-      // Per the model: if dod_verification_json is NULL, evaluateDoDCompleteness
-      // returns allMet=true (no criteria = nothing to violate).
-      // This is by design: until the first progression run initialises DoD,
-      // the case can still be manually closed. After first run, DoD is set and
-      // subsequent close attempts are gated.
-      expect(gate.allowed).toBe(true)
+      expect(gate.allowed).toBe(false)
+      expect(gate.reason).toMatch(/generic status template|nothing was verified/i)
+
+      // The owner is not blocked by any of this. A case with no DoD is still a
+      // case Istvan can declare finished.
+      expect(canCompleteCase(db, 'personal', 'pri-004', 'OWNER').allowed).toBe(true)
     })
 
     it('blocks completion when some DoD criteria are unmet (2 of 3 met)', () => {
       const t = now()
       seedCaseWithProgression(db, 'personal', 'pri-005')
-      initializeDoDVerification(db, 'personal', 'pri-005', ['Do A', 'Do B', 'Do C'], t)
-      satisfyDoDCriterion(db, 'personal', 'pri-005', 0, 'r1', t + 1)
-      satisfyDoDCriterion(db, 'personal', 'pri-005', 2, 'r2', t + 2)
+      initDoD(db, 'personal', 'pri-005', ['Do A', 'Do B', 'Do C'], t)
+      satisfy(db, 'personal', 'pri-005', 0, 'r1', t + 1)
+      satisfy(db, 'personal', 'pri-005', 2, 'r2', t + 2)
       // 'Do B' is still unmet
 
       const gate = canCompleteCase(db, 'personal', 'pri-005')
@@ -433,7 +497,7 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
     it('blocks completion when ZERO DoD criteria are met', () => {
       const t = now()
       seedCaseWithProgression(db, 'personal', 'pri-006')
-      initializeDoDVerification(db, 'personal', 'pri-006', ['Task 1', 'Task 2', 'Task 3'], t)
+      initDoD(db, 'personal', 'pri-006', ['Task 1', 'Task 2', 'Task 3'], t)
 
       const gate = canCompleteCase(db, 'personal', 'pri-006')
 
@@ -445,8 +509,8 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
     it('works for ZST domain', () => {
       const t = now()
       seedCaseWithProgression(db, 'zst', 'zst-001')
-      initializeDoDVerification(db, 'zst', 'zst-001', ['ZST step'], t)
-      satisfyDoDCriterion(db, 'zst', 'zst-001', 0, 'rz', t + 1)
+      initDoD(db, 'zst', 'zst-001', ['ZST step'], t)
+      satisfy(db, 'zst', 'zst-001', 0, 'rz', t + 1)
 
       const gate = canCompleteCase(db, 'zst', 'zst-001')
       expect(gate.allowed).toBe(true)
@@ -463,10 +527,10 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
     it('3 criteria, 2 met — canCompleteCase returns false', () => {
       const t = now()
       seedCaseWithProgression(db, 'personal', 'pri-red-1')
-      initializeDoDVerification(db, 'personal', 'pri-red-1',
+      initDoD(db, 'personal', 'pri-red-1',
         ['Evidence A produced', 'Evidence B verified', 'Stakeholder C notified'], t)
-      satisfyDoDCriterion(db, 'personal', 'pri-red-1', 0, 'r1', t + 1)
-      satisfyDoDCriterion(db, 'personal', 'pri-red-1', 1, 'r2', t + 2)
+      satisfy(db, 'personal', 'pri-red-1', 0, 'r1', t + 1)
+      satisfy(db, 'personal', 'pri-red-1', 1, 'r2', t + 2)
       // Criterion 2 (Stakeholder C notified) is still unmet
 
       const gate = canCompleteCase(db, 'personal', 'pri-red-1')
@@ -479,11 +543,11 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
     it('3 criteria, 3 met — canCompleteCase returns true', () => {
       const t = now()
       seedCaseWithProgression(db, 'personal', 'pri-red-2')
-      initializeDoDVerification(db, 'personal', 'pri-red-2',
+      initDoD(db, 'personal', 'pri-red-2',
         ['Evidence A produced', 'Evidence B verified', 'Stakeholder C notified'], t)
-      satisfyDoDCriterion(db, 'personal', 'pri-red-2', 0, 'r1', t + 1)
-      satisfyDoDCriterion(db, 'personal', 'pri-red-2', 1, 'r2', t + 2)
-      satisfyDoDCriterion(db, 'personal', 'pri-red-2', 2, 'r3', t + 3)
+      satisfy(db, 'personal', 'pri-red-2', 0, 'r1', t + 1)
+      satisfy(db, 'personal', 'pri-red-2', 1, 'r2', t + 2)
+      satisfy(db, 'personal', 'pri-red-2', 2, 'r3', t + 3)
 
       const gate = canCompleteCase(db, 'personal', 'pri-red-2')
 
@@ -494,8 +558,8 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
     it('guardCaseCompletion throws when DoD not met', () => {
       const t = now()
       seedCaseWithProgression(db, 'personal', 'pri-red-3')
-      initializeDoDVerification(db, 'personal', 'pri-red-3', ['A', 'B'], t)
-      satisfyDoDCriterion(db, 'personal', 'pri-red-3', 0, 'r1', t + 1)
+      initDoD(db, 'personal', 'pri-red-3', ['A', 'B'], t)
+      satisfy(db, 'personal', 'pri-red-3', 0, 'r1', t + 1)
       // B still unmet
 
       expect(() =>
@@ -506,8 +570,8 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
     it('guardCaseCompletion does NOT throw when DoD is met', () => {
       const t = now()
       seedCaseWithProgression(db, 'personal', 'pri-red-4')
-      initializeDoDVerification(db, 'personal', 'pri-red-4', ['A'], t)
-      satisfyDoDCriterion(db, 'personal', 'pri-red-4', 0, 'r1', t + 1)
+      initDoD(db, 'personal', 'pri-red-4', ['A'], t)
+      satisfy(db, 'personal', 'pri-red-4', 0, 'r1', t + 1)
 
       expect(() =>
         guardCaseCompletion(db, 'personal', 'pri-red-4'),
@@ -517,14 +581,14 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
     it('RED-PROOF: single unmet criterion among 5 blocks completion', () => {
       const t = now()
       seedCaseWithProgression(db, 'personal', 'pri-red-5')
-      initializeDoDVerification(db, 'personal', 'pri-red-5',
+      initDoD(db, 'personal', 'pri-red-5',
         ['C1', 'C2', 'C3', 'C4', 'C5'], t)
 
       // Satisfy 4 of 5
-      satisfyDoDCriterion(db, 'personal', 'pri-red-5', 0, 'r1', t + 1)
-      satisfyDoDCriterion(db, 'personal', 'pri-red-5', 1, 'r2', t + 2)
-      satisfyDoDCriterion(db, 'personal', 'pri-red-5', 2, 'r3', t + 3)
-      satisfyDoDCriterion(db, 'personal', 'pri-red-5', 3, 'r4', t + 4)
+      satisfy(db, 'personal', 'pri-red-5', 0, 'r1', t + 1)
+      satisfy(db, 'personal', 'pri-red-5', 1, 'r2', t + 2)
+      satisfy(db, 'personal', 'pri-red-5', 2, 'r3', t + 3)
+      satisfy(db, 'personal', 'pri-red-5', 3, 'r4', t + 4)
       // C5 is still unmet
 
       const gate = canCompleteCase(db, 'personal', 'pri-red-5')
@@ -548,9 +612,9 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
     it('once all DoD met, calling canCompleteCase twice returns the same answer', () => {
       const t = now()
       seedCaseWithProgression(db, 'personal', 'pri-idem-1')
-      initializeDoDVerification(db, 'personal', 'pri-idem-1', ['Step 1', 'Step 2'], t)
-      satisfyDoDCriterion(db, 'personal', 'pri-idem-1', 0, 'r1', t + 1)
-      satisfyDoDCriterion(db, 'personal', 'pri-idem-1', 1, 'r2', t + 2)
+      initDoD(db, 'personal', 'pri-idem-1', ['Step 1', 'Step 2'], t)
+      satisfy(db, 'personal', 'pri-idem-1', 0, 'r1', t + 1)
+      satisfy(db, 'personal', 'pri-idem-1', 1, 'r2', t + 2)
 
       const gate1 = canCompleteCase(db, 'personal', 'pri-idem-1')
       const gate2 = canCompleteCase(db, 'personal', 'pri-idem-1')
@@ -563,8 +627,8 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
     it('once all DoD met, guardCaseCompletion does not throw on repeated calls', () => {
       const t = now()
       seedCaseWithProgression(db, 'personal', 'pri-idem-2')
-      initializeDoDVerification(db, 'personal', 'pri-idem-2', ['Task'], t)
-      satisfyDoDCriterion(db, 'personal', 'pri-idem-2', 0, 'r1', t + 1)
+      initDoD(db, 'personal', 'pri-idem-2', ['Task'], t)
+      satisfy(db, 'personal', 'pri-idem-2', 0, 'r1', t + 1)
 
       // Multiple calls — all must pass without error
       expect(() => guardCaseCompletion(db, 'personal', 'pri-idem-2')).not.toThrow()
@@ -575,7 +639,7 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
     it('evaluateDoDCompleteness returns same result after repeated calls', () => {
       const t = now()
       seedCaseWithProgression(db, 'personal', 'pri-idem-3')
-      initializeDoDVerification(db, 'personal', 'pri-idem-3', ['A', 'B'], t)
+      initDoD(db, 'personal', 'pri-idem-3', ['A', 'B'], t)
 
       const r1 = evaluateDoDCompleteness(db, 'personal', 'pri-idem-3')
       const r2 = evaluateDoDCompleteness(db, 'personal', 'pri-idem-3')
@@ -593,23 +657,46 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
 
     beforeEach(() => { db = freshDb() })
 
-    it('transitionCase blocks COMPLETED when DoD not met (progression-enabled case)', () => {
+    // Changed 2026-08-10: the actor now decides. This test used to close as
+    // actor 'test' and expect a throw, which made the guard a wall in front of
+    // the owner as well as the engine — and once the auto-satisfier was gone,
+    // that wall would have stood in front of EVERY human close forever, since
+    // nothing satisfies criteria any more. The engine is what must be stopped.
+    it('transitionCase blocks the ENGINE closing on an unmet DoD', () => {
       const t = now()
       seedCaseWithProgression(db, 'personal', 'pri-close-1', {
         progression_enabled: 1,
       })
-      initializeDoDVerification(db, 'personal', 'pri-close-1', ['A', 'B'], t)
-      satisfyDoDCriterion(db, 'personal', 'pri-close-1', 0, 'r1', t + 1)
+      initDoD(db, 'personal', 'pri-close-1', ['A', 'B'], t)
+      satisfy(db, 'personal', 'pri-close-1', 0, 'r1', t + 1)
       // 'B' is still unmet
 
       expect(() =>
         transitionCase(db, {
           caseId: 'pri-close-1',
           newStatus: 'COMPLETED',
-          actor: 'test',
+          actor: 'progression-engine',
           seenVersion: 1,
         }, t + 10),
       ).toThrow(PrematureCompletionError)
+    })
+
+    it('transitionCase lets the OWNER close the very same case', () => {
+      const t = now()
+      seedCaseWithProgression(db, 'personal', 'pri-close-1b', {
+        progression_enabled: 1,
+      })
+      initDoD(db, 'personal', 'pri-close-1b', ['A', 'B'], t)
+      // nothing satisfied at all — the owner still decides
+
+      expect(() =>
+        transitionCase(db, {
+          caseId: 'pri-close-1b',
+          newStatus: 'COMPLETED',
+          actor: 'istvan',
+          seenVersion: 1,
+        }, t + 10),
+      ).not.toThrow()
     })
 
     it('transitionCase allows COMPLETED when DoD is met (progression-enabled case)', () => {
@@ -617,9 +704,9 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
       seedCaseWithProgression(db, 'personal', 'pri-close-2', {
         progression_enabled: 1,
       })
-      initializeDoDVerification(db, 'personal', 'pri-close-2', ['A', 'B'], t)
-      satisfyDoDCriterion(db, 'personal', 'pri-close-2', 0, 'r1', t + 1)
-      satisfyDoDCriterion(db, 'personal', 'pri-close-2', 1, 'r2', t + 2)
+      initDoD(db, 'personal', 'pri-close-2', ['A', 'B'], t)
+      satisfy(db, 'personal', 'pri-close-2', 0, 'r1', t + 1)
+      satisfy(db, 'personal', 'pri-close-2', 1, 'r2', t + 2)
 
       const newVersion = transitionCase(db, {
         caseId: 'pri-close-2',
@@ -675,7 +762,7 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
       seedCaseWithProgression(db, 'personal', 'pri-close-5', {
         progression_enabled: 1,
       })
-      initializeDoDVerification(db, 'personal', 'pri-close-5', ['A'], t)
+      initDoD(db, 'personal', 'pri-close-5', ['A'], t)
       // DoD not met, but we're not transitioning to COMPLETED — allowed
 
       expect(() =>
@@ -688,20 +775,20 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
       ).not.toThrow()
     })
 
-    it('transitionZstCase blocks COMPLETED when DoD not met (ZST)', () => {
+    it('transitionZstCase blocks the ENGINE closing on an unmet DoD (ZST)', () => {
       const t = now()
       seedCaseWithProgression(db, 'zst', 'zst-close-1', {
         progression_enabled: 1,
       })
-      initializeDoDVerification(db, 'zst', 'zst-close-1', ['ZST A', 'ZST B'], t)
-      satisfyDoDCriterion(db, 'zst', 'zst-close-1', 0, 'rz1', t + 1)
+      initDoD(db, 'zst', 'zst-close-1', ['ZST A', 'ZST B'], t)
+      satisfy(db, 'zst', 'zst-close-1', 0, 'rz1', t + 1)
       // 'ZST B' unmet
 
       expect(() =>
         transitionZstCase(db, {
           caseId: 'zst-close-1',
           newStatus: 'COMPLETED',
-          actor: 'test',
+          actor: 'progression-engine',
           seenVersion: 1,
         }, t + 10),
       ).toThrow(PrematureCompletionError)
@@ -712,8 +799,8 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
       seedCaseWithProgression(db, 'zst', 'zst-close-2', {
         progression_enabled: 1,
       })
-      initializeDoDVerification(db, 'zst', 'zst-close-2', ['ZST task'], t)
-      satisfyDoDCriterion(db, 'zst', 'zst-close-2', 0, 'rz1', t + 1)
+      initDoD(db, 'zst', 'zst-close-2', ['ZST task'], t)
+      satisfy(db, 'zst', 'zst-close-2', 0, 'rz1', t + 1)
 
       const newVersion = transitionZstCase(db, {
         caseId: 'zst-close-2',
@@ -740,8 +827,8 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
       seedProgressionState(db, 'personal', 'pri-pipe-1', {
         progression_enabled: 1,
       })
-      initializeDoDVerification(db, 'personal', 'pri-pipe-1', ['A', 'B', 'C'], t)
-      satisfyDoDCriterion(db, 'personal', 'pri-pipe-1', 0, 'r1', t + 1)
+      initDoD(db, 'personal', 'pri-pipe-1', ['A', 'B', 'C'], t)
+      satisfy(db, 'personal', 'pri-pipe-1', 0, 'r1', t + 1)
       // B and C are unmet
 
       const result = runProgressionCycle(db, 'personal', 'pri-pipe-1', t + 10)
@@ -758,9 +845,9 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
       seedProgressionState(db, 'personal', 'pri-pipe-2', {
         progression_enabled: 1,
       })
-      initializeDoDVerification(db, 'personal', 'pri-pipe-2', ['A', 'B'], t)
-      satisfyDoDCriterion(db, 'personal', 'pri-pipe-2', 0, 'r1', t + 1)
-      satisfyDoDCriterion(db, 'personal', 'pri-pipe-2', 1, 'r2', t + 2)
+      initDoD(db, 'personal', 'pri-pipe-2', ['A', 'B'], t)
+      satisfy(db, 'personal', 'pri-pipe-2', 0, 'r1', t + 1)
+      satisfy(db, 'personal', 'pri-pipe-2', 1, 'r2', t + 2)
 
       const result = runProgressionCycle(db, 'personal', 'pri-pipe-2', t + 10)
 
@@ -776,41 +863,69 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
 
     beforeEach(() => { db = freshDb() })
 
-    it('case goes through gradual DoD satisfaction → eventually completes', () => {
+    // REPLACED 2026-08-10, and this is the most important edit in the change.
+    //
+    // This test used to be called "case goes through gradual DoD satisfaction
+    // → eventually completes", and it was green every day. It drove three
+    // progression cycles and asserted metCriteria 1, then 2, then 3, then
+    // COMPLETE. Every assertion held. The suite therefore certified, run after
+    // run, that a case closes itself after three wake-ups with nothing done to
+    // it — because the test asked whether the counter went up, and the counter
+    // going up WAS the bug. A test can only catch what it thinks to ask.
+    //
+    // What replaces it asks the opposite question, and it is the regression
+    // test for the 2026-08-09 incident: drive the engine repeatedly over a case
+    // it has no contract for, and require that nothing closes, however long it
+    // runs.
+    it('REGRESSION 2026-08-09: repeated cycles never close a case on a generic DoD', () => {
       const t = now()
       seedCase(db, 'personal', 'pri-full', 'COMPLETED')
       seedProgressionState(db, 'personal', 'pri-full', {
         progression_enabled: 1,
       })
-      // DoD has 3 criteria — will need 3 successful runs to fully satisfy
 
-      // Run 1 — DoD initialised, criterion 0 satisfied
-      const r1 = runProgressionCycle(db, 'personal', 'pri-full', t)
-      expect(r1.status).toBe('COMPLETED')
+      // Six cycles: two more than the four it took live to close all 27
+      // corporate cases in the backup-copy dry run.
+      for (let i = 0; i < 6; i++) {
+        const r = runProgressionCycle(db, 'personal', 'pri-full', t + i)
+        expect(r.status).toBe('COMPLETED')          // the RUN succeeds
+        expect(r.decision).not.toBe('COMPLETE')     // the CASE does not close
+      }
 
-      const after1 = evaluateDoDCompleteness(db, 'personal', 'pri-full')
-      expect(after1.metCriteria).toBe(1)
-      expect(canCompleteCase(db, 'personal', 'pri-full').allowed).toBe(false)
+      // Nothing was ever ticked off, because nothing produced evidence.
+      const after = evaluateDoDCompleteness(db, 'personal', 'pri-full')
+      expect(after.metCriteria).toBe(0)
+      expect(after.allMet).toBe(false)
+      expect(after.verification?.provenance).toBe('GENERIC_STATUS_TEMPLATE')
 
-      // Run 2 — criterion 1 satisfied
-      const r2 = runProgressionCycle(db, 'personal', 'pri-full', t + 1)
-      expect(r2.status).toBe('COMPLETED')
+      // And the gate refuses the engine for the reason that matters: the DoD
+      // is not this case's DoD. Even ticking every criterion by hand would not
+      // change that answer.
+      const gate = canCompleteCase(db, 'personal', 'pri-full', 'ENGINE')
+      expect(gate.allowed).toBe(false)
+      expect(gate.reason).toMatch(/generic status template/i)
+    })
 
-      const after2 = evaluateDoDCompleteness(db, 'personal', 'pri-full')
-      expect(after2.metCriteria).toBe(2)
-      expect(canCompleteCase(db, 'personal', 'pri-full').allowed).toBe(false)
+    it('a fully satisfied GENERIC DoD still does not let the engine close', () => {
+      // The provenance gate is not a stand-in for unmet criteria — it is a
+      // separate refusal. Satisfying every criterion with real evidence must
+      // not buy a template-derived contract its way past it, or the fix would
+      // last exactly as long as it takes something to start satisfying them.
+      const t = now()
+      seedCaseWithProgression(db, 'personal', 'pri-generic-full')
+      initDoD(db, 'personal', 'pri-generic-full', ['A', 'B'], t, 'GENERIC_STATUS_TEMPLATE')
+      expect(satisfy(db, 'personal', 'pri-generic-full', 0, 'r1', t + 1)).toBe(true)
+      expect(satisfy(db, 'personal', 'pri-generic-full', 1, 'r2', t + 2)).toBe(true)
 
-      // Run 3 — criterion 2 satisfied → all met
-      const r3 = runProgressionCycle(db, 'personal', 'pri-full', t + 2)
-      expect(r3.status).toBe('COMPLETED')
-
-      const after3 = evaluateDoDCompleteness(db, 'personal', 'pri-full')
-      expect(after3.metCriteria).toBe(3)
-      expect(after3.allMet).toBe(true)
-      expect(canCompleteCase(db, 'personal', 'pri-full').allowed).toBe(true)
-
-      // Now COMPLETE is allowed
-      expect(r3.decision).toBe('COMPLETE')
+      expect(evaluateDoDCompleteness(db, 'personal', 'pri-generic-full').allMet).toBe(true)
+      expect(canCompleteCase(db, 'personal', 'pri-generic-full', 'ENGINE').allowed).toBe(false)
+      // …and the same state under a case-specific contract DOES pass, so the
+      // refusal above is the provenance and nothing else.
+      seedCaseWithProgression(db, 'personal', 'pri-specific-full')
+      initDoD(db, 'personal', 'pri-specific-full', ['A', 'B'], t, 'CASE_SPECIFIC')
+      satisfy(db, 'personal', 'pri-specific-full', 0, 'r1', t + 1)
+      satisfy(db, 'personal', 'pri-specific-full', 1, 'r2', t + 2)
+      expect(canCompleteCase(db, 'personal', 'pri-specific-full', 'ENGINE').allowed).toBe(true)
     })
 
     it('case without progression state can still be closed (backward compatible)', () => {
@@ -906,16 +1021,16 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
       const t = now()
       seedCaseWithProgression(db, 'zst', 'zst-dod-err')
       expect(() =>
-        initializeDoDVerification(db, 'personal', 'zst-dod-err', ['Test'], t),
+        initDoD(db, 'personal', 'zst-dod-err', ['Test'], t),
       ).toThrow(CrossDomainReadError)
     })
 
     it('satisfyDoDCriterion throws CrossDomainReadError for cross-domain', () => {
       const t = now()
       seedCaseWithProgression(db, 'zst', 'zst-dod-err2')
-      initializeDoDVerification(db, 'zst', 'zst-dod-err2', ['Test'], t)
+      initDoD(db, 'zst', 'zst-dod-err2', ['Test'], t)
       expect(() =>
-        satisfyDoDCriterion(db, 'personal', 'zst-dod-err2', 0, 'r1', t),
+        satisfy(db, 'personal', 'zst-dod-err2', 0, 'r1', t),
       ).toThrow(CrossDomainReadError)
     })
 
@@ -933,13 +1048,116 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
       ).toThrow(CrossDomainReadError)
     })
 
-    it('autoSatisfyNextDoDCriterion throws CrossDomainReadError for cross-domain', () => {
+    it('satisfyNextDoDCriterionWithEvidence throws CrossDomainReadError for cross-domain', () => {
       const t = now()
       seedCaseWithProgression(db, 'zst', 'zst-auto-err')
-      initializeDoDVerification(db, 'zst', 'zst-auto-err', ['Test'], t)
+      initDoD(db, 'zst', 'zst-auto-err', ['Test'], t)
       expect(() =>
-        autoSatisfyNextDoDCriterion(db, 'personal', 'zst-auto-err', 'r1', t),
+        satisfyNext(db, 'personal', 'zst-auto-err', 'r1', t),
       ).toThrow(CrossDomainReadError)
+    })
+  })
+
+  // ── Stage 12: the 2026-08-09 defects, one test each ─────────────────────
+  //
+  // Every test in this group fails on the code as it stood on 2026-08-09. That
+  // is the bar: a regression test that also passes against the broken version
+  // documents a preference, not a defect.
+
+  describe('evidence is required to satisfy a criterion', () => {
+    let db: Database.Database
+    beforeEach(() => { db = freshDb() })
+
+    it('refuses a criterion with no evidence reference, and writes nothing', () => {
+      const t = now()
+      seedCaseWithProgression(db, 'personal', 'pri-ev-1')
+      initDoD(db, 'personal', 'pri-ev-1', ['A'], t)
+
+      // Empty and whitespace-only are both refusals, not "close enough".
+      expect(satisfyDoDCriterion(db, 'personal', 'pri-ev-1', 0, 'r1', '', t + 1)).toBe(false)
+      expect(satisfyDoDCriterion(db, 'personal', 'pri-ev-1', 0, 'r1', '   ', t + 2)).toBe(false)
+
+      const comp = evaluateDoDCompleteness(db, 'personal', 'pri-ev-1')
+      expect(comp.metCriteria).toBe(0)
+      expect(comp.verification?.criteria[0].met).toBe(false)
+    })
+
+    it('records what proved it when evidence is given', () => {
+      const t = now()
+      seedCaseWithProgression(db, 'personal', 'pri-ev-2')
+      initDoD(db, 'personal', 'pri-ev-2', ['A'], t)
+
+      expect(satisfyDoDCriterion(db, 'personal', 'pri-ev-2', 0, 'r1', 'case_event:4711', t + 1)).toBe(true)
+
+      const comp = evaluateDoDCompleteness(db, 'personal', 'pri-ev-2')
+      expect(comp.verification?.criteria[0].met_by_evidence).toBe('case_event:4711')
+      expect(comp.verification?.criteria[0].met_by_run).toBe('r1')
+    })
+
+    it('satisfyNext refuses without evidence and touches nothing', () => {
+      const t = now()
+      seedCaseWithProgression(db, 'personal', 'pri-ev-3')
+      initDoD(db, 'personal', 'pri-ev-3', ['A', 'B'], t)
+
+      expect(satisfyNextDoDCriterionWithEvidence(db, 'personal', 'pri-ev-3', 'r1', '', t + 1)).toBe(-1)
+      expect(evaluateDoDCompleteness(db, 'personal', 'pri-ev-3').metCriteria).toBe(0)
+    })
+  })
+
+  describe('rows written before the fix do not read as verified', () => {
+    let db: Database.Database
+    beforeEach(() => { db = freshDb() })
+
+    // This is the live data as of 2026-08-10: 58 progression rows whose
+    // verification JSON has no provenance field and whose criteria were ticked
+    // with no evidence. If the fix trusted those fields, every one of them
+    // would still be closeable, and re-enabling the engine would finish the
+    // job the incident started.
+    const LEGACY_JSON = JSON.stringify({
+      criteria: [
+        { label: 'Case triaged', met: true, met_at: 1, met_by_run: 'r1' },
+        { label: 'Required actions identified', met: true, met_at: 2, met_by_run: 'r2' },
+        { label: 'Owner assigned', met: true, met_at: 3, met_by_run: 'r3' },
+      ],
+      all_met: true,
+      evaluated_at: 3,
+      evaluated_by_run: 'r3',
+    })
+
+    it('a pre-fix all_met=true row is not enough for the engine to close', () => {
+      seedCaseWithProgression(db, 'personal', 'pri-legacy-1', {
+        dod_verification_json: LEGACY_JSON,
+      })
+
+      const comp = evaluateDoDCompleteness(db, 'personal', 'pri-legacy-1')
+      expect(comp.totalCriteria).toBe(3)
+      expect(comp.metCriteria).toBe(0)      // ticked, but nothing proves any of them
+      expect(comp.allMet).toBe(false)       // despite all_met:true in the stored JSON
+
+      expect(canCompleteCase(db, 'personal', 'pri-legacy-1', 'ENGINE').allowed).toBe(false)
+      expect(canCompleteCase(db, 'personal', 'pri-legacy-1', 'OWNER').allowed).toBe(true)
+    })
+
+    it('a missing provenance field reads as generic, not as case-specific', () => {
+      seedCaseWithProgression(db, 'personal', 'pri-legacy-2', {
+        dod_verification_json: LEGACY_JSON,
+      })
+      const comp = evaluateDoDCompleteness(db, 'personal', 'pri-legacy-2')
+      expect(comp.verification?.provenance).toBe('GENERIC_STATUS_TEMPLATE')
+    })
+  })
+
+  describe('completionActor maps the case-event actor to a gate side', () => {
+    it('only the progression engine is the engine', () => {
+      expect(completionActor('progression-engine')).toBe('ENGINE')
+      expect(completionActor('istvan')).toBe('OWNER')
+      expect(completionActor('marveen')).toBe('OWNER')
+      expect(completionActor(null)).toBe('OWNER')
+      expect(completionActor(undefined)).toBe('OWNER')
+      // A near-miss must not be read as the engine — the mapping is exact, so
+      // a renamed engine actor fails open to OWNER (visible) rather than
+      // silently granting itself the engine's exemption from nothing.
+      expect(completionActor('progression-engine-v2')).toBe('OWNER')
     })
   })
 })

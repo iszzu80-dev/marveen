@@ -25,7 +25,7 @@ import { randomUUID } from 'crypto'
 import { HARD_SAFETY_ASSERTIONS, type SafetyViolation } from './progression-eval.js'
 import { resolveContextDeep, CrossDomainReadError, domainGuard, type DeepResolvedContext } from './progression-resolver.js'
 import { interpretGoal, type LlmClient, type GoalInterpretation } from './progression-interpreter.js'
-import { initializeDoDVerification, autoSatisfyNextDoDCriterion, canCompleteCase } from './progression-completion.js'
+import { initializeDoDVerification, canCompleteCase, type DoDProvenance } from './progression-completion.js'
 import { transitionCase } from './case-store.js'
 import { transitionZstCase } from './zst-case-store.js'
 import { scheduleNextProgression } from './progression-scheduler.js'
@@ -58,11 +58,25 @@ export interface OutcomeContract {
   definitionOfDone: string[]
   /** What evidence is needed to prove each DoD criterion was met. */
   successEvidenceRequirements: string[]
+  /** Where definitionOfDone came from. Carried all the way to
+   *  dod_verification_json, because the completion gate has to know whether it
+   *  is looking at this case's contract or at the template every case in this
+   *  status shares. */
+  dodProvenance: DoDProvenance
 }
 
 /** Derive an outcome contract from a case row. Thin slice: heuristic per case
  *  type — no template store, no LLM. The full feature set replaces this with
- *  a template-driven resolver that reads from a goal library. */
+ *  a template-driven resolver that reads from a goal library.
+ *
+ *  Everything this function returns is GENERIC_STATUS_TEMPLATE, and will stay
+ *  that way until something derives a DoD from the case itself. The goal line
+ *  is per case TYPE and the DoD is per case STATUS, so every NEW case in the
+ *  store gets the same three criteria: triaged, actions identified, owner
+ *  assigned. Those describe the engine's own handling, not the outcome Istvan
+ *  cares about — the water bill is not paid because the case was triaged.
+ *  On 2026-08-09 that distinction was the difference between 26 open matters
+ *  and 26 closed ones. */
 export function deriveOutcomeContract(
   caseTitle: string,
   caseType: string,
@@ -109,7 +123,12 @@ export function deriveOutcomeContract(
   const dod = dodByStatus[caseStatus] ?? ['Case progressed', 'Status updated', 'Next action clear']
   const evidenceReqs = dod.map(d => `Evidence: ${d.toLowerCase()}`)
 
-  return { goal, definitionOfDone: dod, successEvidenceRequirements: evidenceReqs }
+  return {
+    goal,
+    definitionOfDone: dod,
+    successEvidenceRequirements: evidenceReqs,
+    dodProvenance: 'GENERIC_STATUS_TEMPLATE',
+  }
 }
 
 // ── Resolver context ────────────────────────────────────────────────────
@@ -953,18 +972,20 @@ export function runProgressionCycle(
     now, now,
   )
 
-  // Checkpoint E.4 DoD: initialise verification on first run, and auto-satisfy
-  // the next unmet DoD criterion on each successful run. This is the only
-  // side-effect of DoD — a single dod_verification_json UPDATE on
-  // case_progression_state. No writes to personal_cases/zst_cases.
-  let dodSatisfiedIdx = -1
+  // Checkpoint E.4 DoD: initialise verification on first run, recording where
+  // the criteria came from. This is the only side-effect of DoD — a single
+  // dod_verification_json UPDATE on case_progression_state. No writes to
+  // personal_cases/zst_cases.
+  //
+  // What used to be here, and is gone: a call to autoSatisfyNextDoDCriterion()
+  // that ticked off one more criterion on every successful run. It checked
+  // nothing. After three runs the DoD read as fully satisfied, the completion
+  // gate below read that back, and the case closed — 72 times, with the same
+  // sentence each time. The engine has no evidence extractor, so it now
+  // satisfies nothing, and a criterion can only be met by a caller that names
+  // what proves it (satisfyNextDoDCriterionWithEvidence).
   if (runStatus === 'COMPLETED') {
-    // Initialise DoD verification if not yet done (first progression run)
-    initializeDoDVerification(db, domain, caseId, contract.definitionOfDone, now)
-    // Auto-satisfy the next unmet DoD criterion (gradual completion).
-    // This run's contribution is recorded BEFORE the completion guard check,
-    // so a case can complete in the same run where the last criterion is met.
-    dodSatisfiedIdx = autoSatisfyNextDoDCriterion(db, domain, caseId, runId, now)
+    initializeDoDVerification(db, domain, caseId, contract.definitionOfDone, contract.dodProvenance, now)
   }
 
   // ── Stagnation detection + step advancement (GATE 2 follow-up) ─────────
@@ -997,11 +1018,15 @@ export function runProgressionCycle(
     // is unmet → reset to 0 to start a fresh plan cycle (wrap-around).
     const maxStep = plan.length > 0 ? plan[plan.length - 1].step : 0
     if (newCompletedPlanStep >= maxStep) {
-      const gate = canCompleteCase(db, domain, caseId)
+      const gate = canCompleteCase(db, domain, caseId, 'ENGINE')
       if (gate.allowed) {
-        // All plan steps done + all DoD criteria met → COMPLETE.
+        // All plan steps done + all DoD criteria met with evidence → COMPLETE.
+        // The reason quotes the gate rather than asserting on its own. The old
+        // text was a constant, which is why 72 closures shared one sentence and
+        // nothing in the record distinguished a real completion from a false
+        // one. A reason that cannot vary cannot be read.
         decision = 'COMPLETE'
-        reason = `All ${plan.length} plan steps completed and DoD criteria satisfied`
+        reason = `All ${plan.length} plan steps completed; completion gate: ${gate.reason}`
         // Update the run row (already INSERTed with the original decision)
         db.prepare(
           `UPDATE case_progression_runs SET decision = ?, reason = ? WHERE progression_run_id = ?`,
@@ -1020,9 +1045,13 @@ export function runProgressionCycle(
   //   - normal advancement (1→2, 2→3, …)
   //   - exhaustion reset (4→0) — nba.canProceedAutonomously gates it, and
   //     we check progress BEFORE the reset (nba.planStep > completedPlanStep)
+  // DoD satisfaction used to be the second half of this test. It was removed
+  // with the auto-satisfier: "a criterion got ticked" was never progress, it
+  // was a side effect of this very run, so it reset the stagnation counter on
+  // exactly the runs that achieved nothing. What is left measures the one
+  // thing that is real — the plan step moved.
   const nbaStepAdvanced = nba.canProceedAutonomously && nba.planStep > completedPlanStep
-  const dodMadeProgress = dodSatisfiedIdx >= 0
-  const realProgress = nbaStepAdvanced || dodMadeProgress
+  const realProgress = nbaStepAdvanced
   const prevNoProgressCount = existing?.no_progress_run_count ?? 0
   const newNoProgressCount = realProgress ? 0 : prevNoProgressCount + 1
 
@@ -1040,7 +1069,7 @@ export function runProgressionCycle(
   if (decision === 'COMPLETE' && runStatus === 'COMPLETED') {
     const isProgressionEnabled = existing != null
     if (isProgressionEnabled) {
-      const gate = canCompleteCase(db, domain, caseId)
+      const gate = canCompleteCase(db, domain, caseId, 'ENGINE')
       if (!gate.allowed) {
         decision = 'CONTINUE_AUTONOMOUSLY'
         reason = `DoD not met (${gate.reason}). Proceeding autonomously until criteria are satisfied.`
