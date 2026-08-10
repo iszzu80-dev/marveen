@@ -96,14 +96,27 @@ export class AnthropicLlmClient implements LlmClient {
     const client = await this.getClient()
     const resp = await client.messages.create({
       model: this.model,
-      max_tokens: 1024,
+      // 1024 was enough for Haiku and NOT for deepseek-v4-flash: the first live
+      // run returned a correct title and summary and then hit the ceiling
+      // mid-sentence, so the JSON had no closing brace and the parser reported
+      // "no JSON object found" -- a truncation wearing a malformed-reply mask.
+      max_tokens: 2048,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMessage }],
     })
     // Handle extended-thinking responses: find the first text block.
     // Some model configurations return 'thinking' blocks before 'text'.
     for (const block of resp.content) {
-      if (block.type === 'text') return block.text
+      if (block.type === 'text') {
+        // A reply cut off at the token ceiling is not a malformed reply, and the
+        // two need different fixes. Say which one happened.
+        if (resp.stop_reason === 'max_tokens') {
+          throw new Error(
+            `LLM reply truncated at max_tokens (${this.model}). Raise max_tokens or shorten the input. `
+            + `Partial: ${String(block.text).slice(0, 160)}`)
+        }
+        return block.text
+      }
     }
     throw new Error(`Unexpected response — no text block found. Content types: ${resp.content.map((b: any) => b.type).join(', ')}`)
   }
