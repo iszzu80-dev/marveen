@@ -634,6 +634,21 @@ export function initCosSchema(db: Database.Database): void {
   // "no such column: recipient" — on a fresh db the ZST ledger had never been
   // through ensureColumns at all.
 
+  // ── §22 kill switch audit ────────────────────────────────────────────
+  // cos_autonomy_global holds the CURRENT state; this holds the HISTORY. A stop
+  // with no record of who, when and why is a stop nobody can review afterwards,
+  // and the review afterwards is most of what a kill switch is for.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cos_kill_switch_events (
+      event_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+      engaged         INTEGER NOT NULL,
+      reason          TEXT,
+      actor           TEXT NOT NULL,
+      tickets_revoked INTEGER NOT NULL DEFAULT 0,
+      created_at      INTEGER NOT NULL
+    )
+  `)
+
   // ── §22.2 action authorization tickets ───────────────────────────────
   // The gate issues, the executor consumes. Opaque single-use records rather
   // than a caller-side boolean: see src/cos/action-authorization.ts for why the

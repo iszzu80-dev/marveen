@@ -11,6 +11,7 @@ import type Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
 import { reserveQuota, releaseQuota } from './quota.js'
 import { consumeAuthorization, type AuthorizationContext } from './action-authorization.js'
+import { killSwitchRefusal } from './kill-switch.js'
 
 /** Used when a caller supplies a ticket but no context: the hash will not match
  *  anything the gate issued, so the send is refused. Deliberately NOT a
@@ -327,6 +328,17 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
     // first. My original guard read `PLANNED` only, which quietly exempted every
     // retry.
     if (a.status === 'PLANNED' || a.status === 'FAILED_RETRYABLE') {
+      // §22 kill switch, at the choke point. `permits()` already refuses at the
+      // gate, but the gate ran earlier: this is the last line before a first
+      // delivery, and a stop engaged in between has to catch it here. Recovery
+      // paths returned above are untouched on purpose — they send nothing, and
+      // freezing them would leave a stopped system full of rows nobody can ever
+      // settle.
+      const stopped = killSwitchRefusal(db)
+      if (stopped) {
+        setStatus(db, ledgerId, 'PLANNED', { last_error: `refused: ${stopped}` }, now)
+        return loadOrThrow(db, ledgerId)
+      }
       // §22.2. Consumed HERE, not at the door: between the gate's decision and
       // this line the process may have been restarted, the row re-queued, or the
       // payload edited. Consumption is the moment the authority is actually
