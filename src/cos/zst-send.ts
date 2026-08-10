@@ -20,7 +20,7 @@ import { isUsable } from './connector-health.js'
 import { effectiveZstSensitivity, isProfileAllowedForZstSensitivity, coerceZstSensitivity } from './zst-sensitivity.js'
 import { makeExecutor, type OutboundAdapter, type OutboundAction, type ExecuteOpts } from './executor-core.js'
 
-const zstExecutor = makeExecutor('zst_outbound_ledger')
+const zstExecutor = makeExecutor('zst_outbound_ledger', 'zst_case_claims')
 
 export interface EmailDraft {
   to: string; subject: string; body: string

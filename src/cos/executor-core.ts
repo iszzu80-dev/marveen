@@ -9,7 +9,7 @@
 
 import type Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
-import { reserveQuota } from './quota.js'
+import { reserveQuota, releaseQuota } from './quota.js'
 
 export type OutboundStatus =
   | 'PLANNED' | 'SENDING' | 'APPLIED_UNVERIFIED' | 'OUTCOME_UNKNOWN'
@@ -163,6 +163,15 @@ export interface ExecuteOpts {
     approvalVersion?: number | null
     renderedVariablesHash?: string | null
   }
+  /** F-4 / A.2: the claim this send runs under. Verified INSIDE the same
+   *  transaction that writes SENDING, so a run whose claim expired and was taken
+   *  over by another worker cannot land a late send. The fence is recorded on
+   *  the row (outbound_ledger.claim_fence existed and was never written). */
+  claim?: { claimKey: string; ownerRunId: string; fence: number }
+  /** F-5 / A.4: the per-campaign ceilings, counted inside the SAME transaction
+   *  as the SENDING write. Counting outside it is check-then-act: two concurrent
+   *  sends both read "there is still room". */
+  campaignLimit?: { campaignId: string; maxTotal?: number; kind?: string; maxPerKind?: number }
 }
 
 export interface Executor {
@@ -176,8 +185,9 @@ export interface Executor {
 
 /** Build an executor bound to one outbound-ledger table. Logic is identical to
  *  the proven personal executor. */
-export function makeExecutor(ledgerTable: string): Executor {
+export function makeExecutor(ledgerTable: string, claimsTable?: string): Executor {
   const T = ledgerTable
+  const CLAIMS = claimsTable
 
   function loadOrThrow(db: Database.Database, ledgerId: string): OutboundAction {
     const r = db.prepare(`SELECT * FROM ${T} WHERE ledger_id = ?`).get(ledgerId) as Row | undefined
@@ -255,23 +265,76 @@ export function makeExecutor(ledgerTable: string): Executor {
       }, now)
       return loadOrThrow(db, ledgerId)
     }
-    if (opts.quota) {
-      const rr = reserveQuota(db, opts.quota.key, opts.quota.maxCount, opts.quota.windowSec, now)
-      if (!rr.reserved) {
-        setStatus(db, ledgerId, 'PLANNED', { last_error: `send quota exceeded for ${opts.quota.key}` }, now)
-        return loadOrThrow(db, ledgerId)
+    // ── A.2 + A.4 (F-4 + F-5): ONE transaction ────────────────────────────
+    // The spec asks for BEGIN … verify claim … RESERVE quota … WRITE SENDING …
+    // COMMIT. Before this, the three were three separate statements: the fence
+    // was never checked at all, the quota reservation had no caller, and the
+    // campaign ceiling was a COUNT(*) outside the write, so two concurrent sends
+    // both read "there is still room".
+    let quotaReserved = false
+    const admission = db.transaction((): { ok: true } | { ok: false; reason: string } => {
+      if (opts.claim) {
+        if (!CLAIMS) return { ok: false, reason: 'a claim was supplied but this executor has no claims table bound' }
+        const c = db.prepare(
+          `SELECT owner_run_id, claim_fence, claim_expires_at FROM ${CLAIMS} WHERE claim_key = ?`
+        ).get(opts.claim.claimKey) as { owner_run_id: string; claim_fence: number; claim_expires_at: number } | undefined
+        if (!c) return { ok: false, reason: `claim ${opts.claim.claimKey} no longer exists` }
+        if (c.owner_run_id !== opts.claim.ownerRunId) {
+          return { ok: false, reason: `claim ${opts.claim.claimKey} is held by ${c.owner_run_id}, not ${opts.claim.ownerRunId}` }
+        }
+        // The fence is the point: a slow run holding a claim that EXPIRED and was
+        // re-acquired by someone else sees its own fence superseded, and its late
+        // send is refused instead of landing after the takeover.
+        if (c.claim_fence !== opts.claim.fence) {
+          return { ok: false, reason: `stale claim fence ${opts.claim.fence}, current is ${c.claim_fence}` }
+        }
+        if (c.claim_expires_at < now) return { ok: false, reason: `claim ${opts.claim.claimKey} expired at ${c.claim_expires_at}` }
       }
+
+      if (opts.campaignLimit) {
+        const L = opts.campaignLimit
+        // PLANNED is excluded as well as the dead statuses: a draft that has
+        // never been sent is not outbound traffic, and counting it would let a
+        // queue of drafts exhaust a campaign's ceiling before a single message
+        // left. Counted: everything from SENDING onwards, because those either
+        // went out or may have.
+        const live = `status NOT IN ('CANCELLED','FAILED_TERMINAL','PLANNED')`
+        if (L.maxTotal !== undefined) {
+          const n = (db.prepare(`SELECT COUNT(*) AS n FROM ${T} WHERE campaign_id=? AND ${live} AND ledger_id<>?`)
+            .get(L.campaignId, ledgerId) as { n: number }).n
+          if (n >= L.maxTotal) return { ok: false, reason: `campaign ${L.campaignId} is at its total ceiling (${n}/${L.maxTotal})` }
+        }
+        if (L.maxPerKind !== undefined && L.kind) {
+          const n = (db.prepare(`SELECT COUNT(*) AS n FROM ${T} WHERE campaign_id=? AND outbound_kind=? AND ${live} AND ledger_id<>?`)
+            .get(L.campaignId, L.kind, ledgerId) as { n: number }).n
+          if (n >= L.maxPerKind) return { ok: false, reason: `campaign ${L.campaignId} is at its ${L.kind} ceiling (${n}/${L.maxPerKind})` }
+        }
+      }
+
+      if (opts.quota) {
+        const rr = reserveQuota(db, opts.quota.key, opts.quota.maxCount, opts.quota.windowSec, now)
+        if (!rr.reserved) return { ok: false, reason: `send quota exceeded for ${opts.quota.key}` }
+        quotaReserved = true
+      }
+
+      setStatus(db, ledgerId, 'SENDING', {
+        sending_at: now, attempt: a.attempt + 1,
+        // F-2: written BEFORE the call, with the same reasoning that puts SENDING
+        // before the call — if the process dies mid-send, the row still says which
+        // run and which approved versions authorised it.
+        ...(opts.claim ? { claim_fence: opts.claim.fence } : {}),
+        ...(opts.audit?.runId !== undefined ? { run_id: opts.audit.runId } : {}),
+        ...(opts.audit?.campaignVersion !== undefined ? { campaign_version: opts.audit.campaignVersion } : {}),
+        ...(opts.audit?.approvalVersion !== undefined ? { approval_version: opts.audit.approvalVersion } : {}),
+        ...(opts.audit?.renderedVariablesHash !== undefined ? { rendered_variables_hash: opts.audit.renderedVariablesHash } : {}),
+      }, now)
+      return { ok: true }
+    })()
+
+    if (!admission.ok) {
+      setStatus(db, ledgerId, 'PLANNED', { last_error: `refused: ${admission.reason}` }, now)
+      return loadOrThrow(db, ledgerId)
     }
-    setStatus(db, ledgerId, 'SENDING', {
-      sending_at: now, attempt: a.attempt + 1,
-      // F-2: written BEFORE the call, with the same reasoning that puts SENDING
-      // before the call — if the process dies mid-send, the row still says which
-      // run and which approved versions authorised it.
-      ...(opts.audit?.runId !== undefined ? { run_id: opts.audit.runId } : {}),
-      ...(opts.audit?.campaignVersion !== undefined ? { campaign_version: opts.audit.campaignVersion } : {}),
-      ...(opts.audit?.approvalVersion !== undefined ? { approval_version: opts.audit.approvalVersion } : {}),
-      ...(opts.audit?.renderedVariablesHash !== undefined ? { rendered_variables_hash: opts.audit.renderedVariablesHash } : {}),
-    }, now)
     let externalRef: string
     try {
       const r = await adapter.send(loadOrThrow(db, ledgerId))
@@ -280,6 +343,13 @@ export function makeExecutor(ledgerTable: string): Executor {
       const hints = err as Partial<SendErrorHints>
       const msg = String((err as Error)?.message ?? err)
       if (hints?.reachedProvider === false) {
+        // F-5: refund. A slot reserved for a send that PROVABLY did not happen
+        // must go back, otherwise a retryable failure burns quota on every
+        // attempt (PLANNED → SENDING re-reserves) and a healthy campaign
+        // throttles itself to a halt. Only on reachedProvider===false: if we
+        // cannot tell, the slot stays spent, because refunding a send that may
+        // have gone out is the error that lets a duplicate through.
+        if (quotaReserved && opts.quota) releaseQuota(db, opts.quota.key, now)
         setStatus(db, ledgerId, hints.terminal ? 'FAILED_TERMINAL' : 'FAILED_RETRYABLE', { last_error: msg }, now)
       } else {
         setStatus(db, ledgerId, 'OUTCOME_UNKNOWN', { last_error: msg }, now)
