@@ -279,6 +279,35 @@ def _zo4():
     return (PASS if not diff else FAIL), "eltérő mező: %s" % (", ".join(sorted(diff)) or "-")
 
 
+@crit("ZO-5", "outbound", "audit 2026-08-10", "a céges kimenő ajtó a KISZOLGÁLT csomagban is benne van, nem csak a forrásban")
+def _zo5():
+    """ZO-1 asks whether src has a caller. That is the right question about the
+    code and the wrong one about the capability: the dashboard runs
+    dist/index.js, so a route that exists only in src answers 404 on localhost.
+
+    Measured on the day this was written — ZO-1 went green and
+    /api/cos/zst-escalations still 404'd, because dist had not been rebuilt.
+    Green source and a 404 at the same moment is the exact false green these
+    gates exist to catch, and this one was mine.
+
+    So the criterion reads the SERVED artifact. It cannot prove the running
+    process loaded that file, only that the file a restart would load contains
+    the door; the runtime check belongs to whoever restarts it."""
+    dist = os.path.join(REPO, "dist", "web", "routes", "cos.js")
+    if not os.path.exists(dist):
+        return FAIL, "nincs dist/web/routes/cos.js — a dashboard nem tud mit kiszolgálni"
+    try:
+        with open(dist, encoding="utf-8") as fh:
+            built = fh.read()
+    except Exception as e:
+        return ERROR, "dist olvashatatlan: %s" % e
+    missing = [p for p in ("/api/cos/zst-outbound/draft", "/api/cos/zst-outbound/approve")
+               if p not in built]
+    if missing:
+        return FAIL, "a forrásban megvan, a kiszolgált csomagban NINCS: %s (dist újraépítés kell)" % ", ".join(missing)
+    return PASS, "dist/web/routes/cos.js tartalmazza a draft és approve végpontot"
+
+
 # ---- group: liveness (built-but-never-invoked) ------------------------------
 
 _ZST_MODULES = [
