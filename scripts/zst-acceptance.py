@@ -149,20 +149,51 @@ def _zi3():
     return (PASS if live else FAIL), detail
 
 
-@crit("ZI-4", "intake", "AT-ZS01", "a ZST tárba KIZÁRÓLAG a ZST fiókból került üzenet")
+@crit("ZI-4", "intake", "AT-ZS01", "a céges tárba idegen fiókból csak JELÖLT üzenet került")
 def _zi4():
     """The corporate boundary is connector identity (the v1.1 deviation Istvan
-    agreed to): not a classifier, the account itself. So the check is whether any
-    row in the corporate ledger came from an account that is not the ZST one."""
+    agreed to): not a classifier, the account itself.
+
+    CORRECTED 2026-08-10, first live run of this criterion. It went red on one
+    row from the private mailbox and called it a foreign account. That row is
+    the Vámosi thread: corporate content that arrived in the private mailbox,
+    which the scope gate moved to the corporate store and MARKED for human
+    review. That is the content-decides rule Istvan settled on 2026-08-09,
+    working exactly as decided -- so the criterion was measuring a rule that had
+    already been superseded, and a gate that fails on a settled decision gets
+    switched off rather than obeyed.
+
+    What the boundary actually protects is SILENT crossing. The personal gate
+    (cos-acceptance SC-2) has said so since it was written: a marked case that
+    is visible on the board and waiting on the owner is not contamination. The
+    two gates measure the same boundary from opposite sides, so they have to
+    agree on what a violation is; this one was the asymmetric half.
+
+    Unmarked crossing is still a failure, and marked crossings are still
+    counted out loud rather than hidden."""
     if _table_missing("zst_email_processing"):
         return ERROR, "nincs zst_email_processing tábla"
-    accts = [r[0] for r in q("SELECT DISTINCT gmail_account_id FROM zst_email_processing")]
-    if not accts:
+    rows = q("SELECT gmail_account_id, message_id, case_id FROM zst_email_processing")
+    if not rows:
         return UNKNOWN, "nincs feldolgozott üzenet, a határ nem mérhető"
-    foreign = [a for a in accts if a != "zst"]
-    return (PASS if not foreign else FAIL), (
-        "fiókok: %s" % ", ".join(sorted(accts)) if not foreign
-        else "idegen fiók a céges naplóban: %s" % ", ".join(sorted(foreign)))
+    foreign = [r for r in rows if r[0] != "zst"]
+    if not foreign:
+        return PASS, "fiókok: %s" % ", ".join(sorted({r[0] for r in rows}))
+
+    # A crossing is legitimate only when the case it landed on carries the scope
+    # gate's marker. No marker means nobody was told.
+    unmarked = []
+    for acct, msg_id, case_id in foreign:
+        marked = False
+        if case_id and not _table_missing("zst_cases"):
+            reason = one("SELECT blocked_reason FROM zst_cases WHERE case_id = ?", case_id)
+            marked = (reason or "").startswith("SCOPE REVIEW")
+        if not marked:
+            unmarked.append("%s/%s" % (acct, msg_id))
+    if unmarked:
+        return FAIL, "%d jelöletlen átlépés a céges naplóba: %s" % (
+            len(unmarked), ", ".join(sorted(unmarked)[:4]))
+    return PASS, "%d átlépés, mind SCOPE REVIEW-val jelölve (tartalom dönt, 2026-08-09)" % len(foreign)
 
 
 # ---- group: outbound (§7, §15, AT-ZA) ---------------------------------------
