@@ -44,6 +44,134 @@ export type CaseSensitivity = (typeof CASE_SENSITIVITIES)[number]
 /** Add any missing columns to an existing table (nullable ADD COLUMN is safe and
  *  cheap). Used to evolve tables that predate a field without a table rebuild.
  *  `defs` maps column name → its SQL type/definition. */
+// F-2: this set has to hold for BOTH ledgers, because ONE executor
+// (makeExecutor) writes both, and the two schemas are initialised by two
+// different exported functions. Module scope, not a local inside one of them —
+// a local is exactly how the ZST half came to be skipped.
+const LEDGER_SHARED_COLUMNS: Record<string, string> = {
+  campaign_id:   'TEXT',
+  outbound_kind: 'TEXT',   // INITIAL | FOLLOW_UP | REPLY
+  recipient:     'TEXT',
+  rendered_payload_hash: 'TEXT',
+  case_version:  'INTEGER',
+  run_id:        'TEXT',
+  provider_message_id: 'TEXT',
+  rfc_message_id: 'TEXT',
+  rendered_variables_hash: 'TEXT',
+}
+
+/**
+ * Widen a table's CHECK(status IN (...)) on a database that already has the
+ * narrow one. SQLite cannot ALTER a CHECK, so the table is rebuilt.
+ *
+ * `probeValue` is a status that the NEW constraint allows and the old one does
+ * not: it is written to a scratch row and rolled back, so this is a no-op on a
+ * database that is already wide. Detecting by trying is the point — parsing the
+ * stored DDL would be guessing at text.
+ *
+ * The copy is a plain INSERT … SELECT, never INSERT OR IGNORE, and the row
+ * counts are compared before the old table is dropped. OR IGNORE silently drops
+ * whatever collides, which is the failure mode where a migration reports success
+ * and takes rows with it.
+ */
+// F-9: hoisted to module scope. It was a `const` inside one init
+// function while the ZST approvals table is created by another — which is how
+// the ZST half of the envelope came to have no columns at all.
+const APPROVAL_ENVELOPE: Record<string, string> = {
+  allowed_recipients:       'TEXT',      // JSON array — no list means no authority
+  allowed_channels:         'TEXT',
+  template_id:              'TEXT',
+  template_version:         'INTEGER',
+  allowed_variable_schema:  'TEXT',
+  allowed_variable_sources: 'TEXT',
+  forbidden_variables:      'TEXT',
+  shareable_data:           'TEXT',
+  quote_target_budget:      'REAL',
+  quote_hard_limit:         'REAL',
+  autonomous_spend_limit:   'REAL NOT NULL DEFAULT 0',   // §3.2 invariant, never non-zero
+  currency:                 'TEXT',
+  max_initial_outbound:     'INTEGER',
+  max_follow_up_outbound:   'INTEGER',
+  max_autonomous_replies:   'INTEGER',
+  max_total_outbound:       'INTEGER',
+  follow_up_policy:         'TEXT',
+  allowed_reply_classes:    'TEXT',
+  allowed_attachment_types: 'TEXT',
+  stop_conditions:          'TEXT',
+  escalation_conditions:    'TEXT',
+  final_gate:               "TEXT NOT NULL DEFAULT 'NONE'",
+  valid_until:              'INTEGER',
+  stopped_reason:           'TEXT',      // §3.4 — set when a stop condition trips
+}
+
+function widenCheckConstraint(db: Database.Database, table: string, probeValue: string, createSql: string): void {
+  const already = db.transaction((): boolean => {
+    try {
+      db.prepare(`UPDATE ${table} SET status = ? WHERE 0 = 1`).run(probeValue)
+      // A no-row UPDATE does not evaluate the CHECK, so probe for real, then throw
+      // to roll back whatever it did.
+      const one = db.prepare(`SELECT rowid FROM ${table} LIMIT 1`).get() as { rowid: number } | undefined
+      if (!one) return true // empty table: the CREATE above already has the wide CHECK
+      db.prepare(`UPDATE ${table} SET status = ? WHERE rowid = ?`).run(probeValue, one.rowid)
+      throw new Error('__rollback__')
+    } catch (e) {
+      if (String((e as Error).message) === '__rollback__') return true
+      return false
+    }
+  })()
+  if (already) return
+
+  const cols = (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(c => c.name).join(', ')
+  const before = (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n
+
+  // Two pragmas, both load-bearing, both learned by running this against a copy
+  // of the live store and watching it throw FOREIGN KEY constraint failed:
+  //
+  //  legacy_alter_table=ON — without it, modern SQLite REWRITES other tables'
+  //    REFERENCES clauses to follow the rename, so email_processing's foreign
+  //    key would end up pointing at email_processing_batches_pre_widen and then
+  //    at nothing when that is dropped.
+  //  foreign_keys=OFF — during the window between the rename and the copy, child
+  //    rows reference a table that does not exist under that name.
+  //
+  // Both must be set OUTSIDE the transaction: SQLite silently ignores a
+  // foreign_keys change inside one, which would look like it worked.
+  // Baseline FIRST. `foreign_key_check` inspects the WHOLE database, and this
+  // store already carries 20 violations in tables this migration never touches
+  // (zst_email_processing, zst_case_events — measured 2026-08-10). Failing on the
+  // absolute count would abort every rebuild forever because of someone else's
+  // orphans; only NEW violations are this migration's business.
+  const fkKey = (v: unknown) => JSON.stringify(v)
+  const fkBefore = new Set((db.pragma('foreign_key_check') as unknown[]).map(fkKey))
+  const priorFk = (db.pragma('foreign_keys', { simple: true }) as number) === 1
+  const priorLegacy = (db.pragma('legacy_alter_table', { simple: true }) as number) === 1
+  db.pragma('foreign_keys = OFF')
+  db.pragma('legacy_alter_table = ON')
+  try {
+    // createSql is passed in, NOT read back from sqlite_master: the caller's
+    // CREATE TABLE IF NOT EXISTS was a no-op on this database, so sqlite_master
+    // still holds the NARROW definition. Re-executing that would rebuild the very
+    // constraint being widened and report success.
+    db.transaction(() => {
+      db.exec(`ALTER TABLE ${table} RENAME TO ${table}_pre_widen`)
+      db.exec(createSql)
+      db.exec(`INSERT INTO ${table} (${cols}) SELECT ${cols} FROM ${table}_pre_widen`)
+      const after = (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n
+      if (after !== before) throw new Error(`widenCheckConstraint(${table}): copied ${after} of ${before} rows — refusing to drop the original`)
+      db.exec(`DROP TABLE ${table}_pre_widen`)
+    })()
+    // Prove the references survived, rather than assuming the pragmas did their
+    // job. An orphaned child row here would be a silent corruption.
+    const introduced = (db.pragma('foreign_key_check') as unknown[]).filter(v => !fkBefore.has(fkKey(v)))
+    if (introduced.length) {
+      throw new Error(`widenCheckConstraint(${table}): the rebuild introduced ${introduced.length} foreign key violations`)
+    }
+  } finally {
+    if (!priorLegacy) db.pragma('legacy_alter_table = OFF')
+    if (priorFk) db.pragma('foreign_keys = ON')
+  }
+}
+
 function ensureColumns(db: Database.Database, table: string, defs: Record<string, string>): void {
   const have = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(c => c.name))
   for (const [name, def] of Object.entries(defs)) {
@@ -251,7 +379,7 @@ export function initCosSchema(db: Database.Database): void {
 
   // a batch = the messages fetched between cursor_before and cursor_after. The
   // account cursor only moves to cursor_after when the batch is TERMINAL.
-  db.exec(`
+  const BATCHES_DDL = `
     CREATE TABLE IF NOT EXISTS email_processing_batches (
       batch_id         TEXT PRIMARY KEY,
       gmail_account_id TEXT NOT NULL,
@@ -260,14 +388,22 @@ export function initCosSchema(db: Database.Database): void {
       status           TEXT NOT NULL DEFAULT 'OPEN',
       created_at       INTEGER NOT NULL,
       updated_at       INTEGER NOT NULL,
-      CHECK (status IN ('OPEN','PROCESSING','TERMINAL','QUARANTINED'))
+      -- F-14 / A.1: BLOCKED, READY_TO_COMMIT, COMMITTED and RECOVERY_REQUIRED
+      -- were in the spec and not in this CHECK, so a batch that could never
+      -- close sat in PROCESSING — the same state as one being worked on right
+      -- now. "Stuck forever" and "busy" have to be distinguishable or no alert
+      -- can tell them apart.
+      CHECK (status IN ('OPEN','PROCESSING','READY_TO_COMMIT','COMMITTED',
+        'TERMINAL','QUARANTINED','BLOCKED','RECOVERY_REQUIRED'))
     )
-  `)
+  `
+  db.exec(BATCHES_DDL)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_ebatch_acct ON email_processing_batches(gmail_account_id, status)`)
+  widenCheckConstraint(db, 'email_processing_batches', 'BLOCKED', BATCHES_DDL)
 
   // per-message processing state (the 7+ status model). UNIQUE(account,message)
   // makes re-discovery a no-op instead of a second processing row.
-  db.exec(`
+  const EPROC_DDL = `
     CREATE TABLE IF NOT EXISTS email_processing (
       gmail_account_id TEXT NOT NULL,
       message_id       TEXT NOT NULL,
@@ -284,10 +420,21 @@ export function initCosSchema(db: Database.Database): void {
       created_at       INTEGER NOT NULL,
       updated_at       INTEGER NOT NULL,
       UNIQUE(gmail_account_id, message_id),
+      -- F-8: SOURCE_COMMIT_SKIPPED. The policy exception used to write
+      -- SOURCE_COMMITTED for messages it had NOT marked at the source, which is
+      -- §6.3's terminal SUCCESS state, and put the truth in last_error. A state
+      -- name that says the opposite of what happened poisons every later query.
       CHECK (status IN ('DISCOVERED','CLAIMED','LOCAL_APPLIED','SOURCE_COMMITTED',
-        'RECOVERY_REQUIRED','EXCLUDED','DUPLICATE','QUARANTINED'))
+        'SOURCE_COMMIT_SKIPPED','RECOVERY_REQUIRED','EXCLUDED','DUPLICATE','QUARANTINED'))
     )
-  `)
+  `
+  db.exec(EPROC_DDL)
+  // NOTE: this is NOT the definition that survives. The A.3 block below renames
+  // this table away and recreates it (search: EPROC_A3_DDL), because this DDL's
+  // UNIQUE key lacks thread_id. Both are kept in step deliberately — a fresh
+  // database briefly has this one, and every column and constraint difference
+  // between the two is a bug waiting to happen. The F-8 status widening is
+  // applied after the A.3 rebuild, where the surviving table is made.
   db.exec(`CREATE INDEX IF NOT EXISTS idx_eproc_batch ON email_processing(batch_id, status)`)
   // Existing dbs (email_processing predates P1.2): add the new columns in place
   // BEFORE the index that references content_hash — on a live db the table
@@ -358,7 +505,7 @@ export function initCosSchema(db: Database.Database): void {
       db.exec(`ALTER TABLE email_processing RENAME TO email_processing_pre_a3`)
     }
   }
-  db.exec(`
+  const EPROC_A3_DDL = `
     CREATE TABLE IF NOT EXISTS email_processing (
       gmail_account_id TEXT NOT NULL,
       message_id       TEXT NOT NULL,
@@ -375,10 +522,15 @@ export function initCosSchema(db: Database.Database): void {
       created_at       INTEGER NOT NULL,
       updated_at       INTEGER NOT NULL,
       UNIQUE(gmail_account_id, thread_id, message_id),
+      -- F-8: SOURCE_COMMIT_SKIPPED. This is the SURVIVING definition of
+      -- email_processing; the one ~120 lines up is renamed away by the block
+      -- above. A change made only there is a change that never takes effect,
+      -- which is exactly how this widening was first written and first failed.
       CHECK (status IN ('DISCOVERED','CLAIMED','LOCAL_APPLIED','SOURCE_COMMITTED',
-        'RECOVERY_REQUIRED','EXCLUDED','DUPLICATE','QUARANTINED'))
+        'SOURCE_COMMIT_SKIPPED','RECOVERY_REQUIRED','EXCLUDED','DUPLICATE','QUARANTINED'))
     )
-  `)
+  `
+  db.exec(EPROC_A3_DDL)
   // A message-szintu egyediseg NEM veszhet el a bovitett kulcs miatt (lasd fent).
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_email_processing_msg
            ON email_processing(gmail_account_id, message_id)`)
@@ -396,6 +548,9 @@ export function initCosSchema(db: Database.Database): void {
     `)
     db.exec(`DROP TABLE email_processing_pre_a3`)
   }
+  // F-8: an existing database that did NOT go through the A.3 rebuild still has
+  // the narrow CHECK. Widen it here, where the surviving definition is known.
+  widenCheckConstraint(db, 'email_processing', 'SOURCE_COMMIT_SKIPPED', EPROC_A3_DDL)
   // A RENAME magaval vitte a tabla indexeit, a DROP pedig el is vitte oket.
   // Ezt a meglevo P1.2 migracios teszt kapta el (idx_eproc_chash eltunt) -- a
   // sajat tesztem csak azt nezte, hogy a regi tabla nincs meg. Az indexeket
@@ -406,6 +561,10 @@ export function initCosSchema(db: Database.Database): void {
   // ── §6.2 / A.5: a ledger hordozza a cimzettet, a szolgaltatoi azonositokat
   //    es a verzio-kotest. Enelkul az AC-21 (minden kimeno visszavezetheto
   //    approvalhoz + case+version-hoz) technikailag nem ellenorizheto.
+  //    F-2 (2026-08-10): rendered_payload_hash, case_version and run_id were the
+  //    three the §6.2 list asked for and the table did not have at all. The
+  //    other columns here existed and were never written on the personal branch,
+  //    which is worse than absent: they read as if the trail were saved.
   ensureColumns(db, 'outbound_ledger', {
     channel:              'TEXT',
     provider_message_id:  'TEXT',
@@ -413,6 +572,9 @@ export function initCosSchema(db: Database.Database): void {
     campaign_version:     'INTEGER',
     approval_version:     'INTEGER',
     rendered_variables_hash: 'TEXT',
+    rendered_payload_hash: 'TEXT',
+    case_version:         'INTEGER',
+    run_id:               'TEXT',
     first_attempt_at:     'INTEGER',
     error_code:           'TEXT',
   })
@@ -443,50 +605,27 @@ export function initCosSchema(db: Database.Database): void {
   // already drifted (ZST had allowed_recipients, personal did not), which meant
   // AC-4 was enforced for the company mailbox and absent for the personal one.
   // See approval-core.ts.
-  const APPROVAL_ENVELOPE: Record<string, string> = {
-    allowed_recipients:       'TEXT',      // JSON array — no list means no authority
-    allowed_channels:         'TEXT',
-    template_id:              'TEXT',
-    template_version:         'INTEGER',
-    allowed_variable_schema:  'TEXT',
-    allowed_variable_sources: 'TEXT',
-    forbidden_variables:      'TEXT',
-    shareable_data:           'TEXT',
-    quote_target_budget:      'REAL',
-    quote_hard_limit:         'REAL',
-    autonomous_spend_limit:   'REAL NOT NULL DEFAULT 0',   // §3.2 invariant, never non-zero
-    currency:                 'TEXT',
-    max_initial_outbound:     'INTEGER',
-    max_follow_up_outbound:   'INTEGER',
-    max_autonomous_replies:   'INTEGER',
-    max_total_outbound:       'INTEGER',
-    follow_up_policy:         'TEXT',
-    allowed_reply_classes:    'TEXT',
-    allowed_attachment_types: 'TEXT',
-    stop_conditions:          'TEXT',
-    escalation_conditions:    'TEXT',
-    final_gate:               "TEXT NOT NULL DEFAULT 'NONE'",
-    valid_until:              'INTEGER',
-    stopped_reason:           'TEXT',      // §3.4 — set when a stop condition trips
-  }
   ensureColumns(db, 'campaign_approvals', APPROVAL_ENVELOPE)
-  if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='zst_campaign_approvals'").get()) {
-    ensureColumns(db, 'zst_campaign_approvals', APPROVAL_ENVELOPE)
-  }
+  // The ZST approvals table is created LATER, in initZstSendSchema — the same
+  // trap the ZST ledger was in (see ZST_LEDGER_COLUMNS_AFTER_CREATE). Guarded on
+  // "if the table exists", this was a no-op on every fresh database, so the ZST
+  // approval envelope (valid_until, stop conditions, quotas) simply had no
+  // columns to live in. Moved to ZST_APPROVAL_ENVELOPE_AFTER_CREATE below.
 
   // The ledger needs to say WHICH campaign and WHICH kind of send it was, or the
   // per-kind and total quotas above have nothing to count.
-  const LEDGER_QUOTA_COLUMNS: Record<string, string> = {
-    campaign_id:   'TEXT',
-    outbound_kind: 'TEXT',   // INITIAL | FOLLOW_UP | REPLY
-    recipient:     'TEXT',
-  }
-  ensureColumns(db, 'outbound_ledger', LEDGER_QUOTA_COLUMNS)
-  if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='zst_outbound_ledger'").get()) {
-    ensureColumns(db, 'zst_outbound_ledger', LEDGER_QUOTA_COLUMNS)
-  }
+  ensureColumns(db, 'outbound_ledger', LEDGER_SHARED_COLUMNS)
+  // The ZST ledger is created LATER in this same function, so the guarded call
+  // that used to stand here was a no-op on every fresh database and only ever
+  // fired on one that already had the table. It has moved to just after the
+  // CREATE (search: ZST_LEDGER_COLUMNS_AFTER_CREATE). Found by F-2: the new
+  // columns landed on the personal ledger and every ZST send threw
+  // "no such column: recipient" — on a fresh db the ZST ledger had never been
+  // through ensureColumns at all.
 
   // ── connector_health (Slice 1 reliability; §20 connector matrix) ──────
+  // F-10 / B.3: where the marker-persistence proof is recorded. Without a
+  // place to put it, the proof could only ever be a log line.
   // One row per connector (gmail/calendar/shopping/rental/...). The preCheck
   // gates actions on isUsable(); repeated failures degrade OK → DEGRADED → DOWN,
   // a success resets to OK. `mode` records the current capability
@@ -507,6 +646,19 @@ export function initCosSchema(db: Database.Database): void {
       CHECK (status IN ('OK','DEGRADED','DOWN','UNKNOWN'))
     )
   `)
+  // F-13: where the Scope Gate's verdict and its review reason are recorded.
+  // The verdict used to be returned in the HTTP response and dropped, and the
+  // review note was squatting in blocked_reason (a §6.1 column meaning something
+  // else). Both namespaces, because the gate routes to both.
+  ensureColumns(db, 'personal_cases', { scope_review_reason: 'TEXT' })
+  // The ZST half is added in initZstSchema, AFTER zst_cases is created. Writing
+  // it here behind "if the table exists" is the trap this file already fell into
+  // twice tonight (the ZST ledger and the ZST approval envelope): a silent
+  // no-op on every fresh database.
+  ensureColumns(db, 'connector_health', {
+    marker_proof_at:     'INTEGER',
+    marker_proof_detail: 'TEXT',
+  })
 
   // ── shopping / price radar (Slice 4; §15) ─────────────────────────────
   // A watched item (a rental search, a grocery product, a product to buy). The
@@ -824,6 +976,8 @@ export function initZstSchema(db: Database.Database): void {
         'ZST_PERSONAL_DATA','ZST_HIGHLY_SENSITIVE','UNKNOWN'))
     )
   `)
+  // F-13: the Scope Gate writes its verdict onto the case in BOTH namespaces.
+  ensureColumns(db, 'zst_cases', { scope: 'TEXT', scope_review_reason: 'TEXT' })
   db.exec(`CREATE INDEX IF NOT EXISTS idx_zcases_status ON zst_cases(status, archived_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_zcases_wake   ON zst_cases(next_wake_at) WHERE next_wake_at IS NOT NULL`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_zcases_workspace ON zst_cases(workspace, status)`)
@@ -948,6 +1102,11 @@ export function initZstSendSchema(db: Database.Database): void {
         'VERIFIED','FAILED_RETRYABLE','FAILED_TERMINAL','CANCELLED','RECOVERY_REQUIRED'))
     )
   `)
+  // ZST_LEDGER_COLUMNS_AFTER_CREATE — the table exists by now, on a fresh
+  // database as well as an existing one. One executor writes both ledgers, so
+  // the column set must be identical on both.
+  ensureColumns(db, 'zst_outbound_ledger', LEDGER_SHARED_COLUMNS)
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS zst_campaigns (
       campaign_id            TEXT PRIMARY KEY,
@@ -986,6 +1145,10 @@ export function initZstSendSchema(db: Database.Database): void {
 // match suggestions. NO payment initiation, NO bank write (spec §16.4/§18.1);
 // the accounting-package SEND is the write-executor half (write-scope gated).
 export function initZstFinanceSchema(db: Database.Database): void {
+  // ZST_APPROVAL_ENVELOPE_AFTER_CREATE — the table exists by now. One approval
+  // engine serves both namespaces (F-9), so the envelope must exist on both.
+  ensureColumns(db, 'zst_campaign_approvals', APPROVAL_ENVELOPE)
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS zst_invoices (
       invoice_id           TEXT PRIMARY KEY,

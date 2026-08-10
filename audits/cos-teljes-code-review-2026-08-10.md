@@ -15,7 +15,7 @@
 | Kapu | Eredmény |
 |---|---|
 | `npx tsc --noEmit` | **zöld** (exit 0) |
-| `npx vitest run` a 135 COS/CostOps teszt-fájlon | 1394 pass / 3 fail első futáson — mind a három a `costops-api.test.ts` budget-CRUD blokkjában, **nem COS**. **Utólagos pontosítás:** ugyanez a parancs megismételve 1397/1397 zöld; a három teszt **flaky**, nem tartósan piros (az okot lásd a CostOps-review C-5 pontjában). A COS-tesztek minden futáson zöldek voltak. |
+| `npx vitest run` a 135 COS/CostOps teszt-fájlon | 1394 pass / **3 fail** / 1 fájl piros — mind a három a `costops-api.test.ts` budget-CRUD blokkjában, **nem COS** |
 | `grep` alapú hívó-követés a `src/`, `scripts/`, `web/`, `ops/scheduled-tasks/` fákon | lásd a halott-út szakaszt |
 
 > **Viszony a mai korábbi audithoz.** A `audits/kod-atvizsgalas-negy-hibaosztaly-2026-08-10.md` ma hajnalban négy hiba-osztályt már feltárt (konstans biztonsági telemetria, hiányzó vészleállító, halott retention/backup, „nem choke point" dispatch, ki nem kényszerített boríték, néma piszkozat-védelem). Azokat **nem ismétlem meg**; ahol egy találás átfed vele, jelölöm (`[ismert]`), és csak azt írom le, amit a spec-oldalról hozzátesz. A többi találás **új**.

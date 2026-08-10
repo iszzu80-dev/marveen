@@ -89,19 +89,44 @@ export function draftSend(db: Database.Database, input: DraftSendInput, now: num
     }, now)
     approveCampaign(db, campaignId, now) // campaign greenlit; per-send approval still required
   }
-  const seq = ((db.prepare(
-    `SELECT COUNT(*) AS n FROM outbound_ledger WHERE case_id=? AND action_type='EMAIL_SEND'`
-  ).get(input.caseId) as { n: number }).n) + 1
-  const planned = planAction(db, { caseId: input.caseId, actionType: 'EMAIL_SEND', sequenceNumber: seq, payload: input.email }, now)
+  // F-1: the sequence number used to be COUNT(*)+1, which two concurrent drafts
+  // read identically and then collided on the UNIQUE key — surfacing as a raw
+  // SqliteError to the caller. MAX(seq)+1 has the same race, so the race is
+  // handled instead of wished away: on a unique-constraint collision, re-read
+  // and try the next number. Bounded, because an unbounded retry on a
+  // mis-shaped row would spin forever.
+  let planned: ReturnType<typeof planAction> | undefined
+  let seq = 0
+  for (let attempt = 0; attempt < 8 && !planned; attempt++) {
+    seq = ((db.prepare(
+      `SELECT COALESCE(MAX(sequence_number), 0) AS n FROM outbound_ledger WHERE case_id=? AND action_type='EMAIL_SEND'`
+    ).get(input.caseId) as { n: number }).n) + 1
+    try {
+      planned = planAction(db, {
+        caseId: input.caseId, actionType: 'EMAIL_SEND', sequenceNumber: seq, payload: input.email,
+        // F-1 / §7.1: the key binds campaign + recipient + rendered payload, so
+        // they have to be known at plan time rather than patched in afterwards.
+        campaignId, recipient: input.email.to, renderedPayloadHash: rHash,
+        // F-2 / AC-21: which version of the case this was planned against.
+        caseVersion: (db.prepare('SELECT version FROM personal_cases WHERE case_id = ?')
+          .get(input.caseId) as { version: number } | undefined)?.version ?? null,
+      }, now)
+    } catch (err) {
+      if (!String((err as Error)?.message ?? '').includes('UNIQUE')) throw err
+    }
+  }
+  if (!planned) throw new Error(`could not allocate a sequence number for ${input.caseId}/EMAIL_SEND after 8 attempts`)
   // Fill the columns §6.2 / A.5 added: which campaign, to whom, what kind. The
   // quota has nothing to count without them, and the approval door cannot find
   // the campaign whose template it must bind to — a ledger row that does not say
   // which campaign it belongs to is unauditable by AC-21.
+  // campaign_id and recipient are written by planAction now (F-2) — in the same
+  // INSERT as the row, so no window exists where the row is unattributable.
   db.prepare(
-    `UPDATE outbound_ledger SET campaign_id=@c, recipient=@r, channel='EMAIL',
+    `UPDATE outbound_ledger SET channel='EMAIL',
        outbound_kind=COALESCE(outbound_kind, @k), first_attempt_at=COALESCE(first_attempt_at, @now)
      WHERE ledger_id=@id`
-  ).run({ c: campaignId, r: input.email.to, k: seq === 1 ? 'INITIAL' : 'FOLLOW_UP', now, id: planned.ledgerId })
+  ).run({ k: seq === 1 ? 'INITIAL' : 'FOLLOW_UP', now, id: planned.ledgerId })
   return {
     campaignId, ledgerId: planned.ledgerId, sequenceNumber: seq,
     templateHash, renderedPayloadHash: rHash, email: input.email, status: 'AWAITING_APPROVAL',
@@ -123,12 +148,32 @@ export interface ApproveSendInput {
 }
 /** The owner's explicit YES to THIS exact rendered payload. After this,
  *  authorizeSend passes for the matching payload at the current campaign version. */
+/** F-16 / §3.2: how long an approval is good for, and how much it authorises,
+ *  when the caller says nothing.
+ *
+ *  approveSend used to fill in only allowedChannels and allowedRecipients, so
+ *  valid_until and maxTotalOutbound were always NULL and authorizeSend's expiry
+ *  check could never fire: every approval lived forever and authorised an
+ *  unbounded number of sends. §3.2 lists valid_until as a required envelope
+ *  field precisely so that an approval nobody revoked still stops mattering.
+ *
+ *  Seven days because an approval older than that has almost certainly been
+ *  overtaken by the conversation it belongs to; one message because approving
+ *  THIS rendered payload to THIS recipient is what the owner did, and a second
+ *  send is a second decision. Both are overridable per approval. */
+export const DEFAULT_APPROVAL_TTL_SEC = 7 * 24 * 3600
+export const DEFAULT_APPROVAL_MAX_OUTBOUND = 1
+
 export function approveSend(db: Database.Database, input: ApproveSendInput, now: number): void {
   recordApproval(db, {
     approvalId: input.approvalId ?? `appr-${input.campaignId}-${input.renderedPayloadHash.slice(0, 16)}`,
     campaignId: input.campaignId, approvedBy: input.approvedBy,
     templateHash: input.templateHash, renderedPayloadHash: input.renderedPayloadHash,
     allowedChannels: ['EMAIL'],
+    // F-16: the defaults go BEFORE the caller's envelope, so an explicit
+    // validUntil or maxTotalOutbound still wins.
+    validUntil: now + DEFAULT_APPROVAL_TTL_SEC,
+    maxTotalOutbound: DEFAULT_APPROVAL_MAX_OUTBOUND,
     ...input.envelope,
     allowedRecipients: [input.recipient],
   }, now)
@@ -148,6 +193,9 @@ export interface DispatchSendInput {
   renderedPayloadHash: string
   declaredSensitivity?: unknown
   targetProfile: string
+  /** F-2 / AC-21: which run drove this send. Optional because a send triggered
+   *  by the owner from the UI belongs to no run. */
+  runId?: string
 }
 export interface DispatchSendResult {
   sent: boolean
@@ -186,8 +234,21 @@ export async function dispatchApprovedSend(
     // taken from the caller. A caller-asserted type would let the same code path
     // pick a more permissive rung by claiming to be a different kind of case.
     caseType: caseTypeOf(db, input.ledgerId),
+    now, // F-16: the same clock as the rest of the send
   })
   if (!decision.allowed) return { sent: false, decision }
-  const action = await executeAction(db, adapter, input.ledgerId, now, opts)
+  // The gate ran and allowed it three lines up — that is the assertion F-7 asks
+  // this call site to make explicit. The versions come from the same evaluation
+  // (F-2), not from a fresh read that could have moved.
+  const action = await executeAction(db, adapter, input.ledgerId, now, {
+    ...opts,
+    authorizedByDispatchGate: true,
+    audit: {
+      ...opts.audit,
+      runId: opts.audit?.runId ?? input.runId,
+      campaignVersion: decision.campaignVersion ?? null,
+      approvalVersion: decision.approvalVersion ?? null,
+    },
+  })
   return { sent: action.status === 'VERIFIED' || action.status === 'APPLIED_UNVERIFIED', decision, action }
 }

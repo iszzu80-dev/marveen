@@ -32,6 +32,9 @@ export interface DispatchRequest {
   caseType?: string
   /** The case's declared sensitivity (escalated against the content). */
   declaredSensitivity: unknown
+  /** F-16: evaluation time. Absent falls back to wall time inside
+   *  authorizeSend, which is only ever right in production. */
+  now?: number
   /** The rendered outbound content (classified for sensitivity). */
   content: string
   /** The model profile that would process/produce this send. */
@@ -54,6 +57,11 @@ export interface DispatchDecision {
    *  is the profile the caller SHOULD use instead. Scoped to the COS gate — it
    *  does not change fleet-wide model resolution. */
   recommendedProfile: string | null
+  /** F-2 / AC-21: the versions the send authorisation was granted at, carried
+   *  out of the gate so the ledger row can record what allowed it. Undefined
+   *  when the campaign check refused. */
+  campaignVersion?: number
+  approvalVersion?: number
 }
 
 /** Evaluate the full send gate. Fail-closed: every layer must pass. */
@@ -75,12 +83,20 @@ export function evaluateDispatch(db: Database.Database, req: DispatchRequest): D
   const rung = permits(db, req.caseType ?? 'UNKNOWN', 'SEND')
   if (!rung.allowed) reasons.push(`autonómia-fokozat: ${rung.reason}`)
 
+  // F-16: `now` is threaded through. authorizeSend defaults it to wall time, and
+  // the gate was letting it — so an approval's expiry was compared against the
+  // real clock while every other timestamp in the send came from the caller.
+  // Harmless while nothing ever set valid_until; the moment approvals got an
+  // expiry it made every fixture-time approval look expired.
   const auth = authorizeSend(db, {
     campaignId: req.campaignId, templateHash: req.templateHash,
     renderedPayloadHash: req.renderedPayloadHash, recipient: req.recipient,
-  })
+  }, req.now)
   if (!auth.authorized) reasons.push(`campaign not authorized: ${auth.reason}`)
 
   const routed = routeModelForSensitivity(tier, { strategy: req.routingStrategy ?? 'capability' })
-  return { allowed: reasons.length === 0, reasons, sensitivityTier: tier, recommendedProfile: routed.profile }
+  return {
+    allowed: reasons.length === 0, reasons, sensitivityTier: tier, recommendedProfile: routed.profile,
+    campaignVersion: auth.campaignVersion, approvalVersion: auth.approvalVersion,
+  }
 }

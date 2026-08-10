@@ -62,9 +62,44 @@ export function getHealth(db: Database.Database, connectorId: string): Connector
   return r ? toHealth(r) : undefined
 }
 
+/**
+ * F-10 / B.3: record that this connector's idempotency marker provably survives
+ * a send-and-read-back round trip. verifyMarkerPersistence produces the report;
+ * this is where the result stops being a printout and becomes state that
+ * something else consults.
+ */
+export function recordMarkerProof(
+  db: Database.Database, connectorId: string, report: { passed: boolean; detail: string }, now: number,
+): void {
+  const info = db.prepare(
+    `UPDATE connector_health SET marker_proof_at=@at, marker_proof_detail=@detail, updated_at=@now WHERE connector_id=@id`
+  ).run({ id: connectorId, at: report.passed ? now : null, detail: report.detail, now })
+  if (info.changes === 0) throw new Error(`connector not registered: ${connectorId}`)
+}
+
+/** Has a marker-persistence proof been recorded for this connector? */
+export function hasMarkerProof(db: Database.Database, connectorId: string): boolean {
+  const r = db.prepare(`SELECT marker_proof_at FROM connector_health WHERE connector_id=?`)
+    .get(connectorId) as { marker_proof_at: number | null } | undefined
+  return !!r?.marker_proof_at
+}
+
 /** Set the connector's capability mode (e.g. flip Gmail READ_ONLY → READ_WRITE
- *  when the consent lands, or DISABLED to fence it off). */
+ *  when the consent lands, or DISABLED to fence it off).
+ *
+ *  F-10 / B.3: "if the marker cannot be proven, EXECUTE mode may NOT be
+ *  activated." That was a sentence in the spec and a manual habit — the gate
+ *  function existed with no caller, so the rule lived in whoever remembered it.
+ *  Raising a connector TO a write mode now requires a recorded proof. Lowering
+ *  it, and every other transition, is untouched: a rule that made it harder to
+ *  DISABLE a misbehaving connector would be a worse rule than none. */
 export function setMode(db: Database.Database, connectorId: string, mode: ConnectorMode, now: number): void {
+  if (mode === 'READ_WRITE' && !hasMarkerProof(db, connectorId)) {
+    throw new Error(
+      `refusing to put "${connectorId}" in READ_WRITE: no marker-persistence proof on record (B.3). ` +
+      `Run verifyMarkerPersistence and recordMarkerProof first.`
+    )
+  }
   const info = db.prepare(`UPDATE connector_health SET mode=@mode, updated_at=@now WHERE connector_id=@id`).run({ id: connectorId, mode, now })
   if (info.changes === 0) throw new Error(`connector not registered: ${connectorId}`)
 }

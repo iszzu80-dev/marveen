@@ -2,8 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import {
   registerConnector, getHealth, setMode, recordSuccess, recordFailure, isUsable,
-  DEGRADED_THRESHOLD, DOWN_THRESHOLD,
-} from '../cos/connector-health.js'
+  DEGRADED_THRESHOLD, DOWN_THRESHOLD, recordMarkerProof } from '../cos/connector-health.js'
 
 // COS connector health matrix. Proves the degradation ladder and the fail-closed
 // preCheck gate (DOWN/DISABLED/unregistered → not usable; a write needs
@@ -46,11 +45,16 @@ describe('COS connector health', () => {
     registerConnector(db, 'gmail', 'email', 'READ_ONLY', 1000)
     expect(isUsable(db, 'gmail')).toBe(true)                 // UNKNOWN is usable (not yet failed)
     expect(isUsable(db, 'gmail', true)).toBe(false)          // write to READ_ONLY → no
+    // CHANGED 2026-08-10 (F-10 / B.3): raising a connector to READ_WRITE now
+    // requires a recorded marker-persistence proof. The proof is the fixture
+    // here; what the test is about is unchanged.
+    recordMarkerProof(db, 'gmail', { passed: true, detail: 'test fixture' }, 1001)
     setMode(db, 'gmail', 'READ_WRITE', 1001)
     expect(isUsable(db, 'gmail', true)).toBe(true)           // now a write is allowed
     setMode(db, 'gmail', 'DISABLED', 1002)
     expect(isUsable(db, 'gmail')).toBe(false)                // disabled → no
     // drive it DOWN and confirm not usable
+    recordMarkerProof(db, 'gmail', { passed: true, detail: 'test fixture' }, 1003)
     setMode(db, 'gmail', 'READ_WRITE', 1003)
     for (let i = 0; i < DOWN_THRESHOLD; i++) recordFailure(db, 'gmail', 'e', 1100 + i)
     expect(getHealth(db, 'gmail')!.status).toBe('DOWN')

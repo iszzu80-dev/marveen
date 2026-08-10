@@ -118,12 +118,26 @@ export function buildRawMessage(email: OutboundEmail, marker: string, from?: str
   return base64url(Buffer.from(`${headers}\r\n\r\n${body}`, 'utf8'))
 }
 
+/** Gmail's Sent index lags a just-sent message by roughly this long. It is the
+ *  poll interval AND the basis of the default readback wait — the two used to
+ *  disagree, with the loop sleeping 2000 ms and the default deadline being 0. */
+const READBACK_INDEXING_LAG_MS = 2000
+
 export interface GmailApiTransportOptions {
   credsPath?: string
   /** Override the sender address (default: the account's own address). */
   from?: string
   /** Max ms to keep polling readback for a just-sent message (Gmail indexes the
-   *  Message-ID with a short lag). 0 = single shot. */
+   *  Message-ID with a short lag). 0 = single shot.
+   *
+   *  F-11: the default used to be 0, which made a single-shot search the normal
+   *  case. The module's own poll loop sleeps 2000 ms because indexing takes
+   *  about that long, so a search fired immediately after a send finds nothing,
+   *  the already-passed deadline turns that into `{found:false, available:true}`
+   *  = "provably absent", and verifyAction reads that as RECOVERY_REQUIRED. A
+   *  perfectly successful send would land in a state that demands a human. The
+   *  default is now one indexing window plus margin; pass 0 explicitly to get
+   *  the old single shot. */
   readbackWaitMs?: number
   /** Per-call HTTP deadline for send + token refresh (ms). Defaults to the
    *  registered gmail-send tool timeout. An abort surfaces as a send error the
@@ -150,7 +164,10 @@ export class GmailApiTransport implements MailTransport {
   constructor(opts: GmailApiTransportOptions = {}) {
     this.credsPath = opts.credsPath ?? 'store/.google-private-creds.json'
     this.from = opts.from
-    this.readbackWaitMs = opts.readbackWaitMs ?? 0
+    // F-11: see the option's doc comment. Default = one indexing window + margin,
+    // not 0. A caller that genuinely wants a single shot passes 0 and gets it,
+    // because `??` only fills in an absent value.
+    this.readbackWaitMs = opts.readbackWaitMs ?? READBACK_INDEXING_LAG_MS * 3
     this.sendTimeoutMs = opts.sendTimeoutMs ?? TOOL_TIMEOUTS['gmail-send']
     this.readbackTimeoutMs = opts.readbackTimeoutMs ?? TOOL_TIMEOUTS['gmail-readback']
     this.embedBodyMarker = opts.embedBodyMarker ?? true
@@ -189,6 +206,24 @@ export class GmailApiTransport implements MailTransport {
     return { messageId: j.id }
   }
 
+  /** F-12: does this provider message id still exist? The evidence of last
+   *  resort when no searchable marker was embedded, which is the live path's
+   *  normal state. `available:false` on a transport/auth failure, never
+   *  found:false — "we could not ask" and "it is not there" must stay
+   *  distinguishable, or a healthy send gets resent. */
+  async getById(messageId: string): Promise<{ found: boolean; available?: boolean }> {
+    try {
+      const token = await this.accessToken(Date.now())
+      const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}?format=minimal`
+      const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(this.readbackTimeoutMs) })
+      if (r.status === 404) return { found: false, available: true } // asked, and it is genuinely gone
+      if (!r.ok) return { found: false, available: false }
+      return { found: true, available: true }
+    } catch {
+      return { found: false, available: false }
+    }
+  }
+
   /** Find a sent message by the marker → full-text search the body ref in Sent.
    *  `available` is false only when the search itself could not run (network/
    *  auth), so a transient failure is never misread as "the message is absent". */
@@ -213,7 +248,7 @@ export class GmailApiTransport implements MailTransport {
       } catch {
         return { found: false, available: false }
       }
-      await new Promise(res => setTimeout(res, 2000)) // indexing lag: brief poll
+      await new Promise(res => setTimeout(res, READBACK_INDEXING_LAG_MS)) // indexing lag: brief poll
     }
   }
 }

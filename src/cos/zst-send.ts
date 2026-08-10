@@ -19,8 +19,10 @@ import { sha256Hex } from './attachments.js'
 import { isUsable } from './connector-health.js'
 import { effectiveZstSensitivity, isProfileAllowedForZstSensitivity, coerceZstSensitivity } from './zst-sensitivity.js'
 import { makeExecutor, type OutboundAdapter, type OutboundAction, type ExecuteOpts } from './executor-core.js'
+import { zstApprovals } from './approval-core.js'
+import { permits } from './autonomy-ladder.js'
 
-const zstExecutor = makeExecutor('zst_outbound_ledger')
+const zstExecutor = makeExecutor('zst_outbound_ledger', 'zst_case_claims')
 
 export interface EmailDraft {
   to: string; subject: string; body: string
@@ -125,29 +127,37 @@ export function rejectZstSend(db: Database.Database, ledgerId: string, reason: s
   return zstExecutor.cancelAction(db, ledgerId, reason, now)
 }
 
-export interface ZstAuthorizeResult { authorized: boolean; reason: string | null }
-/** Is there an APPROVED approval for this exact template + rendered payload at the
- *  campaign's current version, whose allowed_recipients includes the recipient? */
+export interface ZstAuthorizeResult {
+  authorized: boolean
+  reason: string | null
+  campaignVersion?: number
+  approvalVersion?: number
+}
+/**
+ * F-9: delegates to the SHARED approval engine (zstApprovals), which is the one
+ * approval-core.ts was written for — its header says so in as many words: one
+ * implementation, two table sets, so the two namespaces cannot drift.
+ *
+ * This function used to reimplement a narrower check locally, and the list of
+ * what it left out is the point: valid_until (an approval that never expires),
+ * stop conditions (§3.4 could trip and this path would not notice), the channel
+ * check, the variable checks, and both quotas. `zstApprovals.authorizeSend`
+ * existed the whole time and nothing called it.
+ */
 export function authorizeZstSend(
   db: Database.Database,
-  args: { campaignId: string; templateHash: string; renderedPayloadHash: string; recipient: string },
+  args: { campaignId: string; templateHash: string; renderedPayloadHash: string; recipient: string; now?: number },
 ): ZstAuthorizeResult {
-  const camp = db.prepare(`SELECT version, status, allows_free_text FROM zst_campaigns WHERE campaign_id=?`)
-    .get(args.campaignId) as { version: number; status: string; allows_free_text: number } | undefined
-  if (!camp) return { authorized: false, reason: 'campaign not found' }
-  if (camp.status !== 'APPROVED') return { authorized: false, reason: `campaign status ${camp.status}` }
-  if (camp.allows_free_text) return { authorized: false, reason: 'free-text campaign cannot autonomously send' }
-  const appr = db.prepare(
-    `SELECT allowed_recipients FROM zst_campaign_approvals
-     WHERE campaign_id=@cid AND campaign_version=@ver AND template_hash=@th
-       AND rendered_payload_hash=@rh AND status='APPROVED' LIMIT 1`
-  ).get({ cid: args.campaignId, ver: camp.version, th: args.templateHash, rh: args.renderedPayloadHash }) as { allowed_recipients: string } | undefined
-  if (!appr) return { authorized: false, reason: 'no approval for this exact payload at the current version' }
-  const list = JSON.parse(appr.allowed_recipients) as string[]
-  if (!list.map(r => r.toLowerCase()).includes(args.recipient.toLowerCase())) {
-    return { authorized: false, reason: `recipient ${args.recipient} not in the approved list` }
+  const r = zstApprovals.authorizeSend(db, {
+    campaignId: args.campaignId, templateHash: args.templateHash,
+    renderedPayloadHash: args.renderedPayloadHash, recipient: args.recipient,
+    channel: 'EMAIL',
+  }, args.now ?? Math.floor(Date.now() / 1000))
+  return {
+    authorized: r.authorized,
+    reason: r.authorized ? null : r.reason,
+    campaignVersion: r.campaignVersion, approvalVersion: r.approvalVersion,
   }
-  return { authorized: true, reason: null }
 }
 
 export interface DispatchZstSendInput {
@@ -159,8 +169,23 @@ export interface DispatchZstSendInput {
   renderedPayloadHash: string
   declaredSensitivity?: unknown
   targetProfile: string
+  /** F-9 / §22: the case's own type, for the autonomy rung. Read from the store
+   *  by the caller for the same reason the personal gate reads it there — a
+   *  caller-asserted type would let the same path pick a more permissive rung. */
+  caseType?: string
+  /** F-9: evaluation time, so approval expiry is checked against the same clock
+   *  the rest of the send uses instead of wall time inside the gate. */
+  now?: number
+  /** F-2 / AC-21. */
+  runId?: string
 }
-export interface ZstDispatchDecision { allowed: boolean; reasons: string[]; sensitivityTier: string }
+export interface ZstDispatchDecision {
+  allowed: boolean
+  reasons: string[]
+  sensitivityTier: string
+  campaignVersion?: number
+  approvalVersion?: number
+}
 
 /** Evaluate the full ZST send gate. Fail-closed: every layer must pass. */
 export function evaluateZstSendGate(db: Database.Database, req: DispatchZstSendInput): ZstDispatchDecision {
@@ -175,13 +200,23 @@ export function evaluateZstSendGate(db: Database.Database, req: DispatchZstSendI
     reasons.push(`profile "${req.targetProfile}" not allowed for ZST sensitivity ${tier}`)
   }
 
+  // F-9: the autonomy ladder. The personal gate has checked it since §22
+  // (dispatch-gate.ts); the corporate one never did, so a case type sitting at
+  // PREPARE could still send on this path. Checked alongside the others, never
+  // instead of them.
+  const rung = permits(db, req.caseType ?? 'UNKNOWN', 'SEND')
+  if (!rung.allowed) reasons.push(`autonómia-fokozat: ${rung.reason}`)
+
   const auth = authorizeZstSend(db, {
     campaignId: req.campaignId, templateHash: req.templateHash,
-    renderedPayloadHash: req.renderedPayloadHash, recipient: req.email.to,
+    renderedPayloadHash: req.renderedPayloadHash, recipient: req.email.to, now: req.now,
   })
   if (!auth.authorized) reasons.push(`not authorized: ${auth.reason}`)
 
-  return { allowed: reasons.length === 0, reasons, sensitivityTier: tier }
+  return {
+    allowed: reasons.length === 0, reasons, sensitivityTier: tier,
+    campaignVersion: auth.campaignVersion, approvalVersion: auth.approvalVersion,
+  }
 }
 
 export interface DispatchZstSendResult { sent: boolean; decision: ZstDispatchDecision; action?: OutboundAction }
@@ -190,8 +225,19 @@ export interface DispatchZstSendResult { sent: boolean; decision: ZstDispatchDec
 export async function dispatchZstSend(
   db: Database.Database, adapter: OutboundAdapter, input: DispatchZstSendInput, now: number, opts: ExecuteOpts = {},
 ): Promise<DispatchZstSendResult> {
-  const decision = evaluateZstSendGate(db, input)
+  const decision = evaluateZstSendGate(db, { ...input, now: input.now ?? now })
   if (!decision.allowed) return { sent: false, decision }
-  const action = await zstExecutor.executeAction(db, adapter, input.ledgerId, now, opts)
+  // F-7: the gate ran and allowed it on the line above. F-2: the versions come
+  // from that same evaluation, not from a fresh read that could have moved.
+  const action = await zstExecutor.executeAction(db, adapter, input.ledgerId, now, {
+    ...opts,
+    authorizedByDispatchGate: true,
+    audit: {
+      ...opts.audit,
+      runId: opts.audit?.runId ?? input.runId,
+      campaignVersion: decision.campaignVersion ?? null,
+      approvalVersion: decision.approvalVersion ?? null,
+    },
+  })
   return { sent: action.status === 'VERIFIED' || action.status === 'APPLIED_UNVERIFIED', decision, action }
 }

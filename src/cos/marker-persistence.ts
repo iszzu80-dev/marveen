@@ -78,10 +78,20 @@ export async function verifyMarkerPersistence(
   const readbackAvailable = rb.available !== false
   const readbackFound = rb.found === true
   const refMatches = rb.externalRef != null && sentRef != null && rb.externalRef === sentRef
-  const passed = !!sentRef && readbackAvailable && readbackFound
+  // F-10: refMatches is part of `passed`. B.3's third condition is that the
+  // provider id read back is the id we were given on send; it used to be
+  // computed, printed into the detail string ("id not compared") and then left
+  // out of the verdict. A check that only appears in prose is a report, not a
+  // gate — and the point of this whole module is to be a gate.
+  //
+  // An adapter whose readback does not return an id at all cannot satisfy the
+  // condition, and that is the intended answer: it has not PROVEN persistence,
+  // so it stays in PREPARE. Failing closed here costs a manual mode flip;
+  // failing open costs a send nobody can verify.
+  const passed = !!sentRef && readbackAvailable && readbackFound && refMatches
   const detail = passed
-    ? `marker round-trips (sent ${sentRef}, read back ${rb.externalRef ?? '?'}${refMatches ? ', ids match' : ', id not compared'})`
-    : `sent=${!!sentRef} available=${readbackAvailable} found=${readbackFound}`
+    ? `marker round-trips (sent ${sentRef}, read back ${rb.externalRef ?? '?'}, ids match)`
+    : `sent=${!!sentRef} available=${readbackAvailable} found=${readbackFound} idsMatch=${refMatches}`
   return { passed, sent: !!sentRef, readbackFound, readbackAvailable, refMatches, detail }
 }
 

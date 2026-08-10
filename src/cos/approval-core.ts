@@ -89,6 +89,12 @@ export interface SendAuthResult {
   /** Machine-readable refusal, one of REFUSAL_CODES. 'ok' when authorized. */
   code: string
   reason: string
+  /** F-2 / AC-21: present only when authorized — the versions and approval this
+   *  authorisation was granted at, for the ledger row. Read here rather than
+   *  recomputed at the call site, where a second read could disagree. */
+  campaignVersion?: number
+  approvalVersion?: number
+  approvalId?: string
 }
 
 export const REFUSAL_CODES = [
@@ -214,9 +220,17 @@ export function makeApprovalEngine(T: ApprovalTables) {
   /** Count what this campaign has already sent, for the quota checks. */
   function outboundCount(db: Database.Database, campaignId: string, kind?: string): number {
     try {
+      // F-16: PLANNED is excluded. It used to be counted, which meant the row
+      // being authorised RIGHT NOW counted against its own ceiling — so
+      // maxTotalOutbound:1 refused the first send with "1/1 exhausted" and no
+      // campaign with a ceiling could ever send anything. Invisible until F-16
+      // started writing the field: a limit nothing sets is a limit nothing
+      // tests. A draft is not outbound traffic; everything from SENDING onward
+      // is, because it either went out or may have.
+      const LIVE = `status NOT IN ('CANCELLED','FAILED_TERMINAL','PLANNED')`
       const sql = kind
-        ? `SELECT COUNT(*) AS n FROM ${T.ledger} WHERE campaign_id=? AND outbound_kind=? AND status NOT IN ('CANCELLED','FAILED_TERMINAL')`
-        : `SELECT COUNT(*) AS n FROM ${T.ledger} WHERE campaign_id=? AND status NOT IN ('CANCELLED','FAILED_TERMINAL')`
+        ? `SELECT COUNT(*) AS n FROM ${T.ledger} WHERE campaign_id=? AND outbound_kind=? AND ${LIVE}`
+        : `SELECT COUNT(*) AS n FROM ${T.ledger} WHERE campaign_id=? AND ${LIVE}`
       const row = kind
         ? db.prepare(sql).get(campaignId, kind) as { n: number }
         : db.prepare(sql).get(campaignId) as { n: number }
@@ -323,7 +337,14 @@ export function makeApprovalEngine(T: ApprovalTables) {
       }
     }
 
-    return { authorized: true, code: 'ok', reason: 'ok' }
+    // F-2 / AC-21: hand back the versions this authorisation was granted at, so
+    // the caller can record them on the ledger row. Recomputing them at the
+    // call site would be a second read that could disagree with this one.
+    return {
+      authorized: true, code: 'ok', reason: 'ok',
+      campaignVersion: c.version, approvalVersion: appr.campaign_version,
+      approvalId: appr.approval_id,
+    }
   }
 
   return { getCampaign, recordApproval, tripStopCondition, authorizeSend, tables: T }

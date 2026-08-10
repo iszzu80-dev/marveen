@@ -28,7 +28,7 @@
 // watches for.
 
 import type Database from 'better-sqlite3'
-import { sourceCommit, tryAdvanceCheckpoint, isBatchTerminal } from './email-ingest.js'
+import { sourceCommit, sourceCommitSkipped, tryAdvanceCheckpoint, isBatchTerminal } from './email-ingest.js'
 import { quarantineBatchPoison, type QuarantineDeps } from './poison-quarantine.js'
 
 export type CommitOutcome = 'COMMITTED' | 'SKIPPED_NO_CAPABILITY' | 'FAILED'
@@ -130,14 +130,23 @@ export async function closeBatch(
       skipped += 1
       skipReason = res.reason
       if (opts.allowCursorAdvanceWithoutSourceWrite) {
-        // Audited policy exception: the message is terminal on the local side and
-        // its source reference is kept, so the cursor may pass. The reason is
-        // written to the row, so nothing about this is silent.
-        sourceCommit(db, r.gmail_account_id, r.message_id, now)
-        db.prepare(
-          `UPDATE email_processing SET last_error = @why, updated_at = @now
-           WHERE gmail_account_id = @acc AND message_id = @mid`
-        ).run({ why: `source-commit kihagyva: ${res.reason}`, now, acc: r.gmail_account_id, mid: r.message_id })
+        // F-8. Audited policy exception: the message is terminal on the local
+        // side and its source reference is kept, so the cursor may pass. Two
+        // things changed here.
+        //
+        // 1. The state. This used to write SOURCE_COMMITTED — §6.3's terminal
+        //    SUCCESS — for a message that was never marked at the source, with
+        //    the truth demoted to last_error. Every later query inherited the
+        //    lie. SOURCE_COMMIT_SKIPPED is terminal too, so the cursor still
+        //    passes, and it says what happened.
+        // 2. A.1 lists five conditions for letting a batch past an item it could
+        //    not fully process; two of them (critical alert, human review task)
+        //    were wired only to the quarantine branch. An exception nobody is
+        //    told about is indistinguishable from a bug, so this branch raises
+        //    them too when the deps are present.
+        sourceCommitSkipped(db, r.gmail_account_id, r.message_id, `source-commit kihagyva: ${res.reason}`, now)
+        opts.quarantine?.raiseAlert(r.gmail_account_id, r.message_id, `source-commit skipped: ${res.reason}`)
+        opts.quarantine?.createReviewTask(r.gmail_account_id, r.message_id, `source-commit skipped: ${res.reason}`)
         committed += 1
       }
     } else {

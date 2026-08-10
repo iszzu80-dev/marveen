@@ -119,3 +119,28 @@ sem hazugság, de együtt nem alkotnak történetet, és a legfontosabb kapcsol�
   (`~/.claude/scheduled-tasks/`) továbbra is a scheduler olvassa; a
   szinkronban tartás megoldatlan, és ezt jobb kimondani, mint úgy tenni,
   mintha az egyirányú másolás megoldás lenne.
+
+### 18:47 — az értelmező DeepSeek-en fut (a 18:33-as blokk lezárása)
+- **Mit:** `resolveInterpreter()` a DeepSeek Anthropic-kompatibilis végpontjára,
+  `deepseek-v4-flash`. Nem második kliens, csak végpont + modell.
+- **Miért:** Istvan döntése, miután kiderült, hogy Anthropic-kulcs sehol nincs
+  a környezetben és a vaultban sincs (nyolc bejegyzés, egyik sem az).
+- **Miért nem második kliens:** egy második kliens egy második hely lenne, ahol
+  a prompt-injekció elleni védelem elfelejtődhet.
+
+### 19:15 — az értelmező MAGYARUL ír (nyelvi drift javítva)
+- **Mit:** `INTERPRETER_SYSTEM_PROMPT` 5. szabály: a title, summary és goal
+  MIND magyar, függetlenül a levél nyelvétől. Commit `5789422`.
+- **Miért:** a régi 4. szabály azt mondta, „a felhasználó nyelvén", és a
+  másik két mezőről nem mondott semmit. Az első 16 éles értelmezésből 3 angolul
+  jött vissza, ebből kettő MAGYAR nyelvű forráslevélből. Ez a három mező az,
+  amit Istvan a Mission Controlon olvas.
+- **Operatív írás az ÉLŐ store-ba:** a három angol sor `summary` mezőjét
+  NULL-ra állítottam, mert az őr a „van már summary" — enélkül örökre angolul
+  maradtak volna (minden ügy életében EGYSZER kerül értelmezésre). A három sor
+  mentése a repón kívülre készült, a művelet előtt.
+- **Bizonyíték:** újrafuttatás után mind a három magyar, és az ugyanabban a
+  ciklusban frissen értelmezett kettő is. Prompt-változást unit teszt nem tud
+  bizonyítani; ez a bizonyíték, nem a 77 zöld teszt.
+- **Visszacsinálás:** `git revert 5789422`. A már magyarul megírt sorok
+  visszaállítása nem automatikus — újra kellene NULL-ozni a summary mezőt.

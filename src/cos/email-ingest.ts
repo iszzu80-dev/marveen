@@ -16,12 +16,18 @@ import type Database from 'better-sqlite3'
 
 export type MessageStatus =
   | 'DISCOVERED' | 'CLAIMED' | 'LOCAL_APPLIED' | 'SOURCE_COMMITTED'
+  | 'SOURCE_COMMIT_SKIPPED'
   | 'RECOVERY_REQUIRED' | 'EXCLUDED' | 'DUPLICATE' | 'QUARANTINED'
 
 /** A message is terminal (done, one way or another) in these states. The batch
- *  is terminal iff every message is terminal — only then does the cursor move. */
+ *  is terminal iff every message is terminal — only then does the cursor move.
+ *
+ *  F-8: SOURCE_COMMIT_SKIPPED is terminal — that is the whole point of the
+ *  policy exception, the cursor has to be able to pass. What it is NOT is
+ *  SOURCE_COMMITTED, so a query asking "which messages did we actually mark at
+ *  the source" can now be answered truthfully. */
 export const TERMINAL_MESSAGE_STATUSES: ReadonlySet<MessageStatus> = new Set<MessageStatus>([
-  'SOURCE_COMMITTED', 'EXCLUDED', 'DUPLICATE', 'QUARANTINED',
+  'SOURCE_COMMITTED', 'SOURCE_COMMIT_SKIPPED', 'EXCLUDED', 'DUPLICATE', 'QUARANTINED',
 ])
 
 export interface OpenBatchInput {
@@ -78,6 +84,13 @@ export function setMessageStatus(
 export const claimMessage = (db: Database.Database, a: string, m: string, now: number) => setMessageStatus(db, a, m, 'CLAIMED', {}, now)
 export const localApply = (db: Database.Database, a: string, m: string, caseId: string, now: number) => setMessageStatus(db, a, m, 'LOCAL_APPLIED', { caseId }, now)
 export const sourceCommit = (db: Database.Database, a: string, m: string, now: number) => setMessageStatus(db, a, m, 'SOURCE_COMMITTED', {}, now)
+/** F-8 / §6.3: terminal, but NOT the success terminal. The message is done on
+ *  our side and was deliberately let past WITHOUT being marked at the source.
+ *  It used to be written as SOURCE_COMMITTED with the truth in last_error — a
+ *  state name that claims the opposite of what happened, which every later query
+ *  then inherits. */
+export const sourceCommitSkipped = (db: Database.Database, a: string, m: string, reason: string, now: number) =>
+  setMessageStatus(db, a, m, 'SOURCE_COMMIT_SKIPPED', { lastError: reason }, now)
 export const excludeMessage = (db: Database.Database, a: string, m: string, now: number) => setMessageStatus(db, a, m, 'EXCLUDED', {}, now)
 export const markDuplicate = (db: Database.Database, a: string, m: string, now: number) => setMessageStatus(db, a, m, 'DUPLICATE', {}, now)
 export const markRecoveryRequired = (db: Database.Database, a: string, m: string, err: string, now: number) => setMessageStatus(db, a, m, 'RECOVERY_REQUIRED', { lastError: err, attemptDelta: 1 }, now)
