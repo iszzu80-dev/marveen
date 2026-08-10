@@ -74,6 +74,36 @@ const LEDGER_SHARED_COLUMNS: Record<string, string> = {
  * whatever collides, which is the failure mode where a migration reports success
  * and takes rows with it.
  */
+// F-9: hoisted to module scope. It was a `const` inside one init
+// function while the ZST approvals table is created by another — which is how
+// the ZST half of the envelope came to have no columns at all.
+const APPROVAL_ENVELOPE: Record<string, string> = {
+  allowed_recipients:       'TEXT',      // JSON array — no list means no authority
+  allowed_channels:         'TEXT',
+  template_id:              'TEXT',
+  template_version:         'INTEGER',
+  allowed_variable_schema:  'TEXT',
+  allowed_variable_sources: 'TEXT',
+  forbidden_variables:      'TEXT',
+  shareable_data:           'TEXT',
+  quote_target_budget:      'REAL',
+  quote_hard_limit:         'REAL',
+  autonomous_spend_limit:   'REAL NOT NULL DEFAULT 0',   // §3.2 invariant, never non-zero
+  currency:                 'TEXT',
+  max_initial_outbound:     'INTEGER',
+  max_follow_up_outbound:   'INTEGER',
+  max_autonomous_replies:   'INTEGER',
+  max_total_outbound:       'INTEGER',
+  follow_up_policy:         'TEXT',
+  allowed_reply_classes:    'TEXT',
+  allowed_attachment_types: 'TEXT',
+  stop_conditions:          'TEXT',
+  escalation_conditions:    'TEXT',
+  final_gate:               "TEXT NOT NULL DEFAULT 'NONE'",
+  valid_until:              'INTEGER',
+  stopped_reason:           'TEXT',      // §3.4 — set when a stop condition trips
+}
+
 function widenCheckConstraint(db: Database.Database, table: string, probeValue: string, createSql: string): void {
   const already = db.transaction((): boolean => {
     try {
@@ -540,36 +570,12 @@ export function initCosSchema(db: Database.Database): void {
   // already drifted (ZST had allowed_recipients, personal did not), which meant
   // AC-4 was enforced for the company mailbox and absent for the personal one.
   // See approval-core.ts.
-  const APPROVAL_ENVELOPE: Record<string, string> = {
-    allowed_recipients:       'TEXT',      // JSON array — no list means no authority
-    allowed_channels:         'TEXT',
-    template_id:              'TEXT',
-    template_version:         'INTEGER',
-    allowed_variable_schema:  'TEXT',
-    allowed_variable_sources: 'TEXT',
-    forbidden_variables:      'TEXT',
-    shareable_data:           'TEXT',
-    quote_target_budget:      'REAL',
-    quote_hard_limit:         'REAL',
-    autonomous_spend_limit:   'REAL NOT NULL DEFAULT 0',   // §3.2 invariant, never non-zero
-    currency:                 'TEXT',
-    max_initial_outbound:     'INTEGER',
-    max_follow_up_outbound:   'INTEGER',
-    max_autonomous_replies:   'INTEGER',
-    max_total_outbound:       'INTEGER',
-    follow_up_policy:         'TEXT',
-    allowed_reply_classes:    'TEXT',
-    allowed_attachment_types: 'TEXT',
-    stop_conditions:          'TEXT',
-    escalation_conditions:    'TEXT',
-    final_gate:               "TEXT NOT NULL DEFAULT 'NONE'",
-    valid_until:              'INTEGER',
-    stopped_reason:           'TEXT',      // §3.4 — set when a stop condition trips
-  }
   ensureColumns(db, 'campaign_approvals', APPROVAL_ENVELOPE)
-  if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='zst_campaign_approvals'").get()) {
-    ensureColumns(db, 'zst_campaign_approvals', APPROVAL_ENVELOPE)
-  }
+  // The ZST approvals table is created LATER, in initZstSendSchema — the same
+  // trap the ZST ledger was in (see ZST_LEDGER_COLUMNS_AFTER_CREATE). Guarded on
+  // "if the table exists", this was a no-op on every fresh database, so the ZST
+  // approval envelope (valid_until, stop conditions, quotas) simply had no
+  // columns to live in. Moved to ZST_APPROVAL_ENVELOPE_AFTER_CREATE below.
 
   // The ledger needs to say WHICH campaign and WHICH kind of send it was, or the
   // per-kind and total quotas above have nothing to count.
@@ -1087,6 +1093,10 @@ export function initZstSendSchema(db: Database.Database): void {
 // match suggestions. NO payment initiation, NO bank write (spec §16.4/§18.1);
 // the accounting-package SEND is the write-executor half (write-scope gated).
 export function initZstFinanceSchema(db: Database.Database): void {
+  // ZST_APPROVAL_ENVELOPE_AFTER_CREATE — the table exists by now. One approval
+  // engine serves both namespaces (F-9), so the envelope must exist on both.
+  ensureColumns(db, 'zst_campaign_approvals', APPROVAL_ENVELOPE)
+
   db.exec(`
     CREATE TABLE IF NOT EXISTS zst_invoices (
       invoice_id           TEXT PRIMARY KEY,
