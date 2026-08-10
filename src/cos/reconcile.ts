@@ -348,6 +348,88 @@ const sourceWritePolicyActive: Check = (db) => {
   }
 }
 
+// --- corporate (ZST) surface -------------------------------------------------
+//
+// Until 2026-08-10 every check above looked only at the personal tables: the
+// word `zst` appeared nowhere in this file. That is why 27 frozen corporate
+// cases stayed invisible for a full day — not because the state was hard to
+// see, but because nothing looked. A monitor that does not cover a surface
+// cannot report on it, and its silence reads exactly like health.
+//
+// These mirror the personal checks over the zst_ tables. They are deliberately
+// separate functions rather than a parameterized sweep: the corporate side has
+// its own severities (a stuck corporate send is real company email) and will
+// grow checks the personal side does not need.
+
+/** The freeze detector. Runtime twin of the zst-acceptance ZE-2 criterion.
+ *  A case whose STATUS says alive and whose progression_enabled says done is
+ *  the worst of both: the board shows work in flight, the engine never looks
+ *  at it again, and no existing check reads the two fields together. */
+const zstFrozenCases: Check = (db) => {
+  let rows: Array<{ status: string; n: number; last_change: number }> = []
+  try {
+    rows = db.prepare(
+      `SELECT z.status AS status, COUNT(*) AS n, MAX(s.updated_at) AS last_change
+       FROM zst_cases z
+       JOIN case_progression_state s ON s.case_id = z.case_id AND s.domain = 'zst'
+       WHERE s.progression_enabled = 0
+         AND z.status NOT IN ('COMPLETED','CANCELLED','ARCHIVED')
+       GROUP BY z.status ORDER BY COUNT(*) DESC`
+    ).all() as never
+  } catch { return null }
+  if (!rows.length) return null
+  const total = rows.reduce((a, r) => a + r.n, 0)
+  const when = new Date(Math.max(...rows.map(r => r.last_change)) * 1000).toISOString()
+  return {
+    id: 'zst_cases_frozen', severity: 'CRITICAL', ref: '§19, incidens 2026-08-09',
+    title: 'Céges ügyek élőnek látszanak, de a haladás-motor ki van rájuk kapcsolva',
+    detail: `${total} ügy (${rows.map(r => `${r.status}: ${r.n}`).join(', ')}), utolsó kapcsoló-változás ${when}`,
+    action: 'A táblán aktívnak látszanak, a motor viszont soha nem nézi meg őket. '
+      + 'Ne tömegesen kapcsold vissza: előbb kettőt, egy ciklust várj, és nézd meg a case_progression_runs döntését.',
+  }
+}
+
+/** A corporate send stuck mid-flight. Same shape as stuckSending, different
+ *  ledger — and higher stakes, because this one is real company email. */
+const zstStuckSending: Check = (db, now) => {
+  const n = count(db,
+    `SELECT COUNT(*) AS n FROM zst_outbound_ledger WHERE status='SENDING' AND sending_at < ?`,
+    now - 3600)
+  if (n === null) return null
+  if (n === 0) return null
+  return {
+    id: 'zst_outbound_stuck_sending', severity: 'CRITICAL', ref: '§7, §19',
+    title: 'Céges kimenő tétel egy óránál régebben SENDING állapotban áll',
+    detail: `${n} tétel a zst_outbound_ledger-ben`,
+    action: 'Kézzel kell eldönteni, kiment-e. Ne indítsd újra vakon: valódi céges levélről van szó.',
+  }
+}
+
+/** A corporate claim left behind by a crashed run blocks that case forever. */
+const zstStaleClaims: Check = (db, now) => {
+  const n = count(db, `SELECT COUNT(*) AS n FROM zst_case_claims WHERE claim_expires_at < ?`, now)
+  if (n === null || n === 0) return null
+  return {
+    id: 'zst_stale_claims', severity: 'WARNING', ref: '§9',
+    title: 'Lejárt céges claim maradt a táblában',
+    detail: `${n} lejárt claim`,
+    action: 'Egy bent felejtett claim megakadályozza, hogy a motor hozzányúljon az ügyhöz. Nézd meg, melyik futás hasalt el.',
+  }
+}
+
+/** The corporate intake's §8 invariant, measured where it can actually fail. */
+const zstMessagesWithoutThread: Check = (db) => {
+  const n = count(db,
+    `SELECT COUNT(*) AS n FROM zst_email_processing WHERE thread_id IS NULL OR thread_id = ''`)
+  if (n === null || n === 0) return null
+  return {
+    id: 'zst_message_without_thread', severity: 'WARNING', ref: '§8',
+    title: 'Céges üzenet szálazonosító nélkül',
+    detail: `${n} sor a zst_email_processing-ben`,
+    action: 'A szálazonosító nélküli üzenet nem köthető levelezéshez, tehát utánkövetés sem fogalmazható rá.',
+  }
+}
+
 export const CHECKS: Check[] = [
   stuckLocalApplied, openBatches, missingCheckpoint,
   outboundNeedsHuman, outcomeUnknown, stuckSending,
@@ -355,6 +437,8 @@ export const CHECKS: Check[] = [
   // §19 further minimum + critical alerts
   duplicateSendAttempt, failedReadback, stalledCampaign, expiredApproval,
   repeatedFollowUp, radarCheckFailing, cursorBatchMismatch, sourceWritePolicyActive,
+  // corporate surface (2026-08-10)
+  zstFrozenCases, zstStuckSending, zstStaleClaims, zstMessagesWithoutThread,
 ]
 
 /** Run every check. Order of findings: CRITICAL first — a report that buries the

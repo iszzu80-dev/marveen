@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import { createCase } from '../cos/case-store.js'
+import { createZstCase } from '../cos/zst-case-store.js'
 import { openBatch, localApply, sourceCommit } from '../cos/email-ingest.js'
 import { registerConnector, recordFailure, DOWN_THRESHOLD } from '../cos/connector-health.js'
 import { runDailyReconcile, formatReconcileReport, CHECKS, type Finding } from '../cos/reconcile.js'
@@ -228,7 +229,84 @@ describe('COS daily reconcile', () => {
     })
   })
 
+  // The corporate surface. Added 2026-08-10 after the reconcile was found to
+  // contain zero `zst` references, which is how 27 frozen corporate cases stayed
+  // invisible for a day. Each test drives the state in, asserts the complaint,
+  // then removes the state and asserts the silence — a check that cannot be made
+  // to go both ways is not evidence of anything.
+  describe('corporate (ZST) surface', () => {
+    function frozenZstCase(caseId: string, status = 'NEW', enabled = 0): void {
+      const db = getDb()
+      createZstCase(db, { caseId, title: 'Céges ügy', caseType: 'ADMIN' }, NOW - 2 * DAY)
+      if (status !== 'NEW') {
+        db.prepare(`UPDATE zst_cases SET status = ? WHERE case_id = ?`).run(status, caseId)
+      }
+      db.prepare(
+        `INSERT INTO case_progression_state (domain, case_id, progression_enabled, progression_mode, created_at, updated_at)
+         VALUES ('zst', ?, ?, 'internal', ?, ?)`
+      ).run(caseId, enabled, NOW - 2 * DAY, NOW - DAY)
+    }
+
+    it('reproduces 2026-08-09: status says alive, the engine flag says done', () => {
+      const db = getDb()
+      frozenZstCase('z1')
+      frozenZstCase('z2')
+      const f = runDailyReconcile(db, NOW).findings.find((x) => x.id === 'zst_cases_frozen')
+      expect(f?.severity).toBe('CRITICAL')
+      expect(f?.detail).toContain('2 ügy')
+      // and the action must warn against the mass re-enable that caused the incident
+      expect(f?.action).toMatch(/ne tömegesen/i)
+
+      // re-enabling clears it — the check follows the state, it is not a constant
+      db.prepare(`UPDATE case_progression_state SET progression_enabled = 1 WHERE domain='zst'`).run()
+      expect(ids(runDailyReconcile(db, NOW).findings)).not.toContain('zst_cases_frozen')
+    })
+
+    it('does NOT complain about a closed corporate case with the flag off', () => {
+      // Turning the flag off on COMPLETE is the engine working correctly. An
+      // alarm that fires on correct behaviour trains people to ignore it.
+      const db = getDb()
+      frozenZstCase('z3', 'COMPLETED', 0)
+      expect(ids(runDailyReconcile(db, NOW).findings)).not.toContain('zst_cases_frozen')
+    })
+
+    it('spots a corporate send stuck in SENDING, and stays quiet on a fresh one', () => {
+      const db = getDb()
+      const put = (id: string, sendingAt: number): void => {
+        db.prepare(
+          `INSERT INTO zst_outbound_ledger
+             (ledger_id, case_id, action_type, sequence_number, internal_idempotency_key,
+              status, sending_at, created_at, updated_at)
+           VALUES (?, NULL, 'EMAIL', 1, ?, 'SENDING', ?, ?, ?)`
+        ).run(id, `k-${id}`, sendingAt, NOW - 2 * DAY, NOW - 2 * DAY)
+      }
+      put('L-fresh', NOW - 60)
+      expect(ids(runDailyReconcile(db, NOW).findings)).not.toContain('zst_outbound_stuck_sending')
+      put('L-stuck', NOW - 4 * 3600)
+      const f = runDailyReconcile(db, NOW).findings.find((x) => x.id === 'zst_outbound_stuck_sending')
+      expect(f?.severity).toBe('CRITICAL')
+    })
+
+    it('spots an expired corporate claim left behind by a crashed run', () => {
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO zst_case_claims (claim_key, owner_run_id, claim_fence, claimed_at, claim_expires_at)
+         VALUES ('z9','run-dead',1,?,?)`
+      ).run(NOW - 2 * DAY, NOW - DAY)
+      expect(ids(runDailyReconcile(db, NOW).findings)).toContain('zst_stale_claims')
+    })
+
+    it('spots a corporate message with no thread id', () => {
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO zst_email_processing (gmail_account_id, message_id, thread_id, status, created_at)
+         VALUES ('zst','m-nothread',NULL,'LOCAL_APPLIED',?)`
+      ).run(NOW - DAY)
+      expect(ids(runDailyReconcile(db, NOW).findings)).toContain('zst_message_without_thread')
+    })
+  })
+
   it('ships more than a token number of checks', () => {
-    expect(CHECKS.length).toBeGreaterThanOrEqual(17)
+    expect(CHECKS.length).toBeGreaterThanOrEqual(21)
   })
 })

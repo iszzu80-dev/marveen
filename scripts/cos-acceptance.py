@@ -67,8 +67,20 @@ def table_sql(table):
 
 # --- source search -----------------------------------------------------------
 
+# The gates themselves are the measuring instrument, not production code. They
+# name every symbol they check, so leaving them in the search makes a gate report
+# its own prose as a call site. 2026-08-10: the new zst-acceptance.py did exactly
+# that on its first run — ZO-1 went green citing zst-acceptance.py as the caller
+# of dispatchZstSend, which nothing calls. The personal gate had the same latent
+# hole (it appeared in its own OU-3 and LV-2 evidence); there real callers hid it.
+# Excluded at the search helper, not at one criterion, so no future check can
+# reintroduce it.
+INSTRUMENT_FILES = {"cos-acceptance.py", "zst-acceptance.py"}
+
+
 def prod_files(pattern, subdir="cos"):
-    """Files under src/<subdir> containing `pattern`, excluding tests.
+    """Files under src/<subdir> containing `pattern`, excluding tests and the
+    acceptance gates themselves.
     subdir="scripts" searches the runner directory: a scheduled task's entry
     point IS production, and treating it as not-production was the sixth
     wrong-thing-measured of the night (LV-3 could not see the follow-up sweep
@@ -84,7 +96,8 @@ def prod_files(pattern, subdir="cos"):
         ).stdout
     except Exception:
         return None
-    return [p for p in out.split() if "__tests__" not in p]
+    return [p for p in out.split()
+            if "__tests__" not in p and os.path.basename(p) not in INSTRUMENT_FILES]
 
 
 # A search shape that MUST find something. If it does not, the search itself is
