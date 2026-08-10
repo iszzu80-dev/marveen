@@ -129,16 +129,45 @@ def _zi1():
     return (PASS if nulls == 0 else FAIL), "%d/%d sor szálazonosító nélkül" % (nulls, total)
 
 
-@crit("ZI-2", "intake", "v4.2.1 A.3", "a ZST feldolgozási napló egyedi kulcsa tartalmazza a thread_id-t")
+@crit("ZI-2", "intake", "v4.2.1 A.3", "egy üzenet fizikailag sem kerülhet kétszer a feldolgozási naplóba")
 def _zi2():
-    """The personal side satisfies this (IN-1). The corporate table was created
-    with UNIQUE(gmail_account_id, message_id) only — same rule, weaker key."""
+    """CORRECTED 2026-08-10. The criterion used to require that the corporate
+    UNIQUE key CONTAIN thread_id, because the personal one does, and reported the
+    difference as a gap.
+
+    Measured, it is the opposite. A.3's stated purpose is that two near-
+    simultaneous runs cannot physically write two rows for the same message. The
+    corporate key UNIQUE(gmail_account_id, message_id) enforces exactly that.
+    Adding thread_id WEAKENS it: the same message becomes insertable twice under
+    two thread ids. So the criterion was demanding symmetry toward the weaker
+    key and calling the stricter table the defect.
+
+    And there is a real hole, on the side that looked green. In SQLite every
+    NULL is distinct inside a UNIQUE constraint, so
+    UNIQUE(gmail_account_id, thread_id, message_id) stops deduplicating the
+    moment thread_id is NULL — which is the state of one live personal row right
+    now, the same row IN-2 already flags. The weaker key and the missing thread
+    id are the same defect seen twice. Card 567853a1 carries it.
+
+    What this now measures is the invariant rather than the column list: can the
+    store hold the same message twice? A key over account+message is enough; a
+    key that also spans thread_id is only enough if thread_id can never be
+    NULL."""
     sql = table_sql("zst_email_processing")
     if not sql:
         return ERROR, "nincs zst_email_processing tábla"
     uniques = [l.strip() for l in sql.splitlines() if "UNIQUE" in l]
-    ok = any("thread_id" in u for u in uniques)
-    return (PASS if ok else FAIL), "; ".join(uniques) or "nincs UNIQUE"
+    if not uniques:
+        return FAIL, "nincs UNIQUE constraint: ugyanaz az üzenet kétszer is bekerülhet"
+    strict = [u for u in uniques
+              if "message_id" in u and "gmail_account_id" in u and "thread_id" not in u]
+    if strict:
+        return PASS, "%s — szigorúbb mint a személyes kulcs, egy üzenet nem duplikálható" % strict[0]
+    # A key spanning thread_id only dedupes while thread_id is never NULL.
+    nulls = one("SELECT COUNT(*) FROM zst_email_processing WHERE thread_id IS NULL OR thread_id = ''")
+    if nulls:
+        return FAIL, "a kulcs thread_id-t is átfog, de %d sor szálazonosító nélkül áll — azokra a kulcs nem véd" % nulls
+    return PASS, "%s; nulla NULL szálazonosító" % "; ".join(uniques)
 
 
 @crit("ZI-3", "intake", "§4", "a ZST beérkezésnek van éles hívója")
