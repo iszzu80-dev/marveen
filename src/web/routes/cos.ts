@@ -296,7 +296,10 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
   // recipients. Only approve dispatches, and only through the gate.
 
   if (path === '/api/cos/zst-outbound/draft' && method === 'POST') {
-    let b: { caseId?: string; templateId?: string; to?: string; subject?: string; body?: string; campaignId?: string }
+    let b: {
+      caseId?: string; templateId?: string; to?: string; subject?: string; body?: string
+      campaignId?: string; inReplyTo?: string; references?: string
+    }
     try { b = JSON.parse((await readBody(req)).toString()) }
     catch { json(res, { error: 'invalid JSON' }, 400); return true }
     if (!b.caseId || !b.to || !b.subject || !b.body) {
@@ -306,7 +309,12 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
       const r = draftZstSend(getDb(), {
         caseId: b.caseId,
         templateId: b.templateId ?? 'zst-freeform-v1',
-        email: { to: b.to, subject: b.subject, body: b.body },
+        // Threading is opt-in and explicit. The first real corporate send went
+        // out without it and landed as a new conversation in the recipient's
+        // mailbox, so the door now carries it -- but a caller that does not say
+        // "this answers X" still gets a new thread, which is right for a first
+        // approach.
+        email: { to: b.to, subject: b.subject, body: b.body, inReplyTo: b.inReplyTo, references: b.references },
         campaignId: b.campaignId,
       }, Math.floor(Date.now() / 1000))
       json(res, r)

@@ -42,6 +42,31 @@ export function encodeHeaderValue(v: string): string {
   return /[^\x00-\x7F]/.test(v) ? `=?UTF-8?B?${Buffer.from(v, 'utf8').toString('base64')}?=` : v
 }
 
+/** Headers the builder is allowed to copy through from email.headers.
+ *
+ *  Until 2026-08-10 it copied NOTHING: the type promised
+ *  `headers: Record<string, string>` and exactly one header — the idempotency
+ *  marker — reached the wire. Everything else was silently dropped, which is
+ *  how the first real corporate send went out as a NEW THREAD rather than a
+ *  reply. Subject started with "Re:", so it looked like a reply to us and read
+ *  as an unrelated message in the lawyer's mailbox.
+ *
+ *  Allowlisted rather than copied wholesale. The body of an outbound mail is
+ *  owner-approved text; its headers are not, and a caller that can set any
+ *  header can set Bcc, Reply-To or From. Threading is what we need, so
+ *  threading is what passes. */
+const PASSTHROUGH_HEADERS = ['In-Reply-To', 'References'] as const
+
+/** Case-insensitive lookup — a caller writing `in-reply-to` means the same
+ *  header, and silently ignoring it would put us back where we started. */
+function headerValue(headers: Record<string, string>, name: string): string | undefined {
+  const want = name.toLowerCase()
+  for (const [k, v] of Object.entries(headers)) {
+    if (k.toLowerCase() === want && typeof v === 'string' && v.trim() !== '') return v.trim()
+  }
+  return undefined
+}
+
 export function buildRawMessage(email: OutboundEmail, marker: string, from?: string, embedMarker = true): string {
   // The searchable marker footer is embedded only when embedMarker is true. For
   // a customer-facing send where the owner approved the EXACT body, omit it so
@@ -52,6 +77,11 @@ export function buildRawMessage(email: OutboundEmail, marker: string, from?: str
     from ? `From: ${from}` : null,
     `To: ${email.to}`,
     `Subject: ${encodeHeaderValue(email.subject)}`,
+    // Threading, when the caller supplied it. Without these a reply arrives in
+    // the recipient's mailbox as a new conversation, however the subject reads.
+    ...PASSTHROUGH_HEADERS
+      .map(h => { const v = headerValue(email.headers, h); return v ? `${h}: ${v}` : null })
+      .filter((h): h is string => h !== null),
     `${IDEMPOTENCY_HEADER}: ${marker}`,
     'MIME-Version: 1.0',
   ]

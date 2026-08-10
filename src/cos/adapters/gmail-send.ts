@@ -45,7 +45,17 @@ export interface MailTransport {
   findSentByHeader(name: string, value: string): Promise<{ found: boolean; messageId?: string; available?: boolean }>
 }
 
-interface EmailPayload { to: string; subject: string; body: string; attachmentDocumentIds?: string[] }
+interface EmailPayload {
+  to: string; subject: string; body: string; attachmentDocumentIds?: string[]
+  /** RFC Message-ID of the message this one answers, e.g. "<abc@mail.gmail.com>".
+   *  Part of the APPROVED payload on purpose: threading changes where the mail
+   *  lands in the recipient's client, so it is something the owner approved,
+   *  not something the transport decides at send time. */
+  inReplyTo?: string
+  /** Full References chain. Defaults to inReplyTo alone, which is correct for a
+   *  two-message thread and adequate for a longer one. */
+  references?: string
+}
 
 /** Resolve document ids to gated attachments. Throws if any document is not
  *  cleared for sharing (blocking the send). Injected so the adapter stays
@@ -74,7 +84,14 @@ export class GmailSendAdapter implements OutboundAdapter {
     const email: OutboundEmail = {
       to: p.to, subject: p.subject, body: p.body ?? '',
       // The searchable marker embedded in the message = the external marker.
-      headers: { [IDEMPOTENCY_HEADER]: action.externalIdempotencyMarker },
+      headers: {
+        [IDEMPOTENCY_HEADER]: action.externalIdempotencyMarker,
+        // Threading, when the approved payload carries it. Absent means a new
+        // conversation, which is right for a first approach and wrong for a
+        // reply — so the caller has to say which this is.
+        ...(p.inReplyTo ? { 'In-Reply-To': p.inReplyTo } : {}),
+        ...(p.inReplyTo || p.references ? { References: p.references ?? p.inReplyTo! } : {}),
+      },
       ...(attachments ? { attachments } : {}),
     }
     const { messageId } = await this.transport.send(email)

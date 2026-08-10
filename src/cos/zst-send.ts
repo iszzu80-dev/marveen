@@ -22,10 +22,27 @@ import { makeExecutor, type OutboundAdapter, type OutboundAction, type ExecuteOp
 
 const zstExecutor = makeExecutor('zst_outbound_ledger')
 
-export interface EmailDraft { to: string; subject: string; body: string }
+export interface EmailDraft {
+  to: string; subject: string; body: string
+  /** RFC Message-ID this mail answers. Included in the rendered payload hash,
+   *  so approving a reply approves that it IS a reply: changing the threading
+   *  after approval invalidates the approval, like changing the text does. */
+  inReplyTo?: string
+  references?: string
+}
 
 export function renderedPayloadHash(email: EmailDraft): string {
-  return sha256Hex(JSON.stringify({ to: email.to, subject: email.subject, body: email.body }))
+  // inReplyTo is part of what is approved. "Reply to this thread" and "start a
+  // new conversation" are different acts with different consequences in the
+  // recipient's mailbox, so flipping one into the other after approval must
+  // invalidate the approval exactly like editing the text does.
+  //
+  // JSON.stringify drops undefined keys, so a non-reply hashes byte-identically
+  // to what it did before this field existed — no stored approval is disturbed.
+  return sha256Hex(JSON.stringify({
+    to: email.to, subject: email.subject, body: email.body,
+    inReplyTo: email.inReplyTo, references: email.references,
+  }))
 }
 export function templateHashFor(templateId: string): string {
   return sha256Hex(`template:${templateId}`)
