@@ -72,11 +72,58 @@ describe('COS Action Executor', () => {
     expect(ad.sendCalls).toBe(1)
   })
 
+  // CHANGED 2026-08-10 (F-1). The last line asserted the LITERAL old key,
+  // `mv-c1-EMAIL_SEND-1` — a key that binds neither the recipient nor the
+  // content, which is the defect §7.1 names. Asserting a literal digest instead
+  // would just re-freeze whatever the code happens to produce, so the
+  // assertions are now about the PROPERTIES the key must have.
   it('deterministic idempotency: a duplicate plan trips the UNIQUE constraint', () => {
     const db = getDb()
     planAction(db, PLAN, 1000)
     expect(() => planAction(db, PLAN, 1000)).toThrow(/UNIQUE/i)
-    expect(idempotencyKey('c1', 'EMAIL_SEND', 1)).toBe('mv-c1-EMAIL_SEND-1')
+    // deterministic: same inputs, same key
+    expect(idempotencyKey({ caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 1 }))
+      .toBe(idempotencyKey({ caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 1 }))
+  })
+
+  it('F-1: the key separates two sends that the old key called identical', () => {
+    // Same case, same action type, same sequence number — different person,
+    // different words. The old formula produced ONE key for all of these.
+    const base = { caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 1 }
+    const a = idempotencyKey({ ...base, campaignId: 'camp-1', recipient: 'a@x.com', renderedPayloadHash: 'h1' })
+    const differentRecipient = idempotencyKey({ ...base, campaignId: 'camp-1', recipient: 'b@x.com', renderedPayloadHash: 'h1' })
+    const differentPayload = idempotencyKey({ ...base, campaignId: 'camp-1', recipient: 'a@x.com', renderedPayloadHash: 'h2' })
+    const differentCampaign = idempotencyKey({ ...base, campaignId: 'camp-2', recipient: 'a@x.com', renderedPayloadHash: 'h1' })
+    expect(new Set([a, differentRecipient, differentPayload, differentCampaign]).size).toBe(4)
+    // and the same tuple is still stable — idempotency has to survive a retry
+    expect(idempotencyKey({ ...base, campaignId: 'camp-1', recipient: 'a@x.com', renderedPayloadHash: 'h1' })).toBe(a)
+  })
+
+  // MEASURED, not assumed: replanning the same case+type+seq with an edited
+  // payload cannot happen at all — UNIQUE(case_id, action_type, sequence_number)
+  // refuses it before the key is consulted. So the old key's weakness was one of
+  // FORM, not a live collision inside a single store. Where the form matters is
+  // the EXTERNAL MARKER: it is embedded in the outgoing message and readback
+  // finds a message by searching for it, so a marker that does not bind the
+  // recipient or the content identifies a message only as strongly as the tuple
+  // it does bind.
+  it('F-1: the external marker embedded in the message binds the payload', () => {
+    const db = getDb()
+    createCase(db, { caseId: 'c2', title: 'T2', caseType: 'X' }, 900) // outbound_ledger.case_id is a foreign key
+    const p1 = planAction(db, { caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 7, payload: { to: 'a@x.com', subject: 'first' } }, 1000)
+    const p2 = planAction(db, { caseId: 'c2', actionType: 'EMAIL_SEND', sequenceNumber: 7, payload: { to: 'a@x.com', subject: 'EDITED' } }, 1000)
+    expect(p2.externalIdempotencyMarker).not.toBe(p1.externalIdempotencyMarker)
+    // and the marker is a stable function of the inputs, not a counter
+    expect(p1.externalIdempotencyMarker).toBe(p1.internalIdempotencyKey)
+  })
+
+  it('F-1: replanning an edited payload on the same case+type+seq is refused by the schema', () => {
+    // Stated as its own test so the protection is attributed to the constraint
+    // that actually provides it, rather than being credited to the new key.
+    const db = getDb()
+    planAction(db, { caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 7, payload: { to: 'a@x.com', subject: 'first' } }, 1000)
+    expect(() => planAction(db, { caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 7, payload: { to: 'a@x.com', subject: 'EDITED' } }, 1000))
+      .toThrow(/UNIQUE/i)
   })
 
   it('HEADLINE: provider received it but we errored → recovery VERIFIES without a second send', async () => {

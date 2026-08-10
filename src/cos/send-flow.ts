@@ -89,10 +89,30 @@ export function draftSend(db: Database.Database, input: DraftSendInput, now: num
     }, now)
     approveCampaign(db, campaignId, now) // campaign greenlit; per-send approval still required
   }
-  const seq = ((db.prepare(
-    `SELECT COUNT(*) AS n FROM outbound_ledger WHERE case_id=? AND action_type='EMAIL_SEND'`
-  ).get(input.caseId) as { n: number }).n) + 1
-  const planned = planAction(db, { caseId: input.caseId, actionType: 'EMAIL_SEND', sequenceNumber: seq, payload: input.email }, now)
+  // F-1: the sequence number used to be COUNT(*)+1, which two concurrent drafts
+  // read identically and then collided on the UNIQUE key — surfacing as a raw
+  // SqliteError to the caller. MAX(seq)+1 has the same race, so the race is
+  // handled instead of wished away: on a unique-constraint collision, re-read
+  // and try the next number. Bounded, because an unbounded retry on a
+  // mis-shaped row would spin forever.
+  let planned: ReturnType<typeof planAction> | undefined
+  let seq = 0
+  for (let attempt = 0; attempt < 8 && !planned; attempt++) {
+    seq = ((db.prepare(
+      `SELECT COALESCE(MAX(sequence_number), 0) AS n FROM outbound_ledger WHERE case_id=? AND action_type='EMAIL_SEND'`
+    ).get(input.caseId) as { n: number }).n) + 1
+    try {
+      planned = planAction(db, {
+        caseId: input.caseId, actionType: 'EMAIL_SEND', sequenceNumber: seq, payload: input.email,
+        // F-1 / §7.1: the key binds campaign + recipient + rendered payload, so
+        // they have to be known at plan time rather than patched in afterwards.
+        campaignId, recipient: input.email.to, renderedPayloadHash: rHash,
+      }, now)
+    } catch (err) {
+      if (!String((err as Error)?.message ?? '').includes('UNIQUE')) throw err
+    }
+  }
+  if (!planned) throw new Error(`could not allocate a sequence number for ${input.caseId}/EMAIL_SEND after 8 attempts`)
   // Fill the columns §6.2 / A.5 added: which campaign, to whom, what kind. The
   // quota has nothing to count without them, and the approval door cannot find
   // the campaign whose template it must bind to — a ledger row that does not say

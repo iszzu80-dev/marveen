@@ -8,6 +8,7 @@
 // the provider.
 
 import type Database from 'better-sqlite3'
+import { createHash } from 'node:crypto'
 import { reserveQuota } from './quota.js'
 
 export type OutboundStatus =
@@ -51,8 +52,48 @@ export class SendError extends Error implements SendErrorHints {
   }
 }
 
-export function idempotencyKey(caseId: string, actionType: string, sequenceNumber: number): string {
-  return `mv-${caseId}-${actionType}-${sequenceNumber}`
+/**
+ * F-1 / §7.1. The idempotency key is
+ *   sha256(campaign_id + recipient + action_type + sequence_number + rendered_payload_hash)
+ *
+ * The old key was `mv-<case>-<action>-<seq>`. What it protected was "the same
+ * case + action type + sequence number", NOT "the same message to the same
+ * person" — the two things §7.1 exists to bind. Two sends planned for different
+ * recipients under the same case differed only by `seq`, and a payload edited
+ * after approval and replanned on the same `seq` kept an unchanged key, so the
+ * system read a different message as the same action.
+ *
+ * Fields that do not apply to a given action type (a calendar entry has no
+ * recipient) are joined as empty, which is still strictly stronger than the old
+ * key because the payload hash is always present. The `mv-` prefix is kept so a
+ * key is recognisable at a glance in a log line.
+ *
+ * Keys already written keep their old form. That is safe: UNIQUE only has to
+ * hold, not follow one formula, and nothing derives an existing row's identity
+ * by recomputing its key — the one deriver, `ob-${key}`, runs at plan time.
+ */
+export interface IdempotencyKeyParts {
+  caseId: string
+  actionType: string
+  sequenceNumber: number
+  campaignId?: string | null
+  recipient?: string | null
+  renderedPayloadHash?: string | null
+}
+
+export function idempotencyKey(parts: IdempotencyKeyParts): string {
+  const canonical = [
+    parts.campaignId ?? '',
+    parts.recipient ?? '',
+    parts.actionType,
+    String(parts.sequenceNumber),
+    parts.renderedPayloadHash ?? '',
+    // Not in the spec formula, and deliberately kept: without it two different
+    // cases that share a campaign, recipient, type, seq and body would collide,
+    // and a collision here is a SILENTLY dropped send, not an error.
+    parts.caseId,
+  ].join('\u0000')
+  return `mv-${createHash('sha256').update(canonical).digest('hex').slice(0, 32)}`
 }
 
 interface Row {
@@ -84,6 +125,12 @@ export interface PlanInput {
   sequenceNumber: number
   payload?: unknown
   externalMarker?: string
+  /** F-1 / §7.1: the three fields the idempotency key must bind besides case,
+   *  type and sequence. Absent for action types that genuinely have no campaign
+   *  or recipient; the payload hash is derived from `payload` when not given. */
+  campaignId?: string | null
+  recipient?: string | null
+  renderedPayloadHash?: string | null
 }
 
 export interface ExecuteOpts {
@@ -135,7 +182,18 @@ export function makeExecutor(ledgerTable: string): Executor {
   }
 
   function planAction(db: Database.Database, input: PlanInput, now: number): OutboundAction {
-    const key = idempotencyKey(input.caseId, input.actionType, input.sequenceNumber)
+    // Derive the payload hash when the caller did not supply one, so the key
+    // binds the CONTENT even for callers that predate F-1. A caller-supplied
+    // hash wins: send-flow already computed the canonical rendered hash that the
+    // approval binds to, and the key must agree with the approval, not with a
+    // second hashing of the same object.
+    const payloadHash = input.renderedPayloadHash
+      ?? (input.payload === undefined ? null
+        : createHash('sha256').update(JSON.stringify(input.payload)).digest('hex'))
+    const key = idempotencyKey({
+      caseId: input.caseId, actionType: input.actionType, sequenceNumber: input.sequenceNumber,
+      campaignId: input.campaignId, recipient: input.recipient, renderedPayloadHash: payloadHash,
+    })
     const ledgerId = `ob-${key}`
     const marker = input.externalMarker ?? key
     db.prepare(
