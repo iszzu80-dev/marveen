@@ -430,6 +430,109 @@ const zstMessagesWithoutThread: Check = (db) => {
   }
 }
 
+// --- stagnation (card 8eb5a1e9) ----------------------------------------------
+//
+// no_progress_run_count has been incremented correctly since the GATE 2
+// follow-up, and read by nobody. On 2026-08-10 the live store held four cases
+// at 96 consecutive no-progress runs, two at 95 and twelve at 92 — sixteen
+// hours of an engine waking up, achieving nothing, and writing the number down
+// where no report looked. A counter with no reader is not an instrument.
+//
+// This matters more after the completion fix than before it. The engine can no
+// longer close anything on its own, by design, so a case it cannot move will
+// now spin forever instead of eventually (wrongly) resolving. The spinning is
+// the honest behaviour; what would not be honest is doing it quietly.
+
+/** Consecutive fruitless runs before a case is worth mentioning. At the
+ *  ten-minute wake cadence this is two hours of getting nowhere: long enough
+ *  that a WAITING_EXTERNAL case pausing between real events does not trip it,
+ *  short enough to catch a case the same morning it gets stuck. */
+const STAGNATION_RUNS = 12
+/** And the band where "stuck" stops being a fair description. A day of this is
+ *  not a case waiting, it is a case the engine cannot handle. */
+const STAGNATION_RUNS_SEVERE = 72
+
+/** Statuses in which the case is the ENGINE's move. A case in
+ *  WAITING_EXTERNAL, AWAITING_SELECTION, SCHEDULED or BLOCKED is waiting on
+ *  somebody or something else, and its counter climbing is the system working:
+ *  the engine woke, saw it was not its turn, and left it alone.
+ *
+ *  Getting this wrong is not a detail. The unfiltered version of this check
+ *  reported 22 live cases, 18 of which were correctly waiting on a supplier's
+ *  reply or on Istvan. An alarm that fires on correct behaviour is how alarms
+ *  get ignored — and this one would have buried the single case that is
+ *  genuinely stuck under eighteen that are not. */
+const ENGINE_ACTIONABLE = ['NEW', 'READY', 'EXECUTING', 'FOLLOW_UP_DUE', 'INFORMATION_REQUIRED', 'INFO_REQUIRED', 'RECOVERY_REQUIRED']
+
+const stagnantCases: Check = (db) => {
+  let rows: Array<{ domain: string; case_id: string; n: number; status: string }> = []
+  const marks = ENGINE_ACTIONABLE.map(() => '?').join(',')
+  try {
+    // Only cases the engine is actually still polling. A frozen or closed case
+    // with a high counter is a historical fact, not a live complaint, and
+    // reporting it would keep the alarm ringing after the cause was handled.
+    rows = db.prepare(
+      `SELECT s.domain AS domain, s.case_id AS case_id, s.no_progress_run_count AS n,
+              COALESCE(p.status, z.status) AS status
+       FROM case_progression_state s
+       LEFT JOIN personal_cases p ON p.case_id = s.case_id AND s.domain = 'personal'
+       LEFT JOIN zst_cases      z ON z.case_id = s.case_id AND s.domain = 'zst'
+       WHERE s.progression_enabled = 1 AND s.no_progress_run_count >= ?
+         AND COALESCE(p.status, z.status) IN (${marks})
+       ORDER BY s.no_progress_run_count DESC`,
+    ).all(STAGNATION_RUNS, ...ENGINE_ACTIONABLE) as never
+  } catch { return null }
+  if (!rows.length) return null
+
+  const severe = rows.filter(r => r.n >= STAGNATION_RUNS_SEVERE)
+  const worst = rows[0]
+  return {
+    id: 'cases_making_no_progress',
+    severity: severe.length ? 'CRITICAL' : 'WARNING',
+    ref: '§19, kártya 8eb5a1e9',
+    title: 'Ügyek, amiken a motoron van a sor, és mégsem halad',
+    detail: `${rows.length} ügy legalább ${STAGNATION_RUNS} eredménytelen futással`
+      + (severe.length ? `, ebből ${severe.length} legalább ${STAGNATION_RUNS_SEVERE}` : '')
+      + `; a legrosszabb ${worst.domain}/${worst.case_id} (${worst.status}, ${worst.n})`,
+    action: 'Ezek nem külső válaszra várnak: a státuszuk szerint a motoron van a sor, és mégsem mozdulnak. '
+      + 'Nézd meg a legrosszabbat: vagy rossz státuszban áll, vagy a terv nem hajtható végre magától. '
+      + 'A számláló nem oldja meg magától, a motor pedig szándékosan nem zárja le őket.',
+  }
+}
+
+/** Cases waiting on ISTVAN, for a long time. The mirror of the check above and
+ *  deliberately a separate finding: the engine is behaving correctly here, and
+ *  mixing the two would let a real engine failure hide inside a list of
+ *  questions nobody answered.
+ *
+ *  Found by measurement, 2026-08-10: four cases sat in AWAITING_SELECTION with
+ *  96 consecutive engine wake-ups behind them. Sixteen hours of asking a
+ *  question into a room with nobody in it. */
+const OWNER_DECISION_RUNS = 48
+
+const awaitingOwnerTooLong: Check = (db) => {
+  let rows: Array<{ case_id: string; n: number; title: string }> = []
+  try {
+    rows = db.prepare(
+      `SELECT s.case_id AS case_id, s.no_progress_run_count AS n, p.title AS title
+       FROM case_progression_state s
+       JOIN personal_cases p ON p.case_id = s.case_id AND s.domain = 'personal'
+       WHERE s.progression_enabled = 1
+         AND p.status = 'AWAITING_SELECTION'
+         AND s.no_progress_run_count >= ?
+       ORDER BY s.no_progress_run_count DESC`,
+    ).all(OWNER_DECISION_RUNS) as never
+  } catch { return null }
+  if (!rows.length) return null
+  return {
+    id: 'awaiting_owner_decision_too_long', severity: 'WARNING', ref: '§19, kártya 8eb5a1e9',
+    title: 'Döntésre váró ügyek, amiket Istvan nem látott',
+    detail: `${rows.length} ügy: ${rows.slice(0, 4).map(r => r.title.slice(0, 30)).join(' · ')}`,
+    action: 'A motor feltette a kérdést és azóta is várja a választ. Ha ennyi ideig áll, '
+      + 'a kérdés nem jutott el Istvanhoz — a kérdést kell kézbesíteni, nem az ügyet nógatni.',
+  }
+}
+
 export const CHECKS: Check[] = [
   stuckLocalApplied, openBatches, missingCheckpoint,
   outboundNeedsHuman, outcomeUnknown, stuckSending,
@@ -439,6 +542,8 @@ export const CHECKS: Check[] = [
   repeatedFollowUp, radarCheckFailing, cursorBatchMismatch, sourceWritePolicyActive,
   // corporate surface (2026-08-10)
   zstFrozenCases, zstStuckSending, zstStaleClaims, zstMessagesWithoutThread,
+  // stagnation, both domains (2026-08-10)
+  stagnantCases, awaitingOwnerTooLong,
 ]
 
 /** Run every check. Order of findings: CRITICAL first — a report that buries the
