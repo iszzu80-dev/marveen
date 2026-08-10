@@ -60,6 +60,53 @@ const LEDGER_SHARED_COLUMNS: Record<string, string> = {
   rendered_variables_hash: 'TEXT',
 }
 
+/**
+ * Widen a table's CHECK(status IN (...)) on a database that already has the
+ * narrow one. SQLite cannot ALTER a CHECK, so the table is rebuilt.
+ *
+ * `probeValue` is a status that the NEW constraint allows and the old one does
+ * not: it is written to a scratch row and rolled back, so this is a no-op on a
+ * database that is already wide. Detecting by trying is the point — parsing the
+ * stored DDL would be guessing at text.
+ *
+ * The copy is a plain INSERT … SELECT, never INSERT OR IGNORE, and the row
+ * counts are compared before the old table is dropped. OR IGNORE silently drops
+ * whatever collides, which is the failure mode where a migration reports success
+ * and takes rows with it.
+ */
+function widenCheckConstraint(db: Database.Database, table: string, probeValue: string, createSql: string): void {
+  const already = db.transaction((): boolean => {
+    try {
+      db.prepare(`UPDATE ${table} SET status = ? WHERE 0 = 1`).run(probeValue)
+      // A no-row UPDATE does not evaluate the CHECK, so probe for real, then throw
+      // to roll back whatever it did.
+      const one = db.prepare(`SELECT rowid FROM ${table} LIMIT 1`).get() as { rowid: number } | undefined
+      if (!one) return true // empty table: the CREATE above already has the wide CHECK
+      db.prepare(`UPDATE ${table} SET status = ? WHERE rowid = ?`).run(probeValue, one.rowid)
+      throw new Error('__rollback__')
+    } catch (e) {
+      if (String((e as Error).message) === '__rollback__') return true
+      return false
+    }
+  })()
+  if (already) return
+
+  const cols = (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(c => c.name).join(', ')
+  const before = (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n
+  // createSql is passed in, NOT read back from sqlite_master: the caller's
+  // CREATE TABLE IF NOT EXISTS was a no-op on this database, so sqlite_master
+  // still holds the NARROW definition. Re-executing that would rebuild the very
+  // constraint being widened and report success.
+  db.transaction(() => {
+    db.exec(`ALTER TABLE ${table} RENAME TO ${table}_pre_widen`)
+    db.exec(createSql)
+    db.exec(`INSERT INTO ${table} (${cols}) SELECT ${cols} FROM ${table}_pre_widen`)
+    const after = (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n
+    if (after !== before) throw new Error(`widenCheckConstraint(${table}): copied ${after} of ${before} rows — refusing to drop the original`)
+    db.exec(`DROP TABLE ${table}_pre_widen`)
+  })()
+}
+
 function ensureColumns(db: Database.Database, table: string, defs: Record<string, string>): void {
   const have = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(c => c.name))
   for (const [name, def] of Object.entries(defs)) {
@@ -267,7 +314,7 @@ export function initCosSchema(db: Database.Database): void {
 
   // a batch = the messages fetched between cursor_before and cursor_after. The
   // account cursor only moves to cursor_after when the batch is TERMINAL.
-  db.exec(`
+  const BATCHES_DDL = `
     CREATE TABLE IF NOT EXISTS email_processing_batches (
       batch_id         TEXT PRIMARY KEY,
       gmail_account_id TEXT NOT NULL,
@@ -276,14 +323,22 @@ export function initCosSchema(db: Database.Database): void {
       status           TEXT NOT NULL DEFAULT 'OPEN',
       created_at       INTEGER NOT NULL,
       updated_at       INTEGER NOT NULL,
-      CHECK (status IN ('OPEN','PROCESSING','TERMINAL','QUARANTINED'))
+      -- F-14 / A.1: BLOCKED, READY_TO_COMMIT, COMMITTED and RECOVERY_REQUIRED
+      -- were in the spec and not in this CHECK, so a batch that could never
+      -- close sat in PROCESSING — the same state as one being worked on right
+      -- now. "Stuck forever" and "busy" have to be distinguishable or no alert
+      -- can tell them apart.
+      CHECK (status IN ('OPEN','PROCESSING','READY_TO_COMMIT','COMMITTED',
+        'TERMINAL','QUARANTINED','BLOCKED','RECOVERY_REQUIRED'))
     )
-  `)
+  `
+  db.exec(BATCHES_DDL)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_ebatch_acct ON email_processing_batches(gmail_account_id, status)`)
+  widenCheckConstraint(db, 'email_processing_batches', 'BLOCKED', BATCHES_DDL)
 
   // per-message processing state (the 7+ status model). UNIQUE(account,message)
   // makes re-discovery a no-op instead of a second processing row.
-  db.exec(`
+  const EPROC_DDL = `
     CREATE TABLE IF NOT EXISTS email_processing (
       gmail_account_id TEXT NOT NULL,
       message_id       TEXT NOT NULL,
@@ -300,10 +355,21 @@ export function initCosSchema(db: Database.Database): void {
       created_at       INTEGER NOT NULL,
       updated_at       INTEGER NOT NULL,
       UNIQUE(gmail_account_id, message_id),
+      -- F-8: SOURCE_COMMIT_SKIPPED. The policy exception used to write
+      -- SOURCE_COMMITTED for messages it had NOT marked at the source, which is
+      -- §6.3's terminal SUCCESS state, and put the truth in last_error. A state
+      -- name that says the opposite of what happened poisons every later query.
       CHECK (status IN ('DISCOVERED','CLAIMED','LOCAL_APPLIED','SOURCE_COMMITTED',
-        'RECOVERY_REQUIRED','EXCLUDED','DUPLICATE','QUARANTINED'))
+        'SOURCE_COMMIT_SKIPPED','RECOVERY_REQUIRED','EXCLUDED','DUPLICATE','QUARANTINED'))
     )
-  `)
+  `
+  db.exec(EPROC_DDL)
+  // NOTE: this is NOT the definition that survives. The A.3 block below renames
+  // this table away and recreates it (search: EPROC_A3_DDL), because this DDL's
+  // UNIQUE key lacks thread_id. Both are kept in step deliberately — a fresh
+  // database briefly has this one, and every column and constraint difference
+  // between the two is a bug waiting to happen. The F-8 status widening is
+  // applied after the A.3 rebuild, where the surviving table is made.
   db.exec(`CREATE INDEX IF NOT EXISTS idx_eproc_batch ON email_processing(batch_id, status)`)
   // Existing dbs (email_processing predates P1.2): add the new columns in place
   // BEFORE the index that references content_hash — on a live db the table
@@ -374,7 +440,7 @@ export function initCosSchema(db: Database.Database): void {
       db.exec(`ALTER TABLE email_processing RENAME TO email_processing_pre_a3`)
     }
   }
-  db.exec(`
+  const EPROC_A3_DDL = `
     CREATE TABLE IF NOT EXISTS email_processing (
       gmail_account_id TEXT NOT NULL,
       message_id       TEXT NOT NULL,
@@ -391,10 +457,15 @@ export function initCosSchema(db: Database.Database): void {
       created_at       INTEGER NOT NULL,
       updated_at       INTEGER NOT NULL,
       UNIQUE(gmail_account_id, thread_id, message_id),
+      -- F-8: SOURCE_COMMIT_SKIPPED. This is the SURVIVING definition of
+      -- email_processing; the one ~120 lines up is renamed away by the block
+      -- above. A change made only there is a change that never takes effect,
+      -- which is exactly how this widening was first written and first failed.
       CHECK (status IN ('DISCOVERED','CLAIMED','LOCAL_APPLIED','SOURCE_COMMITTED',
-        'RECOVERY_REQUIRED','EXCLUDED','DUPLICATE','QUARANTINED'))
+        'SOURCE_COMMIT_SKIPPED','RECOVERY_REQUIRED','EXCLUDED','DUPLICATE','QUARANTINED'))
     )
-  `)
+  `
+  db.exec(EPROC_A3_DDL)
   // A message-szintu egyediseg NEM veszhet el a bovitett kulcs miatt (lasd fent).
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS uq_email_processing_msg
            ON email_processing(gmail_account_id, message_id)`)
@@ -412,6 +483,9 @@ export function initCosSchema(db: Database.Database): void {
     `)
     db.exec(`DROP TABLE email_processing_pre_a3`)
   }
+  // F-8: an existing database that did NOT go through the A.3 rebuild still has
+  // the narrow CHECK. Widen it here, where the surviving definition is known.
+  widenCheckConstraint(db, 'email_processing', 'SOURCE_COMMIT_SKIPPED', EPROC_A3_DDL)
   // A RENAME magaval vitte a tabla indexeit, a DROP pedig el is vitte oket.
   // Ezt a meglevo P1.2 migracios teszt kapta el (idx_eproc_chash eltunt) -- a
   // sajat tesztem csak azt nezte, hogy a regi tabla nincs meg. Az indexeket
