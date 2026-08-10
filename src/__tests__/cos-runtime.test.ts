@@ -4,7 +4,7 @@ import { createCase } from '../cos/case-store.js'
 import { planAction } from '../cos/executor.js'
 import { createRadarItem } from '../cos/radar.js'
 import { runCosTickOnce, safeCosDeps, registerCosConnectors } from '../cos/runtime.js'
-import { getHealth, setMode } from '../cos/connector-health.js'
+import { getHealth, setMode, recordMarkerProof } from '../cos/connector-health.js'
 import type { RentalAdapter, RentalOffer, RentalSearchParams } from '../cos/rental-adapter.js'
 
 // COS autonomous runtime. Proves the SAFETY posture: safeCosDeps wires no
@@ -66,6 +66,10 @@ describe('COS autonomous runtime', () => {
     expect(getHealth(db, 'rental')?.mode).toBe('READ_ONLY')
     expect(getHealth(db, 'rental')?.status).toBe('OK')
     // a later READ_WRITE flip is NOT clobbered by re-registration (ON CONFLICT DO NOTHING)
+    // CHANGED 2026-08-10 (F-10 / B.3): raising a connector to READ_WRITE now
+    // requires a recorded marker-persistence proof. The proof is the fixture
+    // here; what the test is about is unchanged.
+    recordMarkerProof(db, 'gmail', { passed: true, detail: 'test fixture' }, NOW + 1)
     setMode(db, 'gmail', 'READ_WRITE', NOW + 1)
     registerCosConnectors(db, NOW + 2)
     expect(getHealth(db, 'gmail')?.mode).toBe('READ_WRITE')

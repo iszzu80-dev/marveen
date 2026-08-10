@@ -589,6 +589,8 @@ export function initCosSchema(db: Database.Database): void {
   // through ensureColumns at all.
 
   // ── connector_health (Slice 1 reliability; §20 connector matrix) ──────
+  // F-10 / B.3: where the marker-persistence proof is recorded. Without a
+  // place to put it, the proof could only ever be a log line.
   // One row per connector (gmail/calendar/shopping/rental/...). The preCheck
   // gates actions on isUsable(); repeated failures degrade OK → DEGRADED → DOWN,
   // a success resets to OK. `mode` records the current capability
@@ -609,6 +611,10 @@ export function initCosSchema(db: Database.Database): void {
       CHECK (status IN ('OK','DEGRADED','DOWN','UNKNOWN'))
     )
   `)
+  ensureColumns(db, 'connector_health', {
+    marker_proof_at:     'INTEGER',
+    marker_proof_detail: 'TEXT',
+  })
 
   // ── shopping / price radar (Slice 4; §15) ─────────────────────────────
   // A watched item (a rental search, a grocery product, a product to buy). The
