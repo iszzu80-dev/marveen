@@ -215,15 +215,31 @@ ZE-2 kritérium futásidejű párja: a kapu megmondja, a monitor pedig szól.
 
 DoD: a ZM-1 kritérium zöld, és a riasztás bizonyítottan tud pirosat adni.
 
-## F2 — a 27 befagyott ügy feloldása (P0, `13648f40`) — Istvan GO kell
+## F2 — VISSZAVONVA 03:15-kor, a premissza megfordult
 
-Kanári: előbb tisztázni, javult-e a generikus DoD, ami az incidenst okozta; utána
-KETTŐ ügy visszakapcsolása; egy teljes heartbeat ciklus megvárása és a
-`case_progression_runs` döntésének megnézése; és csak ha egyik sem zárult le
-magától, jön a maradék 25.
+Eredetileg itt a 27 befagyott ügy kanáris feloldása állt. **Ne hajtsd végre.**
 
-DoD: a ZE-2 kritérium zöld, és a `case_progression_runs` bizonyítja, hogy a
-visszakapcsolt ügyek WAIT/PROGRESS döntést kaptak, nem COMPLETE-et.
+A kanárit lefuttattam, de nem élesben, hanem az adatbázis egy hot-backup
+másolatán, mert a lezárási indoklás („minden terv-lépés kész") négy lépést
+feltételez, tehát egyetlen ciklus semmit nem bizonyított volna. Mind a 27 ügyet
+feloldottam a másolatban és hajtottam hat ciklust:
+
+| ciklus | döntés |
+|---|---|
+| 1-3 | 27× CONTINUE_AUTONOMOUSLY, státusz marad NEW |
+| 4 | **27× COMPLETE, mind a 27 lezárul** |
+
+Vagyis a befagyás nem a betegség, hanem jelenleg az egyetlen védelem. Az eredeti
+kétügyes kanári élesben azt a két ügyet elégette volna.
+
+És ez nem céges különlegesség: a 19 lezárt személyes ügyből 17-et ugyanez a motor
+zárt le, mind a 72 lezárási döntés szó szerint azonos indoklással. Az igazi P0
+ezért a `0a7574db` kártyán van, és ez a fázis oda vár.
+
+Új sorrend: (1) a generikus DoD javítása, (2) a lezárt ügyek visszaállítása az
+eseménynaplóból, (3) a céges 27 feloldása, (4) a `personal-case-wake` ütemezés
+visszakapcsolása — annak DoD-je pedig egy száraz futás a másolaton, hat cikluson
+át, nulla indokolatlan COMPLETE-tel.
 
 ## F3 — a céges kimenő ajtó (P1, `f832abf3`)
 
