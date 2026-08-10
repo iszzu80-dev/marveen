@@ -188,6 +188,8 @@ export async function dispatchApprovedSend(
     caseType: caseTypeOf(db, input.ledgerId),
   })
   if (!decision.allowed) return { sent: false, decision }
-  const action = await executeAction(db, adapter, input.ledgerId, now, opts)
+  // The gate ran and allowed it three lines up — that is the assertion F-7 asks
+  // this call site to make explicit.
+  const action = await executeAction(db, adapter, input.ledgerId, now, { ...opts, authorizedByDispatchGate: true })
   return { sent: action.status === 'VERIFIED' || action.status === 'APPLIED_UNVERIFIED', decision, action }
 }

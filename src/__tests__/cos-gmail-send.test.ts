@@ -14,6 +14,15 @@ const PLAN = {
   payload: { to: 'vendor@example.com', subject: 'Quote request', body: 'Please quote.' },
 }
 
+// F-7: executeAction now refuses to leave PLANNED unless the caller declares
+// that it evaluated the dispatch gate (§7.3). Production declares it in
+// dispatchApprovedSend / dispatchZstSend, after the gate has actually run. This
+// file tests the STATE MACHINE, not the policy, so it declares it once here
+// rather than repeating the flag on every call. Recovery paths do not need it,
+// and passing it changes nothing for them.
+const exec: typeof executeAction = (db, adapter, ledgerId, now, opts = {}) =>
+  executeAction(db, adapter, ledgerId, now, { authorizedByDispatchGate: true, ...opts })
+
 describe('GmailSendAdapter + executor', () => {
   beforeEach(() => {
     initDatabase(':memory:')
@@ -25,7 +34,7 @@ describe('GmailSendAdapter + executor', () => {
     const t = new DryRunTransport()
     const ad = new GmailSendAdapter(t)
     const p = planAction(db, PLAN, 1000)
-    const r = await executeAction(db, ad, p.ledgerId, 1001)
+    const r = await exec(db, ad, p.ledgerId, 1001)
     expect(r.status).toBe('VERIFIED')
     expect(t.sent.size).toBe(1)
     const sent = [...t.sent.values()][0]
@@ -40,12 +49,12 @@ describe('GmailSendAdapter + executor', () => {
     const ad = new GmailSendAdapter(t)
     const p = planAction(db, PLAN, 1000)
     t.reachThenThrow = true // delivers, then throws
-    const after = await executeAction(db, ad, p.ledgerId, 1001)
+    const after = await exec(db, ad, p.ledgerId, 1001)
     expect(after.status).toBe('OUTCOME_UNKNOWN')
     expect(t.sent.size).toBe(1) // it DID reach Gmail once
     // retry/restart: recovery finds the marker in Sent → VERIFIED, no resend
     t.reachThenThrow = false
-    const rec = await executeAction(db, ad, p.ledgerId, 1002)
+    const rec = await exec(db, ad, p.ledgerId, 1002)
     expect(rec.status).toBe('VERIFIED')
     expect(t.sent.size).toBe(1) // <-- still exactly one delivery
   })
@@ -56,13 +65,13 @@ describe('GmailSendAdapter + executor', () => {
     const ad = new GmailSendAdapter(t)
     const p = planAction(db, PLAN, 1000)
     t.failNextSend = true
-    const r = await executeAction(db, ad, p.ledgerId, 1001)
+    const r = await exec(db, ad, p.ledgerId, 1001)
     expect(r.status).toBe('OUTCOME_UNKNOWN')
     expect(t.sent.size).toBe(0)
     // recovery: readback finds nothing → back to PLANNED → resend succeeds once
-    const rec = await executeAction(db, ad, p.ledgerId, 1002) // recover → PLANNED
+    const rec = await exec(db, ad, p.ledgerId, 1002) // recover → PLANNED
     expect(['PLANNED', 'VERIFIED']).toContain(rec.status)
-    const done = await executeAction(db, ad, p.ledgerId, 1003)
+    const done = await exec(db, ad, p.ledgerId, 1003)
     expect(done.status).toBe('VERIFIED')
     expect(t.sent.size).toBe(1)
   })
@@ -73,16 +82,16 @@ describe('GmailSendAdapter + executor', () => {
     const ad = new GmailSendAdapter(t)
     const p = planAction(db, PLAN, 1000)
     t.readbackUnavailable = true // the message is delivered, but readback can't confirm
-    let r = await executeAction(db, ad, p.ledgerId, 1001)
+    let r = await exec(db, ad, p.ledgerId, 1001)
     expect(r.status).toBe('APPLIED_UNVERIFIED')
     expect(t.sent.size).toBe(1)
     // reconcile drives it again: still can't confirm → stays, NO second delivery
-    r = await executeAction(db, ad, p.ledgerId, 1002)
+    r = await exec(db, ad, p.ledgerId, 1002)
     expect(r.status).toBe('APPLIED_UNVERIFIED')
     expect(t.sent.size).toBe(1)
     // Sent becomes reachable and the marker is there → VERIFIED
     t.readbackUnavailable = false
-    r = await executeAction(db, ad, p.ledgerId, 1003)
+    r = await exec(db, ad, p.ledgerId, 1003)
     expect(r.status).toBe('VERIFIED')
     expect(t.sent.size).toBe(1)
   })
@@ -99,7 +108,7 @@ describe('GmailSendAdapter + executor', () => {
     const t = new DryRunTransport()
     const ad = new GmailSendAdapter(t)
     const p = planAction(db, { caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 2, payload: { body: 'no recipient' } }, 1000)
-    const r = await executeAction(db, ad, p.ledgerId, 1001)
+    const r = await exec(db, ad, p.ledgerId, 1001)
     expect(r.status).toBe('FAILED_TERMINAL')
     expect(t.sent.size).toBe(0)
   })
@@ -122,7 +131,7 @@ describe('GmailSendAdapter pre-flight failures are local, not unknown (F-3)', ()
     const t = new DryRunTransport()
     const ad = new GmailSendAdapter(t)
     const p = planAction(db, { ...PLAN, payload: { subject: 'no recipient' } }, 1000)
-    const r = await executeAction(db, ad, p.ledgerId, 1001)
+    const r = await exec(db, ad, p.ledgerId, 1001)
     expect(r.status).toBe('FAILED_TERMINAL')
     expect(t.sent.size).toBe(0)
   })
@@ -134,7 +143,7 @@ describe('GmailSendAdapter pre-flight failures are local, not unknown (F-3)', ()
     const p = planAction(db, {
       ...PLAN, payload: { ...PLAN.payload, attachmentDocumentIds: ['doc-1'] },
     }, 1000)
-    const r = await executeAction(db, ad, p.ledgerId, 1001)
+    const r = await exec(db, ad, p.ledgerId, 1001)
     expect(r.status).toBe('FAILED_TERMINAL')
     expect(t.sent.size).toBe(0)
   })
@@ -146,7 +155,7 @@ describe('GmailSendAdapter pre-flight failures are local, not unknown (F-3)', ()
     const p = planAction(db, {
       ...PLAN, payload: { ...PLAN.payload, attachmentDocumentIds: ['doc-1'] },
     }, 1000)
-    const r = await executeAction(db, ad, p.ledgerId, 1001)
+    const r = await exec(db, ad, p.ledgerId, 1001)
     expect(r.status).toBe('FAILED_TERMINAL')
     // last_error is a ledger column, not a field on OutboundAction — read it
     // where it actually lives, so the assertion cannot pass on a stale object.
@@ -163,7 +172,7 @@ describe('GmailSendAdapter pre-flight failures are local, not unknown (F-3)', ()
     const ad = new GmailSendAdapter(t)
     const p = planAction(db, PLAN, 1000)
     t.reachThenThrow = true
-    const r = await executeAction(db, ad, p.ledgerId, 1001)
+    const r = await exec(db, ad, p.ledgerId, 1001)
     expect(r.status).toBe('OUTCOME_UNKNOWN')
   })
 })

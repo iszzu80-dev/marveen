@@ -41,7 +41,14 @@ describe('COS autonomous runtime', () => {
     expect(res.radarChecked).toBe(1)         // radar ran
     expect(rental.called).toBe(1)
     expect(res.outboundProcessed).toBe(0)    // the planned email was NOT sent
-    expect(res.outboundSkippedNoAdapter).toBe(1)
+    // CHANGED 2026-08-10 (F-7). This asserted `outboundSkippedNoAdapter === 1`,
+    // which recorded WHY nothing was sent: the tick reached the row and stopped
+    // only because no adapter was registered. That was the whole danger — one
+    // adapter registration away from an unapproved send. The tick is no longer
+    // offered PLANNED rows at all, so the counter is 0 and the safety no longer
+    // depends on a missing dependency. The test's title ("NEVER sends") is now
+    // true for a structural reason instead of an accidental one.
+    expect(res.outboundSkippedNoAdapter).toBe(0)
     // the outbound row is still PLANNED (untouched) — proof nothing was sent
     expect((db.prepare(`SELECT status FROM outbound_ledger WHERE ledger_id=?`).get(p.ledgerId) as any).status).toBe('PLANNED')
   })

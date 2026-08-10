@@ -45,6 +45,15 @@ class MockAdapter implements OutboundAdapter {
 
 const PLAN = { caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 1, payload: { to: 'x@y.z' } }
 
+// F-7: executeAction now refuses to leave PLANNED unless the caller declares
+// that it evaluated the dispatch gate (§7.3). Production declares it in
+// dispatchApprovedSend / dispatchZstSend, after the gate has actually run. This
+// file tests the STATE MACHINE, not the policy, so it declares it once here
+// rather than repeating the flag on every call. Recovery paths do not need it,
+// and passing it changes nothing for them.
+const exec: typeof executeAction = (db, adapter, ledgerId, now, opts = {}) =>
+  executeAction(db, adapter, ledgerId, now, { authorizedByDispatchGate: true, ...opts })
+
 describe('COS Action Executor', () => {
   beforeEach(() => {
     initDatabase(':memory:')
@@ -57,7 +66,7 @@ describe('COS Action Executor', () => {
     const p = planAction(db, PLAN, 1000)
     expect(p.status).toBe('PLANNED')
     expect(p.externalIdempotencyMarker).toBe(p.internalIdempotencyKey) // D.1 default
-    const r = await executeAction(db, ad, p.ledgerId, 1001)
+    const r = await exec(db, ad, p.ledgerId, 1001)
     expect(r.status).toBe('VERIFIED')
     expect(r.externalRef).toBeTruthy()
     expect(ad.sendCalls).toBe(1)
@@ -74,12 +83,12 @@ describe('COS Action Executor', () => {
     const db = getDb(), ad = new MockAdapter()
     const p = planAction(db, PLAN, 1000)
     ad.mode = 'reach-then-throw' // the message lands, then we get a timeout
-    const after = await executeAction(db, ad, p.ledgerId, 1001)
+    const after = await exec(db, ad, p.ledgerId, 1001)
     expect(after.status).toBe('OUTCOME_UNKNOWN')
     expect(ad.sendCalls).toBe(1)
     // Re-run (e.g. a retry/restart): recovery reads back the marker → VERIFIED,
     // and send is NOT called again.
-    const rec = await executeAction(db, ad, p.ledgerId, 1002)
+    const rec = await exec(db, ad, p.ledgerId, 1002)
     expect(rec.status).toBe('VERIFIED')
     expect(ad.sendCalls).toBe(1) // <-- no double-send
   })
@@ -91,7 +100,7 @@ describe('COS Action Executor', () => {
     // has the message (the send had reached it before we died).
     db.prepare(`UPDATE outbound_ledger SET status='SENDING' WHERE ledger_id=?`).run(p.ledgerId)
     ad.provider.add(p.externalIdempotencyMarker)
-    const r = await executeAction(db, ad, p.ledgerId, 2000) // sees SENDING → recover
+    const r = await exec(db, ad, p.ledgerId, 2000) // sees SENDING → recover
     expect(r.status).toBe('VERIFIED')
     expect(ad.sendCalls).toBe(0) // never re-sent
   })
@@ -100,14 +109,14 @@ describe('COS Action Executor', () => {
     const db = getDb(), ad = new MockAdapter()
     const p = planAction(db, PLAN, 1000)
     ad.mode = 'throw' // a plain throw: we cannot PROVE it did not reach the provider
-    let r = await executeAction(db, ad, p.ledgerId, 1001)
+    let r = await exec(db, ad, p.ledgerId, 1001)
     expect(r.status).toBe('OUTCOME_UNKNOWN')
     // recover: readback absent → PLANNED (safe to resend)
     r = await recoverAction(db, ad, p.ledgerId, 1002)
     expect(r.status).toBe('PLANNED')
     // now the network is back → resend succeeds
     ad.mode = 'ok'
-    r = await executeAction(db, ad, p.ledgerId, 1003)
+    r = await exec(db, ad, p.ledgerId, 1003)
     expect(r.status).toBe('VERIFIED')
     expect(ad.sendCalls).toBe(2) // first failed, second sent — exactly one real delivery
   })
@@ -116,11 +125,11 @@ describe('COS Action Executor', () => {
     const db = getDb(), ad = new MockAdapter()
     const p = planAction(db, PLAN, 1000)
     ad.mode = 'fail-retryable' // adapter PROVES the request never left
-    let r = await executeAction(db, ad, p.ledgerId, 1001)
+    let r = await exec(db, ad, p.ledgerId, 1001)
     expect(r.status).toBe('FAILED_RETRYABLE')
     // FAILED_RETRYABLE is re-sendable (proven not sent, so no double-send risk)
     ad.mode = 'ok'
-    r = await executeAction(db, ad, p.ledgerId, 1002)
+    r = await exec(db, ad, p.ledgerId, 1002)
     expect(r.status).toBe('VERIFIED')
     expect(ad.sendCalls).toBe(2)
   })
@@ -129,10 +138,10 @@ describe('COS Action Executor', () => {
     const db = getDb(), ad = new MockAdapter()
     const p = planAction(db, PLAN, 1000)
     ad.mode = 'fail-terminal'
-    let r = await executeAction(db, ad, p.ledgerId, 1001)
+    let r = await exec(db, ad, p.ledgerId, 1001)
     expect(r.status).toBe('FAILED_TERMINAL')
     // terminal: re-running executeAction does nothing, never sends
-    r = await executeAction(db, ad, p.ledgerId, 1002)
+    r = await exec(db, ad, p.ledgerId, 1002)
     expect(r.status).toBe('FAILED_TERMINAL')
     expect(ad.sendCalls).toBe(1)
   })
@@ -141,17 +150,17 @@ describe('COS Action Executor', () => {
     const db = getDb(), ad = new MockAdapter()
     const p = planAction(db, PLAN, 1000)
     ad.readbackMode = 'unavailable' // send succeeds, but we can't confirm via Sent
-    let r = await executeAction(db, ad, p.ledgerId, 1001)
+    let r = await exec(db, ad, p.ledgerId, 1001)
     expect(r.status).toBe('APPLIED_UNVERIFIED')
     expect(ad.sendCalls).toBe(1)
     // The daily reconcile drives it again; a resend is FORBIDDEN from
     // APPLIED_UNVERIFIED — it only re-attempts readback.
-    r = await executeAction(db, ad, p.ledgerId, 1002)
+    r = await exec(db, ad, p.ledgerId, 1002)
     expect(r.status).toBe('APPLIED_UNVERIFIED')
     expect(ad.sendCalls).toBe(1) // <-- never resent
     // Once readback works and finds the marker → VERIFIED.
     ad.readbackMode = 'normal'
-    r = await executeAction(db, ad, p.ledgerId, 1003)
+    r = await exec(db, ad, p.ledgerId, 1003)
     expect(r.status).toBe('VERIFIED')
     expect(ad.sendCalls).toBe(1) // still exactly one delivery
   })
@@ -160,7 +169,7 @@ describe('COS Action Executor', () => {
     const db = getDb(), ad = new MockAdapter()
     const p = planAction(db, PLAN, 1000)
     ad.readbackMode = 'throw'
-    const r = await executeAction(db, ad, p.ledgerId, 1001)
+    const r = await exec(db, ad, p.ledgerId, 1001)
     expect(r.status).toBe('APPLIED_UNVERIFIED') // provider accepted; readback threw → unavailable
     expect(ad.sendCalls).toBe(1)
   })
@@ -169,10 +178,10 @@ describe('COS Action Executor', () => {
     const db = getDb(), ad = new MockAdapter()
     const p = planAction(db, PLAN, 1000)
     ad.mode = 'ok-but-vanish' // send "succeeds" but provider never really has it, readback available
-    const r = await executeAction(db, ad, p.ledgerId, 1001)
+    const r = await exec(db, ad, p.ledgerId, 1001)
     expect(r.status).toBe('RECOVERY_REQUIRED') // we refuse to resend on a claimed success
     // RECOVERY_REQUIRED is not auto-resent: re-running does not send again.
-    const again = await executeAction(db, ad, p.ledgerId, 1002)
+    const again = await exec(db, ad, p.ledgerId, 1002)
     expect(again.status).toBe('RECOVERY_REQUIRED')
     expect(ad.sendCalls).toBe(1)
   })
@@ -181,7 +190,7 @@ describe('COS Action Executor', () => {
     const db = getDb(), ad = new MockAdapter()
     const p = planAction(db, PLAN, 1000)
     ad.mode = 'throw'
-    let r = await executeAction(db, ad, p.ledgerId, 1001)
+    let r = await exec(db, ad, p.ledgerId, 1001)
     expect(r.status).toBe('OUTCOME_UNKNOWN')
     ad.readbackMode = 'unavailable'
     r = await recoverAction(db, ad, p.ledgerId, 1002)
@@ -195,13 +204,13 @@ describe('COS Action Executor', () => {
     const c = cancelAction(db, p.ledgerId, 'campaign revoked', 1001)
     expect(c.status).toBe('CANCELLED')
     // CANCELLED is terminal: executeAction never sends it.
-    const r = await executeAction(db, ad, p.ledgerId, 1002)
+    const r = await exec(db, ad, p.ledgerId, 1002)
     expect(r.status).toBe('CANCELLED')
     expect(ad.sendCalls).toBe(0)
     // A row the provider may already hold cannot be cancelled.
     const p2 = planAction(db, { caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 2, payload: { to: 'a@b.c' } }, 1000)
     ad.readbackMode = 'unavailable'
-    await executeAction(db, ad, p2.ledgerId, 1001) // → APPLIED_UNVERIFIED
+    await exec(db, ad, p2.ledgerId, 1001) // → APPLIED_UNVERIFIED
     expect(() => cancelAction(db, p2.ledgerId, 'too late', 1002)).toThrow(/cannot cancel APPLIED_UNVERIFIED/)
   })
 
@@ -211,14 +220,14 @@ describe('COS Action Executor', () => {
     const p1 = planAction(db, { caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 1, payload: {} }, 1000)
     const p2 = planAction(db, { caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 2, payload: {} }, 1000)
     // first consumes the only slot → sent
-    expect((await executeAction(db, ad, p1.ledgerId, 1001, { quota: q })).status).toBe('VERIFIED')
+    expect((await exec(db, ad, p1.ledgerId, 1001, { quota: q })).status).toBe('VERIFIED')
     expect(ad.sendCalls).toBe(1)
     // second is over quota → NOT sent, stays PLANNED
-    const r2 = await executeAction(db, ad, p2.ledgerId, 1002, { quota: q })
+    const r2 = await exec(db, ad, p2.ledgerId, 1002, { quota: q })
     expect(r2.status).toBe('PLANNED')
     expect(ad.sendCalls).toBe(1) // <-- send NOT called for the blocked action
     // once the window rolls over, it goes through
-    const r3 = await executeAction(db, ad, p2.ledgerId, 1002 + 3601, { quota: q })
+    const r3 = await exec(db, ad, p2.ledgerId, 1002 + 3601, { quota: q })
     expect(r3.status).toBe('VERIFIED')
     expect(ad.sendCalls).toBe(2)
   })
@@ -226,8 +235,8 @@ describe('COS Action Executor', () => {
   it('terminal states are idempotent no-ops (VERIFIED never re-sends)', async () => {
     const db = getDb(), ad = new MockAdapter()
     const p = planAction(db, PLAN, 1000)
-    await executeAction(db, ad, p.ledgerId, 1001) // → VERIFIED, sendCalls 1
-    const again = await executeAction(db, ad, p.ledgerId, 1002)
+    await exec(db, ad, p.ledgerId, 1001) // → VERIFIED, sendCalls 1
+    const again = await exec(db, ad, p.ledgerId, 1002)
     expect(again.status).toBe('VERIFIED')
     expect(ad.sendCalls).toBe(1)
   })

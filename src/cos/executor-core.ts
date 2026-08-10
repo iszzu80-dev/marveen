@@ -88,6 +88,19 @@ export interface PlanInput {
 
 export interface ExecuteOpts {
   quota?: { key: string; maxCount: number; windowSec: number }
+  /** F-7: the caller states that it has ALREADY evaluated the dispatch gate for
+   *  this row (§7.3: approval hash + template version + rendered payload + scope
+   *  + budget + quota, before every execution). Required to start a FIRST send,
+   *  i.e. to leave PLANNED. Recovery of an already-started row does not need it,
+   *  because the decision that authorized it was made before it left PLANNED.
+   *
+   *  This is a caller ASSERTION, not proof — a caller could pass true without
+   *  having evaluated anything. What it buys is that the permission is no longer
+   *  the silent default: a new call site has to write the word down, and the one
+   *  loop that was driving PLANNED rows with no gate at all (cosTick) now
+   *  refuses instead of sending. The gate itself stays where it belongs, in
+   *  dispatchApprovedSend / dispatchZstSend. */
+  authorizedByDispatchGate?: boolean
 }
 
 export interface Executor {
@@ -146,6 +159,18 @@ export function makeExecutor(ledgerTable: string): Executor {
     if (a.status === 'APPLIED_UNVERIFIED') return verifyAction(db, adapter, ledgerId, now)
     if (a.status === 'RECOVERY_REQUIRED') return a
     if (a.status === 'SENDING' || a.status === 'OUTCOME_UNKNOWN') return recoverAction(db, adapter, ledgerId, now)
+    // F-7. Below this line a FIRST delivery happens. Every early return above is
+    // recovery of a row that already left PLANNED under a decision. §7.3 requires
+    // a check before execution, and the check lives in the dispatch gate — so a
+    // caller that has not run it may not start a send. cosTick used to arrive
+    // here with PLANNED rows and no gate whatsoever; the only thing standing
+    // between it and an unapproved send was an unwired adapter.
+    if (a.status === 'PLANNED' && !opts.authorizedByDispatchGate) {
+      setStatus(db, ledgerId, 'PLANNED', {
+        last_error: 'refused: a first send requires an evaluated dispatch decision (ExecuteOpts.authorizedByDispatchGate)',
+      }, now)
+      return loadOrThrow(db, ledgerId)
+    }
     if (opts.quota) {
       const rr = reserveQuota(db, opts.quota.key, opts.quota.maxCount, opts.quota.windowSec, now)
       if (!rr.reserved) {

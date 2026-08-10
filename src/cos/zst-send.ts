@@ -192,6 +192,7 @@ export async function dispatchZstSend(
 ): Promise<DispatchZstSendResult> {
   const decision = evaluateZstSendGate(db, input)
   if (!decision.allowed) return { sent: false, decision }
-  const action = await zstExecutor.executeAction(db, adapter, input.ledgerId, now, opts)
+  // F-7: the gate ran and allowed it on the line above.
+  const action = await zstExecutor.executeAction(db, adapter, input.ledgerId, now, { ...opts, authorizedByDispatchGate: true })
   return { sent: action.status === 'VERIFIED' || action.status === 'APPLIED_UNVERIFIED', decision, action }
 }

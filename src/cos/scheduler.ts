@@ -65,18 +65,29 @@ export interface OutboundWorkItem {
 }
 
 /**
- * Outbound_ledger rows that still need automated work: PLANNED / FAILED_RETRYABLE
- * (send), SENDING / OUTCOME_UNKNOWN (recover via readback), APPLIED_UNVERIFIED
- * (re-attempt readback → VERIFIED). The runtime drives executeAction on each.
- * Terminal rows and RECOVERY_REQUIRED are excluded. Oldest first so a backlog
- * drains in order.
+ * Outbound_ledger rows that still need automated RECOVERY work: FAILED_RETRYABLE
+ * (retry a send that already passed the gate), SENDING / OUTCOME_UNKNOWN (recover
+ * via readback), APPLIED_UNVERIFIED (re-attempt readback → VERIFIED). Terminal
+ * rows and RECOVERY_REQUIRED are excluded. Oldest first so a backlog drains in
+ * order.
+ *
+ * F-7: PLANNED is excluded on purpose. A PLANNED row has never been sent, so
+ * driving it here would be a FIRST delivery decided by a background loop that
+ * evaluates no gate — §7.3 requires the approval/template/payload/scope/budget
+ * check before every execution, and that check lives in dispatchApprovedSend /
+ * dispatchZstSend. Until today the only thing preventing it was that runtime.ts
+ * wires no adapter; a single adapter registration would have turned an
+ * unapproved draft into sent mail. Two independent guards now: this query never
+ * offers PLANNED, and executeAction refuses to leave PLANNED without an
+ * evaluated decision.
  */
 export function reconcileOutbound(db: Database.Database, limit = 100): OutboundWorkItem[] {
-  const ph = OUTBOUND_NO_AUTO_WORK.map(() => '?').join(',')
+  const excluded = [...OUTBOUND_NO_AUTO_WORK, 'PLANNED']
+  const ph = excluded.map(() => '?').join(',')
   return db.prepare(
     `SELECT ledger_id, case_id, action_type, status, attempt FROM outbound_ledger
      WHERE status NOT IN (${ph}) ORDER BY created_at ASC LIMIT ?`
-  ).all(...OUTBOUND_NO_AUTO_WORK, limit) as OutboundWorkItem[]
+  ).all(...excluded, limit) as OutboundWorkItem[]
 }
 
 /**
