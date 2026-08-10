@@ -30,6 +30,9 @@ export interface OutboundAction {
   status: OutboundStatus
   externalRef: string | null
   attempt: number
+  /** F-15. */
+  lastError?: string | null
+  sendingAt?: number | null
 }
 
 export interface ReadbackResult { found: boolean; available?: boolean; externalRef?: string }
@@ -107,6 +110,8 @@ interface Row {
   payload: string | null
   external_ref: string | null
   attempt: number
+  last_error: string | null
+  sending_at: number | null
 }
 
 function toAction(r: Row): OutboundAction {
@@ -116,6 +121,9 @@ function toAction(r: Row): OutboundAction {
     externalIdempotencyMarker: r.external_idempotency_marker ?? r.internal_idempotency_key,
     payload: r.payload == null ? null : JSON.parse(r.payload),
     status: r.status, externalRef: r.external_ref, attempt: r.attempt,
+    // F-15: the retry ceiling and the backoff both need these, and they were
+    // columns nothing surfaced. `attempt` was already here and nothing READ it.
+    lastError: r.last_error ?? null, sendingAt: r.sending_at ?? null,
   }
 }
 
@@ -172,7 +180,19 @@ export interface ExecuteOpts {
    *  as the SENDING write. Counting outside it is check-then-act: two concurrent
    *  sends both read "there is still room". */
   campaignLimit?: { campaignId: string; maxTotal?: number; kind?: string; maxPerKind?: number }
+  /** F-15: how many times a FAILED_RETRYABLE row may be retried before it is
+   *  moved to FAILED_TERMINAL, and the base backoff between attempts. `attempt`
+   *  was being incremented and nothing read it: a permanently bad recipient was
+   *  reattempted on every single tick, forever, burning a quota slot each time
+   *  once F-5 wired the quota up. */
+  retry?: { maxAttempts?: number; baseBackoffSec?: number }
 }
+
+/** F-15 defaults. Five attempts over an exponential backoff reaches ~8 minutes,
+ *  which covers a provider blip; past that the failure is not transient and a
+ *  human should see it as FAILED_TERMINAL rather than as an endless queue. */
+export const DEFAULT_MAX_SEND_ATTEMPTS = 5
+export const DEFAULT_SEND_BACKOFF_SEC = 30
 
 export interface Executor {
   planAction(db: Database.Database, input: PlanInput, now: number): OutboundAction
@@ -253,6 +273,26 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
     if (a.status === 'APPLIED_UNVERIFIED') return verifyAction(db, adapter, ledgerId, now)
     if (a.status === 'RECOVERY_REQUIRED') return a
     if (a.status === 'SENDING' || a.status === 'OUTCOME_UNKNOWN') return recoverAction(db, adapter, ledgerId, now)
+    // F-15: a retryable failure is not retryable forever. Checked before the
+    // admission block so an exhausted row neither reserves quota nor touches
+    // the claim, and BEFORE the backoff so a terminal row stops appearing in the
+    // work queue at all.
+    if (a.status === 'FAILED_RETRYABLE') {
+      const maxAttempts = opts.retry?.maxAttempts ?? DEFAULT_MAX_SEND_ATTEMPTS
+      if (a.attempt >= maxAttempts) {
+        setStatus(db, ledgerId, 'FAILED_TERMINAL', {
+          last_error: `giving up after ${a.attempt} attempts: ${a.lastError ?? 'repeated retryable failure'}`,
+        }, now)
+        return loadOrThrow(db, ledgerId)
+      }
+      // Exponential backoff from the last attempt. Without it every tick retried
+      // immediately, so "5 attempts" would have been spent inside a minute and
+      // a transient provider outage would still exhaust the budget.
+      const base = opts.retry?.baseBackoffSec ?? DEFAULT_SEND_BACKOFF_SEC
+      const waitUntil = (a.sendingAt ?? 0) + base * Math.pow(2, Math.max(0, a.attempt - 1))
+      if (now < waitUntil) return a
+    }
+
     // F-7. Below this line a FIRST delivery happens. Every early return above is
     // recovery of a row that already left PLANNED under a decision. §7.3 requires
     // a check before execution, and the check lives in the dispatch gate — so a

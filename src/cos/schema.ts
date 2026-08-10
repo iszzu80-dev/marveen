@@ -611,6 +611,15 @@ export function initCosSchema(db: Database.Database): void {
       CHECK (status IN ('OK','DEGRADED','DOWN','UNKNOWN'))
     )
   `)
+  // F-13: where the Scope Gate's verdict and its review reason are recorded.
+  // The verdict used to be returned in the HTTP response and dropped, and the
+  // review note was squatting in blocked_reason (a §6.1 column meaning something
+  // else). Both namespaces, because the gate routes to both.
+  ensureColumns(db, 'personal_cases', { scope_review_reason: 'TEXT' })
+  // The ZST half is added in initZstSchema, AFTER zst_cases is created. Writing
+  // it here behind "if the table exists" is the trap this file already fell into
+  // twice tonight (the ZST ledger and the ZST approval envelope): a silent
+  // no-op on every fresh database.
   ensureColumns(db, 'connector_health', {
     marker_proof_at:     'INTEGER',
     marker_proof_detail: 'TEXT',
@@ -932,6 +941,8 @@ export function initZstSchema(db: Database.Database): void {
         'ZST_PERSONAL_DATA','ZST_HIGHLY_SENSITIVE','UNKNOWN'))
     )
   `)
+  // F-13: the Scope Gate writes its verdict onto the case in BOTH namespaces.
+  ensureColumns(db, 'zst_cases', { scope: 'TEXT', scope_review_reason: 'TEXT' })
   db.exec(`CREATE INDEX IF NOT EXISTS idx_zcases_status ON zst_cases(status, archived_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_zcases_wake   ON zst_cases(next_wake_at) WHERE next_wake_at IS NOT NULL`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_zcases_workspace ON zst_cases(workspace, status)`)

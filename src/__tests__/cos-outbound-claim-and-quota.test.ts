@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import { createCase, acquireClaim } from '../cos/case-store.js'
-import { planAction, executeAction } from '../cos/executor.js'
+import { planAction, executeAction, SendError } from '../cos/executor.js'
 import { GmailSendAdapter, DryRunTransport } from '../cos/adapters/gmail-send.js'
 
 const T0 = 1_700_000_000
@@ -155,5 +155,59 @@ describe('the outbound path checks the claim fence and reserves quota (F-4, F-5)
     return executeAction(getDb(), new GmailSendAdapter(new DryRunTransport()),
       planAction(getDb(), PLAN, T0).ledgerId, T0 + 1, OK)
       .then(r => expect(r.status).toBe('VERIFIED'))
+  })
+})
+
+// F-15 (review 2026-08-10): FAILED_RETRYABLE rows were retried on every tick
+// forever. `attempt` was incremented and nothing read it — no ceiling, no
+// backoff, no move to FAILED_TERMINAL. A permanently bad recipient ground the
+// queue indefinitely, and once F-5 wired the quota up it would have burned a
+// slot on every attempt too.
+describe('a retryable failure is not retryable forever (F-15)', () => {
+  beforeEach(() => {
+    initDatabase(':memory:')
+    createCase(getDb(), { caseId: 'c1', title: 'T', caseType: 'X' }, T0)
+  })
+
+  // An adapter that PROVES the request never left, which is what produces
+  // FAILED_RETRYABLE. DryRunTransport.failNextSend throws a bare Error, so it
+  // yields OUTCOME_UNKNOWN instead — a different state with different rules,
+  // and using it here would have tested nothing.
+  const alwaysRetryable = {
+    actionType: 'EMAIL_SEND',
+    send: async () => { throw new SendError('connection refused', { reachedProvider: false, terminal: false }) },
+    readback: async () => ({ found: false, available: false }),
+  }
+
+  it('gives up after the attempt ceiling and lands in FAILED_TERMINAL', async () => {
+    const db = getDb()
+    const p = planAction(db, PLAN, T0)
+    let now = T0 + 1
+    let status = ''
+    // Drive it well past the ceiling, always waiting out the backoff so the
+    // attempts are real ones rather than no-ops.
+    for (let i = 0; i < 12; i++) {
+      const r = await executeAction(db, alwaysRetryable as never, p.ledgerId, now, { ...OK, retry: { maxAttempts: 3, baseBackoffSec: 1 } })
+      status = r.status
+      if (status === 'FAILED_TERMINAL') break
+      now += 3600 // past any backoff
+    }
+    expect(status).toBe('FAILED_TERMINAL')
+    expect(String(ledger(p.ledgerId).last_error)).toMatch(/giving up after/)
+  })
+
+  it('the backoff makes an immediate retry a no-op instead of an attempt', async () => {
+    const db = getDb()
+    const p = planAction(db, PLAN, T0)
+    const R = { maxAttempts: 5, baseBackoffSec: 60 }
+    await executeAction(db, alwaysRetryable as never, p.ledgerId, T0 + 1, { ...OK, retry: R })
+    const attemptAfterFirst = Number(ledger(p.ledgerId).attempt)
+    expect(String(ledger(p.ledgerId).status)).toBe('FAILED_RETRYABLE')
+    // same second: refused by the backoff, attempt count unchanged
+    await executeAction(db, alwaysRetryable as never, p.ledgerId, T0 + 2, { ...OK, retry: R })
+    expect(Number(ledger(p.ledgerId).attempt)).toBe(attemptAfterFirst)
+    // past the backoff: it really is attempted again
+    await executeAction(db, alwaysRetryable as never, p.ledgerId, T0 + 500, { ...OK, retry: R })
+    expect(Number(ledger(p.ledgerId).attempt)).toBeGreaterThan(attemptAfterFirst)
   })
 })

@@ -32,6 +32,9 @@ export interface DispatchRequest {
   caseType?: string
   /** The case's declared sensitivity (escalated against the content). */
   declaredSensitivity: unknown
+  /** F-16: evaluation time. Absent falls back to wall time inside
+   *  authorizeSend, which is only ever right in production. */
+  now?: number
   /** The rendered outbound content (classified for sensitivity). */
   content: string
   /** The model profile that would process/produce this send. */
@@ -80,10 +83,15 @@ export function evaluateDispatch(db: Database.Database, req: DispatchRequest): D
   const rung = permits(db, req.caseType ?? 'UNKNOWN', 'SEND')
   if (!rung.allowed) reasons.push(`autonómia-fokozat: ${rung.reason}`)
 
+  // F-16: `now` is threaded through. authorizeSend defaults it to wall time, and
+  // the gate was letting it — so an approval's expiry was compared against the
+  // real clock while every other timestamp in the send came from the caller.
+  // Harmless while nothing ever set valid_until; the moment approvals got an
+  // expiry it made every fixture-time approval look expired.
   const auth = authorizeSend(db, {
     campaignId: req.campaignId, templateHash: req.templateHash,
     renderedPayloadHash: req.renderedPayloadHash, recipient: req.recipient,
-  })
+  }, req.now)
   if (!auth.authorized) reasons.push(`campaign not authorized: ${auth.reason}`)
 
   const routed = routeModelForSensitivity(tier, { strategy: req.routingStrategy ?? 'capability' })

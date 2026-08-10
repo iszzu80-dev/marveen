@@ -148,12 +148,32 @@ export interface ApproveSendInput {
 }
 /** The owner's explicit YES to THIS exact rendered payload. After this,
  *  authorizeSend passes for the matching payload at the current campaign version. */
+/** F-16 / §3.2: how long an approval is good for, and how much it authorises,
+ *  when the caller says nothing.
+ *
+ *  approveSend used to fill in only allowedChannels and allowedRecipients, so
+ *  valid_until and maxTotalOutbound were always NULL and authorizeSend's expiry
+ *  check could never fire: every approval lived forever and authorised an
+ *  unbounded number of sends. §3.2 lists valid_until as a required envelope
+ *  field precisely so that an approval nobody revoked still stops mattering.
+ *
+ *  Seven days because an approval older than that has almost certainly been
+ *  overtaken by the conversation it belongs to; one message because approving
+ *  THIS rendered payload to THIS recipient is what the owner did, and a second
+ *  send is a second decision. Both are overridable per approval. */
+export const DEFAULT_APPROVAL_TTL_SEC = 7 * 24 * 3600
+export const DEFAULT_APPROVAL_MAX_OUTBOUND = 1
+
 export function approveSend(db: Database.Database, input: ApproveSendInput, now: number): void {
   recordApproval(db, {
     approvalId: input.approvalId ?? `appr-${input.campaignId}-${input.renderedPayloadHash.slice(0, 16)}`,
     campaignId: input.campaignId, approvedBy: input.approvedBy,
     templateHash: input.templateHash, renderedPayloadHash: input.renderedPayloadHash,
     allowedChannels: ['EMAIL'],
+    // F-16: the defaults go BEFORE the caller's envelope, so an explicit
+    // validUntil or maxTotalOutbound still wins.
+    validUntil: now + DEFAULT_APPROVAL_TTL_SEC,
+    maxTotalOutbound: DEFAULT_APPROVAL_MAX_OUTBOUND,
     ...input.envelope,
     allowedRecipients: [input.recipient],
   }, now)
@@ -214,6 +234,7 @@ export async function dispatchApprovedSend(
     // taken from the caller. A caller-asserted type would let the same code path
     // pick a more permissive rung by claiming to be a different kind of case.
     caseType: caseTypeOf(db, input.ledgerId),
+    now, // F-16: the same clock as the rest of the send
   })
   if (!decision.allowed) return { sent: false, decision }
   // The gate ran and allowed it three lines up — that is the assertion F-7 asks

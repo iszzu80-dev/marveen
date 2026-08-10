@@ -174,9 +174,16 @@ describe('COS Action Executor', () => {
     ad.mode = 'fail-retryable' // adapter PROVES the request never left
     let r = await exec(db, ad, p.ledgerId, 1001)
     expect(r.status).toBe('FAILED_RETRYABLE')
-    // FAILED_RETRYABLE is re-sendable (proven not sent, so no double-send risk)
+    // CHANGED 2026-08-10 (F-15): the retry used to run at 1001+1. There is a
+    // backoff now, so an immediate retry is a no-op — which is the point:
+    // without it every tick retried instantly and "5 attempts" would be spent
+    // inside a minute. Asserted explicitly rather than just skipping ahead.
     ad.mode = 'ok'
-    r = await exec(db, ad, p.ledgerId, 1002)
+    const tooSoon = await exec(db, ad, p.ledgerId, 1002)
+    expect(tooSoon.status).toBe('FAILED_RETRYABLE')
+    expect(ad.sendCalls).toBe(1) // nothing was attempted
+    // FAILED_RETRYABLE is re-sendable (proven not sent, so no double-send risk)
+    r = await exec(db, ad, p.ledgerId, 1001 + 60)
     expect(r.status).toBe('VERIFIED')
     expect(ad.sendCalls).toBe(2)
   })

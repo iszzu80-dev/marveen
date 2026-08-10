@@ -107,14 +107,30 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     const routed = zstTarget
       ? ingestTriagedZstEmail(getDb(), input as unknown as ZstTriagedEmail, now)
       : ingestTriagedEmail(getDb(), input, now)
-    // A placement the gate is not sure about is recorded ON the case, not only
-    // in this response: the review flag has to survive the request.
-    if (scope.needsReview && (routed as { caseId?: string }).caseId) {
+    // F-13: the gate's VERDICT goes in the scope column, and the reason for a
+    // review goes in scope_review_reason.
+    //
+    // It used to write neither. The verdict was returned in the response and
+    // dropped; the scope column kept its 'PERSONAL_CONFIRMED' default, so every
+    // case ever filed claimed to be a confirmed personal case even when the gate
+    // had said AMBIGUOUS — and §25's "the Scope Gate is technically proven"
+    // could not be answered from the store at all. The uncertainty went into
+    // blocked_reason, a column §6.1 reserves for why a case is BLOCKED, so it
+    // both lied and overwrote whatever real blocking reason was there.
+    const caseId = (routed as { caseId?: string }).caseId
+    if (caseId) {
       try {
         getDb().prepare(
           `UPDATE ${zstTarget ? 'zst_cases' : 'personal_cases'}
-           SET blocked_reason = @why, updated_at = @now WHERE case_id = @id`
-        ).run({ why: `SCOPE REVIEW — ${describeScope(scope)}`, now, id: (routed as { caseId: string }).caseId })
+           SET scope = @scope,
+               scope_review_reason = @why,
+               updated_at = @now
+           WHERE case_id = @id`
+        ).run({
+          scope: scope.verdict,
+          why: scope.needsReview ? `SCOPE REVIEW — ${describeScope(scope)}` : null,
+          now, id: caseId,
+        })
       } catch { /* a missing column must not lose the case that was just filed */ }
     }
     json(res, { ...routed, scope: scope.verdict, scopeReasons: scope.reasons, scopeNeedsReview: scope.needsReview })
