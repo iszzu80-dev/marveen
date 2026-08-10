@@ -100,7 +100,10 @@ describe('the corporate outbound door', () => {
   //
   // Asserting a refusal that cannot happen would have been a test asserting the
   // gate is stronger than it is. So: prove the tier is carried and correct, and
-  // state plainly that it does not currently bind. Card d7e5df01.
+  // state plainly that it does not currently bind.
+  //
+  // Settled 2026-08-10 (card d7e5df01): Istvan declined a second approval for
+  // highly sensitive corporate mail. One binding YES is the rule.
   it('carries the case sensitivity into the decision, and escalates it on content', async () => {
     const db = getDb()
     const d = draft()

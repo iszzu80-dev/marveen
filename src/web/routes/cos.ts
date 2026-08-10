@@ -957,7 +957,12 @@ export function escalationNeedsIstvanInPerson(
  *  decision should say what class of content left the company, and if the
  *  allowlist is ever tightened the door starts refusing without anyone having
  *  to remember to wire it. Returning it is what makes it checkable at all --
- *  an input nobody can observe is an input nobody can verify. Card d7e5df01.
+ *  an input nobody can observe is an input nobody can verify.
+ *
+ *  OWNER DECISION 2026-08-10 (Istvan, card d7e5df01, closed): no second approval
+ *  for highly sensitive corporate mail. One binding YES is enough. Do not
+ *  reopen this as a "gap" -- the profile layer being inert here is known and
+ *  accepted, not an oversight anyone still has to fix.
  *
  *  The recipient list defaults to exactly the addressee of the drafted mail. An
  *  approval authorises the people the owner saw; an empty or wider list would
