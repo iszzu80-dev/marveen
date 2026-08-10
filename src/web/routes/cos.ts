@@ -23,7 +23,7 @@ import {
 } from '../../cos/zst-productlab.js'
 import { validateSkillMd, validateSkillPermissions } from '../../cos/skill-permission-validator.js'
 import { getMissionControlProgressionView, runProgressionCycle } from '../../cos/progression-pipeline.js'
-import { storeDocument, documentsForCase, readDocumentBytes } from '../../cos/cos-documents.js'
+import { storeDocument, documentsForCase, readDocumentBytes, resolveShareableAttachments } from '../../cos/cos-documents.js'
 import { evaluateOutputFloors, breachedFloors } from '../../cos/output-floor.js'
 import { runDailyReconcile } from '../../cos/reconcile.js'
 import { linkCases, suggestLinks, linkedCases } from '../../cos/case-link.js'
@@ -107,14 +107,30 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     const routed = zstTarget
       ? ingestTriagedZstEmail(getDb(), input as unknown as ZstTriagedEmail, now)
       : ingestTriagedEmail(getDb(), input, now)
-    // A placement the gate is not sure about is recorded ON the case, not only
-    // in this response: the review flag has to survive the request.
-    if (scope.needsReview && (routed as { caseId?: string }).caseId) {
+    // F-13: the gate's VERDICT goes in the scope column, and the reason for a
+    // review goes in scope_review_reason.
+    //
+    // It used to write neither. The verdict was returned in the response and
+    // dropped; the scope column kept its 'PERSONAL_CONFIRMED' default, so every
+    // case ever filed claimed to be a confirmed personal case even when the gate
+    // had said AMBIGUOUS — and §25's "the Scope Gate is technically proven"
+    // could not be answered from the store at all. The uncertainty went into
+    // blocked_reason, a column §6.1 reserves for why a case is BLOCKED, so it
+    // both lied and overwrote whatever real blocking reason was there.
+    const caseId = (routed as { caseId?: string }).caseId
+    if (caseId) {
       try {
         getDb().prepare(
           `UPDATE ${zstTarget ? 'zst_cases' : 'personal_cases'}
-           SET blocked_reason = @why, updated_at = @now WHERE case_id = @id`
-        ).run({ why: `SCOPE REVIEW — ${describeScope(scope)}`, now, id: (routed as { caseId: string }).caseId })
+           SET scope = @scope,
+               scope_review_reason = @why,
+               updated_at = @now
+           WHERE case_id = @id`
+        ).run({
+          scope: scope.verdict,
+          why: scope.needsReview ? `SCOPE REVIEW — ${describeScope(scope)}` : null,
+          now, id: caseId,
+        })
       } catch { /* a missing column must not lose the case that was just filed */ }
     }
     json(res, { ...routed, scope: scope.verdict, scopeReasons: scope.reasons, scopeNeedsReview: scope.needsReview })
@@ -1024,7 +1040,7 @@ export async function approveAndDispatchZst(
   const transport = new GmailApiTransport({
     credsPath: 'store/.google-zst-creds.json', embedBodyMarker: false,
   })
-  const r = await dispatchZstSend(db, new GmailSendAdapter(transport), {
+  const r = await dispatchZstSend(db, new GmailSendAdapter(transport, ids => resolveShareableAttachments(db, ids)), {
     ledgerId, campaignId: row.campaign_id, connectorId: 'gmail-zst',
     email, templateHash: row.template_hash, renderedPayloadHash: hash,
     declaredSensitivity: row.sensitivity ?? undefined,
@@ -1040,24 +1056,45 @@ export async function approveAndDispatchZst(
 
 export async function dispatchApproved(
   db: ReturnType<typeof getDb>, ledgerId: string, now: number,
-): Promise<{ sent: boolean; status?: string; externalRef?: string; reasons?: string[] }> {
+): Promise<{ sent: boolean; status?: string; externalRef?: string; reasons?: string[]; sensitivityTier?: string }> {
+  // F-6: the case's own sensitivity has to come along. It used to be hardcoded
+  // PERSONAL below, which silently downgraded every HIGHLY_SENSITIVE case on the
+  // only live personal send path — the thing §10 forbids by name. The ZST query
+  // three functions up already joins its case table for exactly this column; the
+  // asymmetry was the tell that this was an omission, not a decision.
   const row = db.prepare(
-    `SELECT l.payload, l.campaign_id, k.template_hash
-     FROM outbound_ledger l LEFT JOIN campaigns k ON k.campaign_id = l.campaign_id
+    `SELECT l.payload AS payload, l.campaign_id AS campaign_id, l.case_id AS case_id,
+            k.template_hash AS template_hash, c.sensitivity AS sensitivity
+     FROM outbound_ledger l
+     LEFT JOIN campaigns      k ON k.campaign_id = l.campaign_id
+     LEFT JOIN personal_cases c ON c.case_id     = l.case_id
      WHERE l.ledger_id = ?`
-  ).get(ledgerId) as { payload: string | null; campaign_id: string | null; template_hash: string | null } | undefined
+  ).get(ledgerId) as {
+    payload: string | null; campaign_id: string | null; case_id: string | null
+    template_hash: string | null; sensitivity: string | null
+  } | undefined
   if (!row?.payload || !row.campaign_id || !row.template_hash) {
     return { sent: false, reasons: ['a küldéshez hiányzik a tartalom vagy a kampány'] }
   }
   const email = JSON.parse(row.payload) as EmailDraft
   const transport = new GmailApiTransport({ from: COS_SEND_FROM, embedBodyMarker: false })
-  const r = await dispatchApprovedSend(db, new GmailSendAdapter(transport), {
+  const r = await dispatchApprovedSend(db, new GmailSendAdapter(transport, ids => resolveShareableAttachments(db, ids)), {
     ledgerId, connectorId: 'gmail', campaignId: row.campaign_id,
     templateHash: row.template_hash, renderedPayloadHash: renderedPayloadHash(email),
-    email, declaredSensitivity: 'PERSONAL', targetProfile: 'premium_reasoning',
+    email,
+    // No fallback to 'PERSONAL' here on purpose: an absent value must stay
+    // absent so coerceSensitivity() can do its job and fail closed to
+    // HIGHLY_SENSITIVE. Defaulting to PERSONAL would reintroduce the downgrade
+    // through the back door.
+    declaredSensitivity: row.sensitivity ?? undefined,
+    targetProfile: 'premium_reasoning',
   }, now)
   return {
     sent: r.sent, status: r.action?.status, externalRef: r.action?.externalRef ?? undefined,
     reasons: r.decision.allowed ? undefined : r.decision.reasons,
+    // Surfaced so the tier the gate actually decided on is observable from
+    // outside — the ZST door already returns it. An unobservable tier is how a
+    // hardcoded one survived this long.
+    sensitivityTier: r.decision.sensitivityTier,
   }
 }

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import { createCase, transitionCase } from '../cos/case-store.js'
-import { planAction } from '../cos/executor.js'
+import { planAction, executeAction } from '../cos/executor.js'
 import { GmailSendAdapter, DryRunTransport } from '../cos/adapters/gmail-send.js'
 import { createRadarItem, getRadarItem } from '../cos/radar.js'
 import { setNextWake } from '../cos/scheduler.js'
@@ -37,10 +37,25 @@ describe('cosTick (one full cycle)', () => {
     createCase(getDb(), { caseId: 'c1', title: 'Spain', caseType: 'TRAVEL' }, NOW)
   })
 
-  it('sends+verifies a planned email, runs a due radar check that hits, and surfaces due work', async () => {
+  // CHANGED 2026-08-10 (F-7). This used to plan an email and assert the tick
+  // SENT it (outboundProcessed === 1). That was the defect stated as a
+  // requirement: cosTick evaluates no dispatch gate, so a first delivery decided
+  // here is a delivery nobody approved. The row now starts mid-flight
+  // (OUTCOME_UNKNOWN) so the test still proves the tick drives outbound work —
+  // recovery, which is the work it is allowed to do.
+  it('recovers an in-flight email, runs a due radar check that hits, and surfaces due work', async () => {
     const db = getDb()
-    // a PLANNED outbound email
+    // An outbound email that already left PLANNED under a decision, reached the
+    // provider, and then threw — the real OUTCOME_UNKNOWN. The same transport is
+    // handed to the tick so its readback can find the delivered message; a fresh
+    // transport would have nothing to read back and the test would be proving
+    // the wrong thing.
+    const transport = new DryRunTransport()
     const p = planAction(db, { caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 1, payload: { to: 'v@x.com', subject: 'Quote' } }, NOW)
+    transport.reachThenThrow = true
+    await executeAction(db, new GmailSendAdapter(transport), p.ledgerId, NOW, { authorizedByDispatchGate: true })
+    transport.reachThenThrow = false
+    expect((db.prepare('SELECT status FROM outbound_ledger WHERE ledger_id=?').get(p.ledgerId) as any).status).toBe('OUTCOME_UNKNOWN')
     // a due RENTAL radar item with a reachable target
     createRadarItem(db, { radarId: 'r1', caseId: 'c1', kind: 'RENTAL', label: 'VLC→AGP', query: RENTAL_QUERY, targetPrice: 90000, currency: 'HUF', checkIntervalSec: 3600 }, NOW - 7200) // next_check in the past → due
     // a due case wake + a due follow-up
@@ -48,7 +63,7 @@ describe('cosTick (one full cycle)', () => {
     transitionCase(db, { caseId: 'c1', seenVersion: 1, newStatus: 'WAITING_EXTERNAL', actor: 'm', patch: { follow_up_at: NOW - 5 } }, NOW)
 
     const res = await cosTick(db, {
-      outboundAdapters: { EMAIL_SEND: new GmailSendAdapter(new DryRunTransport()) },
+      outboundAdapters: { EMAIL_SEND: new GmailSendAdapter(transport) },
       rentalAdapter: new MockRental(),
     }, NOW)
 
@@ -90,9 +105,14 @@ describe('cosTick (one full cycle)', () => {
     expect((db.prepare(`SELECT status FROM outbound_ledger WHERE ledger_id=?`).get(p.ledgerId) as any).status).toBe('RECOVERY_REQUIRED')
   })
 
+  // CHANGED 2026-08-10 (F-7). The row used to be left PLANNED, so the counter it
+  // asserted was really measuring "the tick reached a never-sent row". It now
+  // starts mid-flight, which is the only kind of row the tick is offered, and
+  // the no-adapter skip is still what the test is about.
   it('skips outbound rows with no registered adapter, and does not throw', async () => {
     const db = getDb()
-    planAction(db, { caseId: 'c1', actionType: 'CALENDAR_CREATE', sequenceNumber: 1, payload: {} }, NOW)
+    const p = planAction(db, { caseId: 'c1', actionType: 'CALENDAR_CREATE', sequenceNumber: 1, payload: {} }, NOW)
+    db.prepare("UPDATE outbound_ledger SET status='OUTCOME_UNKNOWN' WHERE ledger_id=?").run(p.ledgerId)
     const res = await cosTick(db, { outboundAdapters: {} }, NOW) // no CALENDAR_CREATE adapter
     expect(res.outboundProcessed).toBe(0)
     expect(res.outboundSkippedNoAdapter).toBe(1)

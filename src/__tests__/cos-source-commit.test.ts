@@ -61,16 +61,45 @@ describe('COS source commit + batch closure', () => {
     expect(r.reason).toMatch(/modify scope/)
   })
 
-  it('with the explicit policy the chain closes AND the row carries the reason', async () => {
+  // CHANGED 2026-08-10 (F-8). This asserted SOURCE_COMMITTED for a message that
+  // was deliberately NOT marked at the source — §6.3's terminal SUCCESS state
+  // standing in for "we could not, and we let it past anyway", with the truth
+  // demoted to last_error. Any later query asking "what did we actually commit"
+  // inherited that. The state is now SOURCE_COMMIT_SKIPPED: still terminal, so
+  // the cursor still passes, which is what the rest of this test checks.
+  it('with the explicit policy the chain closes AND the row says it was SKIPPED, not committed', async () => {
     const db = seed()
     const r = await closeBatch(db, 'b1', new NoSourceWriteCommitter(), NOW,
       { allowCursorAdvanceWithoutSourceWrite: true })
     expect(r.batchClosed).toBe(true)
-    expect(statusOf('m1')).toBe('SOURCE_COMMITTED')
+    expect(statusOf('m1')).toBe('SOURCE_COMMIT_SKIPPED')
+    expect(statusOf('m1')).not.toBe('SOURCE_COMMITTED')
     const row = db.prepare(`SELECT last_error FROM email_processing WHERE message_id='m1'`)
       .get() as { last_error: string }
     expect(row.last_error).toMatch(/source-commit kihagyva/)
     expect(row.last_error).toMatch(/modify scope/)
+  })
+
+  it('F-8: the policy exception raises the A.1 alert and review task, not just a log line', async () => {
+    // A.1 lists five conditions for letting a batch past an item it could not
+    // fully process. Two of them — the critical alert and the human review task
+    // — were wired only to the quarantine branch, so this branch let messages
+    // through silently. An exception nobody is told about is indistinguishable
+    // from a bug.
+    const db = seed()
+    const alerts: string[] = []
+    const tasks: string[] = []
+    const r = await closeBatch(db, 'b1', new NoSourceWriteCommitter(), NOW, {
+      allowCursorAdvanceWithoutSourceWrite: true,
+      quarantine: {
+        raiseAlert: (_a, m, reason) => { alerts.push(`${m}:${reason}`); return true },
+        createReviewTask: (_a, m, reason) => { tasks.push(`${m}:${reason}`); return true },
+        policyAllowsCursorAdvance: () => true,
+      },
+    })
+    expect(r.batchClosed).toBe(true)
+    expect(alerts.some(a => a.startsWith('m1:') && /source-commit skipped/.test(a))).toBe(true)
+    expect(tasks.some(a => a.startsWith('m1:') && /source-commit skipped/.test(a))).toBe(true)
   })
 
   it('a failing committer does NOT close the batch and does not move the cursor', async () => {

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import { createZstCase } from '../cos/zst-case-store.js'
 import { registerConnector, setMode } from '../cos/connector-health.js'
+import { setLadder } from '../cos/autonomy-ladder.js'
 import {
   draftZstSend, approveZstSend, rejectZstSend, dispatchZstSend, evaluateZstSendGate,
   renderedPayloadHash,
@@ -30,6 +31,11 @@ describe('ZST approval-gated send (Slice 1 write-half, AT-ZA)', () => {
     const db = getDb()
     createZstCase(db, { caseId: 'ZST-ACC-1', title: 'Havi könyvelés', caseType: 'ACCOUNTING' }, T0)
     registerConnector(db, 'zst-gmail', 'gmail', 'READ_WRITE', T0)
+    // CHANGED 2026-08-10 (F-9): the corporate gate now checks the autonomy rung,
+    // as the personal one has since §22. Without this the whole file refuses at
+    // the rung and never reaches what it is actually testing. The personal
+    // send-flow suite has had the equivalent line all along.
+    setLadder(db, 'ACCOUNTING', { rung: 'EXECUTE_WITH_APPROVAL' }, T0 - 1000)
   })
 
   function draftAndApprove(email = EMAIL, recipients = [EMAIL.to]) {
@@ -42,6 +48,40 @@ describe('ZST approval-gated send (Slice 1 write-half, AT-ZA)', () => {
     ledgerId: d.ledgerId, campaignId: d.campaignId, connectorId: 'zst-gmail', email,
     templateHash: d.templateHash, renderedPayloadHash: renderedPayloadHash(email),
     declaredSensitivity: 'ZST_INTERNAL', targetProfile: 'premium_reasoning',
+    caseType: 'ACCOUNTING', now: T0 + 2,
+  })
+
+  it('F-9: the corporate gate refuses when the autonomy rung does not permit SEND', async () => {
+    // The gap this closes: the personal gate has checked the rung since §22 and
+    // the corporate one never did, so a case type parked at PREPARE could still
+    // send here. Asserted on a rung the approval is otherwise perfect for, so
+    // nothing else can be the reason for the refusal.
+    const db = getDb()
+    setLadder(db, 'ACCOUNTING', { rung: 'PREPARE' }, T0 - 1000)
+    const d = draftAndApprove()
+    const m = mockAdapter()
+    const res = await dispatchZstSend(db, m.adapter, dispatchInput(d), T0 + 2)
+    expect(res.sent).toBe(false)
+    expect(res.decision.reasons.join(' ')).toMatch(/autonómia-fokozat/)
+    expect(m.sent).toHaveLength(0)
+  })
+
+  it('F-9: an EXPIRED approval refuses — the corporate path used to ignore valid_until', async () => {
+    // authorizeZstSend reimplemented a narrower check locally and never looked
+    // at valid_until, stop conditions, channel or quotas. It delegates to the
+    // shared engine now, so all of them apply to both namespaces.
+    const db = getDb()
+    const d = draftZstSend(db, { caseId: 'ZST-ACC-1', templateId: 'accounting-package', email: EMAIL }, T0)
+    approveZstSend(db, {
+      campaignId: d.campaignId, templateHash: d.templateHash,
+      renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', allowedRecipients: [EMAIL.to],
+    }, T0 + 1)
+    db.prepare('UPDATE zst_campaign_approvals SET valid_until = ? WHERE campaign_id = ?').run(T0 + 5, d.campaignId)
+    const m = mockAdapter()
+    const res = await dispatchZstSend(db, m.adapter, { ...dispatchInput(d), now: T0 + 999 }, T0 + 999)
+    expect(res.sent).toBe(false)
+    expect(res.decision.reasons.join(' ')).toMatch(/expired/i)
+    expect(m.sent).toHaveLength(0)
   })
 
   it('happy path: draft → approve → dispatch → VERIFIED (one send)', async () => {
@@ -72,12 +112,16 @@ describe('ZST approval-gated send (Slice 1 write-half, AT-ZA)', () => {
     expect(m.sent).toHaveLength(0)
   })
 
+  // CHANGED 2026-08-10 (F-9): wording only. The refusal now comes from the
+  // shared approval engine, whose message reads "not ON the approved list"; the
+  // local reimplementation said "not IN". Both accepted so the assertion is
+  // about the refusal, not about one engine's phrasing.
   it('AT-ZA05: a recipient not on the approved list is vetoed', async () => {
     const d = draftAndApprove(EMAIL, ['someone-else@example.com'])
     const m = mockAdapter()
     const res = await dispatchZstSend(getDb(), m.adapter, dispatchInput(d), T0 + 2)
     expect(res.sent).toBe(false)
-    expect(res.decision.reasons.join()).toMatch(/not in the approved list/)
+    expect(res.decision.reasons.join()).toMatch(/not on the approved list|not in the approved list/)
   })
 
   it('AT-ZA09: a connector that is not write-usable blocks the send', async () => {

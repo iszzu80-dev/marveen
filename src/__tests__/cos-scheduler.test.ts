@@ -38,15 +38,24 @@ describe('COS scheduler queries', () => {
     expect(dueFollowUps(db, NOW).map((c) => c.case_id)).toEqual(['c1'])
   })
 
-  it('reconcileOutbound returns non-terminal ledger rows, excludes VERIFIED', async () => {
+  // CHANGED 2026-08-10 (F-7). This asserted `['PLANNED']` — i.e. it asserted the
+  // defect: reconcileOutbound handing a never-sent row to a background loop that
+  // evaluates no dispatch gate. reconcileOutbound is a RECOVERY queue now, so a
+  // PLANNED row must not appear in it. The property the test cared about (a
+  // VERIFIED row is not returned) is still asserted, alongside the new one.
+  it('reconcileOutbound returns rows needing recovery — never a PLANNED first send, never VERIFIED', async () => {
     const db = getDb()
     createCase(db, { caseId: 'c1', title: 'T', caseType: 'X' }, NOW)
     const done = planAction(db, { caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 1, payload: { to: 'a@b.c', subject: 's' } }, NOW)
-    await executeAction(db, new GmailSendAdapter(new DryRunTransport()), done.ledgerId, NOW) // → VERIFIED
-    planAction(db, { caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 2, payload: { to: 'x@y.z', subject: 's2' } }, NOW) // stays PLANNED
+    await executeAction(db, new GmailSendAdapter(new DryRunTransport()), done.ledgerId, NOW, { authorizedByDispatchGate: true }) // → VERIFIED
+    const planned = planAction(db, { caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 2, payload: { to: 'x@y.z', subject: 's2' } }, NOW)
 
-    const work = reconcileOutbound(db)
-    expect(work.map((w) => w.status)).toEqual(['PLANNED']) // the VERIFIED one is not returned
+    expect(reconcileOutbound(db)).toEqual([]) // neither the VERIFIED one nor the PLANNED one
+
+    // CONTROL: the same row, once it is genuinely mid-flight, IS offered — so
+    // the assertion above cannot be satisfied by returning nothing ever.
+    db.prepare("UPDATE outbound_ledger SET status='OUTCOME_UNKNOWN' WHERE ledger_id=?").run(planned.ledgerId)
+    expect(reconcileOutbound(db).map((w) => w.status)).toEqual(['OUTCOME_UNKNOWN'])
   })
 
   it('openEmailBatches returns OPEN/PROCESSING batches, not TERMINAL', () => {

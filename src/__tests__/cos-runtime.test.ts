@@ -4,7 +4,7 @@ import { createCase } from '../cos/case-store.js'
 import { planAction } from '../cos/executor.js'
 import { createRadarItem } from '../cos/radar.js'
 import { runCosTickOnce, safeCosDeps, registerCosConnectors } from '../cos/runtime.js'
-import { getHealth, setMode } from '../cos/connector-health.js'
+import { getHealth, setMode, recordMarkerProof } from '../cos/connector-health.js'
 import type { RentalAdapter, RentalOffer, RentalSearchParams } from '../cos/rental-adapter.js'
 
 // COS autonomous runtime. Proves the SAFETY posture: safeCosDeps wires no
@@ -41,7 +41,14 @@ describe('COS autonomous runtime', () => {
     expect(res.radarChecked).toBe(1)         // radar ran
     expect(rental.called).toBe(1)
     expect(res.outboundProcessed).toBe(0)    // the planned email was NOT sent
-    expect(res.outboundSkippedNoAdapter).toBe(1)
+    // CHANGED 2026-08-10 (F-7). This asserted `outboundSkippedNoAdapter === 1`,
+    // which recorded WHY nothing was sent: the tick reached the row and stopped
+    // only because no adapter was registered. That was the whole danger — one
+    // adapter registration away from an unapproved send. The tick is no longer
+    // offered PLANNED rows at all, so the counter is 0 and the safety no longer
+    // depends on a missing dependency. The test's title ("NEVER sends") is now
+    // true for a structural reason instead of an accidental one.
+    expect(res.outboundSkippedNoAdapter).toBe(0)
     // the outbound row is still PLANNED (untouched) — proof nothing was sent
     expect((db.prepare(`SELECT status FROM outbound_ledger WHERE ledger_id=?`).get(p.ledgerId) as any).status).toBe('PLANNED')
   })
@@ -59,6 +66,10 @@ describe('COS autonomous runtime', () => {
     expect(getHealth(db, 'rental')?.mode).toBe('READ_ONLY')
     expect(getHealth(db, 'rental')?.status).toBe('OK')
     // a later READ_WRITE flip is NOT clobbered by re-registration (ON CONFLICT DO NOTHING)
+    // CHANGED 2026-08-10 (F-10 / B.3): raising a connector to READ_WRITE now
+    // requires a recorded marker-persistence proof. The proof is the fixture
+    // here; what the test is about is unchanged.
+    recordMarkerProof(db, 'gmail', { passed: true, detail: 'test fixture' }, NOW + 1)
     setMode(db, 'gmail', 'READ_WRITE', NOW + 1)
     registerCosConnectors(db, NOW + 2)
     expect(getHealth(db, 'gmail')?.mode).toBe('READ_WRITE')

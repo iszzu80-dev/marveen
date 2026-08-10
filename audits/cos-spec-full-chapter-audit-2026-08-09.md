@@ -13,7 +13,8 @@
 
 | | Fejezet |
 |---|---|
-| **MEGVAN** | §6.1 (részben), §6.6, §6.7, §6.8, §7.1, §7.2, §10, §12 (tábla), §16 (radar), §20 |
+| **MEGVAN** | §6.1 (részben), §6.6, §6.7, §6.8, §7.1, §7.2, §10, §12 (tábla), §20 |
+| **MÁS, EGYSZERŰBB** | §16 (ár-figyelő mag, a spec adat- és szűrésmodellje nélkül) |
 | **INERT** | §7.3, §8 (második fele), §9, §11 (küldési lánc), §15 (revoke), A.1, A.2, B.1, B.2, B.4 |
 | **RÉSZBEN** | §1, §5, §6.2, §6.3, §6.5, §12 (státuszkészlet), §18, §21, §23, A.3, A.5 |
 | **MÁS** | §2 (Scope Gate helyett postafiók-routing), A.4 (kampány-kvóta helyett generikus rate limit), §22 (más autonómia-modell) |
@@ -360,3 +361,26 @@ Amit visszavonok, az az, hogy ez **rendszerré** állt volna össze. A három r�
 3. **A monitorozás** (§19) tizennyolc előírt riasztásából kettő létezik, és a hiányzók közül kettő pontosan a ma megtalált hibákat fogta volna meg.
 
 A rendszer ezért ma egy jól megépített, gondosan tesztelt **alkatrészkészlet**, ami ügyeket rögzít és megjelenít, de nem visz végig semmit.
+
+
+---
+
+## Utólagos javítás — 2026-08-10
+
+A 2026-08-10-i teljes code review (`audits/cos-teljes-code-review-2026-08-10.md`,
+12. javaslat) jogosan kifogásolta, hogy ez az audit a §16-ot a MEGVAN sorban
+szerepelteti, holott a saját szövege a 221-224. sorokban azt írja le, hogy a spec
+négy táblájából nulla épült meg. A két állítás ellentmondott egymásnak, és az
+összesítő táblát olvassa mindenki, nem a fejezetet.
+
+Az összesítő javítva: a §16 külön sorba került, **MÁS, EGYSZERŰBB** besorolással.
+A pontos megfogalmazás: a radar egy **működő ár-figyelő mag, a §16 adat- és
+szűrésmodellje nélkül**. Ami tényleg megvan és él: 9 radar-elem, a 6 órás tick,
+a devizamezők és az értesítés-dedup. Ami nincs: az ajánlatonkénti sor, a
+kereskedői kör, az ország- és szállítási szűrés, a garancia- és
+állapot-követelmény, a `rejection_reason`, és a vásárlás-utókövetés.
+
+Ez nem korrektségi hiba (a Slice 4 nyitva van), de a "radar BUILT" megfogalmazás
+félrevezető volt, és egy audit, ami félrevezet, rosszabb mint amelyik hiányzik.
+Az eredeti fejezet-szöveget nem írtam át: az helyes volt, csak az összesítő nem
+egyezett vele.

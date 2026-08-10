@@ -20,7 +20,7 @@ export type {
   OutboundStatus, OutboundAction, ReadbackResult, OutboundAdapter, SendErrorHints, PlanInput, ExecuteOpts,
 }
 
-const engine = makeExecutor('outbound_ledger')
+const engine = makeExecutor('outbound_ledger', 'case_claims')
 
 export const planAction = engine.planAction
 export const executeAction = engine.executeAction
