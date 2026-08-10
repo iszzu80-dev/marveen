@@ -65,7 +65,7 @@ try {
 // backup nobody has ever restored is a belief, not a backup: the decrypted
 // bytes are written to a temp file and OPENED as a database, so a corrupt or
 // truncated backup fails here rather than on the day it is needed.
-const passphrase = process.env.COS_BACKUP_PASSPHRASE ?? readVaultPassphrase()
+const passphrase = process.env.COS_BACKUP_PASSPHRASE ?? await readVaultPassphrase()
 if (!passphrase) {
   problems.push('no backup passphrase (COS_BACKUP_PASSPHRASE, or COS_BACKUP_PASSPHRASE in the vault) — NO BACKUP WAS MADE')
 } else {
@@ -102,12 +102,24 @@ report.problems = problems
 console.log(JSON.stringify(report, null, 1))
 process.exit(problems.length ? 1 : 0)
 
-function readVaultPassphrase(): string | null {
+async function readVaultPassphrase(): Promise<string | null> {
   try {
-    // Imported lazily: the vault is a dashboard module and a missing vault must
-    // produce a clear "no passphrase" failure, not a stack trace at import time.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { getSecret } = require('../src/web/vault.js') as { getSecret: (id: string) => string | null }
+    // Dynamic import, not require(). This file runs as ESM under tsx, where
+    // require() is not defined — so the first version threw on the very first
+    // line, the catch swallowed it, and the script reported "no passphrase
+    // configured" while the secret sat in the vault the whole time. Exactly the
+    // silent-fallback shape this script's own header warns about, written by me
+    // three hours earlier. Found by putting the real key in and watching it
+    // still say no.
+    //
+    // Imported lazily on purpose: a missing vault must still produce the clean
+    // "no passphrase" failure below rather than a stack trace at import time.
+    const { getSecret } = await import('../src/web/vault.js') as { getSecret: (id: string) => string | null }
     return getSecret('COS_BACKUP_PASSPHRASE')
-  } catch { return null }
+  } catch (e) {
+    // Say WHY. "No passphrase" and "the vault could not be read" are different
+    // facts, and the difference decides whether the fix is a key or a bug.
+    problems.push(`vault unreadable: ${String((e as Error)?.message ?? e)}`)
+    return null
+  }
 }
