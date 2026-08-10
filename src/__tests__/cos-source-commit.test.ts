@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import { createCase } from '../cos/case-store.js'
 import { openBatch, localApply, getCheckpoint, excludeMessage } from '../cos/email-ingest.js'
+import { initCosSchema } from '../cos/schema.js'
 import {
   closeBatch, closeOpenBatches, openBatchIds,
   NoSourceWriteCommitter, GmailLabelCommitter, type SourceCommitter,
@@ -174,5 +175,41 @@ describe('COS source commit + batch closure', () => {
     expect(r.committed).toBe(3)
     expect(r.batchClosed).toBe(true)
     expect(getCheckpoint(db, ACC)).toBe('200')
+  })
+})
+
+// N-1 (second review, 2026-08-10): the CHECK-widening migration used to DETECT
+// "is the constraint already wide?" by writing the probe value onto a real row
+// and throwing '__rollback__' to undo it. The try/catch was INSIDE the
+// transaction callback, so the throw never reached better-sqlite3's wrapper and
+// the transaction committed — probe UPDATE included. Every process start
+// rewrote the lowest-rowid row: email_processing SOURCE_COMMITTED →
+// SOURCE_COMMIT_SKIPPED, which is terminal, so a batch became closeable and the
+// account cursor advanceable over a message nobody ever marked at the source.
+//
+// The regression test is behavioural, not structural: boot the schema
+// repeatedly over rows in known states and assert NOTHING moved. A test that
+// only checked "the CHECK is wide" would have passed against the broken code.
+describe('schema init never rewrites a row (N-1)', () => {
+  it('four consecutive inits leave every status untouched', () => {
+    initDatabase(':memory:')
+    const db = getDb()
+    openBatch(db, {
+      batchId: 'b-probe', accountId: 'acc', cursorBefore: '1', cursorAfter: '2',
+      messages: [{ messageId: 'm-probe' }],
+    }, NOW)
+    // Put the rows in states the probe values would visibly clobber.
+    db.prepare("UPDATE email_processing SET status='LOCAL_APPLIED' WHERE message_id='m-probe'").run()
+    db.prepare("UPDATE email_processing_batches SET status='TERMINAL' WHERE batch_id='b-probe'").run()
+
+    const snapshot = () => JSON.stringify({
+      msg: (db.prepare("SELECT status FROM email_processing WHERE message_id='m-probe'").get() as { status: string }).status,
+      batch: (db.prepare("SELECT status FROM email_processing_batches WHERE batch_id='b-probe'").get() as { status: string }).status,
+    })
+    const before = snapshot()
+    expect(before).toContain('LOCAL_APPLIED')
+
+    for (let i = 0; i < 4; i++) initCosSchema(db)
+    expect(snapshot()).toBe(before)
   })
 })

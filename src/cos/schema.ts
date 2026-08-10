@@ -105,21 +105,32 @@ const APPROVAL_ENVELOPE: Record<string, string> = {
 }
 
 function widenCheckConstraint(db: Database.Database, table: string, probeValue: string, createSql: string): void {
-  const already = db.transaction((): boolean => {
-    try {
-      db.prepare(`UPDATE ${table} SET status = ? WHERE 0 = 1`).run(probeValue)
-      // A no-row UPDATE does not evaluate the CHECK, so probe for real, then throw
-      // to roll back whatever it did.
-      const one = db.prepare(`SELECT rowid FROM ${table} LIMIT 1`).get() as { rowid: number } | undefined
-      if (!one) return true // empty table: the CREATE above already has the wide CHECK
-      db.prepare(`UPDATE ${table} SET status = ? WHERE rowid = ?`).run(probeValue, one.rowid)
-      throw new Error('__rollback__')
-    } catch (e) {
-      if (String((e as Error).message) === '__rollback__') return true
-      return false
-    }
-  })()
-  if (already) return
+  // HOW THIS DETECTS "already wide" — and why it is NOT a write probe any more.
+  //
+  // The first version wrote `probeValue` onto a real row and threw '__rollback__'
+  // to undo it. The try/catch sat INSIDE the transaction callback, so the throw
+  // never reached better-sqlite3's wrapper and the transaction COMMITTED — with
+  // the probe's UPDATE in it. Every process start silently rewrote the status of
+  // the lowest-rowid row: email_processing_batches rowid 1 TERMINAL → BLOCKED,
+  // and email_processing rowid 1 SOURCE_COMMITTED → SOURCE_COMMIT_SKIPPED. The
+  // second one is the dangerous direction: SOURCE_COMMIT_SKIPPED is terminal, so
+  // a batch became closeable and the account cursor advanceable over a message
+  // nobody ever marked at the source (AC-11/AC-12, and §19's "cursor advanced on
+  // a non-terminal batch" critical alert). Found by the second code review,
+  // 2026-08-10; reproduced on the live store, both rows restored from the
+  // pre-merge backup.
+  //
+  // Reading the stored CHECK is what should have been here from the start. I
+  // argued against it in the original comment ("parsing text would be guessing")
+  // and that was wrong twice over: it is precise enough — the constraint either
+  // lists the literal or it does not — and, decisively, it CANNOT WRITE. A wrong
+  // "already wide" only skips a rebuild that was not needed; a wrong "not wide"
+  // triggers a rebuild that is verified by row count and foreign-key check
+  // anyway. Neither failure mode can corrupt a row. The old one could, and did.
+  const storedSql = (db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`)
+    .get(table) as { sql: string } | undefined)?.sql
+  if (!storedSql) return // no such table yet; the caller's CREATE will make it wide
+  if (storedSql.includes(probeValue)) return // the CHECK already lists it
 
   const cols = (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(c => c.name).join(', ')
   const before = (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n
