@@ -14,6 +14,7 @@ import { createCase } from '../cos/case-store.js'
 import { runProgressionCycle, type PipelineOptions } from '../cos/progression-pipeline.js'
 import { seedProgressionState } from '../cos/progression-migrate.js'
 import { releaseProgressionClaim } from '../cos/progression-scheduler.js'
+import { satisfyDoDCriterion } from '../cos/progression-completion.js'
 
 function freshDb(): Database.Database {
   const db = new Database(':memory:')
@@ -27,8 +28,8 @@ function now(): number { return Math.floor(Date.now() / 1000) }
 const MANUAL_OPTS: PipelineOptions = { triggerType: 'MANUAL', triggerReference: 'stagnation-test' }
 
 /** Seed a case with progression state, WITHOUT running initial progression.
- *  Pre-exhausts DoD criteria so auto-satisfy doesn't interfere with stagnation
- *  measurement. */
+ *  Pre-satisfies the DoD so completion is never what these tests are measuring
+ *  — they are about the stagnation counter and plan-step advancement. */
 function seedCaseWithoutInitialRun(db: Database.Database, caseId: string, status: 'NEW' | 'WAITING_EXTERNAL', t: number) {
   createCase(db, {
     caseId, title: caseId, caseType: 'ADMIN',
@@ -36,11 +37,22 @@ function seedCaseWithoutInitialRun(db: Database.Database, caseId: string, status
   }, t)
 
   // Seed state directly — do NOT run initial progression.
-  // Pre-set dod_verification_json with a pre-met criterion so
-  // initializeDoDVerification returns early (criteria.length > 0 guard) and
-  // autoSatisfyNextDoDCriterion finds nothing unmet (returns -1).
+  // The pre-set dod_verification_json makes initializeDoDVerification return
+  // early (criteria.length > 0 guard), so the pipeline's contract never
+  // overwrites it.
+  //
+  // Updated 2026-08-10: this seed used to be a bare `met: true` with all_met
+  // true, which after the completion fix means nothing — a tick with no
+  // evidence is not satisfaction, and a DoD with no provenance is generic.
+  // These tests need a case that CAN complete so that plan exhaustion is the
+  // only variable, so the seed now says so explicitly: a case-specific
+  // contract, satisfied against a named piece of evidence.
   const seedDod = {
-    criteria: [{ label: '_seed_guard', met: true, met_at: t, met_by_run: '_seed' }],
+    provenance: 'CASE_SPECIFIC',
+    criteria: [{
+      label: '_seed_guard', met: true, met_at: t,
+      met_by_run: '_seed', met_by_evidence: 'test_seed:_seed_guard',
+    }],
     all_met: true,
     evaluated_at: t,
   }
@@ -128,8 +140,10 @@ describe('plan step advancement (completed_plan_step)', () => {
   it('completes the case when plan is exhausted and DoD is met (NO wrap-around)', () => {
     const db = freshDb()
     const t = now()
-    // seedCaseWithoutInitialRun pre-sets dod_verification_json with _seed_guard
-    // (all_met=true), so canCompleteCase() returns allowed=true.
+    // seedCaseWithoutInitialRun pre-sets dod_verification_json with a
+    // CASE_SPECIFIC _seed_guard criterion already met against evidence, so
+    // canCompleteCase() returns allowed=true and plan exhaustion is the only
+    // variable this test moves.
     seedCaseWithoutInitialRun(db, 'c-complete', 'NEW', t)
 
     // Run through all 4 plan steps. The 4th run should trigger COMPLETE.
@@ -156,8 +170,8 @@ describe('plan step advancement (completed_plan_step)', () => {
     const t = now()
     seedCaseWithoutInitialRun(db, 'c-wrap', 'NEW', t)
 
-    // Override the seed's DoD with 5 unmet criteria — auto-satisfy satisfies
-    // one per run, so after 4 runs only 4 of 5 are met. canCompleteCase
+    // Override the seed's DoD with 5 unmet criteria. Nothing satisfies them —
+    // as of 2026-08-10 the pipeline satisfies nothing at all. canCompleteCase
     // returns allowed=false → plan wraps around instead of completing.
     db.prepare(
       `UPDATE case_progression_state SET dod_verification_json = ? WHERE domain = ? AND case_id = ?`,
@@ -249,37 +263,49 @@ describe('stagnation detector (no_progress_run_count)', () => {
     expect(final.no_progress_run_count).toBe(5)
   })
 
-  it('resets no_progress_run_count to 0 when DoD criterion is newly met', () => {
+  // REPLACED 2026-08-10. The old test here was called "resets
+  // no_progress_run_count to 0 when DoD criterion is newly met": it injected an
+  // unmet criterion, ran one cycle, and asserted the stagnation counter was 0.
+  //
+  // Two things were wrong with it. It asserted 0 after a run that had already
+  // left the counter at 0, so it would have passed with the mechanism ripped
+  // out — and the mechanism it described was the auto-satisfier, which counted
+  // its own bookkeeping as progress. A run that ticks a box it invented and
+  // then resets the stagnation counter because a box got ticked cannot ever
+  // look stagnant. That is why 26 live cases sat still for hours with a
+  // stagnation counter of zero.
+  //
+  // What replaces it pins the new rule: satisfying a criterion is not progress
+  // by itself, and a case the engine cannot actually move keeps counting up.
+  it('a satisfied DoD criterion alone does NOT reset the stagnation counter', () => {
     const db = freshDb()
     const t = now()
-    seedCaseWithoutInitialRun(db, 'c-dodreset', 'NEW', t)
+    seedCaseWithoutInitialRun(db, 'c-dodreset', 'WAITING_EXTERNAL', t)
 
-    // First, accumulate no-op runs
-    for (let i = 0; i < 12; i++) {
+    // WAITING_EXTERNAL: the engine cannot proceed autonomously, so every cycle
+    // is genuinely a no-op and the counter climbs.
+    for (let i = 0; i < 5; i++) {
       releaseProgressionClaim(db, 'personal', 'c-dodreset', 'runner', t + 60)
       runProgressionCycle(db, 'personal', 'c-dodreset', t + i + 1, MANUAL_OPTS)
     }
+    const mid = getState(db, 'c-dodreset').no_progress_run_count
+    expect(mid).toBeGreaterThan(0)
 
-    const mid = getState(db, 'c-dodreset')
-    console.log(`  after 12 cycles: no_progress=${mid.no_progress_run_count}`)
-
-    // Manually inject an unmet DoD criterion so the next run satisfies it
-    const dodVerification = {
-      criteria: [
-        { label: 'Verify', met: false, met_by_run_id: null, met_at: null },
-      ],
-    }
+    // Satisfy a criterion out of band, with evidence, then run one more cycle.
     db.prepare(
       'UPDATE case_progression_state SET dod_verification_json = ? WHERE domain = ? AND case_id = ?',
-    ).run(JSON.stringify(dodVerification), 'personal', 'c-dodreset')
+    ).run(JSON.stringify({
+      provenance: 'CASE_SPECIFIC',
+      criteria: [{ label: 'Verify', met: false, met_at: null, met_by_run: null, met_by_evidence: null }],
+      all_met: false,
+      evaluated_at: t,
+    }), 'personal', 'c-dodreset')
+    satisfyDoDCriterion(db, 'personal', 'c-dodreset', 0, 'out-of-band', 'case_event:99', t + 19)
 
     releaseProgressionClaim(db, 'personal', 'c-dodreset', 'runner', t + 60)
     runProgressionCycle(db, 'personal', 'c-dodreset', t + 20, MANUAL_OPTS)
 
-    const after = getState(db, 'c-dodreset')
-    console.log(`  after DoD injection + 1 run: no_progress=${after.no_progress_run_count}`)
-
-    // After a DoD criterion is satisfied (real progress), counter must reset to 0
-    expect(after.no_progress_run_count).toBe(0)
+    // The case still has not moved, so the counter still has not reset.
+    expect(getState(db, 'c-dodreset').no_progress_run_count).toBeGreaterThan(mid)
   })
 })

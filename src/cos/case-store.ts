@@ -22,7 +22,7 @@ import {
   type TransitionInput as CoreTransitionInput,
   type TransitionPatchKey,
 } from './case-engine-core.js'
-import { guardCaseCompletion } from './progression-completion.js'
+import { guardCaseCompletion, completionActor } from './progression-completion.js'
 
 export { CaseConcurrencyError }
 export type { CaseRow, AppendEventInput, CaseListItem, ClaimResult }
@@ -68,7 +68,7 @@ export function transitionCase(db: Database.Database, input: TransitionInput, no
   // Checkpoint E.4 completion guard: for progression-enabled cases, DoD must
   // be met before the case can transition to COMPLETED.
   if (input.newStatus === 'COMPLETED') {
-    guardCaseCompletion(db, 'personal', input.caseId)
+    guardCaseCompletion(db, 'personal', input.caseId, completionActor(input.actor))
   }
   return engine.transitionCase(db, input, now)
 }
