@@ -1,0 +1,10 @@
+{
+  "schedule": "30 8 * * *",
+  "agent": "bursar",
+  "enabled": false,
+  "type": "task",
+  "skipIfBusy": false,
+  "forceSend": false,
+  "description": "ZST Radio ceges Gmail napi aktiv triazs + osszefoglalo (read-only)",
+  "createdAt": 1782401642
+}

@@ -1,0 +1,7 @@
+{
+  "schedule": "*/30 * * * *",
+  "agent": "marveen",
+  "enabled": false,
+  "type": "heartbeat",
+  "skipIfBusy": true
+}

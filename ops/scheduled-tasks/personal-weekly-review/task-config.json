@@ -1,0 +1,9 @@
+{
+  "schedule": "0 8 * * 1",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "task",
+  "skipIfBusy": false,
+  "description": "COS heti attekintes (spec 14 personal-weekly-review) -- elakadt ugyek, rajtad a sor, haladt",
+  "createdAt": 1786300000
+}

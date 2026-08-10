@@ -1,0 +1,11 @@
+{
+  "schedule": "0 9 * * *",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "heartbeat",
+  "skipIfBusy": true,
+  "forceSend": false,
+  "description": "Napi szeles webes keresés a termek-radar tetelekre; csak jo ajanlatnal (celar ala) pingel Telegramra",
+  "stuckAfterMinutes": 20,
+  "createdAt": 1786097000
+}

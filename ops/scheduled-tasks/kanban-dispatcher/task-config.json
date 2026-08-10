@@ -1,0 +1,10 @@
+{
+  "schedule": "5,35 * * * *",
+  "agent": "marveen",
+  "enabled": false,
+  "type": "heartbeat",
+  "skipIfBusy": true,
+  "forceSend": false,
+  "description": "[DISABLED 2026-07-02, Istvan-approved] Momentum-szerepet a maestro-backlog-review (deliverylead, */30, skipIfBusy=false) vette at, ami 48/48 fut. Ez a task skipIfBusy=true + agent=marveen miatt a fo-session busy-jekor kihagyott (skipped 49/49 24h alatt, utolso valodi futas 06-30 22:05) -> redundans es megbizhatatlan. Nem alakitjuk command-da most (Istvan direktiva). Eredeti: 10 percenkent dispatch + 24h blocker + waiting Telegram ping + spec-build handoff.",
+  "createdAt": 1782711988
+}

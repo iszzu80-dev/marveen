@@ -1,0 +1,10 @@
+{
+  "schedule": "0 23 * * 0",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "heartbeat",
+  "skipIfBusy": false,
+  "forceSend": false,
+  "description": "Heti kanban housekeeping: done kartyak archivalasa + export logba",
+  "createdAt": 1782290153
+}

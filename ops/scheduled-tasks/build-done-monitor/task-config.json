@@ -1,0 +1,11 @@
+{
+    "schedule": "15,45 * * * *",
+    "agent": "marveen",
+    "enabled": true,
+    "type": "command",
+    "command": "python3 ~/.claude/scheduled-tasks/build-done-monitor/check.py",
+    "timeoutMs": 30000,
+    "failThreshold": 2,
+    "description": "Done kartyak figyelese, Bot API ertesites -- LLM nelkul",
+    "createdAt": 1782662138
+}

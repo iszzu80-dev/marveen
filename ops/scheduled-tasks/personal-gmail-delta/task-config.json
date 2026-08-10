@@ -1,0 +1,11 @@
+{
+  "schedule": "0 * * * *",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "heartbeat",
+  "skipIfBusy": false,
+  "forceSend": false,
+  "description": "COS bejovo levelfigyeles (spec 14 personal-gmail-delta) -- oraankent, mindket Google fiok",
+  "createdAt": 1784359522,
+  "stuckAfterMinutes": 20
+}

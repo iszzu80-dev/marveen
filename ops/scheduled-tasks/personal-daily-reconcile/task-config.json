@@ -1,0 +1,11 @@
+{
+  "schedule": "0 7 * * *",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "command",
+  "command": "bash ~/.claude/scheduled-tasks/personal-daily-reconcile/run.sh",
+  "timeoutMs": 120000,
+  "failThreshold": 1,
+  "description": "COS napi egyeztetes (spec 14): ledger/koteg/checkpoint/health/termeles -- LLM nelkul, csak talalatnal szol",
+  "createdAt": 1786300000
+}

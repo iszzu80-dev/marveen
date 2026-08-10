@@ -1,0 +1,14 @@
+{
+  "schedule": "*/30 * * * *",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "command",
+  "command": "bash ~/.claude/scheduled-tasks/limit-revive/check.sh",
+  "timeoutMs": 30000,
+  "skipIfBusy": false,
+  "forceSend": false,
+  "description": "[2026-07-03 heartbeat->command] Periodikus sweep: a Claude usage-limit modalon parkolt agenseket feloldja (tmux send-keys Enter). Determinisztikus, NULLA agent-context (korabban Cog DeepSeek sessionjet egette). Csendes ha 0 parkolt.",
+  "createdAt": 1782149716,
+  "reenabledAt": "2026-06-27T16:31:57.786Z",
+  "reenabledReason": "Re-enabled after DeepSeek direct config fix and codeworker Flash canary success"
+}

@@ -1,0 +1,10 @@
+{
+  "schedule": "11 08 01 07 *",
+  "agent": "marveen",
+  "enabled": false,
+  "type": "heartbeat",
+  "skipIfBusy": false,
+  "forceSend": false,
+  "description": "Egyszeri (07-01 08:11 CEST) ellenorzo kor bolcsi/eskuvo agentekre",
+  "createdAt": 1782882704
+}

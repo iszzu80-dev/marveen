@@ -1,0 +1,11 @@
+{
+  "schedule": "0 16 * * 5",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "task",
+  "skipIfBusy": true,
+  "forceSend": true,
+  "description": "Heti penteki penzugyi tanacsado osszefoglalo az OTP Global Markets kutatasi levelekbol (privat CoS)",
+  "stuckAfterMinutes": 20,
+  "createdAt": 1786114400
+}

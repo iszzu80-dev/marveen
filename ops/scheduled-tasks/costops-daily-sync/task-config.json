@@ -1,0 +1,10 @@
+{
+  "schedule": "0 6 * * *",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "command",
+  "command": "python3 ~/.claude/scheduled-tasks/costops-daily-sync/check.py",
+  "timeoutMs": 120000,
+  "description": "CostOps daily provider-cost sync (render/openai/github/deepseek), no LLM. openai errors cleanly on bad key without blocking the others.",
+  "createdAt": 1783792567
+}

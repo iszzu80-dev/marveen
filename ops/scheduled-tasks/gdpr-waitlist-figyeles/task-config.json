@@ -1,0 +1,10 @@
+{
+  "schedule": "0 8,14,20 * * *",
+  "agent": "bursar",
+  "enabled": false,
+  "type": "heartbeat",
+  "skipIfBusy": false,
+  "forceSend": false,
+  "description": "ZST Radio waitlist GDPR leiratkozas/torles kerelmek figyelese a ceges Gmailen",
+  "createdAt": 1782334101
+}

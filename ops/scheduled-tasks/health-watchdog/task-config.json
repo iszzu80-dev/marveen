@@ -1,0 +1,11 @@
+{
+  "schedule": "20,50 * * * *",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "command",
+  "command": "bash ~/.claude/scheduled-tasks/health-watchdog/check.sh",
+  "timeoutMs": 15000,
+  "failThreshold": 2,
+  "description": "Agent session count + auth error check -- LLM nelkul",
+  "createdAt": 1782682443
+}

@@ -1,0 +1,11 @@
+{
+  "schedule": "7 */2 * * *",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "command",
+  "command": "bash ~/.claude/scheduled-tasks/agent-oauth-sweep/check.sh",
+  "timeoutMs": 15000,
+  "failThreshold": 2,
+  "description": "OAuth wall detekci\u00f3 -- LLM nelkul",
+  "createdAt": 1782645516
+}

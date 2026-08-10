@@ -1,0 +1,9 @@
+{
+  "schedule": "0 8,12,16,20 * * *",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "heartbeat",
+  "skipIfBusy": true,
+  "createdAt": 0,
+  "stuckAfterMinutes": 20
+}

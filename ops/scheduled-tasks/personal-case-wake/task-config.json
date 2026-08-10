@@ -1,0 +1,10 @@
+{
+  "schedule": "*/10 * * * *",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "heartbeat",
+  "skipIfBusy": false,
+  "forceSend": false,
+  "description": "COS ugy-ebresztes (spec 14 personal-case-wake) -- esedekes ugyek belso koeree, kulso muvelet nelkul. VISSZAKAPCSOLVA 2026-08-10 04:05 a DoD-javitas utan (kartya 0a7574db). A visszakapcsolas DoD-je teljesult: scripts/cos-dryrun-progression.ts az elo allapot masolatan, mind a 96 ugy, 6 ciklus, 0 lezaras -- ugyanaz a masolat a javitas elotti kodon a 4. ciklusban 45 ugyet zart le.",
+  "createdAt": 1786272530
+}

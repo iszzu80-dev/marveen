@@ -1,0 +1,10 @@
+{
+  "schedule": "*/30 * * * *",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "command",
+  "command": "python3 ~/.claude/scheduled-tasks/costops-alert-monitor/check.py",
+  "timeoutMs": 120000,
+  "description": "CostOps proaktiv alert-pusher -- Telegram push kuszob-atlepesre (limit>=80%, high/crit warning, budget-breach), LLM nelkul, dedup. Csendes ha nincs uj.",
+  "createdAt": 1783544400
+}

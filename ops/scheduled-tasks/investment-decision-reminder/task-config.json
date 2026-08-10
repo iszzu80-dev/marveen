@@ -1,0 +1,11 @@
+{
+  "schedule": "0 9 * * 1",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "heartbeat",
+  "skipIfBusy": true,
+  "forceSend": false,
+  "description": "Hetfoi emlekezteto a 15M Ft befektetesi dontesrol, amig a PRI-INV-2026-001 ugy nyitott (elhallgat ha kesz)",
+  "stuckAfterMinutes": 15,
+  "createdAt": 1786114500
+}

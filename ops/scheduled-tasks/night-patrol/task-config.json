@@ -1,0 +1,10 @@
+{
+  "schedule": "0 2 * * *",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "heartbeat",
+  "skipIfBusy": false,
+  "forceSend": false,
+  "description": "02:00 ejszakai orjarat: context-tele idle agensek biztonsagos /clear-je",
+  "createdAt": 1782708988
+}

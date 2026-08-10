@@ -1,0 +1,11 @@
+{
+  "schedule": "*/30 * * * *",
+  "agent": "deliverylead",
+  "enabled": false,
+  "type": "heartbeat",
+  "skipIfBusy": false,
+  "forceSend": false,
+  "description": "30 percenk\u00e9nt: Maestro \u00e1tn\u00e9zi a kanbant \u00e9s deleg\u00e1l",
+  "createdAt": 1782656004,
+  "_paused_reason": "fleet HOLD reinstated 2026-07-29: Istvan reversed the GO (accidental). Keep paused."
+}

@@ -1,0 +1,11 @@
+{
+  "schedule": "20,50 * * * *",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "command",
+  "command": "bash ~/.claude/scheduled-tasks/context-watchdog/check.sh",
+  "timeoutMs": 180000,
+  "failThreshold": 1,
+  "description": "30 percenkent: agent context-saturation detektalas + AUTO-RECOVERY (dispatch-guard fresh-restart); Istvant csak quarantine/timeout eseten ertesiti",
+  "createdAt": 1782882900
+}

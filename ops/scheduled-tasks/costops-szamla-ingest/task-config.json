@@ -1,0 +1,10 @@
+{
+  "schedule": "0 7 * * 1",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "heartbeat",
+  "skipIfBusy": false,
+  "forceSend": false,
+  "description": "Heti szamla-beszedes mindket Gmail fiokbol a CostOps-ba (read-only Gmail, actual_invoice ingest)",
+  "createdAt": 1784483875
+}

@@ -1,0 +1,10 @@
+{
+  "schedule": "*/20 * * * *",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "command",
+  "command": "python3 ~/.claude/scheduled-tasks/fleet-stall-detector/check.py",
+  "timeoutMs": 20000,
+  "description": "Determinisztikus stall-backstop: ha a kanban 90+ percig nem mozdul es van nem-blokkolt munka, force-nudge a deliverylead-nek egy teljes backlog-sweepre (planned ES waiting kartyak auditja). LLM nelkul, DB-direct.",
+  "createdAt": 1783573000
+}

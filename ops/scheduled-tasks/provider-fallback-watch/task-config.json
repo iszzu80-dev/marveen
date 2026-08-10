@@ -1,0 +1,10 @@
+{
+  "schedule": "*/10 * * * *",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "command",
+  "command": "python3 ~/.claude/scheduled-tasks/provider-fallback-watch/check.py",
+  "timeoutMs": 180000,
+  "description": "Provider-dry failover + automatic recovery (card 16a25d46). Switches STALLED primary-model agents to the fallback model when the provider is really dry, then automatically reverts them (canary-proven) once it recovers. Early-warns before the balance hits zero. LLM-free, silent when nothing changed.",
+  "createdAt": 1786219500
+}

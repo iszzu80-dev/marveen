@@ -1,0 +1,11 @@
+{
+  "schedule": "10,40 * * * *",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "command",
+  "command": "python3 ~/.claude/scheduled-tasks/done-evidence-gate/check.py",
+  "timeoutMs": 15000,
+  "failThreshold": 1,
+  "description": "30 percenkent: friss done kartyak fajl-evidencia ellenorzese (hivatkozott path letezik-e), auto-reopen ha hianyzik",
+  "createdAt": 1782883500
+}

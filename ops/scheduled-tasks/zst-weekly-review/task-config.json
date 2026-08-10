@@ -1,0 +1,11 @@
+{
+  "schedule": "0 8 * * 1",
+  "agent": "marveen",
+  "enabled": true,
+  "type": "task",
+  "skipIfBusy": true,
+  "forceSend": true,
+  "description": "Heti (hetfo) ZST uzleti operativ review: nyitott ugyek, dontesre varok, lejaro szerzodesek/licencek, penzugyi statusz. Read-only.",
+  "stuckAfterMinutes": 20,
+  "createdAt": 1786116000
+}
