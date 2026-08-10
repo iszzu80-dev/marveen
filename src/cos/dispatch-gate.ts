@@ -35,6 +35,8 @@ export interface DispatchRequest {
   /** F-16: evaluation time. Absent falls back to wall time inside
    *  authorizeSend, which is only ever right in production. */
   now?: number
+  /** N-2: which per-kind ceiling applies. */
+  outboundKind?: 'INITIAL' | 'FOLLOW_UP' | 'REPLY'
   /** The rendered outbound content (classified for sensitivity). */
   content: string
   /** The model profile that would process/produce this send. */
@@ -62,6 +64,10 @@ export interface DispatchDecision {
    *  when the campaign check refused. */
   campaignVersion?: number
   approvalVersion?: number
+  /** N-2: the envelope ceilings, so the caller can have them counted inside the
+   *  same transaction as the SENDING write instead of only before it. */
+  limits?: { maxTotal: number | null; maxPerKind: number | null; kind: string | null }
+  approvalId?: string
 }
 
 /** Evaluate the full send gate. Fail-closed: every layer must pass. */
@@ -91,6 +97,7 @@ export function evaluateDispatch(db: Database.Database, req: DispatchRequest): D
   const auth = authorizeSend(db, {
     campaignId: req.campaignId, templateHash: req.templateHash,
     renderedPayloadHash: req.renderedPayloadHash, recipient: req.recipient,
+    outboundKind: req.outboundKind,
   }, req.now)
   if (!auth.authorized) reasons.push(`campaign not authorized: ${auth.reason}`)
 
@@ -98,5 +105,6 @@ export function evaluateDispatch(db: Database.Database, req: DispatchRequest): D
   return {
     allowed: reasons.length === 0, reasons, sensitivityTier: tier, recommendedProfile: routed.profile,
     campaignVersion: auth.campaignVersion, approvalVersion: auth.approvalVersion,
+    limits: auth.limits, approvalId: auth.approvalId,
   }
 }

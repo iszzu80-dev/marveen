@@ -1,0 +1,475 @@
+// Single source of truth for settings the dashboard's "Beallitasok" page can
+// show and edit. Each entry describes one .env-backed config key: its type
+// (drives the input widget + validation), default, human description, the
+// module it belongs to (drives UI grouping), whether it is secret (drives
+// API redaction), and whether changing it needs a process restart to take
+// effect (drives the UI warning badge).
+//
+// v1 scope is intentionally narrow: the 9 Kanban WIP keys. Extending this
+// array is how a future setting becomes editable from the UI -- no route or
+// frontend change needed beyond what already reads the registry.
+// The model a fresh install runs when DEFAULT_AGENT_MODEL is unset. Kept here
+// (a zero-import module) so the registry default and the boot-time constant in
+// config.ts cannot drift apart -- bumping the distribution default is a
+// one-line change in exactly one place.
+export const DISTRIBUTION_DEFAULT_AGENT_MODEL = 'claude-opus-4-8[1m]';
+const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+export const SETTINGS_REGISTRY = [
+    {
+        key: 'KANBAN_WIP_PLANNED',
+        type: 'int',
+        default: 0,
+        min: 0,
+        max: 100,
+        description: 'A "planned" oszlop WIP-limitje (max. kártyaszám). 0 = korlátlan.',
+        module: 'kanban',
+        secret: false,
+        requiresRestart: false,
+    },
+    {
+        key: 'KANBAN_WIP_IN_PROGRESS',
+        type: 'int',
+        default: 0,
+        min: 0,
+        max: 100,
+        description: 'Az "in_progress" oszlop WIP-limitje (max. kártyaszám). 0 = korlátlan.',
+        module: 'kanban',
+        secret: false,
+        requiresRestart: false,
+    },
+    {
+        key: 'KANBAN_WIP_TESTING',
+        type: 'int',
+        default: 0,
+        min: 0,
+        max: 100,
+        description: 'A "testing" oszlop WIP-limitje (max. kártyaszám). 0 = korlátlan.',
+        module: 'kanban',
+        secret: false,
+        requiresRestart: false,
+    },
+    {
+        key: 'KANBAN_WIP_WAITING',
+        type: 'int',
+        default: 0,
+        min: 0,
+        max: 100,
+        description: 'A "waiting" oszlop WIP-limitje (max. kártyaszám). 0 = korlátlan.',
+        module: 'kanban',
+        secret: false,
+        requiresRestart: false,
+    },
+    {
+        key: 'KANBAN_WIP_DONE',
+        type: 'int',
+        default: 0,
+        min: 0,
+        max: 100,
+        description: 'A "done" oszlop WIP-limitje (max. kártyaszám). 0 = korlátlan.',
+        module: 'kanban',
+        secret: false,
+        requiresRestart: false,
+    },
+    {
+        key: 'KANBAN_WIP_WARN_PCT',
+        type: 'int',
+        default: 80,
+        min: 1,
+        max: 100,
+        description: 'Kihasználtsági százalék, amely felett a WIP-badge sárgára vált. 0 nem értelmes (azonnali figyelmeztetés), ezért tiltott.',
+        module: 'kanban',
+        secret: false,
+        requiresRestart: false,
+    },
+    {
+        key: 'KANBAN_WIP_OK_COLOR',
+        type: 'color',
+        default: '#6b7280',
+        description: 'A WIP-badge színe, amikor az oszlop kihasználtsága a figyelmeztetési küszöb alatt van.',
+        module: 'kanban',
+        secret: false,
+        requiresRestart: false,
+    },
+    {
+        key: 'KANBAN_WIP_WARN_COLOR',
+        type: 'color',
+        default: '#c9a000',
+        description: 'A WIP-badge színe a figyelmeztetési küszöb (WARN_PCT) felett, limit előtt.',
+        module: 'kanban',
+        secret: false,
+        requiresRestart: false,
+    },
+    {
+        key: 'KANBAN_WIP_FULL_COLOR',
+        type: 'color',
+        default: '#d46b00',
+        description: 'A WIP-badge színe, amikor az oszlop pontosan a limiten áll.',
+        module: 'kanban',
+        secret: false,
+        requiresRestart: false,
+    },
+    {
+        key: 'KANBAN_WIP_OVER_COLOR',
+        type: 'color',
+        default: '#c53030',
+        description: 'A WIP-badge színe, amikor az oszlop túllépte a limitet.',
+        module: 'kanban',
+        secret: false,
+        requiresRestart: false,
+    },
+    // --- Kanban archiving (hot-reload via settings-store) ---
+    {
+        key: 'KANBAN_ARCHIVE_DONE_DAYS',
+        type: 'int',
+        default: 30,
+        min: 1,
+        max: 365,
+        description: 'Ennyi napnál régebbi "done" kártyák automatikusan archiválódnak a listKanbanCards() hívásakor.',
+        module: 'kanban',
+        secret: false,
+        requiresRestart: false,
+    },
+    {
+        key: 'KANBAN_ARCHIVED_MAX_ROWS',
+        type: 'int',
+        default: 500,
+        min: 10,
+        max: 5000,
+        description: 'Az archivált kártya-nézetben egyszerre megjelenített kártyák maximális száma.',
+        module: 'kanban',
+        secret: false,
+        requiresRestart: false,
+    },
+    // --- Kanban aging thresholds and colours (hot-reload via settings-store) ---
+    {
+        key: 'KANBAN_AGING_WARN_H',
+        type: 'int',
+        default: 24,
+        min: 1,
+        max: 8760,
+        description: 'Ennyi óra inaktivitás után jelenik meg az első (sárga) aging-jelzés a kártyán.',
+        module: 'kanban',
+        secret: false,
+        requiresRestart: false,
+    },
+    {
+        key: 'KANBAN_AGING_CAUTION_H',
+        type: 'int',
+        default: 72,
+        min: 1,
+        max: 8760,
+        description: 'Ennyi óra inaktivitás után vált narancssárgára az aging-jelzés.',
+        module: 'kanban',
+        secret: false,
+        requiresRestart: false,
+    },
+    {
+        key: 'KANBAN_AGING_CRITICAL_H',
+        type: 'int',
+        default: 168,
+        min: 1,
+        max: 8760,
+        description: 'Ennyi óra inaktivitás után vált pirosra (kritikus) az aging-jelzés.',
+        module: 'kanban',
+        secret: false,
+        requiresRestart: false,
+    },
+    {
+        key: 'KANBAN_AGING_WARN_COLOR',
+        type: 'color',
+        default: '#c9a000',
+        description: 'Az aging-badge színe a figyelmeztetési küszöbnél (warn).',
+        module: 'kanban',
+        secret: false,
+        requiresRestart: false,
+    },
+    {
+        key: 'KANBAN_AGING_CAUTION_COLOR',
+        type: 'color',
+        default: '#d46b00',
+        description: 'Az aging-badge színe az óvatossági küszöbnél (caution).',
+        module: 'kanban',
+        secret: false,
+        requiresRestart: false,
+    },
+    {
+        key: 'KANBAN_AGING_CRITICAL_COLOR',
+        type: 'color',
+        default: '#c53030',
+        description: 'Az aging-badge színe a kritikus küszöbnél.',
+        module: 'kanban',
+        secret: false,
+        requiresRestart: false,
+    },
+    // --- Kanban swimlanes (hot-reload via settings-store) ---
+    {
+        key: 'KANBAN_SWIMLANE_DEFAULT_GROUP',
+        type: 'string',
+        default: 'none',
+        valueSet: ['none', 'assignee', 'priority'],
+        description: 'A tábla alapértelmezett csoportosítása betöltéskor. none = lapos nézet.',
+        module: 'kanban',
+        secret: false,
+        requiresRestart: false,
+    },
+    {
+        key: 'KANBAN_SWIMLANE_SEPARATOR_COLOR',
+        type: 'color',
+        default: '#374151',
+        description: 'Az swimlane-elválasztó fejléc háttérszíne.',
+        module: 'kanban',
+        secret: false,
+        requiresRestart: false,
+    },
+    // --- System module (requiresRestart -- read at process init) ---
+    {
+        key: 'DASHBOARD_PUBLIC_URL',
+        type: 'string',
+        default: '',
+        description: 'A dashboard nyilvánosan elérhető URL-je (pl. https://marveen.example.com). Üres = nincs CORS whitelist bővítés.',
+        module: 'system',
+        secret: false,
+        requiresRestart: true,
+    },
+    {
+        key: 'OLLAMA_URL',
+        type: 'string',
+        default: 'http://localhost:11434',
+        description: 'Az Ollama API alap-URL-je. Memória-embedding és modell-javaslat ezt használja.',
+        module: 'system',
+        secret: false,
+        requiresRestart: true,
+    },
+    {
+        key: 'DASHBOARD_LANG',
+        type: 'string',
+        default: 'hu',
+        valueSet: ['hu', 'en'],
+        description: 'A dashboard alapértelmezett megjelenítési nyelve (hu = magyar, en = angol). A böngészőben mentett preferencia (localStorage) felülírja.',
+        module: 'system',
+        secret: false,
+        requiresRestart: false,
+    },
+    // --- Heartbeat module (hot-reload via settings-store) ---
+    {
+        key: 'HEARTBEAT_START_HOUR',
+        type: 'int',
+        default: 9,
+        min: 0,
+        max: 22,
+        description: 'A heartbeat aktív időablakának kezdete (helyi idő, 0-22). Előtte nem küld értesítést.',
+        module: 'heartbeat',
+        secret: false,
+        requiresRestart: false,
+    },
+    {
+        key: 'HEARTBEAT_END_HOUR',
+        type: 'int',
+        default: 23,
+        min: 1,
+        max: 24,
+        description: 'A heartbeat aktív időablakának vége (helyi idő, 1-24). Ettől nem küld értesítést.',
+        module: 'heartbeat',
+        secret: false,
+        requiresRestart: false,
+    },
+    {
+        key: 'HEARTBEAT_AGENT_ENABLED',
+        type: 'string',
+        default: '1',
+        valueSet: ['0', '1'],
+        description: 'Heartbeat sub-ágens engedélyezése. 1 = bekapcsolva (újraindítás után lép életbe).',
+        module: 'heartbeat',
+        secret: false,
+        requiresRestart: true,
+    },
+    {
+        key: 'HEARTBEAT_CALENDAR_ACCOUNT',
+        type: 'string',
+        default: '',
+        description: 'Google Calendar fiók neve/e-mailje a heartbeat naptár-összefoglalóhoz. Üresen hagyva a heartbeat nem kérdez le naptáreseményeket.',
+        module: 'heartbeat',
+        secret: false,
+        // Consumed as a boot-time const (src/config.ts) -- a saved override takes
+        // effect on the next restart, and the UI must say so.
+        requiresRestart: true,
+    },
+    {
+        key: 'HEARTBEAT_CALENDAR_ID',
+        type: 'string',
+        default: '',
+        description: 'Google Calendar naptár-azonosítója a heartbeat összefoglalóhoz (pl. primary). Üresen hagyva a heartbeat nem kérdez le naptáreseményeket.',
+        module: 'heartbeat',
+        secret: false,
+        // Boot-time const, see HEARTBEAT_CALENDAR_ACCOUNT above.
+        requiresRestart: true,
+    },
+    {
+        key: 'IDEA_BREAKDOWN_MAX_SUBTASKS',
+        type: 'int',
+        default: 10,
+        min: 2,
+        max: 20,
+        description: 'Az "Kanbanra (AI)" ötlet-bontás során generált részfeladatok maximális száma.',
+        module: 'ideabox',
+        secret: false,
+        requiresRestart: false,
+    },
+    {
+        key: 'IDEA_STALE_DAYS',
+        type: 'int',
+        default: 7,
+        min: 1,
+        max: 365,
+        description: 'Ennyi napnyi mozdulatlanság után kap "Elavult" jelzést egy "új" státuszú ötlet.',
+        module: 'ideabox',
+        secret: false,
+        requiresRestart: false,
+    },
+    // --- Audit log module ---
+    {
+        key: 'AUDIT_LOG_RETENTION_DAYS',
+        type: 'int',
+        default: 90,
+        min: 1,
+        max: 3650,
+        description: 'Az audit napló (config-változások, ötletláda-audit, store-fájl események) megőrzési ideje napokban. Régebbi bejegyzések a napi sweepkor törlődnek.',
+        module: 'audit',
+        secret: false,
+        requiresRestart: false,
+    },
+    {
+        key: 'AUDIT_LOG_MAX_ENTRIES',
+        type: 'int',
+        default: 10000,
+        min: 100,
+        max: 1000000,
+        description: 'Az audit napló összes forrásra vetített maximális bejegyzésszáma. Az API lekérések ennél soha nem adnak vissza többet (forrásanként egyéni limit: AUDIT_LOG_MAX_ENTRIES / 3).',
+        module: 'audit',
+        secret: false,
+        requiresRestart: false,
+    },
+    // --- Brand module (logo URL, accent colour) ---
+    {
+        key: 'BRAND_LOGO_URL',
+        type: 'string',
+        default: '',
+        description: 'A dashboard oldalsávjában megjelenő logó URL-je. Üres = monogram az első betűből.',
+        module: 'brand',
+        secret: false,
+        requiresRestart: false,
+    },
+    {
+        key: 'BRAND_ACCENT',
+        type: 'color',
+        default: '#d97757',
+        description: 'A dashboard kiemelő színe. Beállítja a --qq-accent, --qq-accent-dark és --qq-accent-light CSS változókat.',
+        module: 'brand',
+        secret: false,
+        requiresRestart: false,
+    },
+    // --- Token usage module ---
+    {
+        key: 'TOKEN_USAGE_RETENTION_DAYS',
+        type: 'int',
+        default: 90,
+        min: 7,
+        max: 3650,
+        description: 'A token-használati napló (token_usage tábla) megőrzési ideje napokban. A napi sweep ennél régebbi sorokat törli, így a tábla nem nő korlátlanul. A modell-javaslat csak az utolsó 30 napot nézi, így a 90 nap minden fogyasztónak bőven elég.',
+        module: 'system',
+        secret: false,
+        requiresRestart: false,
+    },
+    // --- Channels module ---
+    {
+        key: 'MAIN_AGENT_ISOLATED_CONFIG',
+        type: 'boolean',
+        default: '0',
+        description: 'Bármely platformon: a fő channels-agent kapjon-e saját, izolált CLAUDE_CONFIG_DIR-t (mint a sub-agentek). Bekapcsolva a fő agent a hosszú élettartamú fleet setup-tokenből (store/.claude-oauth-token) hitelesít, nem a megosztott, önmagát frissítő session-hitelesítésből (macOS: rotálódó Keychain OAuth-session; Linux: megosztott ~/.claude/.credentials.json) -- mindkettő periodikusan lejár, és a lejárt fájl a Claude Code precedencia miatt akkor is nyer az érvényes env-tokennel szemben, ha az élő token ott van mellette (2026-07-23 kiesés). Token hiányában no-op. A módosítás a channels session újraindításakor lép életbe.',
+        module: 'channels',
+        secret: false,
+        requiresRestart: true,
+    },
+    {
+        key: 'MAIN_AGENT_CONFIG_DIR',
+        type: 'string',
+        default: '',
+        description: 'A fő channels-agent explicit CLAUDE_CONFIG_DIR-je (pl. ~/.claude-bot). Akkor kell, ha a botnak SAJÁT Claude-loginja van, külön a flottáétól: a MAIN_AGENT_ISOLATED_CONFIG erre nem alkalmas, mert az a fleet setup-tokenből hitelesít, tehát a flotta identitását adja a botnak (és token nélkül no-op). Üresen hagyva a fő agent a közös ~/.claude-ot használja (alapértelmezés). Ha a megadott könyvtár nem létezik, a beállítás no-op és figyelmeztetést logol. Elsőbbséget élvez a MAIN_AGENT_ISOLATED_CONFIG-gal szemben. A módosítás a channels session újraindításakor lép életbe.',
+        module: 'channels',
+        secret: false,
+        requiresRestart: true,
+    },
+    // --- System module ---
+    {
+        key: 'SCHEDULER_TZ',
+        type: 'string',
+        default: '',
+        description: 'A telepítés időzónája (IANA, pl. Europe/Budapest). EGY zóna vezérli az ütemezést (cron) ÉS minden megjelenített időt (heartbeat, napi napló, memória-címkék). Üresen hagyva a gép saját időzónáját használja. A módosítás a szolgáltatás újraindításakor lép életbe.',
+        module: 'system',
+        secret: false,
+        requiresRestart: true,
+        valueSet: ['Europe/London', 'Europe/Budapest', 'UTC', 'Europe/Dublin', 'Europe/Berlin', 'Europe/Bucharest', 'America/New_York'],
+    },
+    {
+        key: 'DEFAULT_AGENT_MODEL',
+        type: 'string',
+        default: DISTRIBUTION_DEFAULT_AGENT_MODEL,
+        description: 'Az új ügynökök alapértelmezett modellje, egyben a háttér-worker sessionök modellje. Meglévő ügynökök NEM változnak: akinek az agent-config.json-jában konkrét modell van, az marad. A módosítás a szolgáltatás újraindításakor lép életbe.',
+        module: 'agents',
+        secret: false,
+        requiresRestart: true,
+        valueSet: [
+            'claude-opus-5',
+            'claude-sonnet-5',
+            'claude-fable-5',
+            'claude-opus-4-8[1m]',
+            'claude-haiku-4-5-20251001',
+        ],
+    },
+];
+export function getSettingDefinition(key) {
+    return SETTINGS_REGISTRY.find((s) => s.key === key);
+}
+export function listSettingModules() {
+    return [...new Set(SETTINGS_REGISTRY.map((s) => s.module))];
+}
+// Pure validation against a single registry entry. No I/O, no DB -- callers
+// (the /api/settings route, tests) decide what happens with the result.
+export function validateSettingValue(def, raw) {
+    if (def.valueSet && def.valueSet.length > 0) {
+        const str = String(raw);
+        if (!def.valueSet.includes(str)) {
+            return { ok: false, error: `Érvénytelen érték. Megengedett: ${def.valueSet.join(', ')}` };
+        }
+        return { ok: true, value: str };
+    }
+    if (def.type === 'boolean') {
+        // Normalise any of true/false, 1/0, "1"/"0", "true"/"false" to the
+        // canonical "1"/"0" string so it round-trips through .env and the bash
+        // launcher (which compares against "1") identically.
+        const s = String(raw).trim().toLowerCase();
+        if (raw === true || s === '1' || s === 'true')
+            return { ok: true, value: '1' };
+        if (raw === false || s === '0' || s === 'false' || s === '')
+            return { ok: true, value: '0' };
+        return { ok: false, error: 'Logikai érték szükséges (be/ki).' };
+    }
+    if (def.type === 'int') {
+        const n = typeof raw === 'number' ? raw : parseInt(String(raw), 10);
+        if (!Number.isInteger(n))
+            return { ok: false, error: 'Egész szám szükséges.' };
+        if (def.min !== undefined && n < def.min)
+            return { ok: false, error: `Az érték legalább ${def.min} lehet.` };
+        if (def.max !== undefined && n > def.max)
+            return { ok: false, error: `Az érték legfeljebb ${def.max} lehet.` };
+        return { ok: true, value: n };
+    }
+    if (def.type === 'color') {
+        const str = String(raw);
+        if (!HEX_COLOR_RE.test(str))
+            return { ok: false, error: 'Érvénytelen szín (várható formátum: #rrggbb).' };
+        return { ok: true, value: str };
+    }
+    // 'string'
+    return { ok: true, value: String(raw) };
+}

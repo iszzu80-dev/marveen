@@ -634,6 +634,37 @@ export function initCosSchema(db: Database.Database): void {
   // "no such column: recipient" — on a fresh db the ZST ledger had never been
   // through ensureColumns at all.
 
+  // ── §22.2 action authorization tickets ───────────────────────────────
+  // The gate issues, the executor consumes. Opaque single-use records rather
+  // than a caller-side boolean: see src/cos/action-authorization.ts for why the
+  // boolean model is forbidden and why this variant was chosen over an HMAC
+  // ticket or an in-process capability object.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS action_authorizations (
+      authorization_id       TEXT PRIMARY KEY,   -- 32 random bytes; not derivable by a caller
+      domain                 TEXT NOT NULL,
+      case_id                TEXT,
+      case_version           INTEGER,
+      goal_version           INTEGER,
+      action_id              TEXT NOT NULL,      -- the ledger row this authorises, and ONLY it
+      action_type            TEXT NOT NULL,
+      intent                 TEXT NOT NULL,
+      target_reference       TEXT,
+      recipient              TEXT,
+      payload_hash           TEXT,
+      policy_evaluation_hash TEXT NOT NULL,      -- TOCTOU: everything bound, in one comparison
+      approval_id            TEXT,
+      delegation_envelope_id TEXT,
+      issued_at              INTEGER NOT NULL,
+      expires_at             INTEGER NOT NULL,
+      single_use             INTEGER NOT NULL DEFAULT 1,
+      nonce                  TEXT NOT NULL,
+      consumed_at            INTEGER,            -- the audit trail §22.2 asks for
+      CHECK (domain IN ('personal','zst'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_action_auth_action ON action_authorizations(action_id)`)
+
   // ── connector_health (Slice 1 reliability; §20 connector matrix) ──────
   // F-10 / B.3: where the marker-persistence proof is recorded. Without a
   // place to put it, the proof could only ever be a log line.

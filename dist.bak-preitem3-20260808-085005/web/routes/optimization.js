@@ -1,0 +1,248 @@
+import { json, readBody } from '../http-helpers.js';
+import { getDb } from '../../db.js';
+import { readOptimizationConfig, validateModuleDependencies, writeOptimizationConfig, } from '../../optimization/optimization-config.js';
+import { buildOptimizationSummary } from '../../optimization/optimization-summary.js';
+import { buildRoutingSnapshot, previewRuntimeRouting, } from '../../optimization/optimization-routing.js';
+import { getOptimizationDecisionEvents, initOptimizationDecisionsSchema, listOptimizationDecisions, setDecisionStatus, upsertDecisionsFromRecommendations, } from '../../optimization/optimization-decisions.js';
+import { loadPackageInventoryConfig } from '../../costops/package-inventory.js';
+import { loadFxRates } from '../../costops/fx-config.js';
+import { buildPortfolioReport } from '../../costops/portfolio-recommendation.js';
+const DECISION_STATUSES = new Set([
+    'new',
+    'viewed',
+    'accepted',
+    'rejected',
+    'deferred',
+    'canary_needed',
+    'executed',
+    'expired',
+    'insufficient_evidence',
+]);
+const OPTIMIZATION_PRESETS = new Set([
+    'off',
+    'observation',
+    'advisory',
+    'active',
+    'custom',
+]);
+const MODULE_KEYS = [
+    'measurement',
+    'contextEfficiency',
+    'capacityMonitoring',
+    'runtimeRouting',
+    'recommendations',
+    'marketWatch',
+    'benchmarkRecommendations',
+];
+function isObject(value) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+export async function tryHandleOptimization(ctx) {
+    const { req, res, path, method, url } = ctx;
+    // Idempotent CREATE TABLE IF NOT EXISTS -- must run before ANY handler below
+    // touches optimization_decisions/optimization_decision_events, not only the
+    // /recommendations GET. A caller reaching /audit or /recommendations/decision
+    // before ever calling /recommendations would otherwise hit "no such table".
+    if (path.startsWith('/api/optimization/')) {
+        initOptimizationDecisionsSchema(getDb());
+    }
+    if (path === '/api/optimization/summary' && method === 'GET') {
+        const from = url.searchParams.get('from');
+        const to = url.searchParams.get('to');
+        const summary = buildOptimizationSummary(getDb(), Math.floor(Date.now() / 1000), {
+            from: from ? parseInt(from) : undefined,
+            to: to ? parseInt(to) : undefined,
+        });
+        json(res, summary);
+        return true;
+    }
+    if (path === '/api/optimization/routing' && method === 'GET') {
+        const { config } = readOptimizationConfig();
+        let rows = buildRoutingSnapshot(getDb(), Math.floor(Date.now() / 1000), { runtimeRoutingEnabled: config.masterEnabled && config.modules.runtimeRouting });
+        const agent = url.searchParams.get('agent');
+        const state = url.searchParams.get('state');
+        const problematicOnly = url.searchParams.get('problematicOnly') === 'true';
+        if (agent !== null)
+            rows = rows.filter((row) => row.agent === agent);
+        if (state !== null)
+            rows = rows.filter((row) => row.routing_state === state);
+        if (problematicOnly) {
+            rows = rows.filter((row) => row.routing_state === 'fallback'
+                || row.capacity_state === 'limited'
+                || row.capacity_state === 'blocked'
+                || row.capacity_state === 'degraded');
+        }
+        json(res, rows);
+        return true;
+    }
+    if (path === '/api/optimization/routing/preview' && method === 'POST') {
+        const raw = await readBody(req);
+        const body = JSON.parse(raw.toString() || '{}');
+        if (typeof body.agent !== 'string') {
+            json(res, { error: 'agent is required' }, 400);
+            return true;
+        }
+        const result = previewRuntimeRouting(getDb(), { agent: body.agent }, Math.floor(Date.now() / 1000));
+        json(res, result);
+        return true;
+    }
+    if (path === '/api/optimization/recommendations' && method === 'GET') {
+        const packages = loadPackageInventoryConfig().config.packages;
+        if (packages.length === 0) {
+            json(res, {
+                recommendations: [],
+                decisions: [],
+                note: 'no package inventory configured',
+            });
+            return true;
+        }
+        const now = Math.floor(Date.now() / 1000);
+        const from = url.searchParams.get('from');
+        const to = url.searchParams.get('to');
+        const recommendations = buildPortfolioReport(packages, {
+            from: from ? parseInt(from) : now - 30 * 24 * 60 * 60,
+            to: to ? parseInt(to) : now,
+        }, { fxRates: loadFxRates().rates, fxRateRecords: [] });
+        const db = getDb();
+        // Deliberate GET exception: idempotently persist the fresh recommendation snapshot; this neither changes config nor starts screening/LLM work.
+        upsertDecisionsFromRecommendations(db, recommendations, now);
+        const status = url.searchParams.get('status');
+        const decisions = listOptimizationDecisions(db, { status: status ?? undefined });
+        json(res, { recommendations, decisions });
+        return true;
+    }
+    if (path === '/api/optimization/recommendations/events' && method === 'GET') {
+        const packageId = url.searchParams.get('package_id');
+        if (!packageId) {
+            json(res, { error: 'package_id is required' }, 400);
+            return true;
+        }
+        const events = getOptimizationDecisionEvents(getDb(), packageId);
+        json(res, events);
+        return true;
+    }
+    if (path === '/api/optimization/recommendations/decision' && method === 'POST') {
+        const raw = await readBody(req);
+        const body = JSON.parse(raw.toString() || '{}');
+        if (typeof body.package_id !== 'string' || body.package_id.trim() === '') {
+            json(res, { error: 'package_id is required' }, 400);
+            return true;
+        }
+        if (typeof body.status !== 'string' || body.status.trim() === '') {
+            json(res, { error: 'status is required' }, 400);
+            return true;
+        }
+        if (typeof body.actor !== 'string' || body.actor.trim() === '') {
+            json(res, { error: 'actor is required' }, 400);
+            return true;
+        }
+        if (!DECISION_STATUSES.has(body.status)) {
+            json(res, { error: 'invalid status value' }, 400);
+            return true;
+        }
+        // Local decision-state only: this cannot enable plans, cancel subscriptions, or contact provider APIs.
+        const result = setDecisionStatus(getDb(), body.package_id, body.status, body.actor, Math.floor(Date.now() / 1000), {
+            note: typeof body.note === 'string' ? body.note : undefined,
+            deferredUntil: typeof body.deferredUntil === 'number' ? body.deferredUntil : undefined,
+        });
+        if (!result.ok) {
+            json(res, { error: result.error }, 404);
+            return true;
+        }
+        json(res, result.record);
+        return true;
+    }
+    if (path === '/api/optimization/settings' && method === 'GET') {
+        const result = readOptimizationConfig();
+        json(res, {
+            config: result.config,
+            valid: result.valid,
+            errors: result.errors,
+        });
+        return true;
+    }
+    if (path === '/api/optimization/settings' && method === 'PATCH') {
+        const raw = await readBody(req);
+        const parsed = JSON.parse(raw.toString() || '{}');
+        const body = isObject(parsed) ? parsed : {};
+        if (typeof body.masterEnabled !== 'boolean') {
+            json(res, { error: 'masterEnabled must be a boolean' }, 400);
+            return true;
+        }
+        if (typeof body.preset !== 'string'
+            || !OPTIMIZATION_PRESETS.has(body.preset)) {
+            json(res, { error: 'preset must be a valid optimization preset' }, 400);
+            return true;
+        }
+        if (!isObject(body.modules)) {
+            json(res, { error: 'modules must be an object' }, 400);
+            return true;
+        }
+        for (const key of MODULE_KEYS) {
+            if (typeof body.modules[key] !== 'boolean') {
+                json(res, { error: `modules.${key} must be a boolean` }, 400);
+                return true;
+            }
+        }
+        if (!isObject(body.routing)) {
+            json(res, { error: 'routing must be an object' }, 400);
+            return true;
+        }
+        if (!isObject(body.ui)) {
+            json(res, { error: 'ui must be an object' }, 400);
+            return true;
+        }
+        const modules = body.modules;
+        if (body.preview === true) {
+            const dependencyResult = validateModuleDependencies(modules);
+            json(res, {
+                preview: true,
+                wouldApply: { ...dependencyResult.correctedModules },
+                dependencyErrors: dependencyResult.errors,
+            });
+            return true;
+        }
+        const result = writeOptimizationConfig({
+            masterEnabled: body.masterEnabled,
+            preset: body.preset,
+            modules,
+            routing: body.routing,
+            ui: body.ui,
+        }, {
+            expectedVersion: typeof body.expectedVersion === 'number'
+                ? body.expectedVersion
+                : undefined,
+        });
+        if (!result.ok) {
+            json(res, { error: result.error, config: result.config }, 409);
+            return true;
+        }
+        json(res, { config: result.config });
+        return true;
+    }
+    if (path === '/api/optimization/audit' && method === 'GET') {
+        const db = getDb();
+        const decisions = listOptimizationDecisions(db);
+        // Metadata-only invariant: never add prompts, credentials, secrets, or raw account identifiers to this response.
+        const audit = decisions.map((decision) => ({
+            package_id: decision.package_id,
+            current_status: decision.status,
+            events: getOptimizationDecisionEvents(db, decision.package_id),
+        }));
+        json(res, audit);
+        return true;
+    }
+    if (path === '/api/optimization/emergency-disable' && method === 'POST') {
+        const current = readOptimizationConfig().config;
+        const result = writeOptimizationConfig({
+            masterEnabled: current.masterEnabled,
+            preset: 'custom',
+            modules: { ...current.modules, runtimeRouting: false },
+            routing: { ...current.routing, automaticFallback: false },
+            ui: current.ui,
+        }, {});
+        json(res, { ok: true, config: result.config });
+        return true;
+    }
+    return false;
+}

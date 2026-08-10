@@ -1,10 +1,23 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
+import { issueAuthorization } from '../cos/action-authorization.js'
 import { createCase, transitionCase } from '../cos/case-store.js'
 import { planAction, executeAction } from '../cos/executor.js'
 import { GmailSendAdapter, DryRunTransport } from '../cos/adapters/gmail-send.js'
 import { openBatch, quarantineMessage } from '../cos/email-ingest.js'
 import { dueCases, dueFollowUps, setNextWake, reconcileOutbound, openEmailBatches } from '../cos/scheduler.js'
+
+// §22.2: a first send needs a gate-issued ticket, not a caller-side boolean.
+// These tests issue one exactly as production does.
+function authorized(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, now: number) {
+  const ctx = {
+    domain: 'personal' as const, caseId: null, caseVersion: null, goalVersion: null,
+    actionId: ledgerId, actionType: 'EMAIL_SEND', intent: 'TEST', targetReference: null,
+    recipient: null, payloadHash: null, approvalId: null,
+  }
+  return { authorizationId: issueAuthorization(db, ctx, now).authorizationId, authorizationContext: ctx }
+}
+
 
 // COS scheduler query layer — the "what needs doing now" surface the heartbeat
 // drives each tick.
@@ -47,7 +60,7 @@ describe('COS scheduler queries', () => {
     const db = getDb()
     createCase(db, { caseId: 'c1', title: 'T', caseType: 'X' }, NOW)
     const done = planAction(db, { caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 1, payload: { to: 'a@b.c', subject: 's' } }, NOW)
-    await executeAction(db, new GmailSendAdapter(new DryRunTransport()), done.ledgerId, NOW, { authorizedByDispatchGate: true }) // → VERIFIED
+    await executeAction(db, new GmailSendAdapter(new DryRunTransport()), done.ledgerId, NOW, authorized(db, done.ledgerId, NOW)) // → VERIFIED
     const planned = planAction(db, { caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 2, payload: { to: 'x@y.z', subject: 's2' } }, NOW)
 
     expect(reconcileOutbound(db)).toEqual([]) // neither the VERIFIED one nor the PLANNED one

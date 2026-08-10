@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
+import { issueAuthorization } from '../cos/action-authorization.js'
 import { createCase } from '../cos/case-store.js'
 import { planAction, executeAction } from '../cos/executor.js'
 import { GmailSendAdapter, DryRunTransport, IDEMPOTENCY_HEADER } from '../cos/adapters/gmail-send.js'
@@ -20,8 +21,24 @@ const PLAN = {
 // file tests the STATE MACHINE, not the policy, so it declares it once here
 // rather than repeating the flag on every call. Recovery paths do not need it,
 // and passing it changes nothing for them.
+// §22.2: the executor no longer accepts a caller-side boolean. A first send
+// needs a ticket the deterministic gate issued. These unit tests drive the state
+// machine directly, so they issue one the same way production does — via
+// issueAuthorization — rather than being handed a bypass. That is the point: if
+// a test could get in without a real ticket, so could anything else.
+function authorized(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, actionType: string, now: number) {
+  const ctx = {
+    domain: 'personal' as const, caseId: null, caseVersion: null, goalVersion: null,
+    actionId: ledgerId, actionType, intent: 'TEST', targetReference: null,
+    recipient: null, payloadHash: null, approvalId: null,
+  }
+  return { authorizationId: issueAuthorization(db, ctx, now).authorizationId, authorizationContext: ctx }
+}
+
 const exec: typeof executeAction = (db, adapter, ledgerId, now, opts = {}) =>
-  executeAction(db, adapter, ledgerId, now, { authorizedByDispatchGate: true, ...opts })
+  executeAction(db, adapter, ledgerId, now, {
+    ...authorized(db, ledgerId, 'EMAIL_SEND', now), ...opts,
+  })
 
 describe('GmailSendAdapter + executor', () => {
   beforeEach(() => {

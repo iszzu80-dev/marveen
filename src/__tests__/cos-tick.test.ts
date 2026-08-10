@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
+import { issueAuthorization } from '../cos/action-authorization.js'
 import { createCase, transitionCase } from '../cos/case-store.js'
 import { planAction, executeAction } from '../cos/executor.js'
 import { GmailSendAdapter, DryRunTransport } from '../cos/adapters/gmail-send.js'
@@ -7,6 +8,18 @@ import { createRadarItem, getRadarItem } from '../cos/radar.js'
 import { setNextWake } from '../cos/scheduler.js'
 import { cosTick } from '../cos/tick.js'
 import type { RentalAdapter, RentalOffer, RentalSearchParams } from '../cos/rental-adapter.js'
+
+// §22.2: a first send needs a gate-issued ticket, not a caller-side boolean.
+// These tests issue one exactly as production does.
+function authorized(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, now: number) {
+  const ctx = {
+    domain: 'personal' as const, caseId: null, caseVersion: null, goalVersion: null,
+    actionId: ledgerId, actionType: 'EMAIL_SEND', intent: 'TEST', targetReference: null,
+    recipient: null, payloadHash: null, approvalId: null,
+  }
+  return { authorizationId: issueAuthorization(db, ctx, now).authorizationId, authorizationContext: ctx }
+}
+
 
 // COS tick — one cycle end to end: a planned email gets sent+verified, a due
 // rental radar check records an observation and hits its target, and due
@@ -53,7 +66,7 @@ describe('cosTick (one full cycle)', () => {
     const transport = new DryRunTransport()
     const p = planAction(db, { caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 1, payload: { to: 'v@x.com', subject: 'Quote' } }, NOW)
     transport.reachThenThrow = true
-    await executeAction(db, new GmailSendAdapter(transport), p.ledgerId, NOW, { authorizedByDispatchGate: true })
+    await executeAction(db, new GmailSendAdapter(transport), p.ledgerId, NOW, authorized(db, p.ledgerId, NOW))
     transport.reachThenThrow = false
     expect((db.prepare('SELECT status FROM outbound_ledger WHERE ledger_id=?').get(p.ledgerId) as any).status).toBe('OUTCOME_UNKNOWN')
     // a due RENTAL radar item with a reachable target

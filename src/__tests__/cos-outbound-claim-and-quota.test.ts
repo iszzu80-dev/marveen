@@ -7,12 +7,25 @@
 // caller, so a reservation for a send that never happened stayed spent.
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
+import { issueAuthorization } from '../cos/action-authorization.js'
 import { createCase, acquireClaim } from '../cos/case-store.js'
 import { planAction, executeAction, SendError } from '../cos/executor.js'
 import { GmailSendAdapter, DryRunTransport } from '../cos/adapters/gmail-send.js'
 
+// §22.2: a first send needs a gate-issued ticket, not a caller-side boolean.
+// These tests issue one exactly as production does.
+function authorized(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, now: number) {
+  const ctx = {
+    domain: 'personal' as const, caseId: null, caseVersion: null, goalVersion: null,
+    actionId: ledgerId, actionType: 'EMAIL_SEND', intent: 'TEST', targetReference: null,
+    recipient: null, payloadHash: null, approvalId: null,
+  }
+  return { authorizationId: issueAuthorization(db, ctx, now).authorizationId, authorizationContext: ctx }
+}
+
+
 const T0 = 1_700_000_000
-const OK = { authorizedByDispatchGate: true } as const
+const OK = (db: Parameters<typeof issueAuthorization>[0], ledgerId: string, now: number) => authorized(db, ledgerId, now)
 const PLAN = {
   caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 1,
   payload: { to: 'v@x.com', subject: 'S', body: 'B' },
@@ -35,7 +48,7 @@ describe('the outbound path checks the claim fence and reserves quota (F-4, F-5)
     const t = new DryRunTransport()
     const p = planAction(db, PLAN, T0)
     const r = await executeAction(db, new GmailSendAdapter(t), p.ledgerId, T0 + 1,
-      { ...OK, claim: { claimKey: 'case:c1', ownerRunId: 'run-1', fence: c.fence } })
+      { ...OK(db, p.ledgerId, T0), claim: { claimKey: 'case:c1', ownerRunId: 'run-1', fence: c.fence } })
     expect(r.status).toBe('VERIFIED')
     expect(ledger(p.ledgerId).claim_fence).toBe(c.fence) // the column that was never written
   })
@@ -52,7 +65,7 @@ describe('the outbound path checks the claim fence and reserves quota (F-4, F-5)
     const t = new DryRunTransport()
     const p = planAction(db, PLAN, T0)
     const r = await executeAction(db, new GmailSendAdapter(t), p.ledgerId, T0 + 62,
-      { ...OK, claim: { claimKey: 'case:c1', ownerRunId: 'run-slow', fence: first.fence } })
+      { ...OK(db, p.ledgerId, T0), claim: { claimKey: 'case:c1', ownerRunId: 'run-slow', fence: first.fence } })
     expect(r.status).toBe('PLANNED')
     expect(t.sent.size).toBe(0) // nothing left the process
     // The owner check happens to fire first here, which is fine — it is the same
@@ -71,7 +84,7 @@ describe('the outbound path checks the claim fence and reserves quota (F-4, F-5)
     const t = new DryRunTransport()
     const p = planAction(db, PLAN, T0)
     const r = await executeAction(db, new GmailSendAdapter(t), p.ledgerId, T0 + 62,
-      { ...OK, claim: { claimKey: 'case:c1', ownerRunId: 'run-1', fence: first.fence } })
+      { ...OK(db, p.ledgerId, T0), claim: { claimKey: 'case:c1', ownerRunId: 'run-1', fence: first.fence } })
     expect(r.status).toBe('PLANNED')
     expect(t.sent.size).toBe(0)
     expect(String(ledger(p.ledgerId).last_error)).toContain('stale claim fence')
@@ -83,7 +96,7 @@ describe('the outbound path checks the claim fence and reserves quota (F-4, F-5)
     const t = new DryRunTransport()
     const p = planAction(db, PLAN, T0)
     const r = await executeAction(db, new GmailSendAdapter(t), p.ledgerId, T0 + 999,
-      { ...OK, claim: { claimKey: 'case:c1', ownerRunId: 'run-1', fence: c.fence } })
+      { ...OK(db, p.ledgerId, T0), claim: { claimKey: 'case:c1', ownerRunId: 'run-1', fence: c.fence } })
     expect(r.status).toBe('PLANNED')
     expect(t.sent.size).toBe(0)
     expect(String(ledger(p.ledgerId).last_error)).toContain('expired')
@@ -96,8 +109,8 @@ describe('the outbound path checks the claim fence and reserves quota (F-4, F-5)
     const t = new DryRunTransport()
     const p1 = planAction(db, PLAN, T0)
     const p2 = planAction(db, { ...PLAN, caseId: 'c2' }, T0)
-    expect((await executeAction(db, new GmailSendAdapter(t), p1.ledgerId, T0 + 1, { ...OK, quota: q })).status).toBe('VERIFIED')
-    const r2 = await executeAction(db, new GmailSendAdapter(t), p2.ledgerId, T0 + 2, { ...OK, quota: q })
+    expect((await executeAction(db, new GmailSendAdapter(t), p1.ledgerId, T0 + 1, { ...OK(db, p1.ledgerId, T0), quota: q })).status).toBe('VERIFIED')
+    const r2 = await executeAction(db, new GmailSendAdapter(t), p2.ledgerId, T0 + 2, { ...OK(db, p2.ledgerId, T0), quota: q })
     expect(r2.status).toBe('PLANNED')
     expect(t.sent.size).toBe(1)
   })
@@ -110,7 +123,7 @@ describe('the outbound path checks the claim fence and reserves quota (F-4, F-5)
     const t = new DryRunTransport()
     const p = planAction(db, PLAN, T0)
     t.failNextSend = true
-    await executeAction(db, new GmailSendAdapter(t), p.ledgerId, T0 + 1, { ...OK, quota: q })
+    await executeAction(db, new GmailSendAdapter(t), p.ledgerId, T0 + 1, { ...OK(db, p.ledgerId, T0), quota: q })
     const used = db.prepare('SELECT used_count FROM send_quotas WHERE quota_key=?').get('email') as { used_count: number } | undefined
     // failNextSend models "never reached the provider" only if the adapter says
     // so; assert on what the ledger recorded rather than on the label.
@@ -128,7 +141,7 @@ describe('the outbound path checks the claim fence and reserves quota (F-4, F-5)
     const t = new DryRunTransport()
     const p = planAction(db, PLAN, T0)
     t.reachThenThrow = true
-    const r = await executeAction(db, new GmailSendAdapter(t), p.ledgerId, T0 + 1, { ...OK, quota: q })
+    const r = await executeAction(db, new GmailSendAdapter(t), p.ledgerId, T0 + 1, { ...OK(db, p.ledgerId, T0), quota: q })
     expect(r.status).toBe('OUTCOME_UNKNOWN')
     const used = db.prepare('SELECT used_count FROM send_quotas WHERE quota_key=?').get('email') as { used_count: number }
     expect(used.used_count).toBe(1)
@@ -141,8 +154,8 @@ describe('the outbound path checks the claim fence and reserves quota (F-4, F-5)
     const p1 = planAction(db, { ...PLAN, campaignId: 'camp-1' }, T0)
     const p2 = planAction(db, { ...PLAN, caseId: 'c2', campaignId: 'camp-1' }, T0)
     const limit = { campaignId: 'camp-1', maxTotal: 1 }
-    expect((await executeAction(db, new GmailSendAdapter(t), p1.ledgerId, T0 + 1, { ...OK, campaignLimit: limit })).status).toBe('VERIFIED')
-    const r2 = await executeAction(db, new GmailSendAdapter(t), p2.ledgerId, T0 + 2, { ...OK, campaignLimit: limit })
+    expect((await executeAction(db, new GmailSendAdapter(t), p1.ledgerId, T0 + 1, { ...OK(db, p1.ledgerId, T0), campaignLimit: limit })).status).toBe('VERIFIED')
+    const r2 = await executeAction(db, new GmailSendAdapter(t), p2.ledgerId, T0 + 2, { ...OK(db, p2.ledgerId, T0), campaignLimit: limit })
     expect(r2.status).toBe('PLANNED')
     expect(String(ledger(p2.ledgerId).last_error)).toContain('total ceiling')
     expect(t.sent.size).toBe(1)
@@ -152,8 +165,10 @@ describe('the outbound path checks the claim fence and reserves quota (F-4, F-5)
     // The admission block must not become a wall for callers that pass none of
     // these — otherwise every existing path breaks and the guards look effective
     // for the wrong reason.
-    return executeAction(getDb(), new GmailSendAdapter(new DryRunTransport()),
-      planAction(getDb(), PLAN, T0).ledgerId, T0 + 1, OK)
+    const db = getDb()
+    const p = planAction(db, PLAN, T0)
+    return executeAction(db, new GmailSendAdapter(new DryRunTransport()),
+      p.ledgerId, T0 + 1, OK(db, p.ledgerId, T0))
       .then(r => expect(r.status).toBe('VERIFIED'))
   })
 })
@@ -187,7 +202,10 @@ describe('a retryable failure is not retryable forever (F-15)', () => {
     // Drive it well past the ceiling, always waiting out the backoff so the
     // attempts are real ones rather than no-ops.
     for (let i = 0; i < 12; i++) {
-      const r = await executeAction(db, alwaysRetryable as never, p.ledgerId, now, { ...OK, retry: { maxAttempts: 3, baseBackoffSec: 1 } })
+      // A FRESH ticket per attempt — tickets are single-use (§22.2), and in
+      // production every retry goes back through the gate and gets a new one.
+      // Reusing one here would be testing the bypass, not the retry.
+      const r = await executeAction(db, alwaysRetryable as never, p.ledgerId, now, { ...OK(db, p.ledgerId, now), retry: { maxAttempts: 3, baseBackoffSec: 1 } })
       status = r.status
       if (status === 'FAILED_TERMINAL') break
       now += 3600 // past any backoff
@@ -200,14 +218,14 @@ describe('a retryable failure is not retryable forever (F-15)', () => {
     const db = getDb()
     const p = planAction(db, PLAN, T0)
     const R = { maxAttempts: 5, baseBackoffSec: 60 }
-    await executeAction(db, alwaysRetryable as never, p.ledgerId, T0 + 1, { ...OK, retry: R })
+    await executeAction(db, alwaysRetryable as never, p.ledgerId, T0 + 1, { ...OK(db, p.ledgerId, T0 + 1), retry: R })
     const attemptAfterFirst = Number(ledger(p.ledgerId).attempt)
     expect(String(ledger(p.ledgerId).status)).toBe('FAILED_RETRYABLE')
     // same second: refused by the backoff, attempt count unchanged
-    await executeAction(db, alwaysRetryable as never, p.ledgerId, T0 + 2, { ...OK, retry: R })
+    await executeAction(db, alwaysRetryable as never, p.ledgerId, T0 + 2, { ...OK(db, p.ledgerId, T0 + 2), retry: R })
     expect(Number(ledger(p.ledgerId).attempt)).toBe(attemptAfterFirst)
     // past the backoff: it really is attempted again
-    await executeAction(db, alwaysRetryable as never, p.ledgerId, T0 + 500, { ...OK, retry: R })
+    await executeAction(db, alwaysRetryable as never, p.ledgerId, T0 + 500, { ...OK(db, p.ledgerId, T0 + 500), retry: R })
     expect(Number(ledger(p.ledgerId).attempt)).toBeGreaterThan(attemptAfterFirst)
   })
 })

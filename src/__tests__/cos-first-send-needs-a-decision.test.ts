@@ -12,10 +12,23 @@
 // executeAction directly hits it.
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
+import { issueAuthorization } from '../cos/action-authorization.js'
 import { createCase } from '../cos/case-store.js'
 import { planAction, executeAction } from '../cos/executor.js'
 import { reconcileOutbound } from '../cos/scheduler.js'
 import { GmailSendAdapter, DryRunTransport } from '../cos/adapters/gmail-send.js'
+
+// §22.2: a first send needs a gate-issued ticket, not a caller-side boolean.
+// These tests issue one exactly as production does.
+function authorized(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, now: number) {
+  const ctx = {
+    domain: 'personal' as const, caseId: null, caseVersion: null, goalVersion: null,
+    actionId: ledgerId, actionType: 'EMAIL_SEND', intent: 'TEST', targetReference: null,
+    recipient: null, payloadHash: null, approvalId: null,
+  }
+  return { authorizationId: issueAuthorization(db, ctx, now).authorizationId, authorizationContext: ctx }
+}
+
 
 const T0 = 1_700_000_000
 const PLAN = {
@@ -53,14 +66,16 @@ describe('a first send needs an evaluated decision (F-7)', () => {
     expect(t.sent.size).toBe(0) // and provably nothing left the process
     const row = db.prepare('SELECT last_error FROM outbound_ledger WHERE ledger_id=?')
       .get(p.ledgerId) as { last_error: string | null }
-    expect(row.last_error ?? '').toContain('requires an evaluated dispatch decision')
+    // §22.2: the refusal reason changed with the model — a missing ticket, not a
+    // missing boolean. The property under test (refused, nothing sent) is the same.
+    expect(row.last_error ?? '').toContain('no authorization ticket supplied')
   })
 
   it('GUARD 2: with the decision declared, the same send goes through', async () => {
     const db = getDb()
     const t = new DryRunTransport()
     const p = planAction(db, PLAN, T0)
-    const r = await executeAction(db, new GmailSendAdapter(t), p.ledgerId, T0 + 1, { authorizedByDispatchGate: true })
+    const r = await executeAction(db, new GmailSendAdapter(t), p.ledgerId, T0 + 1, authorized(db, p.ledgerId, T0))
     expect(r.status).toBe('VERIFIED')
     expect(t.sent.size).toBe(1)
   })
@@ -73,7 +88,7 @@ describe('a first send needs an evaluated decision (F-7)', () => {
     const t = new DryRunTransport()
     const p = planAction(db, PLAN, T0)
     t.reachThenThrow = true
-    await executeAction(db, new GmailSendAdapter(t), p.ledgerId, T0 + 1, { authorizedByDispatchGate: true })
+    await executeAction(db, new GmailSendAdapter(t), p.ledgerId, T0 + 1, authorized(db, p.ledgerId, T0))
     const stuck = db.prepare('SELECT status FROM outbound_ledger WHERE ledger_id=?').get(p.ledgerId) as { status: string }
     expect(stuck.status).toBe('OUTCOME_UNKNOWN')
     t.reachThenThrow = false
