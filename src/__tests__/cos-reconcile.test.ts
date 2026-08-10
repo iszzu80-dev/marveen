@@ -306,7 +306,99 @@ describe('COS daily reconcile', () => {
     })
   })
 
+  // The stagnation surface. Added 2026-08-10 with the completion fix, because
+  // the two belong together: the engine may no longer close a case it cannot
+  // finish, so a case it cannot move now spins indefinitely. Spinning is the
+  // honest behaviour; spinning quietly is not. no_progress_run_count had been
+  // counting correctly and read by nobody since GATE 2 (card 8eb5a1e9) — four
+  // live cases stood at 96 consecutive fruitless runs.
+  describe('stagnation', () => {
+    function stagnant(
+      caseId: string, runs: number, status = 'READY',
+      enabled = 1, domain: 'personal' | 'zst' = 'personal',
+    ): void {
+      const db = getDb()
+      if (domain === 'personal') {
+        createCase(db, { caseId, title: `Ügy ${caseId}`, caseType: 'ADMIN' }, NOW - 2 * DAY)
+        db.prepare(`UPDATE personal_cases SET status = ? WHERE case_id = ?`).run(status, caseId)
+      } else {
+        createZstCase(db, { caseId, title: `Céges ügy ${caseId}`, caseType: 'ADMIN' }, NOW - 2 * DAY)
+        db.prepare(`UPDATE zst_cases SET status = ? WHERE case_id = ?`).run(status, caseId)
+      }
+      db.prepare(
+        `INSERT INTO case_progression_state
+           (domain, case_id, progression_enabled, progression_mode,
+            no_progress_run_count, created_at, updated_at)
+         VALUES (?, ?, ?, 'internal', ?, ?, ?)`,
+      ).run(domain, caseId, enabled, runs, NOW - DAY, NOW - 3600)
+    }
+
+    it('says nothing below the threshold and complains above it', () => {
+      const db = getDb()
+      stagnant('s-quiet', 11)
+      expect(ids(runDailyReconcile(db, NOW).findings)).not.toContain('cases_making_no_progress')
+
+      stagnant('s-loud', 12)
+      const f = runDailyReconcile(db, NOW).findings.find(x => x.id === 'cases_making_no_progress')
+      expect(f?.severity).toBe('WARNING')
+      expect(f?.detail).toContain('s-loud')
+    })
+
+    it('escalates to CRITICAL once a case has spun for a day', () => {
+      const db = getDb()
+      stagnant('s-severe', 96)
+      const f = runDailyReconcile(db, NOW).findings.find(x => x.id === 'cases_making_no_progress')
+      expect(f?.severity).toBe('CRITICAL')
+      expect(f?.detail).toContain('96')
+    })
+
+    it('ignores a case the engine is no longer polling', () => {
+      // A high counter on a frozen case is a historical fact. Reporting it
+      // would keep the alarm ringing after the cause was dealt with, which is
+      // how alarms get ignored.
+      const db = getDb()
+      stagnant('s-frozen', 96, 'READY', 0)
+      expect(ids(runDailyReconcile(db, NOW).findings)).not.toContain('cases_making_no_progress')
+    })
+
+    // The measurement that made this filter necessary: without it the check
+    // reported 22 live cases, 18 of which were correctly waiting on a
+    // supplier's reply or on Istvan, and the one genuinely stuck case was
+    // buried among them.
+    it('does not accuse a case that is correctly waiting on someone else', () => {
+      const db = getDb()
+      for (const st of ['WAITING_EXTERNAL', 'AWAITING_SELECTION', 'SCHEDULED', 'BLOCKED']) {
+        stagnant(`s-wait-${st}`, 96, st)
+      }
+      expect(ids(runDailyReconcile(db, NOW).findings)).not.toContain('cases_making_no_progress')
+
+      // …and the same counter on a case whose turn it IS does complain, so the
+      // silence above is the status and not a broken query.
+      stagnant('s-actionable', 96, 'EXECUTING')
+      expect(ids(runDailyReconcile(db, NOW).findings)).toContain('cases_making_no_progress')
+    })
+
+    it('covers the corporate domain too, not just personal', () => {
+      const db = getDb()
+      stagnant('s-zst', 40, 'NEW', 1, 'zst')
+      const f = runDailyReconcile(db, NOW).findings.find(x => x.id === 'cases_making_no_progress')
+      expect(f?.detail).toContain('zst/s-zst')
+    })
+
+    it('reports a long-unanswered owner decision separately', () => {
+      const db = getDb()
+      stagnant('s-ask-fresh', 12, 'AWAITING_SELECTION')
+      expect(ids(runDailyReconcile(db, NOW).findings)).not.toContain('awaiting_owner_decision_too_long')
+
+      stagnant('s-ask-stale', 96, 'AWAITING_SELECTION')
+      const f = runDailyReconcile(db, NOW).findings.find(x => x.id === 'awaiting_owner_decision_too_long')
+      expect(f?.severity).toBe('WARNING')
+      // and it must not be double-counted as an engine failure
+      expect(ids(runDailyReconcile(db, NOW).findings)).not.toContain('cases_making_no_progress')
+    })
+  })
+
   it('ships more than a token number of checks', () => {
-    expect(CHECKS.length).toBeGreaterThanOrEqual(21)
+    expect(CHECKS.length).toBeGreaterThanOrEqual(23)
   })
 })
