@@ -524,9 +524,21 @@ export interface ProgressionRunResult {
 
 // ── Goal enrichment (Checkpoint D — lazy LLM interpretation) ───────────
 
-/** Enrich a case with LLM-interpreted goal and summary. Idempotent: if the
- *  case_progression_state already has a non-empty goal, this is a no-op
- *  (lazy enrichment — interpreted once at first progression run).
+/** Enrich a case with LLM-interpreted goal and summary. Idempotent: interpreted
+ *  once per case, never repeated.
+ *
+ *  THE IDEMPOTENCE MARKER IS `summary`, NOT `goal` — fixed 2026-08-10, and the
+ *  distinction is the difference between this function working and not.
+ *
+ *  It used to return early when `goal` was non-empty. But the deterministic
+ *  pipeline writes `goal` on every single run from deriveOutcomeContract's
+ *  status template, so by the time anything could call this, all 98 live cases
+ *  already had one. Wiring the enricher up would have changed nothing: every
+ *  case would have taken the early return and reported interpreted:false.
+ *
+ *  `summary` is written by exactly one thing — this function — and the pipeline
+ *  explicitly preserves it. So an empty summary means "the LLM has never seen
+ *  this case", which is the question the guard is actually asking.
  *
  *  Domain-scoped: calls domainGuard() before interpretation. */
 export async function enrichCaseGoal(
@@ -541,11 +553,11 @@ export async function enrichCaseGoal(
     'SELECT goal, summary FROM case_progression_state WHERE domain = ? AND case_id = ?',
   ).get(domain, caseId) as { goal: string | null; summary: string | null } | undefined
 
-  if (existing?.goal && existing.goal.trim().length > 0) {
+  if (existing?.summary && existing.summary.trim().length > 0) {
     return {
       interpreted: false,
-      goal: existing.goal,
-      summary: existing.summary ?? '',
+      goal: existing.goal ?? '',
+      summary: existing.summary,
       title: '',
     }
   }
