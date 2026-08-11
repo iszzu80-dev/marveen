@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { sendCosMessage, pollCosUpdates, redactToken, loadCosBotConfig, looksLikeAQuestionBack } from '../cos/cos-telegram.js'
+import {
+  sendCosMessage, pollCosUpdates, redactToken, loadCosBotConfig, looksLikeAQuestionBack,
+  loadChannelConfigs, channelForRoute,
+} from '../cos/cos-telegram.js'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -122,5 +125,61 @@ describe('a question back is not an answer', () => {
 
   it('refuses an empty message rather than guessing', () => {
     expect(looksLikeAQuestionBack('   ')).toBe(true)
+  })
+})
+
+// Two bots, two channels (Istvan's decision, 2026-08-11: "legyen harmadik bot").
+//
+// The separation he asked for is on HIS side — a radar hit and an owner question
+// deserve different notification treatment on his phone, and Telegram's unit of
+// that is the bot. On this side the danger is the opposite of complexity: that
+// the second channel quietly collapses into the first and the split exists only
+// in the file names.
+describe('channel registry', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'marveen-chan-'))
+  const write = (name: string, obj: Record<string, unknown>): string => {
+    const p = join(dir, name)
+    writeFileSync(p, JSON.stringify(obj))
+    return p
+  }
+
+  it('loads both bots as SEPARATE channels', () => {
+    const cos = write('.cos-telegram-bot.json', { token: 'a', channel_id: 'telegram:cos', chat_id: '1' })
+    const radar = write('.cos-radar-bot.json', { token: 'b', channel_id: 'telegram:radar', chat_id: '1', routes: ['radar'] })
+    const all = loadChannelConfigs({ cos, radar })
+    expect(all.map(c => c.channelId)).toEqual(['telegram:cos', 'telegram:radar'])
+  })
+
+  it('a second bot that forgot channel_id does NOT inherit the first one’s', () => {
+    // The failure that would undo the whole split: both bots addressing one
+    // queue, so the radar's messages would go out on the questions' bot and the
+    // separation would exist only in the file names.
+    const cos = write('.cos-telegram-bot.json', { token: 'a', channel_id: 'telegram:cos', chat_id: '1' })
+    const radar = write('.cos-radar-bot.json', { token: 'b', chat_id: '1', routes: ['radar'] })
+    const all = loadChannelConfigs({ cos, radar })
+    expect(all).toHaveLength(2)
+    expect(all[1].channelId).not.toBe('telegram:cos')
+  })
+
+  it('a bot that is not configured is ABSENT, not an error', () => {
+    // The radar bot did not exist at all until it was created. Missing must read
+    // as "not set up", never as an outage.
+    const cos = write('.cos-telegram-bot.json', { token: 'a', channel_id: 'telegram:cos', chat_id: '1' })
+    const all = loadChannelConfigs({ cos, radar: join(dir, 'nope.json') })
+    expect(all.map(c => c.channelId)).toEqual(['telegram:cos'])
+  })
+
+  it('channelForRoute finds the bot that DECLARES the route', () => {
+    const cos = write('.cos-telegram-bot.json', { token: 'a', channel_id: 'telegram:cos', chat_id: '1' })
+    const radar = write('.cos-radar-bot.json', { token: 'b', channel_id: 'telegram:radar', chat_id: '1', routes: ['radar'] })
+    expect(channelForRoute('radar', { cos, radar })?.channelId).toBe('telegram:radar')
+    // And nothing carries a route nobody declared — the producer then stays
+    // quiet rather than picking a channel at random.
+    expect(channelForRoute('weather', { cos, radar })).toBeNull()
+  })
+
+  it('with only the CoS bot, nothing carries radar', () => {
+    const cos = write('.cos-telegram-bot.json', { token: 'a', channel_id: 'telegram:cos', chat_id: '1' })
+    expect(channelForRoute('radar', { cos, radar: join(dir, 'nope.json') })).toBeNull()
   })
 })

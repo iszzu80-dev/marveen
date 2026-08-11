@@ -54,9 +54,11 @@ describe('COS radar HIT alert', () => {
 // call, and a hit lost to a transient network error would be lost for good.
 // It enqueues; the channel step delivers with retry.
 describe('radar HIT on the owner channel', () => {
-  const cfg = (routes: string[]) => () => ({
-    token: 'x', channelId: 'telegram:cos', chatId: '1', routes,
-  })
+  // Now a ROUTE LOOKUP, not a config load: the producer asks which channel
+  // carries radar and gets whichever bot declares it. Istvan chose a third bot
+  // (2026-08-11) — the producer does not know which one answers.
+  const cfg = (routes: string[], channelId = 'telegram:radar') => () =>
+    routes.includes('radar') ? { token: 'x', channelId, chatId: '1', routes } : null
 
   beforeEach(() => { initDatabase(':memory:') })
 
@@ -66,7 +68,7 @@ describe('radar HIT on the owner channel', () => {
     const row = db.prepare(
       `SELECT channel, kind, dedupe_key, text, sent_at FROM cos_channel_outbox`,
     ).get() as { channel: string; kind: string; dedupe_key: string; text: string; sent_at: number | null }
-    expect(row.channel).toBe('telegram:cos')
+    expect(row.channel).toBe('telegram:radar')
     expect(row.kind).toBe('radar')
     // Keyed on the OBSERVATION, so a second tick over the same price is not
     // announced twice, while a genuine new drop is.

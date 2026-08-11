@@ -10,7 +10,7 @@
 import type Database from 'better-sqlite3'
 import { createAgentMessage, appendDailyLog } from '../db.js'
 import { enqueueOutbox } from './channel-outbox.js'
-import { loadCosBotConfig, ROUTE_RADAR } from './cos-telegram.js'
+import { channelForRoute, ROUTE_RADAR } from './cos-telegram.js'
 
 interface ItemRow { label: string; kind: string; target_price: number | null; currency: string | null; best_seen_price: number | null; notification_reason: string | null }
 interface ObsRow {
@@ -71,11 +71,11 @@ export function buildRadarHitAlert(db: Database.Database, radarId: string): stri
  *  channel step delivers it with the retry behaviour that path already has. */
 export function alertRadarHit(
   db: Database.Database, radarId: string,
-  // The config loader is injectable so the ROUTED and UNROUTED behaviours can
-  // both be driven in a test. Reading the real file would make the enabled path
+  // The channel lookup is injectable so the ROUTED and UNROUTED behaviours can
+  // both be driven in a test. Reading the real files would make the enabled path
   // untestable without planting a bot token on disk — and an unrouted default
   // that nothing ever exercises is how a route ships silently on.
-  opts: { loadConfig?: typeof loadCosBotConfig } = {},
+  opts: { loadConfig?: typeof channelForRoute } = {},
 ): void {
   const content = buildRadarHitAlert(db, radarId)
   if (!content) return
@@ -87,10 +87,14 @@ export function alertRadarHit(
   // owner's own channel. Removing the bus post would trade one delivery route
   // for another rather than adding one.
   try {
-    const cfg = (opts.loadConfig ?? loadCosBotConfig)()
-    if (!cfg?.routes?.includes(ROUTE_RADAR)) return
+    // WHICH CHANNEL CARRIES RADAR is a property of the channels, not of this
+    // module: it asks for the route and gets whichever bot declares it. Istvan
+    // chose a third bot (2026-08-11); the code does not know or care which one
+    // answers, only that exactly one does.
+    const cfg = (opts.loadConfig ?? channelForRoute)(ROUTE_RADAR)
+    if (!cfg?.channelId) return
     enqueueOutbox(db, {
-      channel: cfg.channelId ?? 'telegram:cos',
+      channel: cfg.channelId,
       kind: ROUTE_RADAR,
       // The ITEM and its newest observation, not the tick: two ticks over the
       // same observation are the same news, and the owner must not be told twice

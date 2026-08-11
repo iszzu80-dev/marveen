@@ -8,7 +8,7 @@
 // whole subsystem keeps re-learning.
 
 import { initDatabase, getDb } from '../src/db.js'
-import { loadCosBotConfig, sendCosMessage } from '../src/cos/cos-telegram.js'
+import { loadCosBotConfig, loadChannelConfigs, sendCosMessage } from '../src/cos/cos-telegram.js'
 import { pendingOutbox, markOutboxSent, markOutboxFailed } from '../src/cos/channel-outbox.js'
 
 async function main(): Promise<void> {
@@ -50,30 +50,48 @@ async function main(): Promise<void> {
       failures.push({ caseId: r.case_id, error: String((e as Error)?.message ?? e).slice(0, 160) })
     }
   }
-  // THE OUTBOX. Producers with no state of their own to hang a message on (the
-  // radar first) queue here instead of sending, so a synchronous tick never
-  // waits on the network and a transient failure retries instead of losing the
-  // message. Drained in the same step as the questions, with the same rule: one
-  // undeliverable item must not stop the rest.
-  const queued = pendingOutbox(getDb(), cfg.channelId ?? 'telegram:cos')
+  // THE OUTBOX, DRAINED PER CHANNEL. Producers with no state of their own to
+  // hang a message on (the radar first) queue here instead of sending, so a
+  // synchronous tick never waits on the network and a transient failure retries
+  // instead of losing the message.
+  //
+  // EVERY configured channel is drained, not just the one the questions went to.
+  // Istvan chose a separate bot for the radar (2026-08-11), so a drain bound to
+  // the question channel would leave the radar queue growing behind a bot nobody
+  // ever emptied — a queue with no drain is a silence, not a delay.
+  let outboxPending = 0
   let outboxSent = 0
-  for (const q of queued) {
-    try {
-      const res = await sendCosMessage(cfg, q.text)
-      markOutboxSent(getDb(), q.outbox_id, `${res.chatId}:${res.messageId}`)
-      outboxSent++
-    } catch (e) {
-      const msg = String((e as Error)?.message ?? e)
-      markOutboxFailed(getDb(), q.outbox_id, msg)
-      failures.push({ caseId: `${q.kind}:${q.dedupe_key}`, error: msg.slice(0, 160) })
+  const byChannel: Record<string, number> = {}
+  for (const chan of loadChannelConfigs()) {
+    if (!chan.chatId) {
+      // Configured but not yet reachable: Telegram will not disclose the chat
+      // until the owner has written to that bot once. Reported, not silent.
+      failures.push({ caseId: `${chan.channelId}`, error: 'no chat_id yet (owner must message this bot once)' })
+      continue
+    }
+    const queued = pendingOutbox(getDb(), chan.channelId ?? '')
+    outboxPending += queued.length
+    for (const q of queued) {
+      try {
+        const res = await sendCosMessage(chan, q.text)
+        markOutboxSent(getDb(), q.outbox_id, `${res.chatId}:${res.messageId}`)
+        outboxSent++
+        byChannel[chan.channelId ?? '?'] = (byChannel[chan.channelId ?? '?'] ?? 0) + 1
+      } catch (e) {
+        const msg = String((e as Error)?.message ?? e)
+        markOutboxFailed(getDb(), q.outbox_id, msg)
+        failures.push({ caseId: `${q.kind}:${q.dedupe_key}`, error: msg.slice(0, 160) })
+      }
     }
   }
 
   console.log('CosChannel:', JSON.stringify({
     channel: cfg.channelId, pending: rows.length, sent, failures,
     // Reported even when zero: "the outbox was empty" and "the outbox was never
-    // drained" must not look the same in the cycle report.
-    outboxPending: queued.length, outboxSent,
+    // drained" must not look the same in the cycle report. `outboxByChannel`
+    // makes the split visible — one number for two bots would hide a channel
+    // that never delivers.
+    outboxPending, outboxSent, outboxByChannel: byChannel,
   }))
 }
 

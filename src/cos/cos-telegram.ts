@@ -13,6 +13,7 @@
 // is read from a 0600 file at call time and used as a URL segment, nothing else.
 
 import { readFileSync } from 'node:fs'
+import { basename } from 'node:path'
 
 export interface CosBotConfig {
   token: string
@@ -49,6 +50,43 @@ export const ROUTE_RADAR = 'radar'
 
 export const COS_BOT_CONFIG_PATH = 'store/.cos-telegram-bot.json'
 
+/** The RADAR bot (Istvan's decision, 2026-08-11: "legyen harmadik bot").
+ *
+ *  A separate bot, not a second route on the CoS one, because the separation he
+ *  wants is on HIS side: a radar hit and an owner question deserve different
+ *  notification treatment on his phone, and Telegram's unit of that is the bot.
+ *  On this side the cost is the same either way — the work was the outbox, which
+ *  already exists. */
+export const RADAR_BOT_CONFIG_PATH = 'store/.cos-radar-bot.json'
+
+/** Every channel this machine can send on, in the order they were configured.
+ *
+ *  MISSING IS NOT BROKEN. A config file that does not exist means that channel
+ *  was never set up, which is a normal state and must not read as an outage —
+ *  the radar bot did not exist at all until Istvan created it. Callers that need
+ *  a specific channel ask for it and handle null; callers that drain the outbox
+ *  iterate over whatever is here. */
+export function loadChannelConfigs(
+  paths: { cos?: string; radar?: string } = {},
+): CosBotConfig[] {
+  const out: CosBotConfig[] = []
+  const cos = loadCosBotConfig(paths.cos ?? COS_BOT_CONFIG_PATH)
+  if (cos) out.push(cos)
+  const radar = loadCosBotConfig(paths.radar ?? RADAR_BOT_CONFIG_PATH)
+  // The radar config declares its own channel id; falling back to the CoS one
+  // would silently merge the two channels the file exists to separate.
+  if (radar && radar.channelId !== cos?.channelId) out.push(radar)
+  return out
+}
+
+/** The channel that carries a given kind of message, or null when none does.
+ *  Used by producers (the radar) to address their outbox entry. */
+export function channelForRoute(
+  route: string, paths: { cos?: string; radar?: string } = {},
+): CosBotConfig | null {
+  return loadChannelConfigs(paths).find(c => c.routes?.includes(route)) ?? null
+}
+
 export function loadCosBotConfig(path = COS_BOT_CONFIG_PATH): CosBotConfig | null {
   try {
     const j = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
@@ -56,7 +94,12 @@ export function loadCosBotConfig(path = COS_BOT_CONFIG_PATH): CosBotConfig | nul
     if (!token) return null
     return {
       token,
-      channelId: typeof j.channel_id === 'string' ? j.channel_id : 'telegram:cos',
+      // Defaults to the CoS channel ONLY for the CoS file. A second bot whose
+      // config forgot `channel_id` must not inherit the first one's address —
+      // that would put both channels' traffic in one queue and undo the split.
+      channelId: typeof j.channel_id === 'string'
+        ? j.channel_id
+        : (path.endsWith('.cos-telegram-bot.json') ? 'telegram:cos' : `telegram:${basename(path)}`),
       chatId: typeof j.chat_id === 'string' ? j.chat_id : undefined,
       botUsername: typeof j.bot_username === 'string' ? j.bot_username : undefined,
       routes: Array.isArray(j.routes) ? j.routes.filter(r => typeof r === 'string') as string[] : [],
