@@ -122,14 +122,35 @@ export interface AskResult {
   nothingToAsk: number
 }
 
-/** Has this exact question already gone out and not yet been answered? */
-function isOutstanding(db: Database.Database, caseId: string, hash: string): boolean {
+/** Has this exact question already been HANDLED — either still waiting for an
+ *  answer, or answered and nothing has moved since?
+ *
+ *  The second half is the 2026-08-11 fix. The old check only suppressed
+ *  UNANSWERED questions, on the reasoning that "once an answer is recorded, the
+ *  same question may legitimately be asked again if the situation returns". The
+ *  situation returning is the right trigger; the code never checked for it. So
+ *  within twenty minutes of Istvan answering five questions, two came straight
+ *  back — same case, same ask, nothing changed — and the UPSERT below wiped
+ *  `answered_at` on the way, making them look like they had never been answered.
+ *
+ *  Getting an answer must not be what causes the question to reappear. That is
+ *  the fastest way to teach someone to stop answering.
+ *
+ *  "Moved since" is the case's own updated_at: if the case has not changed since
+ *  the answer landed, there is nothing new to ask about. */
+function isHandled(db: Database.Database, caseId: string, domain: string, hash: string): boolean {
   try {
     const row = db.prepare(
-      `SELECT 1 FROM cos_owner_questions
-       WHERE case_id = ? AND question_hash = ? AND answered_at IS NULL AND superseded_at IS NULL`,
-    ).get(caseId, hash)
-    return row !== undefined
+      `SELECT answered_at FROM cos_owner_questions
+       WHERE case_id = ? AND question_hash = ? AND superseded_at IS NULL`,
+    ).get(caseId, hash) as { answered_at: number | null } | undefined
+    if (!row) return false
+    if (row.answered_at == null) return true          // still waiting on him
+    const table = domain === 'zst' ? 'zst_cases' : 'personal_cases'
+    const c = db.prepare(`SELECT updated_at FROM ${table} WHERE case_id = ?`).get(caseId) as
+      { updated_at: number } | undefined
+    // Answered and the case has not moved since -> nothing new to ask.
+    return c == null || c.updated_at <= row.answered_at
   } catch {
     // No table yet: nothing can be outstanding. Returning true here would mute
     // the channel on a fresh install, which is the failure worth avoiding.
@@ -193,6 +214,15 @@ export function askPendingOwnerQuestions(
          FROM case_evidence_packets WHERE packet_json IS NOT NULL GROUP BY case_id
        ) latest ON latest.case_id = p.case_id AND latest.created_at = p.created_at
        WHERE p.packet_json IS NOT NULL AND p.plan_json IS NOT NULL
+         -- A finished case has no open question. Live 2026-08-11: a COMPLETED
+         -- rental case produced one anyway, because this query only ever looked
+         -- at packets and never at the case behind them.
+         AND NOT EXISTS (
+           SELECT 1 FROM personal_cases pc WHERE pc.case_id = p.case_id
+             AND (pc.status IN ('COMPLETED','CANCELLED','ARCHIVED') OR pc.archived_at IS NOT NULL))
+         AND NOT EXISTS (
+           SELECT 1 FROM zst_cases zc WHERE zc.case_id = p.case_id
+             AND (zc.status IN ('COMPLETED','CANCELLED','ARCHIVED') OR zc.archived_at IS NOT NULL))
        ORDER BY p.created_at DESC LIMIT 50`,
     ).all() as never
   } catch {
@@ -213,7 +243,7 @@ export function askPendingOwnerQuestions(
       caseId: row.case_id, domain: row.domain, title, packet, plan,
     })
     if (!question) { result.nothingToAsk++; continue }
-    if (isOutstanding(db, row.case_id, question.hash)) { result.alreadyAsked++; continue }
+    if (isHandled(db, row.case_id, row.domain, question.hash)) { result.alreadyAsked++; continue }
     // A REPLACEMENT is not an addition. When this case already has an open
     // question, asking the reworded one supersedes it — the pile waiting on him
     // does not grow, so the ceiling has nothing to protect against here.
