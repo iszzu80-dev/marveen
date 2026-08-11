@@ -119,9 +119,21 @@ export function runProgressionHeartbeat(
         continue
       }
 
+      // A run whose trigger is missing must not be labelled 'SCHEDULED' -- §10.8
+      // says the clock coming round is not a reason, and writing it here would
+      // put 'the clock' back into the record under a different route. If
+      // decideTrigger said yes without naming a trigger, that is a defect in the
+      // trigger contract, and it is recorded as one rather than smoothed over.
+      if (!trig.trigger) {
+        result.cycleErrors++
+        result.errors.push(`${domain}/${dc.case_id}: shouldRun with no trigger named (§10.8 defect)`)
+        releaseProgressionClaim(db, domain, dc.case_id, runId, now)
+        continue
+      }
+
       try {
         const opts: PipelineOptions = {
-          triggerType: trig.trigger ?? 'SCHEDULED',
+          triggerType: trig.trigger,
           triggerReference: trig.triggerReference ?? `heartbeat-${runId.slice(0, 8)}`,
         }
         runProgressionCycle(db, domain, dc.case_id, now, opts)

@@ -70,7 +70,14 @@ export function resolveInterpreter(
   getSecret: SecretReader,
   opts: { maxTokens?: number } = {},
 ): ResolvedInterpreter | null {
-  const anthropicKey = process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN
+  // Env first, then the VAULT. The vault branch is not a nicety: Istvan handed
+  // over an Anthropic key on 2026-08-11 and it went into the vault, where the
+  // env-only lookup could not see it -- the provider would have stayed DeepSeek
+  // while every report said "switched to Anthropic". A key nobody reads is the
+  // same as no key, and it would have been invisible in the cycle output.
+  const anthropicKey = process.env.ANTHROPIC_API_KEY
+    || process.env.ANTHROPIC_AUTH_TOKEN
+    || (getSecret('ANTHROPIC_API_KEY') ?? '').trim()
   if (anthropicKey) {
     return {
       client: new AnthropicLlmClient({

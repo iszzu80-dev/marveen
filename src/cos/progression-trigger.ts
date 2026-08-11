@@ -33,6 +33,37 @@ export const TRIGGER_TYPES = [
 ] as const
 export type TriggerType = (typeof TRIGGER_TYPES)[number]
 
+/**
+ * Legacy trigger names → the §10.8 vocabulary (review #3, Ú-5).
+ *
+ * The old six values stayed legal when §10.8's eight arrived, so the stored
+ * vocabulary is fourteen wide and an analysis of the trigger distribution counts
+ * the same event under two names. This maps the ones that are genuinely
+ * synonyms, at the WRITE boundary — old rows keep their old values, because
+ * rewriting history to make a report tidier is how history stops being evidence.
+ *
+ * NOT mapped, deliberately, against the review's suggestion:
+ *   - `INTAKE` is not `NEW_RELEVANT_EVENT`. Intake is the case coming into
+ *     existence; a new relevant event happens to a case that already exists.
+ *     They answer different questions ("where do cases come from" vs "what wakes
+ *     them"), and the live store has 101 INTAKE rows that mean the first.
+ *   - `ESCALATION_RESOLVED` has no §10.8 equivalent. Mapping it to
+ *     APPROVAL_RESOLVED or DECISION_RESOLVED would invent a distinction the
+ *     caller never made.
+ */
+const TRIGGER_SYNONYMS: Record<string, TriggerType> = {
+  WAKE: 'WAIT_WAKE_DUE',
+  MANUAL: 'MANUAL_REVIEW_REQUEST',
+  RECOVERY: 'CAPABILITY_RECOVERED',
+}
+
+/** Canonical name for a trigger about to be WRITTEN. Unknown and un-mapped
+ *  values pass through unchanged: this is a de-duplicator, not a validator, and
+ *  the CHECK constraint is what rejects an illegal value. */
+export function canonicalTriggerType(t: string): string {
+  return TRIGGER_SYNONYMS[t] ?? t
+}
+
 export interface TriggerDecision {
   shouldRun: boolean
   trigger: TriggerType | null
