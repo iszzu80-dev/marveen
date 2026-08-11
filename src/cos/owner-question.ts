@@ -120,6 +120,10 @@ export interface AskResult {
   alreadyAsked: number
   /** Cases read this pass with nothing to ask the owner. */
   nothingToAsk: number
+  /** Cases whose stored reading is OLDER than the case itself — asked from such
+   *  a packet, the question describes a world that has moved on. Counted, not
+   *  silent: the next reader pass refreshes them. */
+  staleReading: number
 }
 
 /** Has this exact question already been HANDLED — either still waiting for an
@@ -156,6 +160,18 @@ function isHandled(db: Database.Database, caseId: string, domain: string, hash: 
     // the channel on a fresh install, which is the failure worth avoiding.
     return false
   }
+}
+
+/** Seconds a stored reading may lag the case before it counts as stale. */
+export const STALE_READING_GRACE_SEC = 120
+
+function caseUpdatedAt(db: Database.Database, domain: string, caseId: string): number {
+  const table = domain === 'zst' ? 'zst_cases' : 'personal_cases'
+  try {
+    const r = db.prepare(`SELECT updated_at FROM ${table} WHERE case_id = ?`).get(caseId) as
+      { updated_at: number } | undefined
+    return r?.updated_at ?? 0
+  } catch { return 0 }
 }
 
 /** Does this case already have a DIFFERENT open question? Then a new ask is a
@@ -201,7 +217,7 @@ export function askPendingOwnerQuestions(
   const maxOutstanding = opts.maxOutstanding ?? 5
   const now = opts.now ?? Math.floor(Date.now() / 1000)
   const result: AskResult = {
-    asked: 0, alreadyAsked: 0, nothingToAsk: 0, heldBacklogFull: 0,
+    asked: 0, alreadyAsked: 0, nothingToAsk: 0, heldBacklogFull: 0, staleReading: 0,
   }
 
   // Questions that GREW the open pile this sweep. A superseding rewrite does
@@ -214,10 +230,10 @@ export function askPendingOwnerQuestions(
     ).get() as { n: number }).n
   } catch { outstanding = 0 }
 
-  let rows: Array<{ case_id: string; domain: string; packet_json: string; plan_json: string }> = []
+  let rows: Array<{ case_id: string; domain: string; packet_json: string; plan_json: string; packet_at: number }> = []
   try {
     rows = db.prepare(
-      `SELECT p.case_id, p.domain, p.packet_json, p.plan_json
+      `SELECT p.case_id, p.domain, p.packet_json, p.plan_json, p.created_at AS packet_at
        FROM case_evidence_packets p
        JOIN (
          SELECT case_id, MAX(created_at) AS created_at
@@ -247,6 +263,27 @@ export function askPendingOwnerQuestions(
       packet = JSON.parse(row.packet_json) as ReaderEvidencePacket
       plan = JSON.parse(row.plan_json) as EvidencePlan
     } catch { continue }
+
+    // A READING OLDER THAN THE CASE IS NOT A READING OF THIS CASE.
+    //
+    // Live 2026-08-11: I read a contract case's email body and wrote its real
+    // content onto the case at 16:51. Minutes later the sweep asked Istvan the
+    // ORIGINAL question -- "the intake is only an email reference, it contains
+    // no contract information" -- because the question is composed from the
+    // stored packet, and that packet was from 08:40. Eight hours of new facts,
+    // invisible to the sentence he would have read.
+    //
+    // The grace window is not decoration: intake, reading and the case's own
+    // updated_at land within the same cycle, seconds apart in arbitrary order
+    // (one live pair was 22 seconds). A strict comparison would call that
+    // staleness and silence a perfectly fresh question. Measured before writing
+    // this: 11% of cases with packets were genuinely stale, almost all because
+    // an owner answer or a correction had landed since -- exactly the ones that
+    // must NOT be asked from the old reading.
+    if (row.packet_at + STALE_READING_GRACE_SEC < caseUpdatedAt(db, row.domain, row.case_id)) {
+      result.staleReading++
+      continue
+    }
 
     const title = caseTitle(db, row.domain, row.case_id) ?? row.case_id
     const question = buildOwnerQuestion({

@@ -77,8 +77,20 @@ describe('an answered question does not come back on its own', () => {
     recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'Rendben.', now: NOW + 20 })
 
     getDb().prepare(`UPDATE personal_cases SET updated_at=? WHERE case_id='c1'`).run(NOW + 500)
+
+    // MOVING ON IS NOT ENOUGH BY ITSELF -- the case must be RE-READ first.
+    // Sharpened 2026-08-11: this test originally expected the bare updated_at
+    // bump to re-ask, and it did, from the ORIGINAL packet. Then the
+    // stale-reading guard landed and correctly refused: a reading older than the
+    // case does not describe the case. The two rules together are stricter and
+    // righter than either alone -- move, re-read, THEN ask -- so the test now
+    // asserts that sequence instead of the shortcut.
     askPendingOwnerQuestions(getDb(), { now: NOW + 600 })
-    expect(openFor('c1'), 'a case that moved on may be asked about again').toHaveLength(1)
+    expect(openFor('c1'), 'a moved case with a STALE reading must not be asked yet').toHaveLength(0)
+
+    packet('c1', 'kell-e a kártya', NOW + 550)   // friss olvasat a mozgas utan
+    askPendingOwnerQuestions(getDb(), { now: NOW + 700 })
+    expect(openFor('c1'), 'once re-read, the question may go out again').toHaveLength(1)
   })
 })
 
