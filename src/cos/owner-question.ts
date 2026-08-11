@@ -357,6 +357,19 @@ export function recordOwnerAnswer(
   // question the CoS chat is still displaying, and the owner would see a
   // question he had already answered somewhere else.
   //
+  // MATCHES ON `channel`, NOT on `channel_target`. The two columns answer
+  // different questions: `channel` is WHICH CHANNEL, `channel_target` is WHICH
+  // MESSAGE on it (chatId:messageId, written by the sender so a Telegram
+  // reply-to can name one question exactly). The first version compared the
+  // answer's channel address against channel_target and therefore matched
+  // nothing at all -- caught live on the first poll, which reported
+  // `unmatched: 2` instead of mis-attributing. Failing closed is why it was
+  // merely wrong and not damaging.
+  //
+  // `asked_at <= now` keeps a message that arrived BEFORE the question from
+  // being read as its answer -- the first two updates on the new bot were
+  // "/start" and "Hi", sent while the questions were still queued.
+  //
   // A question with NO recorded channel (asked before the split) still matches
   // anything -- it predates the distinction, and refusing it would strand every
   // question asked today.
@@ -364,9 +377,10 @@ export function recordOwnerAnswer(
     ? db.prepare(
         `SELECT question_hash FROM cos_owner_questions
          WHERE case_id = ? AND answered_at IS NULL AND superseded_at IS NULL
-           AND (channel IS NULL OR (channel = ? AND channel_target = ?))
+           AND (channel IS NULL OR channel = ?)
+           AND asked_at <= ?
          ORDER BY asked_at DESC LIMIT 1`,
-      ).get(input.caseId, input.channel.channel, input.channel.target) as { question_hash: string } | undefined
+      ).get(input.caseId, input.channel.channel, now) as { question_hash: string } | undefined
     : db.prepare(
         `SELECT question_hash FROM cos_owner_questions
          WHERE case_id = ? AND answered_at IS NULL AND superseded_at IS NULL

@@ -10,8 +10,13 @@ import { askPendingOwnerQuestions, recordOwnerAnswer, outstandingOwnerQuestions 
 // the channel exists for.
 
 const NOW = 1_700_000_000
-const COS = { channel: 'telegram', target: 'cos-chat' }
-const DEV = { channel: 'telegram', target: 'dev-chat' }
+// The two channels share a chat id and differ by BOT. Measured 2026-08-11: in a
+// private chat Telegram uses the user's own id, so both bots' chats with Istvan
+// are 8942301795. The first version of this file distinguished them by TARGET,
+// which the live measurement disproved -- so the identity is the channel name.
+const CHAT = '8942301795'
+const COS = { channel: 'telegram:cos', target: CHAT }
+const DEV = { channel: 'telegram', target: CHAT }
 
 function seed(caseId: string, ask: string) {
   createCase(getDb(), { caseId, title: `T ${caseId}`, caseType: 'ADMIN', status: 'NEW' }, NOW)
@@ -38,7 +43,7 @@ describe('a question remembers where it was asked', () => {
   it('records the channel and target it went out on', () => {
     seed('c1', 'kell-e')
     askPendingOwnerQuestions(getDb(), { now: NOW + 10, channel: COS })
-    expect(channelOf('c1')).toEqual({ channel: 'telegram', channel_target: 'cos-chat' })
+    expect(channelOf('c1')).toEqual({ channel: 'telegram:cos', channel_target: CHAT })
   })
 
   it('leaves them NULL when no channel is given — no invented provenance', () => {
@@ -51,7 +56,7 @@ describe('a question remembers where it was asked', () => {
 describe('an answer only closes a question asked on the SAME channel', () => {
   beforeEach(() => { initDatabase(':memory:') })
 
-  it('an answer from the dev chat does not close a CoS-chat question', () => {
+  it('an answer from the DEV bot does not close a CoS-bot question — same chat id, different channel', () => {
     seed('c1', 'kell-e')
     askPendingOwnerQuestions(getDb(), { now: NOW + 10, channel: COS })
     const r = recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'Igen.', now: NOW + 20, channel: DEV })
