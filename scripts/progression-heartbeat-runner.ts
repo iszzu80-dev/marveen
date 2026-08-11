@@ -102,6 +102,9 @@ if (ENRICH_PER_CYCLE > 0 || READ_PER_CYCLE > 0) {
         const readerInterp = resolveInterpreter(getSecret, { maxTokens: READER_MAX_TOKENS })
         const read = await runReaderPass(db, (readerInterp ?? interp).client, {
           limit: READ_PER_CYCLE, now, model: interp.model,
+          // §10 gate input. Passed explicitly so the sweep knows WHAT is about
+          // to read the data; without it nothing is sent (review #4, N4-1).
+          profile: (readerInterp ?? interp).profile,
         })
         // NESTED under `reader`, not spread. cos-cycle.ts merges every JSON line
         // of this runner into ONE object, so a top-level `remaining`/`failures`
@@ -110,7 +113,11 @@ if (ENRICH_PER_CYCLE > 0 || READ_PER_CYCLE > 0) {
         // live output and being unable to say which subsystem `remaining: 98`
         // belonged to.
         console.log('Reader:', JSON.stringify({
-          reader: { provider: interp.provider, model: interp.model, maxTokens: READER_MAX_TOKENS, ...read },
+          reader: {
+            provider: interp.provider, model: interp.model,
+            profile: (readerInterp ?? interp).profile,
+            maxTokens: READER_MAX_TOKENS, ...read,
+          },
         }))
       }
     }

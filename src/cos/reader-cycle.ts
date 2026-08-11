@@ -26,12 +26,44 @@ import type { LlmClient } from './progression-interpreter.js'
 import { planFromEvidence } from './evidence-planner.js'
 import { arbitrate } from './reader-arbitration.js'
 import { killSwitchRefusal } from './kill-switch.js'
+import {
+  effectiveSensitivity, escalateSensitivity, isProfileAllowedForSensitivity,
+  allowedProfilesFor,
+} from './sensitivity.js'
+import type { CaseSensitivity } from './schema.js'
+
+/**
+ * The most sensitive thing in the context (§10, review #4 N4-1).
+ *
+ * WHY THIS EXISTS. Wiring the chain created an egress path that did not exist
+ * while it was an island: the Reader sends whole email bodies and extracted
+ * document text to an EXTERNAL provider. The sensitivity field travelled through
+ * the whole system, was printed into the prompt as a label, and decided nothing.
+ * §10 of v4.2 says a sensitive case may only be processed by an explicitly
+ * allowed model profile — enforced on the SENDING path, absent on the reading one.
+ *
+ * Declared tier AND content: `effectiveSensitivity` escalates the case's own
+ * declaration with what the classifier finds, so an IBAN in a thread lifts the
+ * tier even when nobody labelled the case.
+ */
+export function contextSensitivity(items: Array<{ sensitivity: string; content: string }>): CaseSensitivity {
+  // Starts at PUBLIC and only ever escalates. Starting fail-closed instead would
+  // make an EMPTY context maximally sensitive, which reads as a policy verdict
+  // about content nobody has.
+  let tier: CaseSensitivity = 'PUBLIC'
+  for (const i of items) tier = escalateSensitivity(tier, effectiveSensitivity(i.sensitivity, i.content))
+  return tier
+}
 
 export interface ReaderPassResult {
   /** Cases the Reader produced a valid packet for. */
   read: number
   /** Cases where a reading was attempted and refused (stored, with the reason). */
   refused: number
+  /** §10: cases NOT sent to the model because the provider's profile is not
+   *  allowed for their sensitivity. Counted separately from `refused` because
+   *  "read: 2" and "read: 2, sensitivityBlocked: 1" must not look the same. */
+  sensitivityBlocked: number
   /** §13.1 conflicts: the Reader proposed something the ordering did not allow. */
   conflicts: number
   /** Per-case errors that were not a refusal — a DB failure, a thrown builder. */
@@ -126,12 +158,18 @@ function storePacket(
 export async function runReaderPass(
   db: Database.Database,
   llm: LlmClient,
-  opts: { limit?: number; now?: number; model?: string } = {},
+  opts: { limit?: number; now?: number; model?: string; profile?: string } = {},
 ): Promise<ReaderPassResult> {
   const limit = opts.limit ?? 3
   const now = opts.now ?? Math.floor(Date.now() / 1000)
   const model = opts.model ?? null
-  const result: ReaderPassResult = { read: 0, refused: 0, conflicts: 0, failures: [], remaining: 0 }
+  // No profile supplied = no gate can be evaluated = nothing may be sent. The
+  // caller must say WHAT is about to read the data; a missing answer is not a
+  // permission.
+  const profile = opts.profile ?? null
+  const result: ReaderPassResult = {
+    read: 0, refused: 0, sensitivityBlocked: 0, conflicts: 0, failures: [], remaining: 0,
+  }
 
   // The hard gate is read ONCE per sweep and passed to every arbitration. Read
   // per case it would be a TOCTOU window the size of the sweep; read here, a
@@ -158,6 +196,28 @@ export async function runReaderPass(
           readerCandidate: null, policyResult: c.policyDecision, finalDecision: c.policyDecision,
           conflictReason: null, safeFallback: c.policyDecision, decidedBy: 'INVALID_PACKET',
           refusalReason: `context integrity: ${violations.join('; ')}`, model,
+        })
+        continue
+      }
+
+      // §10 SENSITIVITY GATE — the last thing before the content leaves the
+      // machine. Everything above this line is local; everything below is a
+      // request to a third party.
+      const tier = contextSensitivity(ctx.items)
+      if (!profile || !isProfileAllowedForSensitivity(profile, tier)) {
+        result.sensitivityBlocked++
+        const allowed = [...allowedProfilesFor(tier)].join(', ')
+        storePacket(db, {
+          domain: c.domain, caseId: c.caseId, runId: c.runId, now,
+          contextItems: ctx.items.length, contextExcluded: ctx.excluded.length,
+          contextUnavailable: ctx.unavailable.length,
+          packetJson: null, planJson: null, confidence: null,
+          readerCandidate: null, policyResult: c.policyDecision, finalDecision: c.policyDecision,
+          conflictReason: null, safeFallback: c.policyDecision, decidedBy: 'SENSITIVITY_BLOCKED',
+          refusalReason: profile
+            ? `§10: ${tier} content may not be processed by profile "${profile}" (allowed: ${allowed}) — not sent`
+            : `§10: no model profile declared for the reader — nothing sent`,
+          model,
         })
         continue
       }

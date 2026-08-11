@@ -26,6 +26,8 @@
 // because "the Reader saw no calendar entries" and "there is no calendar
 // connector" lead to very different conclusions and must not look the same.
 import type Database from 'better-sqlite3'
+import { CASE_SENSITIVITIES, type CaseSensitivity } from './schema.js'
+import { escalateSensitivity, coerceSensitivity } from './sensitivity.js'
 
 export type TrustClass =
   /** Written by this system or by Istvan. Instructions here are legitimate. */
@@ -72,6 +74,16 @@ export interface CaseContext {
    *  `excluded` on purpose: "not permitted" and "not connected" are different
    *  facts, and only one of them is a policy decision. */
   unavailable: Array<{ source: string; reason: string }>
+}
+
+/** A document's tier: its own if it declared a valid one, otherwise the case's.
+ *  Exported so the rule is testable rather than inlined in a query loop. */
+export function docSensitivity(own: unknown, caseTier: string): string {
+  const valid = (CASE_SENSITIVITIES as readonly string[]).includes(String(own))
+  if (!valid) return caseTier
+  // Both declared: the MORE sensitive wins. A document may be more sensitive
+  // than the case it hangs off; it may never make the case less sensitive.
+  return escalateSensitivity(own as CaseSensitivity, coerceSensitivity(caseTier))
 }
 
 const SOURCES_NOT_WIRED = [
@@ -226,7 +238,18 @@ export function buildCaseContext(
       // Everything here came from outside. This is the class §10.2's Reader must
       // treat as data and never as instruction.
       trust: 'UNTRUSTED_SOURCE_DATA',
-      sensitivity: String(d.sensitivity ?? 'UNKNOWN'),
+      // A document attached to a case inherits the CASE's declared tier unless
+      // it carries a valid one of its own. Measured 2026-08-11: all 92 rows in
+      // the live document store carry the literal 'UNKNOWN' — the store never
+      // classified anything — and a fail-closed reader gate coerces 'UNKNOWN' to
+      // HIGHLY_SENSITIVE, which would have blocked 36 of 40 cases on a data gap
+      // rather than on their actual content.
+      //
+      // This is not a relaxation: 'UNKNOWN' means NOT DECLARED, and the case row
+      // holds the real declaration made at intake. A document with its own valid
+      // tier still escalates (the max of the two wins), and the content
+      // classifier escalates on top of both.
+      sensitivity: docSensitivity(d.sensitivity, sensitivity),
       // The extracted TEXT when we have it. A filename is a label, not content,
       // and a Reader handed only labels would confidently report that a thread
       // says nothing — the failure mode that looks like an answer.

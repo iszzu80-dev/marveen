@@ -12,6 +12,7 @@
 // interpreter's prompt-injection guard to be forgotten.
 
 import { AnthropicLlmClient, DEFAULT_INTERPRETER_MODEL, type LlmClient } from './progression-interpreter.js'
+import type { ModelProfileId } from '../model-profiles.js'
 
 /** DeepSeek's Anthropic-compatible endpoint. The SDK appends /v1/messages. */
 export const DEEPSEEK_ANTHROPIC_BASE_URL = 'https://api.deepseek.com/anthropic'
@@ -26,6 +27,28 @@ export interface ResolvedInterpreter {
   /** For the log line, so a reader can see WHICH model wrote the goals. */
   provider: 'anthropic' | 'deepseek'
   model: string
+  /** Which §10 model profile this interpreter counts as, for the sensitivity
+   *  allowlist. Carried EXPLICITLY rather than inferred at the call site: a gate
+   *  that guesses which profile it is protecting is a gate nobody can audit. */
+  profile: ModelProfileId
+}
+
+/**
+ * Interpreter → model profile.
+ *
+ * Derived from the deployment's own map (`store/model-profile-map.json`), not
+ * from a guess: there `analysis_efficient` and `routine_lowcost` both resolve to
+ * a DeepSeek model, and the two Claude tiers to Opus and Sonnet. Both
+ * interpreters here are cheap-tier models — DeepSeek flash and Claude Haiku —
+ * so neither counts as `premium_reasoning`, and the §10 allowlist consequently
+ * keeps SENSITIVE_PERSONAL and above away from both.
+ *
+ * If that becomes too strict for the Reader, the fix is a decision about WHICH
+ * MODEL may read sensitive cases — an owner call — not a quieter profile here.
+ */
+export const INTERPRETER_PROFILE: Record<'anthropic' | 'deepseek', ModelProfileId> = {
+  anthropic: 'analysis_efficient',
+  deepseek: 'analysis_efficient',
 }
 
 /** Read a secret without the caller having to know where secrets live, and
@@ -55,6 +78,7 @@ export function resolveInterpreter(
       }),
       provider: 'anthropic',
       model: DEFAULT_INTERPRETER_MODEL,
+      profile: INTERPRETER_PROFILE.anthropic,
     }
   }
 
@@ -69,6 +93,7 @@ export function resolveInterpreter(
       }),
       provider: 'deepseek',
       model: DEEPSEEK_INTERPRETER_MODEL,
+      profile: INTERPRETER_PROFILE.deepseek,
     }
   }
 
