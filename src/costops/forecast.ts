@@ -290,10 +290,10 @@ export function forecastSnapshotDedupKey(sourceId: string | null, month: string,
   return `${sourceId ?? 'TOTAL'}|${month}|${day}`
 }
 
-// ---- schema (DEFINER ONLY -- not mounted; see file header) ---------------------
+// ---- schema (DEFINER; mounted via initCostOpsSchema -- see file header) --------
 
 /**
- * Schema DEFINER only. NOT called from db.ts -- per fork-upstream-policy.md
+ * Schema DEFINER. CALLED from src/costops/schema.ts (initCostOpsSchema) -- per fork-upstream-policy.md
  * §2a, the ONE seam mount (`initCostOpsSchema(db)` in db.ts calling this
  * among the module's other schema definers) is the seam-refactor's job, done
  * once alongside the rest of the accounting-core schema so db.ts gains a

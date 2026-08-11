@@ -16,7 +16,8 @@
 //    recommendation whose condition disappears on its own auto-resolves.
 //
 // NO db.ts/web.ts/schema.ts edits: `initOptimizationSchema` is a schema
-// DEFINER only, not mounted anywhere -- the seam-refactor's
+// Schema DEFINER. MOUNTED: initCostOpsSchema (src/costops/schema.ts) calls
+// initOptimizationSchema, and db.ts calls initCostOpsSchema. The seam-refactor's
 // `initCostOpsSchema(db)` aggregator calls it, per
 // docs/fork-upstream-policy.md §2a.
 //
@@ -461,10 +462,10 @@ export function dismissRecommendation(r: RecommendationRecord, actor: string, no
 
 export { serializeEvidence, deserializeEvidence }
 
-// ---- schema (DEFINER ONLY -- not mounted; see file header) ------------------------------------
+// ---- schema (DEFINER; mounted via initCostOpsSchema -- see file header) -----------------------
 
 /**
- * Schema DEFINER only. NOT called from db.ts or src/costops/schema.ts -- per
+ * Schema DEFINER. CALLED from src/costops/schema.ts (initCostOpsSchema) -- per
  * fork-upstream-policy.md §2a, the seam mount (`initCostOpsSchema(db)`
  * calling this among the module's other schema definers) is the
  * seam-refactor's job. Safe to call more than once (`IF NOT EXISTS`).
