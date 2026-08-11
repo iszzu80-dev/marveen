@@ -39,7 +39,14 @@ describe('buildSourceInventory (CostOps Phase 0, GAP-03/GAP-04)', () => {
     expect(openai.lifecycle).toBe('inactive')
     expect(openai.blocker).toBeNull()
     expect(openai.collection_method).toBe('provider_api_collector')
-    expect(openai.sync_cadence).toBe('manual') // honest -- no collector is boot-scheduled today
+    // 2026-08-11 (card 15cfff51): was `toBe('manual')` with the comment "honest
+    // -- no collector is boot-scheduled today". That was true when written and
+    // false since the scheduled sync landed: openai-costs is on the collector
+    // plan, and web.ts starts that sweep at boot. The test asserted the same
+    // stale belief the module comment did, so it kept the wrong dashboard value
+    // green. The rest of this case (working credential + zero usage is INACTIVE,
+    // not blocked) is unchanged.
+    expect(openai.sync_cadence).toBe('automatic_interval')
   })
 
   it('OpenAI with no credential configured is not_configured, with a concrete blocker', () => {
