@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import { createCase } from '../cos/case-store.js'
-import { askPendingOwnerQuestions, recordOwnerAnswer, outstandingOwnerQuestions } from '../cos/owner-question.js'
+import { askPendingOwnerQuestions, recordOwnerAnswer, outstandingOwnerQuestions, matchAnswerTarget } from '../cos/owner-question.js'
 
 // Istvan's decision (2026-08-11): the CoS gets its own Telegram bot and chat, so
 // case traffic stops competing with build and fleet noise. The part that makes
@@ -86,5 +86,74 @@ describe('an answer only closes a question asked on the SAME channel', () => {
     askPendingOwnerQuestions(getDb(), { now: NOW + 10, channel: COS })
     const r = recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'Igen.', now: NOW + 20 })
     expect(r).not.toBeNull()
+  })
+})
+
+// WHICH CASE does a plain message answer? (live misattribution, 2026-08-11)
+//
+// At 16:40 Istvan answered about the WIZZ AIR invoice. The rule was "take the
+// newest open question"; the newest happened to be the NAV mailbox case, so his
+// sentence was written onto that case. Everything downstream then treated the
+// guess as his word — including me: I built a card on it and reported it back to
+// him. He corrected it five hours later: "I wrote about the Wizz Air invoice,
+// not the NAV one."
+//
+// A wrong attribution is worse than none. The wrong case gains a decision he
+// never made, the right case stays open, and nothing in the record says it was
+// a guess.
+describe('matchAnswerTarget', () => {
+  const ask = (caseId: string, domain: string, askedAt: number, target?: string): void => {
+    getDb().prepare(
+      `INSERT INTO cos_owner_questions
+         (case_id, domain, question_hash, question_text, asked_at, channel, channel_target)
+       VALUES (?, ?, ?, 'kerdes', ?, 'telegram:cos', ?)`,
+    ).run(caseId, domain, `h-${caseId}`, askedAt, target ?? null)
+  }
+
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('HEADLINE: with several questions open and no reply target, it refuses to guess', () => {
+    ask('nav-case', 'zst', 1000)
+    ask('wizz-case', 'zst', 900)
+    expect(matchAnswerTarget(getDb(), { channel: 'telegram:cos', chatId: '1' })).toBe('AMBIGUOUS')
+  })
+
+  it('an explicit reply names the question, however many are open', () => {
+    ask('nav-case', 'zst', 1000)
+    ask('wizz-case', 'zst', 900, '1:77')
+    expect(matchAnswerTarget(getDb(), { channel: 'telegram:cos', chatId: '1', replyToMessageId: 77 }))
+      .toEqual({ caseId: 'wizz-case', domain: 'zst' })
+  })
+
+  it('with exactly ONE open question there is nothing to guess', () => {
+    // The common case, and the reason this is not simply "require a reply": he
+    // usually types a plain sentence, and refusing that would drop every answer.
+    ask('only-case', 'personal', 1000)
+    expect(matchAnswerTarget(getDb(), { channel: 'telegram:cos', chatId: '1' }))
+      .toEqual({ caseId: 'only-case', domain: 'personal' })
+  })
+
+  it('nothing open at all is NOT ambiguity', () => {
+    // Different fact, different response: nobody asked him anything, so there is
+    // no case to attach to and no question to put back to him.
+    expect(matchAnswerTarget(getDb(), { channel: 'telegram:cos', chatId: '1' })).toBeNull()
+  })
+
+  it('an answered question does not compete for the attribution', () => {
+    ask('done-case', 'zst', 1000)
+    getDb().prepare(`UPDATE cos_owner_questions SET answered_at = 1200 WHERE case_id = 'done-case'`).run()
+    ask('live-case', 'zst', 900)
+    expect(matchAnswerTarget(getDb(), { channel: 'telegram:cos', chatId: '1' }))
+      .toEqual({ caseId: 'live-case', domain: 'zst' })
+  })
+
+  it('a question on ANOTHER channel does not create ambiguity here', () => {
+    ask('cos-case', 'zst', 1000)
+    getDb().prepare(
+      `INSERT INTO cos_owner_questions (case_id, domain, question_hash, question_text, asked_at, channel)
+       VALUES ('radar-case', 'zst', 'h-radar', 'kerdes', 1100, 'telegram:radar')`,
+    ).run()
+    expect(matchAnswerTarget(getDb(), { channel: 'telegram:cos', chatId: '1' }))
+      .toEqual({ caseId: 'cos-case', domain: 'zst' })
   })
 })

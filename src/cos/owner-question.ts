@@ -579,6 +579,49 @@ export function recordOwnerAnswer(
   return { caseId: input.caseId, questionHash: open.question_hash, eventType, choice }
 }
 
+
+/** Which case an incoming channel message answers.
+ *
+ *  `{ caseId, domain }` when it is knowable, `'AMBIGUOUS'` when several
+ *  questions are open and the message names none of them, `null` when nothing
+ *  is open at all.
+ *
+ *  THE GUESS THAT USED TO LIVE HERE COST A REAL MISATTRIBUTION. On 2026-08-11 at
+ *  16:40 Istvan answered about the Wizz Air invoice; the rule was "take the
+ *  newest open question", the newest happened to be the NAV mailbox case, and
+ *  his sentence was written onto that case. Everything downstream then treated
+ *  the guess as his word — including me, who built a card on it and reported it
+ *  back to him. He corrected it five hours later.
+ *
+ *  A wrong attribution is worse than none: the wrong case gains a decision he
+ *  never made, and the right one stays open. So ambiguity is now reported, not
+ *  resolved. */
+export type AnswerTarget = { caseId: string; domain: string } | 'AMBIGUOUS' | null
+
+export function matchAnswerTarget(
+  db: Database.Database,
+  input: { channel: string; chatId?: string; replyToMessageId?: number },
+): AnswerTarget {
+  // An explicit Telegram reply names the question exactly — no ambiguity to
+  // resolve, however many are open.
+  if (input.replyToMessageId && input.chatId) {
+    const exact = db.prepare(
+      `SELECT case_id AS caseId, domain FROM cos_owner_questions
+        WHERE channel = ? AND channel_target = ? AND answered_at IS NULL AND superseded_at IS NULL`,
+    ).get(input.channel, `${input.chatId}:${input.replyToMessageId}`) as
+      { caseId: string; domain: string } | undefined
+    if (exact) return exact
+  }
+  const open = db.prepare(
+    `SELECT case_id AS caseId, domain FROM cos_owner_questions
+      WHERE channel = ? AND answered_at IS NULL AND superseded_at IS NULL
+      ORDER BY asked_at DESC LIMIT 2`,
+  ).all(input.channel) as Array<{ caseId: string; domain: string }>
+  if (open.length === 0) return null
+  if (open.length === 1) return open[0]
+  return 'AMBIGUOUS'
+}
+
 /** The questions still waiting on him — so "what did it ask me?" is a query. */
 export function outstandingOwnerQuestions(
   db: Database.Database, limit = 20,

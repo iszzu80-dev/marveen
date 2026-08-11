@@ -20,7 +20,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { initDatabase, getDb } from '../src/db.js'
 import { loadCosBotConfig, pollCosUpdates, looksLikeAQuestionBack } from '../src/cos/cos-telegram.js'
-import { recordOwnerAnswer } from '../src/cos/owner-question.js'
+import { recordOwnerAnswer, matchAnswerTarget } from '../src/cos/owner-question.js'
 
 const OFFSET_PATH = 'store/.cos-telegram-offset'
 const OWNER_ID = '8942301795'
@@ -42,7 +42,11 @@ async function main(): Promise<void> {
   }
 
   const updates = await pollCosUpdates(cfg, readOffset())
-  const result = { channel: cfg.channelId, read: updates.length, matched: 0, unmatched: 0, rejected: 0, notAnAnswer: 0 }
+  // `ambiguous`: the owner wrote a plain message while SEVERAL questions were
+  // open, so which case he meant cannot be known. Counted separately from
+  // `unmatched` (nothing open at all) because the two need different responses:
+  // one needs a question back to him, the other needs nothing.
+  const result = { channel: cfg.channelId, read: updates.length, matched: 0, unmatched: 0, ambiguous: 0, rejected: 0, notAnAnswer: 0 }
   let highest = 0
 
   for (const u of updates) {
@@ -53,22 +57,16 @@ async function main(): Promise<void> {
     // something and deserves a reply, and the case must stay open.
     if (looksLikeAQuestionBack(u.text)) { result.notAnAnswer++; continue }
 
-    // Prefer the explicit reply target.
-    let row: { case_id: string; domain: string } | undefined
-    if (u.replyToMessageId) {
-      row = db.prepare(
-        `SELECT case_id, domain FROM cos_owner_questions
-          WHERE channel = ? AND channel_target = ? AND answered_at IS NULL AND superseded_at IS NULL`,
-      ).get(cfg.channelId, `${u.chatId}:${u.replyToMessageId}`) as never
-    }
-    if (!row) {
-      row = db.prepare(
-        `SELECT case_id, domain FROM cos_owner_questions
-          WHERE channel = ? AND answered_at IS NULL AND superseded_at IS NULL
-          ORDER BY asked_at DESC LIMIT 1`,
-      ).get(cfg.channelId) as never
-    }
-    if (!row) { result.unmatched++; continue }
+    // WHICH CASE this message answers is decided by one tested function, not by
+    // a rule inlined in a script: the guess it replaced wrote the owner's words
+    // onto the wrong case (2026-08-11 16:40, Wizz Air answer landed on the NAV
+    // case). See matchAnswerTarget.
+    const target = matchAnswerTarget(db, {
+      channel: cfg.channelId!, chatId: u.chatId, replyToMessageId: u.replyToMessageId,
+    })
+    if (target === 'AMBIGUOUS') { result.ambiguous++; continue }
+    if (!target) { result.unmatched++; continue }
+    const row = { case_id: target.caseId, domain: target.domain }
 
     const rec = recordOwnerAnswer(db, {
       caseId: row.case_id, domain: row.domain, text: u.text,
