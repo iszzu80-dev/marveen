@@ -1812,5 +1812,33 @@ export function initProgressionSchema(db: Database.Database): void {
     progression_run_id: 'TEXT',
   })
   db.exec(`CREATE INDEX IF NOT EXISTS idx_coq_open ON cos_owner_questions(answered_at, asked_at)`)
+
+  // ── cos_channel_outbox ───────────────────────────────────────────────────
+  //
+  // Messages waiting to LEAVE on a channel. The owner-question path keeps its
+  // own table (the question IS the state there); this is for producers that have
+  // something to say and no state of their own to hang it on — the radar first.
+  //
+  // `dedupe_key` is the identity of the THING announced, not of the attempt, and
+  // it is UNIQUE: a retry, a second radar tick or a restarted process must not
+  // send the same hit twice. `sent_at IS NULL` is the whole queue semantics — a
+  // failed send leaves the row alone, so the next drain retries rather than
+  // losing it. A price falls below target once.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cos_channel_outbox (
+      outbox_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+      channel        TEXT NOT NULL,
+      kind           TEXT NOT NULL,
+      dedupe_key     TEXT NOT NULL UNIQUE,
+      text           TEXT NOT NULL,
+      created_at     INTEGER NOT NULL,
+      sent_at        INTEGER,
+      channel_target TEXT,
+      attempts       INTEGER NOT NULL DEFAULT 0,
+      last_error     TEXT
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_outbox_pending
+             ON cos_channel_outbox(channel, sent_at, created_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cep_conflict ON case_evidence_packets(conflict_reason, created_at)`)
 }

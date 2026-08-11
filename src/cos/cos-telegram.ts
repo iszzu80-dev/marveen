@@ -28,7 +28,24 @@ export interface CosBotConfig {
    *  Telegram does not disclose a user to a bot before that. */
   chatId?: string
   botUsername?: string
+  /** WHICH KINDS OF MESSAGE this channel carries.
+   *
+   *  Istvan's open question (2026-08-11): should radar hits move here too, or
+   *  stay on the dev channel? The answer is one config value rather than a
+   *  rewrite, which is the point of the outbox — the work is the queue, not the
+   *  bot. Absent or empty means owner questions ONLY, because turning a channel
+   *  ON is a decision and a default must never make it silently.
+   *
+   *  OPTIONAL on the type, always present from `loadCosBotConfig`. The send
+   *  path does not care which routes a channel carries, and making every
+   *  caller that builds a config for a send state an empty list would be
+   *  ceremony, not safety. */
+  routes?: string[]
 }
+
+/** The route name for radar hits, so the config file and the producer cannot
+ *  drift apart on a spelling. */
+export const ROUTE_RADAR = 'radar'
 
 export const COS_BOT_CONFIG_PATH = 'store/.cos-telegram-bot.json'
 
@@ -42,6 +59,7 @@ export function loadCosBotConfig(path = COS_BOT_CONFIG_PATH): CosBotConfig | nul
       channelId: typeof j.channel_id === 'string' ? j.channel_id : 'telegram:cos',
       chatId: typeof j.chat_id === 'string' ? j.chat_id : undefined,
       botUsername: typeof j.bot_username === 'string' ? j.bot_username : undefined,
+      routes: Array.isArray(j.routes) ? j.routes.filter(r => typeof r === 'string') as string[] : [],
     }
   } catch { return null }
 }

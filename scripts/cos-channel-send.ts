@@ -9,6 +9,7 @@
 
 import { initDatabase, getDb } from '../src/db.js'
 import { loadCosBotConfig, sendCosMessage } from '../src/cos/cos-telegram.js'
+import { pendingOutbox, markOutboxSent, markOutboxFailed } from '../src/cos/channel-outbox.js'
 
 async function main(): Promise<void> {
   initDatabase()
@@ -49,8 +50,30 @@ async function main(): Promise<void> {
       failures.push({ caseId: r.case_id, error: String((e as Error)?.message ?? e).slice(0, 160) })
     }
   }
+  // THE OUTBOX. Producers with no state of their own to hang a message on (the
+  // radar first) queue here instead of sending, so a synchronous tick never
+  // waits on the network and a transient failure retries instead of losing the
+  // message. Drained in the same step as the questions, with the same rule: one
+  // undeliverable item must not stop the rest.
+  const queued = pendingOutbox(getDb(), cfg.channelId ?? 'telegram:cos')
+  let outboxSent = 0
+  for (const q of queued) {
+    try {
+      const res = await sendCosMessage(cfg, q.text)
+      markOutboxSent(getDb(), q.outbox_id, `${res.chatId}:${res.messageId}`)
+      outboxSent++
+    } catch (e) {
+      const msg = String((e as Error)?.message ?? e)
+      markOutboxFailed(getDb(), q.outbox_id, msg)
+      failures.push({ caseId: `${q.kind}:${q.dedupe_key}`, error: msg.slice(0, 160) })
+    }
+  }
+
   console.log('CosChannel:', JSON.stringify({
     channel: cfg.channelId, pending: rows.length, sent, failures,
+    // Reported even when zero: "the outbox was empty" and "the outbox was never
+    // drained" must not look the same in the cycle report.
+    outboxPending: queued.length, outboxSent,
   }))
 }
 
