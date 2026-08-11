@@ -21,6 +21,7 @@ import { effectiveZstSensitivity, isProfileAllowedForZstSensitivity, coerceZstSe
 import { makeExecutor, type OutboundAdapter, type OutboundAction, type ExecuteOpts } from './executor-core.js'
 import { zstApprovals } from './approval-core.js'
 import { permits } from './autonomy-ladder.js'
+import { issueAuthorization, type AuthorizationContext } from './action-authorization.js'
 
 const zstExecutor = makeExecutor('zst_outbound_ledger', 'zst_case_claims')
 
@@ -229,9 +230,29 @@ export async function dispatchZstSend(
   if (!decision.allowed) return { sent: false, decision }
   // F-7: the gate ran and allowed it on the line above. F-2: the versions come
   // from that same evaluation, not from a fresh read that could have moved.
+  // §22.2, corporate side. Same rule, same single issuing point.
+  const authContext: AuthorizationContext = {
+    domain: 'zst',
+    caseId: (db.prepare('SELECT case_id FROM zst_outbound_ledger WHERE ledger_id = ?')
+      .get(input.ledgerId) as { case_id: string | null } | undefined)?.case_id ?? null,
+    caseVersion: (db.prepare(
+      `SELECT c.version AS v FROM zst_outbound_ledger l
+       JOIN zst_cases c ON c.case_id = l.case_id WHERE l.ledger_id = ?`
+    ).get(input.ledgerId) as { v: number } | undefined)?.v ?? null,
+    goalVersion: null,
+    actionId: input.ledgerId,
+    actionType: 'EMAIL_SEND',
+    intent: 'SEND_APPROVED_EMAIL',
+    targetReference: input.campaignId,
+    recipient: input.email.to,
+    payloadHash: input.renderedPayloadHash,
+    approvalId: null,
+  }
+  const ticket = issueAuthorization(db, authContext, now)
   const action = await zstExecutor.executeAction(db, adapter, input.ledgerId, now, {
     ...opts,
-    authorizedByDispatchGate: true,
+    authorizationId: ticket.authorizationId,
+    authorizationContext: authContext,
     audit: {
       ...opts.audit,
       runId: opts.audit?.runId ?? input.runId,

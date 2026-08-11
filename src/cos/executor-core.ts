@@ -10,6 +10,17 @@
 import type Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
 import { reserveQuota, releaseQuota } from './quota.js'
+import { consumeAuthorization, type AuthorizationContext } from './action-authorization.js'
+import { killSwitchRefusal } from './kill-switch.js'
+
+/** Used when a caller supplies a ticket but no context: the hash will not match
+ *  anything the gate issued, so the send is refused. Deliberately NOT a
+ *  permissive default — a missing context must fail closed. */
+const EMPTY_AUTH_CONTEXT: AuthorizationContext = {
+  domain: 'personal', caseId: null, caseVersion: null, goalVersion: null,
+  actionId: '', actionType: '', intent: '', targetReference: null,
+  recipient: null, payloadHash: null, approvalId: null,
+}
 
 export type OutboundStatus =
   | 'PLANNED' | 'SENDING' | 'APPLIED_UNVERIFIED' | 'OUTCOME_UNKNOWN'
@@ -150,19 +161,24 @@ export interface PlanInput {
 
 export interface ExecuteOpts {
   quota?: { key: string; maxCount: number; windowSec: number }
-  /** F-7: the caller states that it has ALREADY evaluated the dispatch gate for
-   *  this row (§7.3: approval hash + template version + rendered payload + scope
-   *  + budget + quota, before every execution). Required to start a FIRST send,
-   *  i.e. to leave PLANNED. Recovery of an already-started row does not need it,
-   *  because the decision that authorized it was made before it left PLANNED.
+  /** §22.2: the ticket the deterministic gate issued for THIS action. Required
+   *  to start a first delivery (leaving PLANNED or FAILED_RETRYABLE).
    *
-   *  This is a caller ASSERTION, not proof — a caller could pass true without
-   *  having evaluated anything. What it buys is that the permission is no longer
-   *  the silent default: a new call site has to write the word down, and the one
-   *  loop that was driving PLANNED rows with no gate at all (cosTick) now
-   *  refuses instead of sending. The gate itself stays where it belongs, in
-   *  dispatchApprovedSend / dispatchZstSend. */
-  authorizedByDispatchGate?: boolean
+   *  This REPLACES the `authorizedByDispatchGate: true` boolean that used to sit
+   *  here. That boolean was a caller assertion — I wrote it, and its own comment
+   *  admitted it was not proof. §22.2 names that model and forbids it: any code
+   *  path able to reach executeAction was equally able to write `true`, so it
+   *  constrained only the callers that were going to behave anyway. The ticket
+   *  cannot be fabricated (32 random bytes that must exist in the table), cannot
+   *  be replayed (consumption is an atomic conditional UPDATE) and cannot be
+   *  aimed elsewhere (consumption re-checks the bound context). */
+  authorizationId?: string
+  /** The action context the ticket must still match at execution time. Passed
+   *  separately from the ticket on purpose: the executor re-derives the hash
+   *  from what is about to happen NOW, and compares it with what was authorised
+   *  THEN. A ticket proves the gate said yes once, not that it would say yes
+   *  now. */
+  authorizationContext?: AuthorizationContext
   /** F-2 / AC-21: "every outbound action is traceable to an approval, a
    *  campaign, a case+version, a run and a source". These are the run-time half
    *  — the plan-time half (payload hash, case version, campaign, recipient) is
@@ -302,11 +318,40 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
     // caller that has not run it may not start a send. cosTick used to arrive
     // here with PLANNED rows and no gate whatsoever; the only thing standing
     // between it and an unapproved send was an unwired adapter.
-    if (a.status === 'PLANNED' && !opts.authorizedByDispatchGate) {
-      setStatus(db, ledgerId, 'PLANNED', {
-        last_error: 'refused: a first send requires an evaluated dispatch decision (ExecuteOpts.authorizedByDispatchGate)',
-      }, now)
-      return loadOrThrow(db, ledgerId)
+    // N-3 (second review): FAILED_RETRYABLE belongs here too. That status means
+    // the adapter PROVED the request never reached the provider, so a retry is a
+    // FIRST delivery, not a recovery — and between the failure and the retry the
+    // campaign may have been revoked or paused, the approval may have expired
+    // (a real field since F-16), the connector may have dropped to READ_ONLY,
+    // the autonomy rung may have been lowered, and the case's sensitivity may
+    // have risen. §7.3 puts the CHECK before EVERY execution, not only the
+    // first. My original guard read `PLANNED` only, which quietly exempted every
+    // retry.
+    if (a.status === 'PLANNED' || a.status === 'FAILED_RETRYABLE') {
+      // §22 kill switch, at the choke point. `permits()` already refuses at the
+      // gate, but the gate ran earlier: this is the last line before a first
+      // delivery, and a stop engaged in between has to catch it here. Recovery
+      // paths returned above are untouched on purpose — they send nothing, and
+      // freezing them would leave a stopped system full of rows nobody can ever
+      // settle.
+      const stopped = killSwitchRefusal(db)
+      if (stopped) {
+        setStatus(db, ledgerId, 'PLANNED', { last_error: `refused: ${stopped}` }, now)
+        return loadOrThrow(db, ledgerId)
+      }
+      // §22.2. Consumed HERE, not at the door: between the gate's decision and
+      // this line the process may have been restarted, the row re-queued, or the
+      // payload edited. Consumption is the moment the authority is actually
+      // spent, so it belongs where the send begins.
+      const consumed = consumeAuthorization(
+        db, opts.authorizationId,
+        opts.authorizationContext ?? { ...EMPTY_AUTH_CONTEXT, actionId: ledgerId, actionType: a.actionType },
+        now,
+      )
+      if (!consumed.ok) {
+        setStatus(db, ledgerId, 'PLANNED', { last_error: `refused: ${consumed.reason}` }, now)
+        return loadOrThrow(db, ledgerId)
+      }
     }
     // ── A.2 + A.4 (F-4 + F-5): ONE transaction ────────────────────────────
     // The spec asks for BEGIN … verify claim … RESERVE quota … WRITE SENDING …
@@ -341,7 +386,7 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
         // queue of drafts exhaust a campaign's ceiling before a single message
         // left. Counted: everything from SENDING onwards, because those either
         // went out or may have.
-        const live = `status NOT IN ('CANCELLED','FAILED_TERMINAL','PLANNED')`
+        const live = `status NOT IN ('CANCELLED','FAILED_TERMINAL','PLANNED','FAILED_RETRYABLE')`
         if (L.maxTotal !== undefined) {
           const n = (db.prepare(`SELECT COUNT(*) AS n FROM ${T} WHERE campaign_id=? AND ${live} AND ledger_id<>?`)
             .get(L.campaignId, ledgerId) as { n: number }).n

@@ -24,6 +24,7 @@ import {
 import { validateSkillMd, validateSkillPermissions } from '../../cos/skill-permission-validator.js'
 import { getMissionControlProgressionView, runProgressionCycle } from '../../cos/progression-pipeline.js'
 import { storeDocument, documentsForCase, readDocumentBytes, resolveShareableAttachments } from '../../cos/cos-documents.js'
+import { engageKillSwitch, releaseKillSwitch, killSwitchState } from '../../cos/kill-switch.js'
 import { evaluateOutputFloors, breachedFloors } from '../../cos/output-floor.js'
 import { runDailyReconcile } from '../../cos/reconcile.js'
 import { linkCases, suggestLinks, linkedCases } from '../../cos/case-link.js'
@@ -78,6 +79,37 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
   // candidate here (with its verdict) to open/update a case. Idempotent per
   // (account, message). This is the ONLY /api/cos/* write path — the mutation
   // is confined to the intake domain logic.
+  // §22 kill switch (card 89b2ab52). GET reads it, POST engages or releases.
+  // The CLI (scripts/cos-kill-switch.ts) does the same without needing this
+  // server to be healthy — a stop that only exists here is missing whenever the
+  // dashboard itself is the problem.
+  if (path === '/api/cos/kill-switch' && method === 'GET') {
+    const s = killSwitchState(getDb())
+    const recent = getDb().prepare(
+      `SELECT engaged, reason, actor, tickets_revoked, created_at FROM cos_kill_switch_events
+       ORDER BY event_id DESC LIMIT 10`
+    ).all()
+    json(res, { ...s, recent })
+    return true
+  }
+  if (path === '/api/cos/kill-switch' && method === 'POST') {
+    const body = JSON.parse((await readBody(req)).toString()) as
+      { engaged?: boolean; reason?: string; actor?: string }
+    const now = Math.floor(Date.now() / 1000)
+    const actor = body.actor || 'dashboard'
+    if (body.engaged === true) {
+      if (!body.reason) { json(res, { error: 'reason required to engage' }, 400); return true }
+      json(res, engageKillSwitch(getDb(), { reason: body.reason, actor }, now))
+      return true
+    }
+    if (body.engaged === false) {
+      json(res, releaseKillSwitch(getDb(), { actor, reason: body.reason }, now))
+      return true
+    }
+    json(res, { error: 'engaged must be true or false' }, 400)
+    return true
+  }
+
   if (path === '/api/cos/intake' && method === 'POST') {
     let input: TriagedEmail
     try { input = JSON.parse((await readBody(req)).toString()) as TriagedEmail }

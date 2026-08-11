@@ -25,6 +25,22 @@ import { createCampaign, getCampaign, approveCampaign, recordApproval } from './
 import type { ApprovalEnvelope } from './approval-core.js'
 import { planAction, executeAction, cancelAction, type OutboundAdapter, type OutboundAction, type ExecuteOpts } from './executor.js'
 import { evaluateDispatch, type DispatchDecision } from './dispatch-gate.js'
+import { acquireClaim, releaseClaim } from './case-store.js'
+import { issueAuthorization, type AuthorizationContext } from './action-authorization.js'
+
+/** The case a ledger row belongs to, and the version it is at right now. Read
+ *  here so the ticket binds the state the gate decided on; if the case moves
+ *  before execution, the hash no longer matches and the ticket dies. */
+function caseIdOf(db: Database.Database, ledgerId: string): string | null {
+  return (db.prepare('SELECT case_id FROM outbound_ledger WHERE ledger_id = ?')
+    .get(ledgerId) as { case_id: string | null } | undefined)?.case_id ?? null
+}
+function caseVersionOfLedger(db: Database.Database, ledgerId: string): number | null {
+  return (db.prepare(
+    `SELECT c.version AS v FROM outbound_ledger l
+     JOIN personal_cases c ON c.case_id = l.case_id WHERE l.ledger_id = ?`
+  ).get(ledgerId) as { v: number } | undefined)?.v ?? null
+}
 
 export interface EmailDraft {
   to: string; subject: string; body: string
@@ -235,20 +251,77 @@ export async function dispatchApprovedSend(
     // pick a more permissive rung by claiming to be a different kind of case.
     caseType: caseTypeOf(db, input.ledgerId),
     now, // F-16: the same clock as the rest of the send
+    // N-2: read from the row, not asserted by the caller — the ceiling that
+    // applies is the one for the kind this send actually IS.
+    outboundKind: (db.prepare('SELECT outbound_kind FROM outbound_ledger WHERE ledger_id = ?')
+      .get(input.ledgerId) as { outbound_kind: string | null } | undefined)?.outbound_kind as
+      'INITIAL' | 'FOLLOW_UP' | 'REPLY' | undefined,
   })
   if (!decision.allowed) return { sent: false, decision }
   // The gate ran and allowed it three lines up — that is the assertion F-7 asks
   // this call site to make explicit. The versions come from the same evaluation
   // (F-2), not from a fresh read that could have moved.
-  const action = await executeAction(db, adapter, input.ledgerId, now, {
-    ...opts,
-    authorizedByDispatchGate: true,
-    audit: {
-      ...opts.audit,
-      runId: opts.audit?.runId ?? input.runId,
-      campaignVersion: decision.campaignVersion ?? null,
-      approvalVersion: decision.approvalVersion ?? null,
-    },
-  })
-  return { sent: action.status === 'VERIFIED' || action.status === 'APPLIED_UNVERIFIED', decision, action }
+  // N-2 (second review): the claim and the ceilings are PASSED now. Before this,
+  // executor-core's fence check and quota reservation sat behind `if (opts.claim)`
+  // and `if (opts.campaignLimit)` that no production caller ever satisfied — the
+  // exact pattern the first review named as the system's recurring fault, and I
+  // reproduced it while fixing it. My own scripts/cos-caller-report.ts would have
+  // shown it; I did not run it on my own work.
+  //
+  // The claim is acquired HERE, on the ledger row, rather than taken from a
+  // caller. An owner-triggered send has no run to inherit a claim from, and the
+  // race that matters on this path is two dispatches of the SAME row (a
+  // double-click, a retried HTTP call) — which is exactly what a per-row claim
+  // serialises. Short TTL: it guards one send, not a work session.
+  const claimKey = `outbound:${input.ledgerId}`
+  const runId = opts.audit?.runId ?? input.runId ?? `dispatch-${input.ledgerId}`
+  const claim = acquireClaim(db, { claimKey, ownerRunId: runId, ttlSeconds: 120 }, now)
+  if (!claim.acquired) {
+    return { sent: false, decision: { ...decision, allowed: false, reasons: [...decision.reasons, `a sor mar kuldes alatt van (${claim.ownerRunId})`] } }
+  }
+  // §22.2: the gate allowed it, so the gate ISSUES the ticket. This is the only
+  // place on the personal path that may call issueAuthorization, and it happens
+  // after evaluateDispatch and after the claim — never before.
+  const authContext: AuthorizationContext = {
+    domain: 'personal',
+    caseId: caseIdOf(db, input.ledgerId),
+    caseVersion: caseVersionOfLedger(db, input.ledgerId),
+    goalVersion: null,
+    actionId: input.ledgerId,
+    actionType: 'EMAIL_SEND',
+    intent: 'SEND_APPROVED_EMAIL',
+    targetReference: input.campaignId,
+    recipient: input.email.to,
+    payloadHash: input.renderedPayloadHash,
+    approvalId: decision.approvalId ?? null,
+  }
+  const ticket = issueAuthorization(db, authContext, now)
+
+  try {
+    const action = await executeAction(db, adapter, input.ledgerId, now, {
+      ...opts,
+      authorizationId: ticket.authorizationId,
+      authorizationContext: authContext,
+      claim: { claimKey, ownerRunId: runId, fence: claim.fence },
+      campaignLimit: decision.limits
+        ? {
+            campaignId: input.campaignId,
+            ...(decision.limits.maxTotal !== null ? { maxTotal: decision.limits.maxTotal } : {}),
+            ...(decision.limits.kind ? { kind: decision.limits.kind } : {}),
+            ...(decision.limits.maxPerKind !== null ? { maxPerKind: decision.limits.maxPerKind } : {}),
+          }
+        : opts.campaignLimit,
+      audit: {
+        ...opts.audit,
+        runId,
+        campaignVersion: decision.campaignVersion ?? null,
+        approvalVersion: decision.approvalVersion ?? null,
+      },
+    })
+    return { sent: action.status === 'VERIFIED' || action.status === 'APPLIED_UNVERIFIED', decision, action }
+  } finally {
+    // Released whatever happened: a claim left behind would block the row's next
+    // legitimate attempt for its whole TTL.
+    releaseClaim(db, { claimKey, ownerRunId: runId, fence: claim.fence })
+  }
 }

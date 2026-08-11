@@ -105,21 +105,32 @@ const APPROVAL_ENVELOPE: Record<string, string> = {
 }
 
 function widenCheckConstraint(db: Database.Database, table: string, probeValue: string, createSql: string): void {
-  const already = db.transaction((): boolean => {
-    try {
-      db.prepare(`UPDATE ${table} SET status = ? WHERE 0 = 1`).run(probeValue)
-      // A no-row UPDATE does not evaluate the CHECK, so probe for real, then throw
-      // to roll back whatever it did.
-      const one = db.prepare(`SELECT rowid FROM ${table} LIMIT 1`).get() as { rowid: number } | undefined
-      if (!one) return true // empty table: the CREATE above already has the wide CHECK
-      db.prepare(`UPDATE ${table} SET status = ? WHERE rowid = ?`).run(probeValue, one.rowid)
-      throw new Error('__rollback__')
-    } catch (e) {
-      if (String((e as Error).message) === '__rollback__') return true
-      return false
-    }
-  })()
-  if (already) return
+  // HOW THIS DETECTS "already wide" — and why it is NOT a write probe any more.
+  //
+  // The first version wrote `probeValue` onto a real row and threw '__rollback__'
+  // to undo it. The try/catch sat INSIDE the transaction callback, so the throw
+  // never reached better-sqlite3's wrapper and the transaction COMMITTED — with
+  // the probe's UPDATE in it. Every process start silently rewrote the status of
+  // the lowest-rowid row: email_processing_batches rowid 1 TERMINAL → BLOCKED,
+  // and email_processing rowid 1 SOURCE_COMMITTED → SOURCE_COMMIT_SKIPPED. The
+  // second one is the dangerous direction: SOURCE_COMMIT_SKIPPED is terminal, so
+  // a batch became closeable and the account cursor advanceable over a message
+  // nobody ever marked at the source (AC-11/AC-12, and §19's "cursor advanced on
+  // a non-terminal batch" critical alert). Found by the second code review,
+  // 2026-08-10; reproduced on the live store, both rows restored from the
+  // pre-merge backup.
+  //
+  // Reading the stored CHECK is what should have been here from the start. I
+  // argued against it in the original comment ("parsing text would be guessing")
+  // and that was wrong twice over: it is precise enough — the constraint either
+  // lists the literal or it does not — and, decisively, it CANNOT WRITE. A wrong
+  // "already wide" only skips a rebuild that was not needed; a wrong "not wide"
+  // triggers a rebuild that is verified by row count and foreign-key check
+  // anyway. Neither failure mode can corrupt a row. The old one could, and did.
+  const storedSql = (db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`)
+    .get(table) as { sql: string } | undefined)?.sql
+  if (!storedSql) return // no such table yet; the caller's CREATE will make it wide
+  if (storedSql.includes(probeValue)) return // the CHECK already lists it
 
   const cols = (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(c => c.name).join(', ')
   const before = (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n
@@ -622,6 +633,52 @@ export function initCosSchema(db: Database.Database): void {
   // columns landed on the personal ledger and every ZST send threw
   // "no such column: recipient" — on a fresh db the ZST ledger had never been
   // through ensureColumns at all.
+
+  // ── §22 kill switch audit ────────────────────────────────────────────
+  // cos_autonomy_global holds the CURRENT state; this holds the HISTORY. A stop
+  // with no record of who, when and why is a stop nobody can review afterwards,
+  // and the review afterwards is most of what a kill switch is for.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cos_kill_switch_events (
+      event_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+      engaged         INTEGER NOT NULL,
+      reason          TEXT,
+      actor           TEXT NOT NULL,
+      tickets_revoked INTEGER NOT NULL DEFAULT 0,
+      created_at      INTEGER NOT NULL
+    )
+  `)
+
+  // ── §22.2 action authorization tickets ───────────────────────────────
+  // The gate issues, the executor consumes. Opaque single-use records rather
+  // than a caller-side boolean: see src/cos/action-authorization.ts for why the
+  // boolean model is forbidden and why this variant was chosen over an HMAC
+  // ticket or an in-process capability object.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS action_authorizations (
+      authorization_id       TEXT PRIMARY KEY,   -- 32 random bytes; not derivable by a caller
+      domain                 TEXT NOT NULL,
+      case_id                TEXT,
+      case_version           INTEGER,
+      goal_version           INTEGER,
+      action_id              TEXT NOT NULL,      -- the ledger row this authorises, and ONLY it
+      action_type            TEXT NOT NULL,
+      intent                 TEXT NOT NULL,
+      target_reference       TEXT,
+      recipient              TEXT,
+      payload_hash           TEXT,
+      policy_evaluation_hash TEXT NOT NULL,      -- TOCTOU: everything bound, in one comparison
+      approval_id            TEXT,
+      delegation_envelope_id TEXT,
+      issued_at              INTEGER NOT NULL,
+      expires_at             INTEGER NOT NULL,
+      single_use             INTEGER NOT NULL DEFAULT 1,
+      nonce                  TEXT NOT NULL,
+      consumed_at            INTEGER,            -- the audit trail §22.2 asks for
+      CHECK (domain IN ('personal','zst'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_action_auth_action ON action_authorizations(action_id)`)
 
   // ── connector_health (Slice 1 reliability; §20 connector matrix) ──────
   // F-10 / B.3: where the marker-persistence proof is recorded. Without a
@@ -1570,11 +1627,28 @@ export function initProgressionSchema(db: Database.Database): void {
       CHECK (semantic_completion_status IN ('NOT_STARTED','IN_PROGRESS','PROPOSED','VERIFIED'))
     )
   `)
+  // ── §10.8 trigger contract ───────────────────────────────────────────
+  // HERE, not in initCosSchema. I put it there first and it threw
+  // "no such table: case_progression_state" on every fresh database, because
+  // that function runs BEFORE this one. Third time tonight in this same file —
+  // and the first time it was LOUD instead of silent, because ensureColumns on
+  // a missing table errors rather than quietly doing nothing. Loud is better.
+  //
+  // wait_version completes §10.8's dedup key: a wait re-armed with a new
+  // deadline is a NEW state even when nothing else about the case moved, and
+  // without it the re-armed wait looks identical to the one already reasoned
+  // over.
+  ensureColumns(db, 'case_progression_state', {
+    wait_version:         'INTEGER NOT NULL DEFAULT 0',
+    last_effective_state: 'TEXT',
+    last_event_seen:      'INTEGER',
+  })
+
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cps_next_prog ON case_progression_state(domain, next_progression_at) WHERE progression_enabled = 1`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cps_claimed ON case_progression_state(progression_claimed_by, progression_claim_expires_at)`)
 
   // ── case_progression_runs (plan §14 — audit/replay ledger) ─────────────
-  db.exec(`
+  const RUNS_DDL = `
     CREATE TABLE IF NOT EXISTS case_progression_runs (
       progression_run_id   TEXT PRIMARY KEY,
       domain               TEXT NOT NULL,
@@ -1601,9 +1675,18 @@ export function initProgressionSchema(db: Database.Database): void {
       safety_assertions_json TEXT,
       CHECK (domain IN ('personal','zst')),
       CHECK (status IN ('STARTED','COMPLETED','FAILED','RECOVERY_REQUIRED','CANCELLED')),
-      CHECK (trigger_type IN ('INTAKE','SCHEDULED','MANUAL','WAKE','ESCALATION_RESOLVED','RECOVERY'))
+      -- §10.8 named its own trigger vocabulary; the old six stay so existing
+      -- rows remain legal. SCHEDULED survives as a value but is no longer
+      -- WRITTEN by the heartbeat: "the clock came round" is not a reason.
+      CHECK (trigger_type IN ('INTAKE','SCHEDULED','MANUAL','WAKE','ESCALATION_RESOLVED','RECOVERY',
+        'NEW_RELEVANT_EVENT','WAIT_WAKE_DUE','FOLLOW_UP_DUE','APPROVAL_RESOLVED',
+        'DECISION_RESOLVED','USER_INPUT','CAPABILITY_RECOVERED','MANUAL_REVIEW_REQUEST'))
     )
-  `)
+  `
+  db.exec(RUNS_DDL)
+  // §10.8: existing stores carry the narrow six-value CHECK. Widened in place
+  // so a run triggered by NEW_RELEVANT_EVENT can actually be written.
+  widenCheckConstraint(db, 'case_progression_runs', 'NEW_RELEVANT_EVENT', RUNS_DDL)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cpruns_case ON case_progression_runs(domain, case_id, started_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cpruns_status ON case_progression_runs(status, started_at)`)
 

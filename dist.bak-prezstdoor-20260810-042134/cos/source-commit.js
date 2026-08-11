@@ -1,0 +1,142 @@
+// Personal Chief of Staff (COS) — closing the inbound chain (§8, second half).
+//
+// The spec's chain is DISCOVERED → CLAIMED → LOCAL_APPLIED → SOURCE_COMMITTED,
+// and only then may the batch terminalise and the account cursor advance. The
+// first half has run since day one. The second half was written, tested, and
+// never called: on 2026-08-09 all eighteen processed messages sat at
+// LOCAL_APPLIED, every batch was still OPEN, and the checkpoint table was empty.
+// The system genuinely did not know how far it had got.
+//
+// Why it was never called is worth stating, because it is not laziness: with
+// Gmail, "commit the source" means writing the COS/Processed label, and this
+// install's token is `gmail.send` only — least privilege, no modify scope. There
+// was no way to do the labelling step, so the whole tail of the chain stayed
+// unwired, and with it the batch closure and the cursor that depend on it.
+//
+// The fix is not to pretend the label happened. It is to make the source-commit
+// step EXPLICIT and pluggable:
+//   - GmailLabelCommitter        — the real thing, once a modify scope exists.
+//   - NoSourceWriteCommitter     — records that the source could not be marked,
+//                                  with the reason, and lets the chain close on
+//                                  an audited policy rather than silently.
+//
+// The second one follows the precedent the spec already sets in §A.1 for
+// quarantine: a message may be terminal off the happy path only if the source
+// reference is kept, the reason is recorded, and an explicit policy permits the
+// cursor to pass. Anything looser would let the cursor march over mail nobody
+// processed, which §19 names as a critical alert — and which the reconcile now
+// watches for.
+import { sourceCommit, tryAdvanceCheckpoint, isBatchTerminal } from './email-ingest.js';
+import { quarantineBatchPoison } from './poison-quarantine.js';
+/** The real committer, for when a modify-scoped token exists. Deliberately not
+ *  instantiated anywhere yet — wiring it before the scope exists would produce a
+ *  committer that fails every call and a chain that looks broken rather than
+ *  ungranted. */
+export class GmailLabelCommitter {
+    applyLabel;
+    id = 'gmail-label';
+    constructor(applyLabel) {
+        this.applyLabel = applyLabel;
+    }
+    async commit(accountId, messageId) {
+        try {
+            await this.applyLabel(accountId, messageId);
+            return { outcome: 'COMMITTED', reason: 'COS/Processed címke felírva' };
+        }
+        catch (e) {
+            return { outcome: 'FAILED', reason: `címkézés sikertelen: ${e.message}` };
+        }
+    }
+}
+/** No source-write capability. Reports the skip with its reason rather than
+ *  pretending success — the distinction between "marked at the source" and
+ *  "we could not mark it" has to survive into the audit trail. */
+export class NoSourceWriteCommitter {
+    reason;
+    id = 'no-source-write';
+    constructor(reason = 'a Gmail token csak gmail.send jogot hordoz, nincs modify scope') {
+        this.reason = reason;
+    }
+    async commit() {
+        return { outcome: 'SKIPPED_NO_CAPABILITY', reason: this.reason };
+    }
+}
+/**
+ * Finish the chain for one batch: source-commit every LOCAL_APPLIED message,
+ * then try to advance the checkpoint.
+ *
+ * The ordering is the spec's and it matters: local business writes happened
+ * earlier and exactly once, so a failure here can only cost a retry of the
+ * SOURCE side, never a duplicate case. That is the whole reason the two halves
+ * are separate states rather than one.
+ */
+export async function closeBatch(db, batchId, committer, now, opts = {}) {
+    const rows = db.prepare(`SELECT gmail_account_id, message_id FROM email_processing
+     WHERE batch_id = ? AND status = 'LOCAL_APPLIED'`).all(batchId);
+    let committed = 0, skipped = 0, failed = 0;
+    let skipReason = '';
+    for (const r of rows) {
+        const res = await committer.commit(r.gmail_account_id, r.message_id);
+        if (res.outcome === 'COMMITTED') {
+            sourceCommit(db, r.gmail_account_id, r.message_id, now);
+            committed += 1;
+        }
+        else if (res.outcome === 'SKIPPED_NO_CAPABILITY') {
+            skipped += 1;
+            skipReason = res.reason;
+            if (opts.allowCursorAdvanceWithoutSourceWrite) {
+                // Audited policy exception: the message is terminal on the local side and
+                // its source reference is kept, so the cursor may pass. The reason is
+                // written to the row, so nothing about this is silent.
+                sourceCommit(db, r.gmail_account_id, r.message_id, now);
+                db.prepare(`UPDATE email_processing SET last_error = @why, updated_at = @now
+           WHERE gmail_account_id = @acc AND message_id = @mid`).run({ why: `source-commit kihagyva: ${res.reason}`, now, acc: r.gmail_account_id, mid: r.message_id });
+                committed += 1;
+            }
+        }
+        else {
+            failed += 1;
+        }
+    }
+    // A.1: a message that keeps failing must not pin the cursor forever. Swept
+    // BEFORE the terminality check, so a jam cleared here lets the batch close in
+    // the same pass rather than waiting for the next run.
+    let quarantined = 0;
+    const quarantineBlocked = [];
+    if (opts.quarantine) {
+        const q = quarantineBatchPoison(db, batchId, opts.quarantine, now);
+        quarantined = q.quarantined;
+        for (const b of q.blocked)
+            quarantineBlocked.push(b.reason);
+    }
+    if (!isBatchTerminal(db, batchId)) {
+        return {
+            attempted: rows.length, committed, skipped, failed, quarantined, batchClosed: false, cursor: null,
+            reason: quarantineBlocked.length
+                ? `a köteg blokkolt: ${quarantineBlocked[0]}`
+                : skipped && !opts.allowCursorAdvanceWithoutSourceWrite
+                    ? `a köteg nyitva marad: ${skipReason} (a pozíció-léptetéshez explicit policy kell)`
+                    : 'a köteg nem minden eleme terminális',
+        };
+    }
+    const adv = tryAdvanceCheckpoint(db, batchId, now);
+    return {
+        attempted: rows.length, committed, skipped, failed, quarantined,
+        batchClosed: adv.advanced, cursor: adv.cursor,
+        reason: adv.advanced ? 'a köteg lezárult, a pozíció lépett' : 'a köteg terminális, de a pozíció nem lépett',
+    };
+}
+/** Every batch that still has work. Ordered oldest first so the cursor advances
+ *  in the order the mail arrived. */
+export function openBatchIds(db, limit = 100) {
+    return db.prepare(`SELECT batch_id FROM email_processing_batches
+     WHERE status IN ('OPEN','PROCESSING') ORDER BY created_at LIMIT ?`).all(limit).map((r) => r.batch_id);
+}
+/** Close every open batch. Used by the case-wake / reconcile path. */
+export async function closeOpenBatches(db, committer, now, opts = {}) {
+    const ids = openBatchIds(db);
+    const results = [];
+    for (const id of ids)
+        results.push(await closeBatch(db, id, committer, now, opts));
+    return { batches: ids.length, closed: results.filter((r) => r.batchClosed).length, results };
+}

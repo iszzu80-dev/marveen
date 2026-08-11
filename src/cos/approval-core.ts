@@ -95,6 +95,11 @@ export interface SendAuthResult {
   campaignVersion?: number
   approvalVersion?: number
   approvalId?: string
+  /** N-2 (second review): the envelope's ceilings, handed to the caller so the
+   *  DECIDING count can happen inside the same transaction as the SENDING write.
+   *  The COUNT(*) here stays as a cheap pre-filter; A.4 forbids it being the
+   *  only check, because a pre-filter outside the write is check-then-act. */
+  limits?: { maxTotal: number | null; maxPerKind: number | null; kind: string | null }
 }
 
 export const REFUSAL_CODES = [
@@ -227,7 +232,11 @@ export function makeApprovalEngine(T: ApprovalTables) {
       // started writing the field: a limit nothing sets is a limit nothing
       // tests. A draft is not outbound traffic; everything from SENDING onward
       // is, because it either went out or may have.
-      const LIVE = `status NOT IN ('CANCELLED','FAILED_TERMINAL','PLANNED')`
+      // FAILED_RETRYABLE is excluded for the same reason as PLANNED: the
+      // adapter PROVED it never reached the provider, so it is not outbound
+      // traffic and must not consume a ceiling it never used. Found by writing
+      // the N-2 door test — the retry was refused by its own failed attempt.
+      const LIVE = `status NOT IN ('CANCELLED','FAILED_TERMINAL','PLANNED','FAILED_RETRYABLE')`
       const sql = kind
         ? `SELECT COUNT(*) AS n FROM ${T.ledger} WHERE campaign_id=? AND outbound_kind=? AND ${LIVE}`
         : `SELECT COUNT(*) AS n FROM ${T.ledger} WHERE campaign_id=? AND ${LIVE}`
@@ -344,6 +353,12 @@ export function makeApprovalEngine(T: ApprovalTables) {
       authorized: true, code: 'ok', reason: 'ok',
       campaignVersion: c.version, approvalVersion: appr.campaign_version,
       approvalId: appr.approval_id,
+      limits: {
+        maxTotal: appr.max_total_outbound,
+        maxPerKind: q.outboundKind === 'INITIAL' ? appr.max_initial_outbound
+          : q.outboundKind === 'FOLLOW_UP' ? appr.max_follow_up_outbound : null,
+        kind: q.outboundKind ?? null,
+      },
     }
   }
 

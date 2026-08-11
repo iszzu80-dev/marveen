@@ -53,13 +53,21 @@ for (const s of STEPS) {
     problems.push(`${s.name}: ${why}`)
     continue
   }
-  // The steps print one or more JSON lines. Keep the last parseable one; if none
-  // parses, keep the raw tail rather than pretending the step produced nothing.
-  let parsed: unknown = null
+  // The steps print one or more JSON lines. MERGE them, do not keep only the
+  // last: the progression runner prints Migration, Heartbeat and GoalEnrichment
+  // on separate lines, and keeping the last silently threw away every heartbeat
+  // counter — including the one added to measure the §10.8 trigger contract.
+  // Found by looking for those counters and finding nulls. A reporter that
+  // quietly drops most of what it was given is the same shape as the failures
+  // this runner exists to catch.
+  let parsed: Record<string, unknown> | null = null
   for (const line of out.split('\n')) {
     const brace = line.indexOf('{')
     if (brace < 0) continue
-    try { parsed = JSON.parse(line.slice(brace)) } catch { /* not this line */ }
+    try {
+      const obj = JSON.parse(line.slice(brace)) as Record<string, unknown>
+      parsed = { ...(parsed ?? {}), ...obj }
+    } catch { /* not this line */ }
   }
   report[s.name] = parsed ?? { raw: out.slice(-500) }
 

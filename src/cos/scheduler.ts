@@ -82,7 +82,11 @@ export interface OutboundWorkItem {
  * evaluated decision.
  */
 export function reconcileOutbound(db: Database.Database, limit = 100): OutboundWorkItem[] {
-  const excluded = [...OUTBOUND_NO_AUTO_WORK, 'PLANNED']
+  // N-3: FAILED_RETRYABLE joins PLANNED. A row the adapter proved never reached
+  // the provider needs a FIRST delivery, and this loop evaluates no gate. Its
+  // retry now goes through the gated path, where the ceiling and backoff from
+  // F-15 still apply — the bound moved, it did not disappear.
+  const excluded = [...OUTBOUND_NO_AUTO_WORK, 'PLANNED', 'FAILED_RETRYABLE']
   const ph = excluded.map(() => '?').join(',')
   return db.prepare(
     `SELECT ledger_id, case_id, action_type, status, attempt FROM outbound_ledger

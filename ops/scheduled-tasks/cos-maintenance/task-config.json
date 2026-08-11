@@ -1,9 +1,9 @@
 {
   "schedule": "30 4 * * *",
   "agent": "marveen",
-  "enabled": false,
+  "enabled": true,
   "type": "heartbeat",
   "skipIfBusy": false,
   "forceSend": false,
-  "description": "COS §C karbantartas (review 2026-08-10, F-C): jogosultsag-ellenorzes, retention purge, titkositott mentes + prune + VALODI restore-teszt. ENABLED:FALSE amig a COS_BACKUP_PASSPHRASE nincs a vaultban -- egy mentes-feladat, ami jelszo nelkul fut, minden ejjel hangosan bukna. Istvan donti el, mikor kerul be a kulcs."
+  "description": "COS \u00a7C karbantartas (review 2026-08-10, F-C): jogosultsag-ellenorzes, retention purge, titkositott mentes + prune + VALODI restore-teszt. ELESITVE 2026-08-10 22:00: Istvan megadta a kulcsot, a vaultban van, es az eles futas 173 MB mentest keszitett, visszafejtette es 64 ugyet olvasott vissza belole."
 }
