@@ -16,6 +16,14 @@ import { readFileSync } from 'node:fs'
 
 export interface CosBotConfig {
   token: string
+  /** The channel IDENTITY, which is the BOT and not the chat.
+   *
+   *  Measured 2026-08-11: the CoS bot's private chat with Istvan has the SAME
+   *  chat_id as the fleet bot's, because in a private chat Telegram uses the
+   *  user's own id. Storing only the chat id would make the two channels
+   *  indistinguishable — and the answer matching built for the split would then
+   *  mis-attribute exactly the way the split exists to prevent. */
+  channelId?: string
   /** The chat the questions go to. Unknown until Istvan messages the bot once —
    *  Telegram does not disclose a user to a bot before that. */
   chatId?: string
@@ -31,6 +39,7 @@ export function loadCosBotConfig(path = COS_BOT_CONFIG_PATH): CosBotConfig | nul
     if (!token) return null
     return {
       token,
+      channelId: typeof j.channel_id === 'string' ? j.channel_id : 'telegram:cos',
       chatId: typeof j.chat_id === 'string' ? j.chat_id : undefined,
       botUsername: typeof j.bot_username === 'string' ? j.bot_username : undefined,
     }

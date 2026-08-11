@@ -32,6 +32,9 @@ const STEPS: Step[] = [
   { name: 'batches', args: ['scripts/cos-close-batches.ts'] },
   { name: 'threads', args: ['scripts/cos-fetch-threads.ts', '--limit', '10'] },
   { name: 'followups', args: ['scripts/cos-draft-followups.ts', '--limit', '5'] },
+  // A kerdes megirasa es a KIKULDESE ket kulon lepes: ha egybe lennenek, egy
+  // kezbesitesi hiba ugy nezne ki, mint "nincs mit kerdezni".
+  { name: 'channel', args: ['scripts/cos-channel-send.ts'] },
 ]
 
 const problems: string[] = []
