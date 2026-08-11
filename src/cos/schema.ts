@@ -1704,4 +1704,44 @@ export function initProgressionSchema(db: Database.Database): void {
   try {
     db.exec("ALTER TABLE case_progression_state ADD COLUMN completed_plan_step INTEGER NOT NULL DEFAULT 0")
   } catch { /* column already exists */ }
+
+  // ── case_evidence_packets (§10.2 Reader output + §13.1 arbitration audit) ──
+  //
+  // REFUSALS ARE ROWS TOO. refusal_reason is populated when a reading was
+  // discarded (empty context, model error, schema or provenance failure), and
+  // packet_json is then NULL. A store that only keeps successful readings cannot
+  // distinguish "the Reader looked and found little" from "the Reader never
+  // produced anything usable", and those need opposite responses.
+  //
+  // The four §13.1 audit fields are columns rather than JSON so a conflict can
+  // be counted with a query instead of a script.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS case_evidence_packets (
+      packet_id        TEXT PRIMARY KEY,
+      domain           TEXT NOT NULL,
+      case_id          TEXT NOT NULL,
+      /* The progression run this reading is ABOUT. */
+      progression_run_id TEXT,
+      created_at       INTEGER NOT NULL,
+      /* Context Builder receipts — what the Reader was actually given. */
+      context_items    INTEGER NOT NULL DEFAULT 0,
+      context_excluded INTEGER NOT NULL DEFAULT 0,
+      context_unavailable INTEGER NOT NULL DEFAULT 0,
+      packet_json      TEXT,
+      plan_json        TEXT,
+      confidence       REAL,
+      /* §13.1 audit, four fields, named as the spec names them. */
+      reader_candidate TEXT,
+      policy_result    TEXT,
+      final_decision   TEXT,
+      conflict_reason  TEXT,
+      safe_fallback_decision TEXT,
+      decided_by       TEXT,
+      refusal_reason   TEXT,
+      model            TEXT,
+      CHECK (domain IN ('personal','zst'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_cep_case ON case_evidence_packets(domain, case_id, created_at)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_cep_conflict ON case_evidence_packets(conflict_reason, created_at)`)
 }

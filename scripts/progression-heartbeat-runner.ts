@@ -56,7 +56,8 @@ console.log('Heartbeat:', JSON.stringify({
 // to keep the cases moving; a missing API key or a model timeout degrades the
 // goals to the old template and nothing else.
 const ENRICH_PER_CYCLE = Number(process.env.COS_ENRICH_PER_CYCLE ?? 5)
-if (ENRICH_PER_CYCLE > 0) {
+const READ_PER_CYCLE = Number(process.env.COS_READ_PER_CYCLE ?? 3)
+if (ENRICH_PER_CYCLE > 0 || READ_PER_CYCLE > 0) {
   try {
     const { enrichPendingGoals } = await import('../src/cos/goal-enrichment.js')
     const { resolveInterpreter } = await import('../src/cos/interpreter-provider.js')
@@ -68,13 +69,46 @@ if (ENRICH_PER_CYCLE > 0) {
       console.log('GoalEnrichment:', JSON.stringify({
         enriched: 0, failed: true, error: 'no interpreter configured (no ANTHROPIC key in env, no DEEPSEEK_API_KEY in vault)',
       }))
+      // Same fact, stated once per subsystem: without an interpreter the Reader
+      // cannot run either, and a silent zero here would read as "no case needed
+      // reading" rather than "nothing could read them".
+      console.log('Reader:', JSON.stringify({
+        read: 0, failed: true, error: 'no interpreter configured',
+      }))
     } else {
-      const enrich = await enrichPendingGoals(db, interp.client, ENRICH_PER_CYCLE)
-      console.log('GoalEnrichment:', JSON.stringify({ provider: interp.provider, model: interp.model, ...enrich }))
+      if (ENRICH_PER_CYCLE > 0) {
+        const enrich = await enrichPendingGoals(db, interp.client, ENRICH_PER_CYCLE)
+        console.log('GoalEnrichment:', JSON.stringify({ provider: interp.provider, model: interp.model, ...enrich }))
+      }
+
+      // Step 4: §10.1 → §10.2 → §12 → §13.1, on the live path (2026-08-11).
+      //
+      // The chain was built and committed the night before with no caller. This
+      // import is the route in, and `read` in the cycle output is the evidence
+      // that it is taken — a number that stays 0 while cases are running is the
+      // island coming back, and it is visible every ten minutes instead of on
+      // the day someone thinks to grep for callers.
+      //
+      // Bounded to a few per cycle: unlike goal enrichment a case does NOT leave
+      // the candidate set for ever, it leaves until it next progresses, so this
+      // is a recurring cost and the bound is the budget.
+      if (READ_PER_CYCLE > 0) {
+        const { runReaderPass } = await import('../src/cos/reader-cycle.js')
+        const read = await runReaderPass(db, interp.client, {
+          limit: READ_PER_CYCLE, now, model: interp.model,
+        })
+        console.log('Reader:', JSON.stringify({ provider: interp.provider, model: interp.model, ...read }))
+      }
     }
   } catch (e) {
+    // One catch for both, and it names neither as healthy. Reporting only
+    // GoalEnrichment here would have let a Reader failure surface under the
+    // other subsystem's name.
     console.log('GoalEnrichment:', JSON.stringify({
       enriched: 0, failed: true, error: String((e as Error)?.message ?? e),
+    }))
+    console.log('Reader:', JSON.stringify({
+      read: 0, failed: true, error: String((e as Error)?.message ?? e),
     }))
   }
 }
