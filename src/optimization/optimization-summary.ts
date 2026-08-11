@@ -204,12 +204,24 @@ export function buildOptimizationSummary(
   const { config } = configResult
   const freshness: number[] = []
 
+  // O-2 (review 2026-08-11): the master switch is part of every module gate.
+  //
+  // Every branch below read `config.modules.X` and the word `masterEnabled`
+  // appeared nowhere in this file — while /api/optimization/routing already
+  // gated on `masterEnabled && modules.runtimeRouting`. Since a master-OFF
+  // write does NOT force the module flags to false (it stashes them in
+  // lastEnabledConfiguration), "master OFF, modules still true" is an ordinary
+  // state — and the summary reported every module as live in exactly that
+  // state. The asymmetry between the two endpoints is what made it a gap
+  // rather than a decision.
+  const on = (module: boolean): boolean => config.masterEnabled && module === true
+
   let capacity: OptimizationSummary['capacity'] = {
     available: false,
     report: null,
     blocker: 'capacity monitoring module disabled',
   }
-  if (config.modules.capacityMonitoring) {
+  if (on(config.modules.capacityMonitoring)) {
     try {
       const subscriptions = loadSubscriptionsConfig()
       const lifecycle = deriveLifecycle(subscriptions.config, now)
@@ -229,7 +241,7 @@ export function buildOptimizationSummary(
     report: null,
     blocker: 'measurement module disabled',
   }
-  if (config.modules.measurement) {
+  if (on(config.modules.measurement)) {
     try {
       const report = buildPhase2Kpis(db, { from: opts.from, to: opts.to, now })
       kpi = { available: true, report, blocker: null }
@@ -275,7 +287,7 @@ export function buildOptimizationSummary(
     blocker: 'recommendations module disabled',
   }
 
-  if (config.modules.recommendations) {
+  if (on(config.modules.recommendations)) {
     try {
       const inventory = loadPackageInventoryConfig()
       if (inventory.config.packages.length === 0) {
@@ -341,7 +353,7 @@ export function buildOptimizationSummary(
     pack: null,
     blocker: 'benchmark module disabled',
   }
-  if (config.modules.benchmarkRecommendations) {
+  if (on(config.modules.benchmarkRecommendations)) {
     try {
       const pack = buildMarveenBenchmarkPack(db, now, { from: opts.from, to: opts.to })
       benchmark = { available: true, pack, blocker: null }
@@ -377,7 +389,7 @@ export function buildOptimizationSummary(
   } else if (hasCriticalAttention) {
     systemState = 'attention_needed'
   } else if (
-    config.modules.runtimeRouting
+    on(config.modules.runtimeRouting)
     && (!config.routing.automaticFallback || !runtimeRoutingConfig.enabled)
   ) {
     systemState = 'observation'
