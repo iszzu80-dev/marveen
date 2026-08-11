@@ -475,7 +475,7 @@ export function recordOwnerAnswer(
     // question released -> case unchanged -> same packet -> same question sent
     // again (review #6, H-2, reproduced: two identical messages after
     // answering).
-    db.prepare(
+    const info = db.prepare(
       `INSERT INTO ${events} (case_id, case_version, actor, event_type, reason, payload,
                               source_system, source_reference, created_at)
        VALUES (?, ?, 'istvan', ?, ?, ?, 'telegram', ?, ?)`,
@@ -486,6 +486,26 @@ export function recordOwnerAnswer(
       open.progression_run_id ?? null,
       now,
     )
+
+    // AND WAKE THE CASE. Found live on 2026-08-11, twenty minutes after the
+    // source_reference fix went in: Istvan answered a question, the event was
+    // written and correctly attached — and `decideTrigger` still said "nothing
+    // has changed and no new deadline has arrived", so the engine was never
+    // going to look at it.
+    //
+    // The trigger's state hash reads `last_event_id` from the case row. That
+    // column was written by NOTHING: zero cases out of 106 had it set, and a
+    // grep found no writer at all. So an EVENT-ONLY change — which is exactly
+    // what an owner answer is — could not make a case eligible. The answer path
+    // had three doors in a row: no caller, then no reference, and then no wake.
+    //
+    // Set here rather than in the shared event-append helper on purpose: the
+    // engine writes its own events during a run, so waking on EVERY event would
+    // make each run schedule the next one. Which event classes deserve a wake is
+    // a real question and it is carded; an OWNER ANSWER is the one case that
+    // needs no argument.
+    db.prepare(`UPDATE ${table} SET last_event_id = ? WHERE case_id = ?`)
+      .run(Number(info.lastInsertRowid), input.caseId)
   }
   return { caseId: input.caseId, questionHash: open.question_hash, eventType, choice }
 }

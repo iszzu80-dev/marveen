@@ -422,3 +422,85 @@ describe('H-3: the accent must not decide what he is asked', () => {
     expect(res.ok).toBe(false)
   })
 })
+
+// THE THIRD DOOR: the answer landed, named its question — and the engine still
+// never looked at it.
+//
+// Live, 2026-08-11 20:10, twenty minutes after the source_reference fix went in.
+// Istvan answered on the CoS bot, the event was written with the right run
+// reference, and `decideTrigger` returned {shouldRun: false, reason: "nothing has
+// changed and no new deadline has arrived"}. The trigger's state hash reads the
+// case row's `last_event_id`, and that column had never been written by anything
+// — zero of 106 cases had it set. So an EVENT-ONLY change, which is exactly what
+// an answer is, could not make a case eligible.
+describe('an owner answer WAKES the case', () => {
+  beforeEach(() => {
+    initDatabase(':memory:')
+    initProgressionSchema(getDb())
+    createCase(getDb(), { caseId: 'c1', title: 'ZST uzletresz-adasvetel', caseType: 'ADMIN' }, T0)
+    storePacket('c1', packet())
+    // The case has to have been progressed once, or the trigger's first rule
+    // ("never reasoned -> reason now") answers before the one under test.
+    getDb().prepare(
+      `INSERT INTO case_progression_state (domain, case_id, progression_enabled, created_at, updated_at)
+       VALUES ('personal', 'c1', 1, ?, ?)`,
+    ).run(T0, T0)
+  })
+
+  const triggerFor = async (): Promise<{ shouldRun: boolean; reason: string }> => {
+    const { decideTrigger } = await import('../cos/progression-trigger.js')
+    const d = decideTrigger(getDb(), 'personal', 'c1', T0 + 100)
+    return { shouldRun: d.shouldRun, reason: d.reason }
+  }
+
+  it('the answer advances last_event_id to the event it wrote', () => {
+    askPendingOwnerQuestions(getDb(), { now: T0 + 1 })
+    expect((getDb().prepare(
+      `SELECT last_event_id AS e FROM personal_cases WHERE case_id = 'c1'`,
+    ).get() as { e: number | null }).e).toBeNull()
+
+    recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'igen', now: T0 + 2 })
+
+    const { e } = getDb().prepare(
+      `SELECT last_event_id AS e FROM personal_cases WHERE case_id = 'c1'`,
+    ).get() as { e: number | null }
+    const newest = (getDb().prepare(
+      `SELECT MAX(event_id) AS m FROM personal_case_events WHERE case_id = 'c1'`,
+    ).get() as { m: number }).m
+    expect(e).toBe(newest)
+  })
+
+  it('HEADLINE: the case becomes eligible to run BECAUSE of the answer', () => {
+    // The assertion the live system failed. Everything else about the answer
+    // path worked; this is what made it a no-op anyway.
+    askPendingOwnerQuestions(getDb(), { now: T0 + 1 })
+    // Pin the pre-answer state as "already reasoned about", so the only thing
+    // that can change the verdict below is the answer itself.
+    return (async () => {
+      const { decideTrigger, recordProgressionState } = await import('../cos/progression-trigger.js')
+      // Record the CURRENT state as already reasoned about, so the only thing
+      // that can change the verdict below is the answer itself.
+      recordProgressionState(
+        getDb(), 'personal', 'c1',
+        decideTrigger(getDb(), 'personal', 'c1', T0 + 100).effectiveStateHash, T0 + 100,
+      )
+      expect((await triggerFor()).shouldRun).toBe(false)
+
+      recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'igen', now: T0 + 200 })
+
+      const after = await triggerFor()
+      expect(after.shouldRun).toBe(true)
+      expect(after.reason).toMatch(/changed/)
+    })()
+  })
+
+  it('answering a case nobody asked about changes nothing', () => {
+    // The counter-case. recordOwnerAnswer returns null when no question is
+    // outstanding, and it must not wake a case on the way out — a wake with no
+    // answer behind it is a run with nothing to run on.
+    expect(recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'igen', now: T0 + 2 })).toBeNull()
+    expect((getDb().prepare(
+      `SELECT last_event_id AS e FROM personal_cases WHERE case_id = 'c1'`,
+    ).get() as { e: number | null }).e).toBeNull()
+  })
+})
