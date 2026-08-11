@@ -12,10 +12,15 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { deriveDisplayState, APG_CHECKPOINT_RESULTS } from '../apg/ui-projection.js'
 
+// The REAL DeriveDisplayStateInput. The first version of this fixture invented
+// field names; vitest passed it happily (it does not typecheck) and tsc caught
+// it — a green test that was not exercising the branch it claimed to.
 const base = {
-  candidateId: 'wi-1', mode: 'assisted' as const, transitionState: 'in_progress',
-  latestCheckpointResult: 'PASS', hasRecommendation: false, hasOwnerDecision: false,
-  acceptanceStatus: 'in_review', updatedAt: 0,
+  latestTransitionState: null,
+  latestCheckpointResult: 'PASS',
+  latestCheckpoint: 'build',
+  hasAssistedRecommendation: false,
+  recommendationEvidenceCompleteness: null,
 }
 
 describe('F-8: the kernel result vocabulary is one contract, not two', () => {
@@ -48,8 +53,7 @@ describe('F-8: the kernel result vocabulary is one contract, not two', () => {
   })
 
   it('a genuinely running gate is still "executing" — the counter-case', () => {
-    expect(deriveDisplayState({ ...base, latestCheckpointResult: 'PASS', transitionState: 'in_progress' }))
-      .toBe('executing')
+    expect(deriveDisplayState({ ...base, latestCheckpointResult: 'PASS' })).toBe('executing')
   })
 })
 
