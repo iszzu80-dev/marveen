@@ -28,6 +28,7 @@
 import type Database from 'better-sqlite3'
 import { CASE_SENSITIVITIES, type CaseSensitivity } from './schema.js'
 import { escalateSensitivity, coerceSensitivity } from './sensitivity.js'
+import { readDocumentBytes } from './cos-documents.js'
 
 export type TrustClass =
   /** Written by this system or by Istvan. Instructions here are legitimate. */
@@ -74,6 +75,33 @@ export interface CaseContext {
    *  `excluded` on purpose: "not permitted" and "not connected" are different
    *  facts, and only one of them is a policy decision. */
   unavailable: Array<{ source: string; reason: string }>
+}
+
+
+/**
+ * The readable content of a stored document.
+ *
+ * Order: the extracted text column, then the stored bytes, then the label. The
+ * middle step is the one that was missing — see the call site for the
+ * measurement that produced it.
+ */
+function documentContent(db: Database.Database, d: Record<string, unknown>): string {
+  const kind = String(d.doc_kind ?? 'document')
+  const name = String(d.filename ?? d.document_id)
+  const extracted = typeof d.extracted_text === 'string' ? d.extracted_text.trim() : ''
+  if (extracted) return `${kind} (${name}):\n${extracted}`
+
+  const mime = String(d.mime_type ?? '')
+  // Only text-ish payloads are worth decoding here; a PDF or an image would
+  // produce noise, and noise reads to a model as content.
+  if (mime.startsWith('text/') || mime === 'message/rfc822' || mime === 'application/json') {
+    try {
+      const text = readDocumentBytes(db, String(d.document_id)).toString('utf8').trim()
+      // A decode that produced replacement characters is not text.
+      if (text && !text.includes('\uFFFD')) return `${kind} (${name}):\n${text}`
+    } catch { /* purged, missing on disk, or unreadable — fall through to the label */ }
+  }
+  return `${kind}: ${name} [no extracted text]`
 }
 
 /** A document's tier: its own if it declared a valid one, otherwise the case's.
@@ -209,7 +237,7 @@ export function buildCaseContext(
   // the exclusion is demonstrable rather than merely intended.
   const docs = db.prepare(
     `SELECT document_id, doc_kind, filename, source, source_ref, sensitivity, content_purged_at,
-            extracted_text
+            mime_type, extracted_text
      FROM cos_documents WHERE namespace = ? AND case_id = ? ORDER BY created_at DESC LIMIT 20`
   ).all(namespace, caseId) as Array<Record<string, unknown>>
   for (const d of docs) {
@@ -250,12 +278,19 @@ export function buildCaseContext(
       // tier still escalates (the max of the two wins), and the content
       // classifier escalates on top of both.
       sensitivity: docSensitivity(d.sensitivity, sensitivity),
-      // The extracted TEXT when we have it. A filename is a label, not content,
-      // and a Reader handed only labels would confidently report that a thread
-      // says nothing — the failure mode that looks like an answer.
-      content: d.extracted_text
-        ? `${String(d.doc_kind ?? 'document')} (${String(d.filename ?? d.document_id)}):\n${String(d.extracted_text)}`
-        : `${String(d.doc_kind ?? 'document')}: ${String(d.filename ?? d.document_id)} [no extracted text]`,
+      // The extracted TEXT when we have it — and when we do NOT, the stored
+      // bytes, because they are usually the same text one function call away.
+      //
+      // Measured 2026-08-11: all 22 stored email threads had
+      // `extracted_text` NULL while the files on disk held the plain-text
+      // conversation. The Reader therefore reported "the thread content is not
+      // readable" on the ZST share-transfer case and put the ball on EXTERNAL —
+      // a correct answer to the question it was asked, about a letter it was
+      // never shown. The judgement layer was never the bottleneck here.
+      //
+      // Binary or undecodable content still yields the label form: a Reader
+      // handed mojibake would report on the mojibake.
+      content: documentContent(db, d),
     })
   }
 

@@ -9,6 +9,8 @@
 // cross-domain item is demonstrably excluded — because "we filter by domain"
 // reviewed by eye is exactly the kind of claim tonight kept disproving.
 import { describe, it, expect, beforeEach } from 'vitest'
+import { writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { initDatabase, getDb } from '../db.js'
 import { createCase, transitionCase } from '../cos/case-store.js'
 import { buildCaseContext, contextIntegrityViolations } from '../cos/context-builder.js'
@@ -136,5 +138,71 @@ describe('§10.1 Context Builder', () => {
     const ctx = buildCaseContext(getDb(), 'personal', 'nincs-ilyen', T0 + 1)
     expect(ctx.items).toEqual([])
     expect(ctx.caseVersion).toBeNull()
+  })
+})
+
+describe('document content: the bytes on disk are content too', () => {
+  // Its own setup: this block sits outside the suite above, so it does not
+  // inherit that beforeEach.
+  beforeEach(() => {
+    initDatabase(':memory:')
+    createCase(getDb(), { caseId: 'c1', title: 'Medence', caseType: 'HOME_REPAIR' }, T0)
+  })
+
+  it('HEADLINE: a thread with NULL extracted_text still reaches the Reader', () => {
+    // Measured on the live store 2026-08-11: ALL 22 stored email threads had
+    // extracted_text NULL while the files on disk held the plain-text
+    // conversation. The Reader therefore reported "the thread is not readable"
+    // on the ZST share-transfer case — a correct answer about a letter it was
+    // never shown. The judgement layer was never the bottleneck.
+    const db = getDb()
+    const path = '/tmp/marveen-test-thread.txt'
+    const body = 'Feladó: Panos\n\nItt vannak a kert adatok.'
+    writeFileSync(path, body)
+    doc({
+      document_id: 'doc-bytes', doc_kind: 'email_thread', mime_type: 'text/plain',
+      extracted_text: null, stored_path: path,
+      // The byte read is INTEGRITY-CHECKED — readDocumentBytes compares the
+      // sha256 and refuses a mismatch. The first version of this fixture used a
+      // placeholder sha, the check correctly rejected it, and the test failed
+      // for the right reason: content that does not match its checksum is not
+      // the content.
+      sha256: createHash('sha256').update(Buffer.from(body)).digest('hex'),
+    })
+    const ctx = buildCaseContext(db, 'personal', 'c1', T0 + 1)
+    const item = ctx.items.find(i => i.kind === 'EMAIL_THREAD')!
+    expect(item.content).toContain('Itt vannak a kert adatok')
+  })
+
+  it('a BINARY document is not decoded into noise', () => {
+    // Noise reads to a model as content. A PDF turned into mojibake would be
+    // worse than the honest label.
+    const path = '/tmp/marveen-test-binary.pdf'
+    const bytes = Buffer.from([0x25, 0x50, 0x44, 0x46, 0xff, 0xfe, 0x00, 0x01])
+    writeFileSync(path, bytes)
+    doc({
+      document_id: 'doc-bin', doc_kind: 'other', mime_type: 'application/pdf',
+      extracted_text: null, stored_path: path,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+    })
+    const ctx = buildCaseContext(getDb(), 'personal', 'c1', T0 + 1)
+    const item = ctx.items.find(i => i.provenance.reference === 'doc-bin')!
+    expect(item.content).toContain('[no extracted text]')
+  })
+
+  it('extracted_text still WINS when it exists', () => {
+    // The column is the cheap path and the one an extractor would populate;
+    // reading bytes is the fallback, not a replacement.
+    doc({ document_id: 'doc-both', extracted_text: 'A kinyert szoveg.', stored_path: '/nonexistent' })
+    const ctx = buildCaseContext(getDb(), 'personal', 'c1', T0 + 1)
+    const item = ctx.items.find(i => i.provenance.reference === 'doc-both')!
+    expect(item.content).toContain('A kinyert szoveg.')
+  })
+
+  it('a missing file falls back to the label, not a crash', () => {
+    doc({ document_id: 'doc-gone', mime_type: 'text/plain', extracted_text: null, stored_path: '/nope/nope' })
+    const ctx = buildCaseContext(getDb(), 'personal', 'c1', T0 + 1)
+    const item = ctx.items.find(i => i.provenance.reference === 'doc-gone')!
+    expect(item.content).toContain('[no extracted text]')
   })
 })

@@ -1743,5 +1743,28 @@ export function initProgressionSchema(db: Database.Database): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cep_case ON case_evidence_packets(domain, case_id, created_at)`)
+
+  // ── cos_owner_questions (§10.4 Writer, first slice) ──────────────────────
+  //
+  // What was ASKED, so the same ask does not go out twice. Keyed by a hash of
+  // the ASK — not of the packet — because a new fact that does not change what
+  // Istvan has to answer must not re-ask him. Same doctrine as the pipeline's
+  // owner-answer matching: identity is the question's content, not the run.
+  //
+  // `answered_at` is the release: once an answer is recorded, the same question
+  // may legitimately be asked again if the situation returns.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cos_owner_questions (
+      case_id        TEXT NOT NULL,
+      domain         TEXT NOT NULL,
+      question_hash  TEXT NOT NULL,
+      question_text  TEXT NOT NULL,
+      asked_at       INTEGER NOT NULL,
+      answered_at    INTEGER,
+      answer_text    TEXT,
+      PRIMARY KEY (case_id, question_hash)
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_coq_open ON cos_owner_questions(answered_at, asked_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cep_conflict ON case_evidence_packets(conflict_reason, created_at)`)
 }

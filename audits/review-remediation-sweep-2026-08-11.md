@@ -183,5 +183,109 @@ A javítás: a merge-parancs a fő checkoutból, `cd` nélkül.
 
 ---
 
+---
+
+## 6. Utólag: a lánc bezárult (07:00–07:10)
+
+Istvan kérdése — „ki gondolja végig, mit írt vissza az ügyvéd, és mi kell tőlem?
+Ez Telegramon jött volna hozzám" — három hiányzó darabot mutatott meg, ebben a
+sorrendben.
+
+### 6.1 A levél szövege sosem jutott el a Readerhez
+
+**Mérés:** mind a 22 tárolt email-szál `extracted_text`-je NULL, miközben a
+fájlok a lemezen ott vannak, sima szöveggel. A ZST üzletrész-ügyön a Reader ezt
+írta ki hiányzó tételként: *„az email_thread tartalma nem értelmezhető"*, és a
+labdát EXTERNAL-ra tette. **Helyes válasz egy levélről, amit soha nem látott.**
+
+Előtte-utána, ugyanaz az ügy, ugyanaz a modell:
+
+| | Előtte | Utána |
+|---|---|---|
+| tények | 9, mind az ügy-kartonról | 22, köztük cégjegyzékszám, adószám, tulajdoni arány, a vételár nyitottsága, Panos külföldi tartózkodása |
+| hiányzó tételek | „a szál nem olvasható" | ügyvédi szakvélemény · Panos okmányadatai · alapítási dokumentumok · a vételár megállapodása — **kinél van** mindegyik |
+
+Két korlát szándékos: csak szöveg-szerű mime típus (egy PDF dekódolva zaj, és a
+zaj a modellnek tartalomnak látszik), és a beolvasás sha256-ellenőrzött. Az első
+teszt-fixture-öm helyőrző checksumot adott, az ellenőrzés visszautasította, és a
+teszt a helyes okból bukott.
+
+### 6.2 A Writer (§10.4, első szelet)
+
+A csomag eddig egy táblában ért véget. Most kérdés lesz belőle Istvan saját
+csatornáján — a meglévő busz→Telegram úton, amit az outbound-recovery riasztás
+már használ. Egy tulajdonos-riasztó út, nem kettő.
+
+Determinisztikus, nem második modell-hívás, ugyanaz az indoklás, mint a
+tervezőnél: az ítélet már megtörtént.
+
+Három szabály viszi a súlyt, és egyik sem a megfogalmazás:
+
+1. **Csak akkor kérdez, ha a válasz tényleg az övé.** Egy harmadik félre váró ügy
+   nem kérdés — így válik egy értesítő-csatorna zajjá, aztán némítva.
+2. **Ugyanazt nem kérdezi kétszer.** A lenyomat az ASK-ot fedi, nem a csomagot:
+   egy új tény, ami nem változtat a válaszolandón, nem pingel újra. Ugyanaz a
+   doktrína, mint a §10.8 trigger contract — csak most a telefonján.
+3. **Sweepenként kettő.** Tizenkét kérdés hajnali háromkor megkülönböztethetetlen
+   a spamtől.
+
+A rögzítés az üzenetküldés **előtt** történik: egy összeomlás a kettő között egy
+elmaradt kérdésbe kerül, amit egy későbbi sweep újra levezet; a másik sorrend egy
+duplikátumba kerül minden sweepen.
+
+**Élő, 07:04:** `questions: {asked: 2, alreadyAsked: 0, nothingToAsk: 1}` — és a
+két kérdés meg is érkezett a buszon.
+
+### 6.3 A válasz-út
+
+Egy kérdés, aminek nincs hova a válasza, fél csatorna. A válasz lezárja a nyitott
+kérdést ÉS case-eventet ír, amit a pipeline meglévő owner-answer feldolgozása
+olvas.
+
+Amit szándékosan **nem** csinál: nem értelmezi a választ a legegyszerűbb
+igen/nem-en túl. A 78e81155 kártya a valódi verzió (értelmezés válaszidőben,
+javaslatként amit ő megerősít); a találgatás itt szavakat adna a szájába egy
+append-only nyilvántartáson.
+
+Egy válasz olyan ügyre, amiről senki nem kérdezett, **visszautasítódik**. Egy
+esemény, amit a motor nem tud mihez kötni, rosszabb, mint az elveszett mondat:
+úgy nézne ki, mint a válasz a következő kérdésre.
+
+### 6.4 A csatorna plafonja, és a szám, amit előhozott
+
+A sweep-enkénti kettő önmagában engedi, hogy óránként tizenkettő legyen: hat kör,
+kettesével, és senki nem válaszol. Ami a csatornát védi, az nem az ütem, hanem a
+RÁ VÁRÓ kupac mérete — egy maroknyival túl egy újabb kérdés nem válaszolódik meg
+hamarabb, hanem a csatorna elnémul.
+
+Globális plafon a nyitott kérdésekre (5), és a visszatartás **számlálóval**
+jelentve: egy csatorna, ami a plafon miatt hallgat, nem nézhet ki úgy, mint egy
+rendszer, aminek nincs mit kérdeznie.
+
+Az első éles kör ezzel: `heldBacklogFull: 30`.
+
+**A mérés, amit ez kikényszerített.** 55 ügyről van olvasat:
+
+| labda | ügy |
+|---|---|
+| ISTVAN | 34 |
+| EXTERNAL | 18 |
+| MARVEEN | 1 |
+| UNKNOWN | 2 |
+
+A 34 Istvanra tett ügyből **27-nél a rendszer meg is tudja nevezni, mi hiányzik
+konkrétan tőle** (79%) — vagyis a visszatartott kupac nagyrészt valódi, nem a
+Reader alapértelmezése. Az átlagos magabiztosság ezeken 0,61, ami nem magas: az
+ügyek fele még a szál-szöveg javítása ELŐTT lett olvasva, üres kontextussal.
+
+A 18 EXTERNAL ügy pedig pontosan az, amiért a „csak akkor kérdez, ha a válasz
+tényleg az övé" szabály kell.
+
+**Egy saját hiba, amit a plafon tesztje hozott ki:** a `cos_owner_questions` sor
+`(case_id, question_hash)`-re kulcsolt, tehát egy megválaszolt és később újra
+időszerűvé váló kérdés a SAJÁT történetével ütközött. Upsertre javítva; a válasz
+nem vész el, mert az a case-eseményekbe került, amikor megérkezett — az az
+append-only nyilvántartás.
+
 *Marveen, 2026-08-11 — tizenkét találás, egy hibaosztály: egy felület, ami olyan
 állapotot jelent, amit nem ellenőrzött.*
