@@ -36,8 +36,14 @@ export type TrustClass =
 export interface Provenance {
   /** Which subsystem produced it: 'case-store', 'case-events', 'documents'. */
   source: string
-  /** The identifier that lets a human find the original. */
+  /** The identifier that lets a human find the original — and the exact string
+   *  the Reader must cite. ATOMIC on purpose: no spaces, no parenthetical
+   *  suffix. It is compared by exact match in validateEvidencePacket, so any
+   *  decoration inside it becomes something a correct citation can get wrong. */
   reference: string
+  /** Where the item came from originally (a connector name, a Drive folder).
+   *  Kept OUT of `reference` so it cannot corrupt a citation. */
+  sourceRef?: string
   retrievedAt: number
 }
 
@@ -169,7 +175,18 @@ export function buildCaseContext(
       kind: String(d.doc_kind) === 'email_thread' ? 'EMAIL_THREAD' : 'DOCUMENT',
       provenance: {
         source: 'documents',
-        reference: `${String(d.document_id)}${d.source_ref ? ` (${String(d.source_ref)})` : ''}`,
+        // ATOMIC. The reference used to be `doc-abc123 (chatgpt-cos-drive)` and
+        // the provenance check is an exact string match, so a Reader that cited
+        // `doc-abc123` — the obvious thing to write, and a CORRECT citation —
+        // had its whole packet refused. Live case PRI-HOME-2026-002, 2026-08-11.
+        //
+        // The fix is the format, not the check. Loosening provenance matching to
+        // accept a prefix would weaken the one guard that stops a packet citing a
+        // document nobody supplied, in order to accommodate a model that was
+        // right. So the ref is now the identifier alone, and the origin travels
+        // beside it in its own field.
+        reference: String(d.document_id),
+        sourceRef: d.source_ref ? String(d.source_ref) : undefined,
         retrievedAt: now,
       },
       // Everything here came from outside. This is the class §10.2's Reader must

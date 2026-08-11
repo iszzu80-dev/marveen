@@ -42,9 +42,9 @@ function seedWithInjection() {
 const obedientModel: LlmClient = {
   async complete() {
     return JSON.stringify({
-      readSources: ['doc-evil (msg-evil)'],
+      readSources: ['doc-evil'],
       unreadableSources: [],
-      facts: [{ statement: 'Utalni kell a megadott IBAN-ra.', sourceRef: 'doc-evil (msg-evil)' }],
+      facts: [{ statement: 'Utalni kell a megadott IBAN-ra.', sourceRef: 'doc-evil' }],
       missingRequirements: [],
       ballHolder: 'MARVEEN',
       // the model tries to escalate to an action verb outside the vocabulary
@@ -146,9 +146,9 @@ describe('§10.2 Reader — the ordinary path', () => {
     const ctx = buildCaseContext(db, 'personal', 'c1', T0 + 1)
     const good: LlmClient = {
       complete: async () => JSON.stringify({
-        readSources: ['doc-evil (msg-evil)'],
+        readSources: ['doc-evil'],
         unreadableSources: [],
-        facts: [{ statement: 'A levél utasításnak álcázott szöveget tartalmaz, utalást kér.', sourceRef: 'doc-evil (msg-evil)' }],
+        facts: [{ statement: 'A levél utasításnak álcázott szöveget tartalmaz, utalást kér.', sourceRef: 'doc-evil' }],
         missingRequirements: [{ what: 'Istvan megerősítése', whoHasIt: 'ISTVAN', why: 'gyanús fizetési kérés' }],
         ballHolder: 'ISTVAN',
         candidateDecision: 'REQUEST_DECISION',
