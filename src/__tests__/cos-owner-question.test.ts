@@ -241,3 +241,36 @@ describe('a question must say WHAT to decide', () => {
     expect(q.text).toContain('nem talált konkrét hiányzó tételt')
   })
 })
+
+describe('the channel has a global cap, not just a rate', () => {
+  beforeEach(() => {
+    initDatabase(':memory:')
+    initProgressionSchema(getDb())
+  })
+
+  it('HEADLINE: with too many unanswered, it holds back — and SAYS so', () => {
+    // Two per sweep becomes twelve an hour if nobody answers. Past a handful,
+    // one more question does not get answered sooner; it gets the channel muted.
+    for (const id of ['c1', 'c2', 'c3', 'c4', 'c5', 'c6']) {
+      createCase(getDb(), { caseId: id, title: id, caseType: 'ADMIN' }, T0)
+      storePacket(id, packet({ caseId: id }))
+    }
+    const first = askPendingOwnerQuestions(getDb(), { limit: 10, now: T0 + 1, maxOutstanding: 3 })
+    expect(first.asked).toBe(3)
+    expect(first.heldBacklogFull).toBeGreaterThan(0)
+
+    // ...and it stays held while they are unanswered.
+    const second = askPendingOwnerQuestions(getDb(), { limit: 10, now: T0 + 2, maxOutstanding: 3 })
+    expect(second.asked).toBe(0)
+  })
+
+  it('answering releases the cap — it is a backlog limit, not a mute', () => {
+    for (const id of ['c1', 'c2']) {
+      createCase(getDb(), { caseId: id, title: id, caseType: 'ADMIN' }, T0)
+      storePacket(id, packet({ caseId: id }))
+    }
+    askPendingOwnerQuestions(getDb(), { limit: 10, now: T0 + 1, maxOutstanding: 1 })
+    recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'Igen', now: T0 + 2 })
+    expect(askPendingOwnerQuestions(getDb(), { limit: 10, now: T0 + 3, maxOutstanding: 1 }).asked).toBe(1)
+  })
+})

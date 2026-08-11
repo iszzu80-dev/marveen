@@ -112,6 +112,10 @@ export function buildOwnerQuestion(
 
 export interface AskResult {
   asked: number
+  /** Questions NOT asked because too many are already waiting on him.
+   *  Reported rather than silent: a channel that went quiet because of a cap
+   *  must not look like a system with nothing to ask. */
+  heldBacklogFull: number
   /** Questions suppressed because the same ask is already outstanding. */
   alreadyAsked: number
   /** Cases read this pass with nothing to ask the owner. */
@@ -141,11 +145,27 @@ function isOutstanding(db: Database.Database, caseId: string, hash: string): boo
  */
 export function askPendingOwnerQuestions(
   db: Database.Database,
-  opts: { limit?: number; now?: number } = {},
+  opts: { limit?: number; now?: number; maxOutstanding?: number } = {},
 ): AskResult {
   const limit = opts.limit ?? 2
+  // A GLOBAL cap on unanswered questions, on top of the per-sweep bound.
+  //
+  // The per-sweep bound alone allows two an hour to become twelve: six sweeps,
+  // two each, nobody answering. The thing that actually protects the channel is
+  // not the rate, it is the size of the pile waiting on him — past a handful,
+  // one more question does not get answered faster, it gets the channel muted.
+  const maxOutstanding = opts.maxOutstanding ?? 5
   const now = opts.now ?? Math.floor(Date.now() / 1000)
-  const result: AskResult = { asked: 0, alreadyAsked: 0, nothingToAsk: 0 }
+  const result: AskResult = {
+    asked: 0, alreadyAsked: 0, nothingToAsk: 0, heldBacklogFull: 0,
+  }
+
+  let outstanding = 0
+  try {
+    outstanding = (db.prepare(
+      `SELECT COUNT(*) AS n FROM cos_owner_questions WHERE answered_at IS NULL`,
+    ).get() as { n: number }).n
+  } catch { outstanding = 0 }
 
   let rows: Array<{ case_id: string; domain: string; packet_json: string; plan_json: string }> = []
   try {
@@ -178,13 +198,23 @@ export function askPendingOwnerQuestions(
     })
     if (!question) { result.nothingToAsk++; continue }
     if (isOutstanding(db, row.case_id, question.hash)) { result.alreadyAsked++; continue }
+    if (outstanding + result.asked >= maxOutstanding) { result.heldBacklogFull++; continue }
 
     // Record BEFORE sending. A crash between the two costs an unasked question,
     // which a later sweep re-derives; the other order costs a duplicate every
     // sweep until someone notices.
+    // UPSERT, not INSERT. The row is keyed by (case_id, question_hash), so a
+    // question that was answered and later becomes relevant again collides with
+    // its own history — found by the test for exactly that path. Re-asking
+    // resets the ask and clears the previous answer here; the answer itself is
+    // not lost, because it was appended to the case events when it arrived, and
+    // that record is the append-only one.
     db.prepare(
       `INSERT INTO cos_owner_questions (case_id, domain, question_hash, question_text, asked_at)
-       VALUES (?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (case_id, question_hash) DO UPDATE
+         SET asked_at = excluded.asked_at, question_text = excluded.question_text,
+             answered_at = NULL, answer_text = NULL`,
     ).run(row.case_id, row.domain, question.hash, question.text, now)
 
     createAgentMessage('cos-reader', 'marveen', question.text, 'cos-owner-question')
