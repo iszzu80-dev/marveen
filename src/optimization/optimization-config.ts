@@ -2,6 +2,7 @@ import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PROJECT_ROOT } from '../config.js'
 import { atomicWriteFileSync } from '../web/atomic-write.js'
+import { setCapacityRoutingEnabled } from '../web/capacity-routing-store.js'
 
 export interface OptimizationModules {
   measurement: boolean
@@ -307,6 +308,23 @@ export function writeOptimizationConfig(
     // Preserve the exact pre-write bytes in a sibling backup before replacing the live config.
     if (existsSync(path)) copyFileSync(path, `${path}.bak`)
     atomicWriteFileSync(path, JSON.stringify(config, null, 2) + '\n')
+
+    // O-1 (review 2026-08-11): make the control panel CONTROL.
+    //
+    // The master switch, the runtimeRouting module toggle and the emergency
+    // stop all write this file — and the capacity-routing runner gates on a
+    // DIFFERENT file that nothing wrote. Measured that morning: the runner's
+    // flag had been `true` since 2026-07-30, so the emergency stop reported
+    // success while the sweep kept running. A switch that reports success
+    // without acting is worse than no switch.
+    //
+    // Only the OFF direction is propagated automatically, and only when the
+    // default path is in use. Arming routing is an owner decision (Phase 3);
+    // a dashboard toggle may stop it, never start it.
+    if (!opts.path) {
+      const shouldRun = config.masterEnabled && config.modules.runtimeRouting === true
+      if (!shouldRun) setCapacityRoutingEnabled(false)
+    }
     return { ok: true, config, error: null }
   } catch (error) {
     return {

@@ -154,6 +154,38 @@ export function readCapacityRoutingConfig(path: string = CONFIG_PATH): CapacityR
   }
 }
 
+/**
+ * Set the runtime routing master flag (review 2026-08-11, lean-opt O-1).
+ *
+ * WHY THIS EXISTS. The Optimalizálás page offered a master switch, seven module
+ * toggles and an emergency stop, and none of them reached the runner: the page
+ * writes `store/optimization-config.json`, and `startCapacityRoutingRunner`
+ * gates on `enabled` in THIS file, which nothing in the codebase wrote. Measured
+ * 2026-08-11: `enabled` was true and had been since 2026-07-30, so pressing the
+ * emergency stop would have reported success while the sweep kept running.
+ *
+ * A switch that reports success without acting is worse than no switch: it is
+ * the one you press in the minute you actually need it.
+ *
+ * Everything else in the file is preserved — this writes ONE field. The routing
+ * candidates and their trust flags are an owner decision and are not touched.
+ */
+export function setCapacityRoutingEnabled(enabled: boolean, path: string = CONFIG_PATH): boolean {
+  let raw: Record<string, unknown> = {}
+  try {
+    raw = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>
+  } catch {
+    // No config on disk: write one that is OFF whatever was asked. Creating an
+    // ENABLED config as a side effect of a dashboard toggle would arm routing
+    // from a UI action, and arming is an owner decision (Phase 3, 2026-07-30).
+    if (enabled) return false
+    raw = { ...DEFAULT_CAPACITY_ROUTING_CONFIG }
+  }
+  if (raw.enabled === enabled) return false
+  atomicWriteFileSync(path, JSON.stringify({ ...raw, enabled }, null, 2))
+  return true
+}
+
 /** Whether a (provider, authProfile) pair is currently trusted for routing, per the LIVE config -- read fresh, not cached from write time. */
 export function isEnabledForRouting(provider: string, authProfile: string, config: CapacityRoutingConfig = readCapacityRoutingConfig()): boolean {
   return config.candidates.some((c) => c.provider === provider && c.authProfile === authProfile && c.enabledForRouting)
