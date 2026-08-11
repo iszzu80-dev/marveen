@@ -128,6 +128,10 @@ export interface AskResult {
    *  a packet, the question describes a world that has moved on. Counted, not
    *  silent: the next reader pass refreshes them. */
   staleReading: number
+  /** Cases held back because they asked recently and got no answer. Counted for
+   *  the same reason as everything else here: a channel that went quiet because
+   *  of a rule must not look like a system with nothing to say. */
+  cooldown: number
 }
 
 /** Has this exact question already been HANDLED — either still waiting for an
@@ -168,6 +172,43 @@ function isHandled(db: Database.Database, caseId: string, domain: string, hash: 
 
 /** Seconds a stored reading may lag the case before it counts as stale. */
 export const STALE_READING_GRACE_SEC = 120
+
+/** How long one case must stay quiet after asking, unless the owner answers.
+ *
+ *  Live on 2026-08-11: ONE case produced THREE questions in twenty minutes.
+ *  20:20 "what should be done with this invoice?", answered at 20:21; 20:30
+ *  "does 'parking' mean a line item on the invoice?", which I resolved myself;
+ *  20:40 "please confirm the follow-up date Marveen proposed" — the Reader had
+ *  read my own note, which said in so many words that Istvan could override the
+ *  date, and turned it into a question.
+ *
+ *  Each one was individually defensible. Together they are a case talking to its
+ *  owner every ten minutes, which is how a channel gets muted — and the ceiling
+ *  does not catch it, because the ceiling bounds the PILE, not the RATE per case.
+ *
+ *  Six hours is not a magic number: it is "not again this working session". An
+ *  ANSWER clears it immediately, so a conversation the owner is actually having
+ *  is never slowed down — only a case talking to itself is. */
+export const ASK_COOLDOWN_SEC = 6 * 3600
+
+/** Has this case already asked recently, with no answer since?
+ *
+ *  Deliberately NOT keyed on the question's hash: the failure is a case that
+ *  keeps finding new things to ask, so a rule that only suppressed IDENTICAL
+ *  questions would have stopped none of the three. */
+function askedRecently(db: Database.Database, caseId: string, now: number): boolean {
+  try {
+    const row = db.prepare(
+      `SELECT MAX(asked_at) AS last_ask, MAX(COALESCE(answered_at, 0)) AS last_answer
+         FROM cos_owner_questions WHERE case_id = ?`,
+    ).get(caseId) as { last_ask: number | null; last_answer: number } | undefined
+    if (!row?.last_ask) return false
+    // An answer since the last ask means the owner is engaged with this case;
+    // the next question is part of that exchange, not noise on top of it.
+    if (row.last_answer >= row.last_ask) return false
+    return now - row.last_ask < ASK_COOLDOWN_SEC
+  } catch { return false }
+}
 
 function caseUpdatedAt(db: Database.Database, domain: string, caseId: string): number {
   const table = domain === 'zst' ? 'zst_cases' : 'personal_cases'
@@ -221,7 +262,7 @@ export function askPendingOwnerQuestions(
   const maxOutstanding = opts.maxOutstanding ?? 5
   const now = opts.now ?? Math.floor(Date.now() / 1000)
   const result: AskResult = {
-    asked: 0, alreadyAsked: 0, nothingToAsk: 0, heldBacklogFull: 0, staleReading: 0,
+    asked: 0, alreadyAsked: 0, nothingToAsk: 0, heldBacklogFull: 0, staleReading: 0, cooldown: 0,
   }
 
   // Questions that GREW the open pile this sweep. A superseding rewrite does
@@ -317,6 +358,18 @@ export function askPendingOwnerQuestions(
     // Counting it would let a full queue block the very rewrite that makes a bad
     // question answerable, which is the opposite of what the ceiling is for.
     const replacesOwn = hasOtherOpenQuestion(db, row.case_id, question.hash)
+
+    // ONE CASE, ONE NEW QUESTION PER SESSION — unless he answered.
+    //
+    // Placed HERE, after both earlier checks, on purpose:
+    //   - after `isHandled`, so an identical repeat is still reported as
+    //     `alreadyAsked`; the more specific diagnosis is the more useful one.
+    //   - and exempting `replacesOwn`, because a REWRITE of a question he is
+    //     already looking at does not add anything to his pile — it makes a
+    //     vague question answerable, which is the opposite of noise. Holding
+    //     that back would leave him with the worse wording and call it quiet.
+    if (!replacesOwn && askedRecently(db, row.case_id, now)) { result.cooldown++; continue }
+
     if (!replacesOwn && outstanding + netAdded >= maxOutstanding) { result.heldBacklogFull++; continue }
 
     // Record BEFORE sending. A crash between the two costs an unasked question,

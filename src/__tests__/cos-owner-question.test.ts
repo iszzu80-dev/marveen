@@ -17,6 +17,7 @@ import { initProgressionSchema } from '../cos/schema.js'
 import { createCase } from '../cos/case-store.js'
 import {
   buildOwnerQuestion, askPendingOwnerQuestions, recordOwnerAnswer, outstandingOwnerQuestions,
+  ASK_COOLDOWN_SEC,
 } from '../cos/owner-question.js'
 import { planFromEvidence } from '../cos/evidence-planner.js'
 import { validateEvidencePacket, type ReaderEvidencePacket } from '../cos/reader.js'
@@ -572,6 +573,124 @@ describe('an answer makes older readings STALE', () => {
 
     const res = askPendingOwnerQuestions(getDb(), { now: T0 + 5200 })
     expect(res.staleReading).toBe(0)
+    expect(res.asked).toBe(1)
+  })
+})
+
+// ONE CASE, ONE QUESTION PER SESSION — unless he answers.
+//
+// Live 2026-08-11: one case produced THREE questions in twenty minutes. 20:20
+// "what should be done with this invoice?" (answered at 20:21); 20:30 "does
+// 'parking' mean a line item?" (a misreading of his answer, which I resolved
+// myself); 20:40 "please confirm the follow-up date Marveen proposed" — the
+// Reader had read MY OWN note, which said Istvan could override the date, and
+// turned it into a question for him.
+//
+// Every one of them was individually defensible. Together they are a case
+// talking to its owner every ten minutes. The existing ceiling does not catch
+// this: it bounds the PILE of open questions, not the RATE at which one case
+// produces them.
+describe('per-case ask cooldown', () => {
+  beforeEach(() => {
+    initDatabase(':memory:')
+    initProgressionSchema(getDb())
+    createCase(getDb(), { caseId: 'c1', title: 'ZST szamla', caseType: 'ADMIN' }, T0)
+    getDb().prepare(
+      `INSERT INTO case_progression_state (domain, case_id, progression_enabled, created_at, updated_at)
+       VALUES ('personal', 'c1', 1, ?, ?)`,
+    ).run(T0, T0)
+  })
+
+  /** A fresh packet with a DIFFERENT ask, so the suppression under test is the
+   *  cooldown and not the identical-question check. */
+  const freshPacket = (what: string, at: number): void => {
+    getDb().prepare(`DELETE FROM case_evidence_packets WHERE case_id = 'c1'`).run()
+    const p = packet({ missingRequirements: [{ what, whoHasIt: 'ISTVAN', why: 'ehhez kell' }] })
+    getDb().prepare(
+      `INSERT INTO case_evidence_packets
+         (packet_id, domain, case_id, created_at, packet_json, plan_json, confidence, policy_result)
+       VALUES (?, 'personal', 'c1', ?, ?, ?, ?, 'WAIT_EXTERNAL')`,
+    ).run(`pk-${at}`, at, JSON.stringify(p), JSON.stringify(planFromEvidence(p)), p.confidence)
+  }
+
+  it('HEADLINE: a NEW question ten minutes after an unanswered one is held', () => {
+    // The live shape, exactly: the case asked, the question was closed WITHOUT
+    // an answer from him (I resolved it myself), and ten minutes later the case
+    // had something new to ask. That third message is the one that turns a
+    // channel into noise.
+    freshPacket('A szamla kezelesenek szabalya', T0)
+    expect(askPendingOwnerQuestions(getDb(), { now: T0 + 1 }).asked).toBe(1)
+    // Closed without an answer — superseded, the way I closed the live one.
+    getDb().prepare(
+      `UPDATE cos_owner_questions SET superseded_at = ? WHERE case_id = 'c1'`,
+    ).run(T0 + 100)
+
+    freshPacket('A parkolasi datum megerositese', T0 + 600)
+    const second = askPendingOwnerQuestions(getDb(), { now: T0 + 601 })
+    expect(second.asked).toBe(0)
+    // Counted, not silent. A channel that went quiet because of a rule must not
+    // look like a system with nothing to say.
+    expect(second.cooldown).toBe(1)
+  })
+
+  it('a REWRITE of a question he is still looking at is NOT held', () => {
+    // The exemption, stated as its own test so the next reader sees it is
+    // deliberate: a rewrite replaces the open question rather than adding to his
+    // pile, and holding it back would leave him with the vaguer wording.
+    freshPacket('Istvan dontese szukseges', T0)
+    expect(askPendingOwnerQuestions(getDb(), { now: T0 + 1 }).asked).toBe(1)
+    freshPacket('A 404/800 tulajdoni hanyad tisztazasa', T0 + 600)
+    const rewrite = askPendingOwnerQuestions(getDb(), { now: T0 + 601 })
+    expect(rewrite.asked).toBe(1)
+    expect(rewrite.cooldown).toBe(0)
+    // And it replaced rather than added: one open question on the case.
+    expect((getDb().prepare(
+      `SELECT COUNT(*) AS n FROM cos_owner_questions
+        WHERE case_id = 'c1' AND answered_at IS NULL AND superseded_at IS NULL`,
+    ).get() as { n: number }).n).toBe(1)
+  })
+
+  it('an ANSWER clears it immediately', () => {
+    // The exchange the owner is actually having must never be slowed down —
+    // only a case talking to itself is.
+    freshPacket('A szamla kezelesenek szabalya', T0)
+    askPendingOwnerQuestions(getDb(), { now: T0 + 1 })
+    recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'parkolas', now: T0 + 60 })
+
+    freshPacket('A parkolasi datum megerositese', T0 + 600)
+    const after = askPendingOwnerQuestions(getDb(), { now: T0 + 601 })
+    expect(after.asked).toBe(1)
+    expect(after.cooldown).toBe(0)
+  })
+
+  it('after the window the case may speak again', () => {
+    // The counter-case: this is a cooldown, not a gag. A case that still needs
+    // something tomorrow must be able to say so.
+    freshPacket('A szamla kezelesenek szabalya', T0)
+    askPendingOwnerQuestions(getDb(), { now: T0 + 1 })
+
+    freshPacket('A parkolasi datum megerositese', T0 + ASK_COOLDOWN_SEC + 10)
+    const later = askPendingOwnerQuestions(getDb(), { now: T0 + ASK_COOLDOWN_SEC + 11 })
+    expect(later.asked).toBe(1)
+  })
+
+  it('a DIFFERENT case is not held by its neighbour', () => {
+    // The cooldown is per case. One noisy case must not mute the rest.
+    createCase(getDb(), { caseId: 'c2', title: 'Masik ugy', caseType: 'ADMIN' }, T0)
+    getDb().prepare(
+      `INSERT INTO case_progression_state (domain, case_id, progression_enabled, created_at, updated_at)
+       VALUES ('personal', 'c2', 1, ?, ?)`,
+    ).run(T0, T0)
+    freshPacket('A szamla kezelesenek szabalya', T0)
+    askPendingOwnerQuestions(getDb(), { now: T0 + 1 })
+
+    const p2 = packet({ caseId: 'c2' })
+    getDb().prepare(
+      `INSERT INTO case_evidence_packets
+         (packet_id, domain, case_id, created_at, packet_json, plan_json, confidence, policy_result)
+       VALUES ('pk-c2', 'personal', 'c2', ?, ?, ?, ?, 'WAIT_EXTERNAL')`,
+    ).run(T0 + 600, JSON.stringify(p2), JSON.stringify(planFromEvidence(p2)), p2.confidence)
+    const res = askPendingOwnerQuestions(getDb(), { now: T0 + 601 })
     expect(res.asked).toBe(1)
   })
 })
