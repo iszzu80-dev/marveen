@@ -21,8 +21,20 @@
 import type { LlmClient } from './progression-interpreter.js'
 
 /** The cheapest OpenAI model that reliably returns the strict JSON the
- *  interpreter validates. Overridable per client, like the Anthropic one. */
-export const DEFAULT_OPENAI_MODEL = 'gpt-5.6-mini'
+ *  interpreter validates. Overridable per client, like the Anthropic one.
+ *
+ *  VERIFIED AGAINST THE ACCOUNT, not assumed. The first value here was
+ *  `gpt-5.6-mini`, which I inferred from the naming pattern of the model the
+ *  fleet uses elsewhere (gpt-5.6-sol). It does not exist: the live probe came
+ *  back `model_not_found`. The account's 5.6 line is luna/sol/terra with no mini
+ *  tier, and the newest mini is this one — confirmed by listing /v1/models and
+ *  then completing a real request through it.
+ *
+ *  Worth stating because of WHEN it would have failed: this client is the
+ *  FALLBACK for sensitive content. A wrong model id here costs nothing until the
+ *  Anthropic key expires, and then the fallback fails at exactly the moment it
+ *  exists for — an untested spare tyre. */
+export const DEFAULT_OPENAI_MODEL = 'gpt-5.4-mini'
 
 export const OPENAI_API_URL = 'https://api.openai.com/v1/chat/completions'
 
