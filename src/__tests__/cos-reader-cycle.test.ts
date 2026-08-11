@@ -69,7 +69,7 @@ describe('Reader pass on the live path', () => {
   it('reads a case that ran, and STORES the packet, the plan and the arbitration', async () => {
     seedRanCase()
     const llm = stubLlm(packetJson())
-    const r = await runReaderPass(getDb(), llm, { limit: 5, now: T0 + 20, model: 'test-model', profile: 'analysis_efficient' })
+    const r = await runReaderPass(getDb(), { general: { client: llm, provider: 'deepseek', model: 'test-model' } }, { limit: 5, now: T0 + 20 })
 
     expect(r.read).toBe(1)
     expect(r.refused).toBe(0)
@@ -97,10 +97,10 @@ describe('Reader pass on the live path', () => {
     // would cost a model call every ten minutes.
     seedRanCase()
     const llm = stubLlm(packetJson())
-    const first = await runReaderPass(getDb(), llm, { limit: 5, now: T0 + 20, profile: 'analysis_efficient' })
+    const first = await runReaderPass(getDb(), { general: { client: llm, provider: 'deepseek' } }, { limit: 5, now: T0 + 20 })
     expect(first.read).toBe(1)
 
-    const second = await runReaderPass(getDb(), llm, { limit: 5, now: T0 + 30, profile: 'analysis_efficient' })
+    const second = await runReaderPass(getDb(), { general: { client: llm, provider: 'deepseek' } }, { limit: 5, now: T0 + 30 })
     expect(second.read).toBe(0)
     expect(casesNeedingReading(getDb(), 0)).toHaveLength(0)
     expect(llm.seen).toHaveLength(1)
@@ -115,7 +115,7 @@ describe('Reader pass on the live path', () => {
     // usable" need opposite responses, so they must not both be an absent row.
     seedRanCase()
     const llm = stubLlm('I am not going to answer with JSON today.')
-    const r = await runReaderPass(getDb(), llm, { limit: 5, now: T0 + 20, profile: 'analysis_efficient' })
+    const r = await runReaderPass(getDb(), { general: { client: llm, provider: 'deepseek' } }, { limit: 5, now: T0 + 20 })
 
     expect(r.read).toBe(0)
     expect(r.refused).toBe(1)
@@ -134,7 +134,7 @@ describe('Reader pass on the live path', () => {
   it('a packet citing a source it was never given is refused (§10.3 provenance)', async () => {
     seedRanCase()
     const llm = stubLlm(packetJson({}, 'doc-that-does-not-exist'))
-    const r = await runReaderPass(getDb(), llm, { limit: 5, now: T0 + 20, profile: 'analysis_efficient' })
+    const r = await runReaderPass(getDb(), { general: { client: llm, provider: 'deepseek' } }, { limit: 5, now: T0 + 20 })
 
     expect(r.read).toBe(0)
     expect(r.refused).toBe(1)
@@ -148,7 +148,7 @@ describe('Reader pass on the live path', () => {
     seedRanCase()
     engageKillSwitch(getDb(), { reason: 'test', actor: 'test' }, T0 + 15)
     const llm = stubLlm(packetJson({ candidateDecision: 'CONTINUE_AUTONOMOUSLY', confidence: 0.99 }))
-    const r = await runReaderPass(getDb(), llm, { limit: 5, now: T0 + 20, profile: 'analysis_efficient' })
+    const r = await runReaderPass(getDb(), { general: { client: llm, provider: 'deepseek' } }, { limit: 5, now: T0 + 20 })
 
     expect(r.conflicts).toBe(1)
     const row = getDb().prepare(
@@ -167,7 +167,7 @@ describe('Reader pass on the live path', () => {
       if (n === 1) throw new Error('model exploded')
       return packetJson({}, 'c2')
     })
-    const r = await runReaderPass(getDb(), llm, { limit: 5, now: T0 + 20, profile: 'analysis_efficient' })
+    const r = await runReaderPass(getDb(), { general: { client: llm, provider: 'deepseek' } }, { limit: 5, now: T0 + 20 })
     // The thrown call is a refusal (readCase catches it), the other is read.
     expect(r.read + r.refused).toBe(2)
     expect(r.read).toBe(1)
@@ -178,7 +178,7 @@ describe('Reader pass on the live path', () => {
     // the actual prompt rather than on the builder's return value.
     seedRanCase()
     const llm = stubLlm(packetJson())
-    await runReaderPass(getDb(), llm, { limit: 5, now: T0 + 20, profile: 'analysis_efficient' })
+    await runReaderPass(getDb(), { general: { client: llm, provider: 'deepseek' } }, { limit: 5, now: T0 + 20 })
     expect(llm.seen[0]).toContain('TRUSTED_CASE_FIELD')
     expect(llm.seen[0]).toContain('case_id: c1')
   })
@@ -192,6 +192,8 @@ describe('Reader pass on the live path', () => {
     )
     expect(runner).toMatch(/reader-cycle\.js/)
     expect(runner).toMatch(/runReaderPass\(/)
+    // Two routes, not one client: the §10 routing lives in the caller.
+    expect(runner).toMatch(/resolveReaderInterpreters/)
     // The counter has to be printed too: a pass whose result nobody prints is
     // the same silence one level further along.
     expect(runner).toMatch(/'Reader:'/)

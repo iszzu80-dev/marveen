@@ -117,3 +117,52 @@ export function resolveInterpreter(
  *  side was bounded at the same time (context-builder's per-item ceiling).
  *  Raising this alone would have been treating the symptom. */
 export const READER_MAX_TOKENS = 16384
+
+/**
+ * Both readers the §10 routing needs: one cleared for sensitive content and one
+ * for everything else (Istvan's decision, 2026-08-11).
+ *
+ * `contracted` is null when no Anthropic key exists anywhere — and that is a
+ * REPORTABLE state, not a fallback: sensitive cases are then skipped rather
+ * than quietly sent to the general provider. `general` is whatever
+ * resolveInterpreter picks, which is the cheap path when both keys are present.
+ */
+export function resolveReaderInterpreters(
+  getSecret: SecretReader,
+  opts: { maxTokens?: number } = {},
+): { contracted: ResolvedInterpreter | null; general: ResolvedInterpreter | null } {
+  const anthropicKey = process.env.ANTHROPIC_API_KEY
+    || process.env.ANTHROPIC_AUTH_TOKEN
+    || (getSecret('ANTHROPIC_API_KEY') ?? '').trim()
+  const contracted: ResolvedInterpreter | null = anthropicKey
+    ? {
+        client: new AnthropicLlmClient({
+          apiKey: anthropicKey, model: DEFAULT_INTERPRETER_MODEL, maxTokens: opts.maxTokens,
+        }),
+        provider: 'anthropic',
+        model: DEFAULT_INTERPRETER_MODEL,
+        profile: INTERPRETER_PROFILE.anthropic,
+      }
+    : null
+
+  // The general reader is the CHEAP one when it exists — that is the whole
+  // point of routing by tier rather than sending everything to the contracted
+  // provider. Falls back to the contracted client when no DeepSeek key exists,
+  // because a cleared provider is always acceptable for a lower tier.
+  const deepseekKey = (getSecret('DEEPSEEK_API_KEY') ?? '').trim()
+  const general: ResolvedInterpreter | null = deepseekKey
+    ? {
+        client: new AnthropicLlmClient({
+          apiKey: deepseekKey,
+          baseURL: DEEPSEEK_ANTHROPIC_BASE_URL,
+          model: DEEPSEEK_INTERPRETER_MODEL,
+          maxTokens: opts.maxTokens,
+        }),
+        provider: 'deepseek',
+        model: DEEPSEEK_INTERPRETER_MODEL,
+        profile: INTERPRETER_PROFILE.deepseek,
+      }
+    : contracted
+
+  return { contracted, general }
+}

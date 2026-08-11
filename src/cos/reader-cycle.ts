@@ -26,10 +26,8 @@ import type { LlmClient } from './progression-interpreter.js'
 import { planFromEvidence } from './evidence-planner.js'
 import { arbitrate } from './reader-arbitration.js'
 import { killSwitchRefusal } from './kill-switch.js'
-import {
-  effectiveSensitivity, escalateSensitivity, isProfileAllowedForSensitivity,
-  allowedProfilesFor,
-} from './sensitivity.js'
+import { effectiveSensitivity, escalateSensitivity } from './sensitivity.js'
+import { isProviderAllowedForSensitivity, providersAllowedFor } from './provider-data-policy.js'
 import type { CaseSensitivity } from './schema.js'
 
 /**
@@ -60,10 +58,13 @@ export interface ReaderPassResult {
   read: number
   /** Cases where a reading was attempted and refused (stored, with the reason). */
   refused: number
-  /** §10: cases NOT sent to the model because the provider's profile is not
-   *  allowed for their sensitivity. Counted separately from `refused` because
-   *  "read: 2" and "read: 2, sensitivityBlocked: 1" must not look the same. */
+  /** §10: cases NOT sent because no configured provider may see their tier.
+   *  Counted separately from `refused` because "read: 2" and
+   *  "read: 2, sensitivityBlocked: 1" must not look the same. */
   sensitivityBlocked: number
+  /** How many cases went to each provider. The routing is the point, so the
+   *  split is the evidence — not a log line nobody reads. */
+  byProvider: Record<string, number>
   /** §13.1 conflicts: the Reader proposed something the ordering did not allow. */
   conflicts: number
   /** Per-case errors that were not a refusal — a DB failure, a thrown builder. */
@@ -155,20 +156,42 @@ function storePacket(
  * cost the whole sweep, and the counters say plainly which of the three outcomes
  * each case had.
  */
+export interface ReaderRoute {
+  client: LlmClient
+  provider: string
+  model?: string
+}
+
+/**
+ * Read up to `limit` cases, routing each to a provider its content may go to.
+ *
+ * Istvan's decision, 2026-08-11: sensitive content goes to a provider that is
+ * acceptable on data handling; everything else may go to the cheap one. So this
+ * takes TWO routes and picks per case — the gate is not a veto bolted on the
+ * front, it is the routing itself.
+ *
+ * `contracted` may be null (no cleared provider configured), and then sensitive
+ * cases are BLOCKED rather than downgraded to the general route. Falling back
+ * would defeat the whole rule at exactly the moment it matters.
+ */
 export async function runReaderPass(
   db: Database.Database,
-  llm: LlmClient,
-  opts: { limit?: number; now?: number; model?: string; profile?: string } = {},
+  routes: { general: ReaderRoute | null; contracted?: ReaderRoute | null },
+  opts: { limit?: number; now?: number } = {},
 ): Promise<ReaderPassResult> {
   const limit = opts.limit ?? 3
   const now = opts.now ?? Math.floor(Date.now() / 1000)
-  const model = opts.model ?? null
-  // No profile supplied = no gate can be evaluated = nothing may be sent. The
-  // caller must say WHAT is about to read the data; a missing answer is not a
-  // permission.
-  const profile = opts.profile ?? null
   const result: ReaderPassResult = {
-    read: 0, refused: 0, sensitivityBlocked: 0, conflicts: 0, failures: [], remaining: 0,
+    read: 0, refused: 0, sensitivityBlocked: 0, conflicts: 0, byProvider: {}, failures: [], remaining: 0,
+  }
+  const contracted = routes.contracted ?? null
+  const general = routes.general ?? null
+
+  /** The route this content may travel on, or null if none may take it. */
+  const routeFor = (tier: CaseSensitivity): ReaderRoute | null => {
+    if (general && isProviderAllowedForSensitivity(general.provider, tier)) return general
+    if (contracted && isProviderAllowedForSensitivity(contracted.provider, tier)) return contracted
+    return null
   }
 
   // The hard gate is read ONCE per sweep and passed to every arbitration. Read
@@ -195,7 +218,7 @@ export async function runReaderPass(
           packetJson: null, planJson: null, confidence: null,
           readerCandidate: null, policyResult: c.policyDecision, finalDecision: c.policyDecision,
           conflictReason: null, safeFallback: c.policyDecision, decidedBy: 'INVALID_PACKET',
-          refusalReason: `context integrity: ${violations.join('; ')}`, model,
+          refusalReason: `context integrity: ${violations.join('; ')}`, model: null,
         })
         continue
       }
@@ -204,9 +227,10 @@ export async function runReaderPass(
       // machine. Everything above this line is local; everything below is a
       // request to a third party.
       const tier = contextSensitivity(ctx.items)
-      if (!profile || !isProfileAllowedForSensitivity(profile, tier)) {
+      const route = routeFor(tier)
+      if (!route) {
         result.sensitivityBlocked++
-        const allowed = [...allowedProfilesFor(tier)].join(', ')
+        const allowed = providersAllowedFor(tier).join(', ')
         storePacket(db, {
           domain: c.domain, caseId: c.caseId, runId: c.runId, now,
           contextItems: ctx.items.length, contextExcluded: ctx.excluded.length,
@@ -214,15 +238,15 @@ export async function runReaderPass(
           packetJson: null, planJson: null, confidence: null,
           readerCandidate: null, policyResult: c.policyDecision, finalDecision: c.policyDecision,
           conflictReason: null, safeFallback: c.policyDecision, decidedBy: 'SENSITIVITY_BLOCKED',
-          refusalReason: profile
-            ? `§10: ${tier} content may not be processed by profile "${profile}" (allowed: ${allowed}) — not sent`
-            : `§10: no model profile declared for the reader — nothing sent`,
-          model,
+          refusalReason: general || contracted
+            ? `§10: ${tier} content needs a provider cleared for it (allowed: ${allowed}); none configured — not sent`
+            : `§10: no reader provider configured — nothing sent`,
+          model: null,
         })
         continue
       }
 
-      const r = await readCase(llm, ctx)
+      const r = await readCase(route.client, ctx)
 
       if (!r.ok) {
         result.refused++
@@ -237,11 +261,12 @@ export async function runReaderPass(
           packetJson: null, planJson: null, confidence: null,
           readerCandidate: null, policyResult: arb.policyResult, finalDecision: arb.finalDecision,
           conflictReason: arb.conflictReason, safeFallback: arb.safeFallbackDecision,
-          decidedBy: arb.decidedBy, refusalReason: r.reason, model,
+          decidedBy: arb.decidedBy, refusalReason: r.reason, model: route.model ?? null,
         })
         continue
       }
 
+      result.byProvider[route.provider] = (result.byProvider[route.provider] ?? 0) + 1
       const plan = planFromEvidence(r.packet)
       const arb = arbitrate({
         readerCandidate: r.packet.candidateDecision,
@@ -262,7 +287,7 @@ export async function runReaderPass(
         readerCandidate: arb.readerCandidate, policyResult: arb.policyResult,
         finalDecision: arb.finalDecision, conflictReason: arb.conflictReason,
         safeFallback: arb.safeFallbackDecision, decidedBy: arb.decidedBy,
-        refusalReason: null, model,
+        refusalReason: null, model: route.model ?? null,
       })
     } catch (e) {
       result.failures.push({ caseId: `${c.domain}/${c.caseId}`, error: String((e as Error)?.message ?? e) })

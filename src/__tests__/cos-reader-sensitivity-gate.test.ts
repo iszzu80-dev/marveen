@@ -1,26 +1,31 @@
-// §10 sensitivity gate on the READING path (review #4, N4-1).
+// §10 on the READING path: which PROVIDER may see which tier.
 //
-// The finding this exists for: wiring the Reader chain created an egress path
-// that did not exist while it was an island. Whole email bodies and extracted
-// document text now go to an EXTERNAL provider, and the sensitivity field —
-// which travels through the entire system and is printed into the prompt as a
-// label — decided nothing. §10 is enforced on the sending path and was absent
-// here.
+// Istvan's decision, 2026-08-11: sensitive content goes to a provider that is
+// acceptable on data handling (Anthropic); everything else may go to DeepSeek.
 //
-// These tests assert the gate at the only place that matters: the last step
-// before content leaves the machine.
+// The first version of this gate keyed on the MODEL PROFILE — HIGHLY_SENSITIVE
+// only on `premium_reasoning`, and so on. That table was written when the price
+// tier happened to coincide with the provider (premium = Opus = Anthropic,
+// cheap = DeepSeek). The coincidence broke the moment an Anthropic key arrived:
+// Haiku and Opus are the same provider under the same terms, so refusing Haiku
+// a sensitive case protected nothing and only made the same egress dearer.
+//
+// What these tests pin is the axis: WHERE the content lands, not how clever the
+// model is.
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import { createCase } from '../cos/case-store.js'
 import { runProgressionCycle } from '../cos/progression-pipeline.js'
 import { runReaderPass, contextSensitivity } from '../cos/reader-cycle.js'
 import { buildCaseContext, docSensitivity } from '../cos/context-builder.js'
-import { INTERPRETER_PROFILE } from '../cos/interpreter-provider.js'
+import {
+  isProviderAllowedForSensitivity, dataClassOf, PROVIDER_DATA_CLASS,
+} from '../cos/provider-data-policy.js'
 import type { LlmClient } from '../cos/progression-interpreter.js'
 
 const T0 = 1_700_000_000
 
-function llm(): LlmClient & { calls: number } {
+function stub(): LlmClient & { calls: number } {
   const o = {
     calls: 0,
     async complete() {
@@ -40,58 +45,90 @@ function seed(sensitivity: string, caseId = 'c1'): void {
   runProgressionCycle(getDb(), 'personal', caseId, T0 + 10, { triggerType: 'INTAKE' })
 }
 
-describe('§10 sensitivity gate before the Reader', () => {
+describe('§10 provider routing before the Reader', () => {
   beforeEach(() => { initDatabase(':memory:') })
 
-  it('HEADLINE: a SENSITIVE_PERSONAL case is NOT sent to a cheap-tier profile', async () => {
+  it('HEADLINE: a SENSITIVE_PERSONAL case goes to the CONTRACTED provider, not the cheap one', () => {
     seed('SENSITIVE_PERSONAL')
-    const model = llm()
-    const r = await runReaderPass(getDb(), model, {
-      limit: 5, now: T0 + 20, profile: 'analysis_efficient',
+    const cheap = stub()
+    const cleared = stub()
+    return runReaderPass(getDb(), {
+      general: { client: cheap, provider: 'deepseek' },
+      contracted: { client: cleared, provider: 'anthropic' },
+    }, { limit: 5, now: T0 + 20 }).then(r => {
+      expect(cheap.calls).toBe(0)      // the assertion that matters: it never left to DeepSeek
+      expect(cleared.calls).toBe(1)
+      expect(r.read).toBe(1)
+      expect(r.byProvider).toEqual({ anthropic: 1 })
     })
-    // The assertion that matters is not the counter — it is that no request was made.
-    expect(model.calls).toBe(0)
+  })
+
+  it('a PERSONAL case goes to the CHEAP provider — routing, not a blanket upgrade', async () => {
+    // The counter-case, and the cost argument: if everything went to the
+    // contracted provider the rule would be "spend more", not "route".
+    seed('PERSONAL')
+    const cheap = stub()
+    const cleared = stub()
+    const r = await runReaderPass(getDb(), {
+      general: { client: cheap, provider: 'deepseek' },
+      contracted: { client: cleared, provider: 'anthropic' },
+    }, { limit: 5, now: T0 + 20 })
+    expect(cheap.calls).toBe(1)
+    expect(cleared.calls).toBe(0)
+    expect(r.byProvider).toEqual({ deepseek: 1 })
+  })
+
+  it('with NO contracted provider, a sensitive case is blocked — never downgraded', async () => {
+    // Falling back to the cheap route here would defeat the whole rule at
+    // exactly the moment it matters.
+    seed('SENSITIVE_PERSONAL')
+    const cheap = stub()
+    const r = await runReaderPass(getDb(), { general: { client: cheap, provider: 'deepseek' } },
+      { limit: 5, now: T0 + 20 })
+    expect(cheap.calls).toBe(0)
     expect(r.sensitivityBlocked).toBe(1)
     expect(r.read).toBe(0)
   })
 
-  it('the block is a stored row naming the tier, the profile and what would be allowed', async () => {
-    seed('SENSITIVE_PERSONAL')
-    await runReaderPass(getDb(), llm(), { limit: 5, now: T0 + 20, profile: 'analysis_efficient' })
+  it('the block is a stored row naming the tier and what WOULD have been allowed', async () => {
+    seed('HIGHLY_SENSITIVE')
+    await runReaderPass(getDb(), { general: { client: stub(), provider: 'deepseek' } },
+      { limit: 5, now: T0 + 20 })
     const row = getDb().prepare(
       `SELECT decided_by, refusal_reason, packet_json FROM case_evidence_packets WHERE case_id='c1'`,
     ).get() as Record<string, string | null>
     expect(row.decided_by).toBe('SENSITIVITY_BLOCKED')
     expect(row.packet_json).toBeNull()
-    expect(row.refusal_reason).toContain('SENSITIVE_PERSONAL')
-    expect(row.refusal_reason).toContain('analysis_efficient')
-    expect(row.refusal_reason).toContain('premium_reasoning')
+    expect(row.refusal_reason).toContain('HIGHLY_SENSITIVE')
+    expect(row.refusal_reason).toContain('anthropic')
   })
 
-  it('a PERSONAL case IS read by the same profile — the gate is not a blanket stop', async () => {
-    // The counter-case. A gate that blocks everything is indistinguishable from
-    // a broken pipeline, and would have been "passing" all night.
-    seed('PERSONAL')
-    const model = llm()
-    const r = await runReaderPass(getDb(), model, { limit: 5, now: T0 + 20, profile: 'analysis_efficient' })
-    expect(model.calls).toBe(1)
-    expect(r.read).toBe(1)
-    expect(r.sensitivityBlocked).toBe(0)
-  })
-
-  it('NO declared profile means nothing is sent', async () => {
-    // A caller that cannot say what is about to read the data has not been
-    // granted permission by omission.
+  it('no provider at all means nothing is sent', async () => {
     seed('PUBLIC')
-    const model = llm()
-    const r = await runReaderPass(getDb(), model, { limit: 5, now: T0 + 20 })
-    expect(model.calls).toBe(0)
+    const r = await runReaderPass(getDb(), { general: null }, { limit: 5, now: T0 + 20 })
     expect(r.sensitivityBlocked).toBe(1)
+    expect(r.read).toBe(0)
   })
 
-  it('CONTENT escalates the tier even when the case is labelled PERSONAL', async () => {
-    // The declared label is a claim, not a measurement. A card number in a
-    // document lifts the whole context regardless of what the case row says.
+  it('the policy is fail-closed on both axes', () => {
+    // An unknown tier coerces to HIGHLY_SENSITIVE, an unknown provider to
+    // THIRD_PARTY — so an unconfigured question always answers no.
+    expect(dataClassOf('some-new-vendor')).toBe('THIRD_PARTY')
+    expect(isProviderAllowedForSensitivity('some-new-vendor', 'HIGHLY_SENSITIVE')).toBe(false)
+    expect(isProviderAllowedForSensitivity('deepseek', 'not-a-tier')).toBe(false)
+    expect(isProviderAllowedForSensitivity('anthropic', 'not-a-tier')).toBe(true)
+    // ...and the cheap provider is fine for the lower tiers.
+    expect(isProviderAllowedForSensitivity('deepseek', 'PERSONAL')).toBe(true)
+    expect(isProviderAllowedForSensitivity('deepseek', 'PUBLIC')).toBe(true)
+  })
+
+  it('the table says exactly what Istvan decided', () => {
+    // Pins the decision so a later edit is deliberate rather than incidental.
+    expect(PROVIDER_DATA_CLASS.anthropic).toBe('CONTRACTED')
+    expect(PROVIDER_DATA_CLASS.deepseek).toBe('THIRD_PARTY')
+  })
+
+  it('CONTENT escalates the tier even when the case is labelled PERSONAL', () => {
     const items = [
       { sensitivity: 'PERSONAL', content: 'semmi erdekes' },
       { sensitivity: 'PERSONAL', content: 'a kartya: 4111 1111 1111 1111' },
@@ -101,22 +138,16 @@ describe('§10 sensitivity gate before the Reader', () => {
   })
 
   it('an empty context is PUBLIC, not maximally sensitive', () => {
-    // Fail-closed on CONTENT, not on absence: an empty context carries no
-    // secret, and calling it HIGHLY_SENSITIVE would be a policy verdict about
-    // data nobody has.
     expect(contextSensitivity([])).toBe('PUBLIC')
   })
 
-  it('a document with no tier of its own inherits the CASE tier, not the fail-closed maximum', () => {
+  it('a document with no tier of its own inherits the CASE tier', () => {
     // Measured on the live store 2026-08-11: all 92 document rows carry the
     // literal 'UNKNOWN'. Coercing that fail-closed would have blocked 36 of 40
-    // cases on a data-quality gap rather than on their content — a gate that
-    // fires on everything teaches people to switch it off.
+    // cases on a data-quality gap rather than on their content.
     expect(docSensitivity('UNKNOWN', 'PERSONAL')).toBe('PERSONAL')
     expect(docSensitivity(null, 'PUBLIC')).toBe('PUBLIC')
-    // ...but a document that DOES declare a higher tier still escalates.
     expect(docSensitivity('HIGHLY_SENSITIVE', 'PERSONAL')).toBe('HIGHLY_SENSITIVE')
-    // ...and never de-escalates below the case.
     expect(docSensitivity('PUBLIC', 'SENSITIVE_PERSONAL')).toBe('SENSITIVE_PERSONAL')
   })
 
@@ -131,15 +162,6 @@ describe('§10 sensitivity gate before the Reader', () => {
          'email_thread','UNKNOWN',0,'sima szoveg',@t,@t,@t)`,
     ).run({ t: T0 })
     const ctx = buildCaseContext(getDb(), 'personal', 'c1', T0 + 1)
-    const doc = ctx.items.find(i => i.kind === 'EMAIL_THREAD')!
-    expect(doc.sensitivity).toBe('PERSONAL')
-  })
-
-  it('both interpreters are cheap-tier, so neither may read SENSITIVE_PERSONAL', () => {
-    // Pins the policy consequence of the provider choice. If someone later maps
-    // an interpreter to premium_reasoning, this test makes that a deliberate,
-    // visible edit rather than a side effect.
-    expect(INTERPRETER_PROFILE.deepseek).not.toBe('premium_reasoning')
-    expect(INTERPRETER_PROFILE.anthropic).not.toBe('premium_reasoning')
+    expect(ctx.items.find(i => i.kind === 'EMAIL_THREAD')!.sensitivity).toBe('PERSONAL')
   })
 })
