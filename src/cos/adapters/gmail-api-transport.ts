@@ -190,7 +190,7 @@ export class GmailApiTransport implements MailTransport {
     return j.access_token
   }
 
-  async send(email: OutboundEmail): Promise<{ messageId: string }> {
+  async send(email: OutboundEmail): Promise<{ messageId: string; threadId?: string }> {
     const marker = email.headers[IDEMPOTENCY_HEADER]
     if (!marker) throw new Error('outbound email missing idempotency marker header')
     const token = await this.accessToken(Date.now())
@@ -202,8 +202,12 @@ export class GmailApiTransport implements MailTransport {
       signal: AbortSignal.timeout(this.sendTimeoutMs),
     })
     if (!r.ok) throw new Error(`gmail send failed: ${r.status} ${await r.text()}`)
-    const j = await r.json() as { id: string }
-    return { messageId: j.id }
+    // Gmail's send response carries `threadId` alongside `id`, and always has.
+    // The declared type used to name only `id`, so the thread — the one field
+    // that lets the reply be matched back to this case — was parsed away at the
+    // boundary and never existed anywhere downstream.
+    const j = await r.json() as { id: string; threadId?: string }
+    return { messageId: j.id, ...(j.threadId ? { threadId: j.threadId } : {}) }
   }
 
   /** F-12: does this provider message id still exist? The evidence of last

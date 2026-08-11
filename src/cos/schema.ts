@@ -58,6 +58,9 @@ const LEDGER_SHARED_COLUMNS: Record<string, string> = {
   provider_message_id: 'TEXT',
   rfc_message_id: 'TEXT',
   rendered_variables_hash: 'TEXT',
+  /** §8 / IN-2: the provider thread this action landed in. Without it a case
+   *  cannot recognise the reply to its own letter — see gmail-send.send. */
+  thread_ref: 'TEXT',
 }
 
 /**
@@ -530,6 +533,9 @@ export function initCosSchema(db: Database.Database): void {
       content_hash     TEXT,
       self_event_count INTEGER NOT NULL DEFAULT 0,
       last_self_event_at INTEGER,
+      -- IN-2 / §8: 1 = the thread id was DERIVED (no producer value, so the
+      -- message was filed as its own thread), 0 = observed from the source.
+      thread_id_derived INTEGER NOT NULL DEFAULT 0,
       created_at       INTEGER NOT NULL,
       updated_at       INTEGER NOT NULL,
       UNIQUE(gmail_account_id, thread_id, message_id),
@@ -559,6 +565,14 @@ export function initCosSchema(db: Database.Database): void {
     `)
     db.exec(`DROP TABLE email_processing_pre_a3`)
   }
+  // IN-2 / §8, and it belongs HERE, after the rebuild, for the reason the block
+  // above states about itself: a column added before the A.3 rename lands on the
+  // table that gets renamed away, so on a fresh database it silently does not
+  // exist. (That is not a hypothetical — it is how this very column was written
+  // the first time, and eight tests caught it.) A database that already has the
+  // wide key never enters the rebuild, so it needs the ALTER; a fresh one gets
+  // the column from EPROC_A3_DDL and this is a no-op.
+  ensureColumns(db, 'email_processing', { thread_id_derived: 'INTEGER NOT NULL DEFAULT 0' })
   // F-8: an existing database that did NOT go through the A.3 rebuild still has
   // the narrow CHECK. Widen it here, where the surviving definition is known.
   widenCheckConstraint(db, 'email_processing', 'SOURCE_COMMIT_SKIPPED', EPROC_A3_DDL)

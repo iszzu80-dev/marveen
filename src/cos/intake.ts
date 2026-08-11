@@ -62,11 +62,26 @@ export interface IntakeResult {
 }
 
 function findActiveCaseByThread(db: Database.Database, threadId: string): { case_id: string } | undefined {
-  return db.prepare(
+  const byCase = db.prepare(
     `SELECT case_id FROM personal_cases
      WHERE gmail_thread_ids LIKE ? AND archived_at IS NULL
        AND status NOT IN ('COMPLETED','CANCELLED','ARCHIVED') LIMIT 1`
   ).get(`%"${threadId}"%`) as { case_id: string } | undefined
+  if (byCase) return byCase
+
+  // Second source, and it is not redundant: gmail_thread_ids is written ONLY at
+  // case creation, from the intake message's thread. A case that we WROTE to —
+  // where the thread exists because our own letter created it — has nothing in
+  // that column, so the answer to our own letter would not find its case and
+  // would open a new one. The ledger knows which thread each sent action landed
+  // in; asking it closes exactly that gap.
+  return db.prepare(
+    `SELECT l.case_id FROM outbound_ledger l
+     JOIN personal_cases c ON c.case_id = l.case_id
+     WHERE l.thread_ref = ? AND c.archived_at IS NULL
+       AND c.status NOT IN ('COMPLETED','CANCELLED','ARCHIVED')
+     ORDER BY l.created_at DESC LIMIT 1`
+  ).get(threadId) as { case_id: string } | undefined
 }
 
 export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now: number): IntakeResult {

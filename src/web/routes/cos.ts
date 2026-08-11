@@ -117,6 +117,13 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     if (!input?.accountId || !input?.messageId || !input?.subject) {
       json(res, { error: 'accountId, messageId, subject required' }, 400); return true
     }
+    // IN-2 / §8. A missing threadId is NOT a 400: refusing the post would drop a
+    // real letter to protect a linking invariant, which is the worse trade (see
+    // openBatch/resolveThreadId — the message degrades to its own thread and the
+    // row records that the value was derived). What the boundary does owe the
+    // caller is a straight answer that it degraded, so a feeder dropping the
+    // field is visible in its own logs rather than only in the store.
+    const threadIdDerived = !input.threadId
     // Scope Gate (§2). The mailbox used to decide the store on its own, which
     // is deterministic and cheap and put two ZST share-transfer cases into the
     // personal store on 2026-08-09 because Istvan wrote them from his private
@@ -165,7 +172,13 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
         })
       } catch { /* a missing column must not lose the case that was just filed */ }
     }
-    json(res, { ...routed, scope: scope.verdict, scopeReasons: scope.reasons, scopeNeedsReview: scope.needsReview })
+    json(res, {
+      ...routed, scope: scope.verdict, scopeReasons: scope.reasons, scopeNeedsReview: scope.needsReview,
+      ...(threadIdDerived ? {
+        threadIdDerived: true,
+        threadIdNote: 'no threadId supplied — the message was filed as its own thread (§8). Pass candidate.threadId: a derived thread cannot link a later reply to this case.',
+      } : {}),
+    })
     return true
   }
 
