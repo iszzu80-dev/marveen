@@ -48,7 +48,10 @@ export interface Provenance {
 }
 
 export interface ContextItem {
-  kind: 'CASE' | 'CASE_EVENT' | 'EMAIL_THREAD' | 'DOCUMENT'
+  /** CASE = the fields this system writes. CASE_INTAKE = title/description,
+   *  which for an email-born case are the SENDER's words and are therefore
+   *  carried separately and untrusted (§10.3, review #3 Ú-1). */
+  kind: 'CASE' | 'CASE_INTAKE' | 'CASE_EVENT' | 'EMAIL_THREAD' | 'DOCUMENT'
   provenance: Provenance
   trust: TrustClass
   sensitivity: string
@@ -118,21 +121,52 @@ export function buildCaseContext(
 
   const sensitivity = String(c.sensitivity ?? 'UNKNOWN')
 
-  // 1. The case itself. Our own record, so TRUSTED.
+  // 1. The case's OWN fields — the ones this system and Istvan write. TRUSTED.
+  //
+  // `title` and `description` are deliberately NOT here. For a case born from an
+  // incoming email they are the SENDER's text: intake.ts writes
+  // `title: input.title ?? input.subject` and `description: From: ${input.from}`.
+  // Leaving them in this item put attacker-authored text inside the block whose
+  // trust label tells the model that instructions here are legitimate — unfenced.
+  // Found by review #3 (Ú-1, 2026-08-10) and reproduced with this module's own
+  // buildReaderPrompt before the fix.
+  //
+  // The module already made exactly this argument one item further down, about
+  // an event's `reason` text. It was true here too, and it was not applied.
   items.push({
     kind: 'CASE',
     provenance: { source: 'case-store', reference: caseId, retrievedAt: now },
     trust: 'TRUSTED_CASE_FIELD',
     sensitivity,
     content: [
-      `title: ${String(c.title ?? '')}`,
       `status: ${String(c.status ?? '')}`,
       `type: ${String(c.case_type ?? '')}`,
-      c.description ? `description: ${String(c.description)}` : '',
       c.next_action ? `next_action: ${String(c.next_action)}` : '',
       c.waiting_on ? `waiting_on: ${String(c.waiting_on)}` : '',
       c.blocked_reason ? `blocked_reason: ${String(c.blocked_reason)}` : '',
     ].filter(Boolean).join('\n'),
+  })
+
+  // 1b. The intake-authored fields, as their own UNTRUSTED item, so the Reader
+  // sees them fenced and labelled as data.
+  //
+  // A manually created case has a title Istvan wrote, and marking that untrusted
+  // costs a little caution. An email-born case has a title a stranger wrote, and
+  // NOT marking it costs the boundary. The builder cannot tell the two apart
+  // from the row — the origin is not stored on the field — so it takes the cost
+  // it can afford.
+  const intake = [
+    `title: ${String(c.title ?? '')}`,
+    c.description ? `description: ${String(c.description)}` : '',
+  ].filter(Boolean).join('\n')
+  items.push({
+    kind: 'CASE_INTAKE',
+    // A ref of its own: a fact about the subject line must be citable, and must
+    // not be attributable to the case's own trusted fields.
+    provenance: { source: 'case-store', reference: `${caseId}#intake`, retrievedAt: now },
+    trust: 'UNTRUSTED_SOURCE_DATA',
+    sensitivity,
+    content: intake,
   })
 
   // 2. The case history. Also ours — but the `reason` text on an event can
