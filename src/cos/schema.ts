@@ -1840,5 +1840,35 @@ export function initProgressionSchema(db: Database.Database): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_outbox_pending
              ON cos_channel_outbox(channel, sent_at, created_at)`)
+
+  // ── cos_channel_held ─────────────────────────────────────────────────────
+  //
+  // Owner messages that arrived on a channel and could NOT be attributed to a
+  // case. Written 2026-08-11, an hour after the rule that produces them.
+  //
+  // The rule (matchAnswerTarget) refuses to guess when several questions are
+  // open — correct, because a wrong attribution puts the owner's words on a case
+  // he never mentioned. But the first live firing showed the hole in it: the
+  // poll counted `ambiguous: 1`, advanced the Telegram offset, and the SENTENCE
+  // WAS GONE. Telegram does not re-serve an update once a higher offset is
+  // requested. "Held, not lost" was only true of the counter, not of the words.
+  //
+  // So the text is stored here before the cursor moves. `resolved_at` is set
+  // when it has been dealt with -- attached to a case, or answered directly.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cos_channel_held (
+      held_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+      channel      TEXT NOT NULL,
+      chat_id      TEXT,
+      message_id   INTEGER,
+      text         TEXT NOT NULL,
+      reason       TEXT NOT NULL,
+      received_at  INTEGER NOT NULL,
+      resolved_at  INTEGER,
+      resolution   TEXT,
+      UNIQUE (channel, message_id)
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_held_open ON cos_channel_held(resolved_at, received_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cep_conflict ON case_evidence_packets(conflict_reason, created_at)`)
 }

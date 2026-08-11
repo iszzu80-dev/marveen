@@ -162,6 +162,9 @@ export interface CosUpdate {
   updateId: number
   chatId: string
   fromId: string
+  /** The owner's own message id. Needed to store a message that could not be
+   *  attributed: without it the held row cannot be deduplicated across polls. */
+  messageId?: number
   text: string
   /** Set when the owner used Telegram's reply-to on one of our questions. */
   replyToMessageId?: number
@@ -184,6 +187,7 @@ export async function pollCosUpdates(
       updateId: u.update_id,
       chatId: String(m.chat.id),
       fromId: String(m.from.id),
+      messageId: typeof m.message_id === 'number' ? m.message_id : undefined,
       text: String(m.text),
       replyToMessageId: m.reply_to_message?.message_id,
     })

@@ -1,7 +1,10 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import { createCase } from '../cos/case-store.js'
-import { askPendingOwnerQuestions, recordOwnerAnswer, outstandingOwnerQuestions, matchAnswerTarget } from '../cos/owner-question.js'
+import {
+  askPendingOwnerQuestions, recordOwnerAnswer, outstandingOwnerQuestions, matchAnswerTarget,
+  holdOwnerMessage, heldOwnerMessages,
+} from '../cos/owner-question.js'
 
 // Istvan's decision (2026-08-11): the CoS gets its own Telegram bot and chat, so
 // case traffic stops competing with build and fleet noise. The part that makes
@@ -155,5 +158,43 @@ describe('matchAnswerTarget', () => {
     ).run()
     expect(matchAnswerTarget(getDb(), { channel: 'telegram:cos', chatId: '1' }))
       .toEqual({ caseId: 'cos-case', domain: 'zst' })
+  })
+})
+
+// HELD MEANS THE WORDS ARE KEPT, not just a counter.
+//
+// The ambiguity rule went in at 21:52 and fired live at 22:00: the poll counted
+// `ambiguous: 1`, advanced the Telegram cursor, and the sentence was gone —
+// Telegram does not re-serve an update once a higher offset is requested. I had
+// told Istvan "the message is not lost, it is on the channel and in the
+// counter". Only the counter was true.
+describe('an unattributable message is HELD, not dropped', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('the text survives, with the reason it could not be placed', () => {
+    holdOwnerMessage(getDb(), {
+      channel: 'telegram:cos', chatId: '1', messageId: 42,
+      text: 'Nem a NAV ugyre irtam hanem a wizzair szamlara',
+      reason: 'tobb nyitott kerdes', now: 1000,
+    })
+    const held = heldOwnerMessages(getDb())
+    expect(held).toHaveLength(1)
+    expect(held[0].text).toContain('wizzair')
+    expect(held[0].reason).toContain('tobb nyitott')
+  })
+
+  it('the same message is not held twice', () => {
+    // Polls overlap and a crash costs a re-read by design; a re-read must not
+    // turn one sentence into a queue of duplicates.
+    for (const now of [1000, 1100]) {
+      holdOwnerMessage(getDb(), { channel: 'telegram:cos', chatId: '1', messageId: 42, text: 'egy', reason: 'r', now })
+    }
+    expect(heldOwnerMessages(getDb())).toHaveLength(1)
+  })
+
+  it('a resolved message leaves the list', () => {
+    holdOwnerMessage(getDb(), { channel: 'telegram:cos', chatId: '1', messageId: 42, text: 'egy', reason: 'r', now: 1000 })
+    getDb().prepare(`UPDATE cos_channel_held SET resolved_at = 1200, resolution = 'a Wizz ugyre tettem' WHERE held_id = 1`).run()
+    expect(heldOwnerMessages(getDb())).toHaveLength(0)
   })
 })

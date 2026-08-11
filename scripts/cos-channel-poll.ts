@@ -20,7 +20,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { initDatabase, getDb } from '../src/db.js'
 import { loadCosBotConfig, pollCosUpdates, looksLikeAQuestionBack } from '../src/cos/cos-telegram.js'
-import { recordOwnerAnswer, matchAnswerTarget } from '../src/cos/owner-question.js'
+import { recordOwnerAnswer, matchAnswerTarget, holdOwnerMessage } from '../src/cos/owner-question.js'
 
 const OFFSET_PATH = 'store/.cos-telegram-offset'
 const OWNER_ID = '8942301795'
@@ -64,7 +64,15 @@ async function main(): Promise<void> {
     const target = matchAnswerTarget(db, {
       channel: cfg.channelId!, chatId: u.chatId, replyToMessageId: u.replyToMessageId,
     })
-    if (target === 'AMBIGUOUS') { result.ambiguous++; continue }
+    if (target === 'AMBIGUOUS') {
+      // HOLD THE WORDS, not just the count. The cursor moves below and Telegram
+      // will not serve this update again.
+      holdOwnerMessage(db, {
+        channel: cfg.channelId!, chatId: u.chatId, messageId: u.messageId, text: u.text,
+        reason: 'tobb nyitott kerdes, es az uzenet egyiket sem nevezte meg',
+      })
+      result.ambiguous++; continue
+    }
     if (!target) { result.unmatched++; continue }
     const row = { case_id: target.caseId, domain: target.domain }
 

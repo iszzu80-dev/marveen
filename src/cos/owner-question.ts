@@ -622,6 +622,38 @@ export function matchAnswerTarget(
   return 'AMBIGUOUS'
 }
 
+
+/** Keep an owner message that could not be attributed to a case.
+ *
+ *  Because "held" has to mean the WORDS are kept, not just a counter. The first
+ *  live firing of the ambiguity rule counted the message and let the Telegram
+ *  cursor move past it, and Telegram does not re-serve an update once a higher
+ *  offset is requested — so the sentence was gone. Idempotent per message. */
+export function holdOwnerMessage(
+  db: Database.Database,
+  input: { channel: string; chatId?: string; messageId?: number; text: string; reason: string; now?: number },
+): void {
+  const now = input.now ?? Math.floor(Date.now() / 1000)
+  db.prepare(
+    `INSERT INTO cos_channel_held (channel, chat_id, message_id, text, reason, received_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT (channel, message_id) DO NOTHING`,
+  ).run(input.channel, input.chatId ?? null, input.messageId ?? null, input.text, input.reason, now)
+}
+
+/** Owner messages still waiting to be placed. */
+export function heldOwnerMessages(
+  db: Database.Database, limit = 20,
+): Array<{ heldId: number; channel: string; text: string; reason: string; receivedAt: number }> {
+  try {
+    return db.prepare(
+      `SELECT held_id AS heldId, channel, text, reason, received_at AS receivedAt
+         FROM cos_channel_held WHERE resolved_at IS NULL
+         ORDER BY received_at ASC LIMIT ?`,
+    ).all(limit) as never
+  } catch { return [] }
+}
+
 /** The questions still waiting on him — so "what did it ask me?" is a query. */
 export function outstandingOwnerQuestions(
   db: Database.Database, limit = 20,
