@@ -35,6 +35,10 @@ const STEPS: Step[] = [
   // A kerdes megirasa es a KIKULDESE ket kulon lepes: ha egybe lennenek, egy
   // kezbesitesi hiba ugy nezne ki, mint "nincs mit kerdezni".
   { name: 'channel', args: ['scripts/cos-channel-send.ts'] },
+  // A bejovo oldal: Istvan valasza a CoS-csatornarol visszaer az ugyhez.
+  // Enelkul a szetvalasztas rosszabb lenne az egycsatornas vilagnal --
+  // egy chatbe valaszolna, amit senki nem olvas.
+  { name: 'inbox', args: ['scripts/cos-channel-poll.ts'] },
 ]
 
 const problems: string[] = []
