@@ -145,8 +145,8 @@ export async function closeBatch(
         //    told about is indistinguishable from a bug, so this branch raises
         //    them too when the deps are present.
         sourceCommitSkipped(db, r.gmail_account_id, r.message_id, `source-commit kihagyva: ${res.reason}`, now)
-        opts.quarantine?.raiseAlert(r.gmail_account_id, r.message_id, `source-commit skipped: ${res.reason}`)
-        opts.quarantine?.createReviewTask(r.gmail_account_id, r.message_id, `source-commit skipped: ${res.reason}`)
+        opts.quarantine?.raiseAlert(r.gmail_account_id, r.message_id, res.reason, 'SOURCE_COMMIT_SKIPPED')
+        opts.quarantine?.createReviewTask(r.gmail_account_id, r.message_id, res.reason, 'SOURCE_COMMIT_SKIPPED')
         committed += 1
       }
     } else {

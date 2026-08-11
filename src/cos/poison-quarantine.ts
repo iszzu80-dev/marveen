@@ -37,11 +37,19 @@ export interface QuarantineResult {
   reason: string
 }
 
+/** WHY the cursor is being let past this message. The two are not the same
+ *  event and must not carry the same words: a poison message could NOT be
+ *  processed, while a source-commit skip WAS processed fully and only failed to
+ *  be marked at the source. Reusing the quarantine wording for the second one
+ *  told Istvan on 2026-08-11 that a perfectly handled GLS notice was an
+ *  "unprocessable message, check it by hand". */
+export type CursorPassKind = 'POISON_QUARANTINE' | 'SOURCE_COMMIT_SKIPPED'
+
 export interface QuarantineDeps {
   /** Raise the critical alert (condition 2). Returns false when it could not. */
-  raiseAlert: (accountId: string, messageId: string, reason: string) => boolean
+  raiseAlert: (accountId: string, messageId: string, reason: string, kind: CursorPassKind) => boolean
   /** Create the human review task (condition 3). Returns false when it could not. */
-  createReviewTask: (accountId: string, messageId: string, reason: string) => boolean
+  createReviewTask: (accountId: string, messageId: string, reason: string, kind: CursorPassKind) => boolean
   /** Whether policy permits the cursor to pass a quarantined item (condition 5). */
   policyAllowsCursorAdvance: () => boolean
 }
@@ -91,8 +99,8 @@ export function quarantinePoison(
   if (!row) {
     return { quarantined: false, missing: ['sourceReferenceKept'], reason: `nincs ilyen üzenet: ${messageId}` }
   }
-  conditions.alertRaised = deps.raiseAlert(accountId, messageId, reason)
-  conditions.reviewTaskCreated = deps.createReviewTask(accountId, messageId, reason)
+  conditions.alertRaised = deps.raiseAlert(accountId, messageId, reason, 'POISON_QUARANTINE')
+  conditions.reviewTaskCreated = deps.createReviewTask(accountId, messageId, reason, 'POISON_QUARANTINE')
 
   const missing = (Object.keys(conditions) as Array<keyof QuarantineConditions>)
     .filter((k) => !conditions[k])
