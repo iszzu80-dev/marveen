@@ -8,6 +8,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import { issueAuthorization } from '../cos/action-authorization.js'
+import { mintGatePermit } from '../cos/gate-permit.js'
 import { createCase, acquireClaim } from '../cos/case-store.js'
 import { planAction, executeAction, SendError } from '../cos/executor.js'
 import { GmailSendAdapter, DryRunTransport } from '../cos/adapters/gmail-send.js'
@@ -20,7 +21,7 @@ function authorized(db: Parameters<typeof issueAuthorization>[0], ledgerId: stri
     actionId: ledgerId, actionType: 'EMAIL_SEND', intent: 'TEST', targetReference: null,
     recipient: null, payloadHash: null, approvalId: null,
   }
-  return { authorizationId: issueAuthorization(db, ctx, now).authorizationId, authorizationContext: ctx }
+  return { authorizationId: issueAuthorization(db, ctx, now, {}, mintGatePermit({ allowed: true, reasons: [] })).authorizationId, authorizationContext: ctx }
 }
 
 

@@ -22,6 +22,7 @@ import { makeExecutor, type OutboundAdapter, type OutboundAction, type ExecuteOp
 import { zstApprovals } from './approval-core.js'
 import { permits } from './autonomy-ladder.js'
 import { issueAuthorization, type AuthorizationContext } from './action-authorization.js'
+import { mintGatePermit } from './gate-permit.js'
 
 const zstExecutor = makeExecutor('zst_outbound_ledger', 'zst_case_claims')
 
@@ -214,10 +215,13 @@ export function evaluateZstSendGate(db: Database.Database, req: DispatchZstSendI
   })
   if (!auth.authorized) reasons.push(`not authorized: ${auth.reason}`)
 
-  return {
+  // §22.2 (review #3 U-4): same stamp as the personal gate. The two gates are
+  // separate modules on purpose (different tables, different limits), so both
+  // must mint -- and the standing check test enumerates exactly these two.
+  return mintGatePermit({
     allowed: reasons.length === 0, reasons, sensitivityTier: tier,
     campaignVersion: auth.campaignVersion, approvalVersion: auth.approvalVersion,
-  }
+  })
 }
 
 export interface DispatchZstSendResult { sent: boolean; decision: ZstDispatchDecision; action?: OutboundAction }
@@ -248,7 +252,7 @@ export async function dispatchZstSend(
     payloadHash: input.renderedPayloadHash,
     approvalId: null,
   }
-  const ticket = issueAuthorization(db, authContext, now)
+  const ticket = issueAuthorization(db, authContext, now, {}, decision)
   const action = await zstExecutor.executeAction(db, adapter, input.ledgerId, now, {
     ...opts,
     authorizationId: ticket.authorizationId,

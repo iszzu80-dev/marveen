@@ -19,6 +19,7 @@ import { effectiveSensitivity, isProfileAllowedForSensitivity } from './sensitiv
 import { authorizeSend } from './campaigns.js'
 import { permits } from './autonomy-ladder.js'
 import { routeModelForSensitivity, type RoutingStrategy } from './model-routing.js'
+import { mintGatePermit } from './gate-permit.js'
 import type { CaseSensitivity } from './schema.js'
 
 export interface DispatchRequest {
@@ -102,9 +103,12 @@ export function evaluateDispatch(db: Database.Database, req: DispatchRequest): D
   if (!auth.authorized) reasons.push(`campaign not authorized: ${auth.reason}`)
 
   const routed = routeModelForSensitivity(tier, { strategy: req.routingStrategy ?? 'capability' })
-  return {
+  // §22.2 (review #3 Ú-4): stamp the decision as gate-produced. issueAuthorization
+  // refuses anything not minted here, so a caller can no longer write a ticket by
+  // importing the module and calling the function.
+  return mintGatePermit({
     allowed: reasons.length === 0, reasons, sensitivityTier: tier, recommendedProfile: routed.profile,
     campaignVersion: auth.campaignVersion, approvalVersion: auth.approvalVersion,
     limits: auth.limits, approvalId: auth.approvalId,
-  }
+  })
 }

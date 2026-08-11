@@ -17,6 +17,7 @@ import {
   issueAuthorization, consumeAuthorization, revokeAuthorizationsForAction,
   type AuthorizationContext,
 } from '../cos/action-authorization.js'
+import { mintGatePermit } from '../cos/gate-permit.js'
 
 const T0 = 1_700_000_000
 const EMAIL = { to: 'v@x.com', subject: 'S', body: 'B' }
@@ -63,7 +64,7 @@ describe('§22.2 authorization ticket — adversarial', () => {
   it('consumed ticket reuse → BLOCK', () => {
     const db = getDb()
     const c = ctx()
-    const { authorizationId } = issueAuthorization(db, c, T0)
+    const { authorizationId } = issueAuthorization(db, c, T0, {}, mintGatePermit({ allowed: true, reasons: [] }))
     expect(consumeAuthorization(db, authorizationId, c, T0 + 1).ok).toBe(true)
     const again = consumeAuthorization(db, authorizationId, c, T0 + 2)
     expect(again.ok).toBe(false)
@@ -72,7 +73,7 @@ describe('§22.2 authorization ticket — adversarial', () => {
 
   it('recipient changed after authorization → BLOCK', () => {
     const db = getDb()
-    const { authorizationId } = issueAuthorization(db, ctx(), T0)
+    const { authorizationId } = issueAuthorization(db, ctx(), T0, {}, mintGatePermit({ allowed: true, reasons: [] }))
     const r = consumeAuthorization(db, authorizationId, ctx({ recipient: 'attacker@evil.com' }), T0 + 1)
     expect(r.ok).toBe(false)
     expect(r.ok === false && r.reason).toContain('changed after authorization')
@@ -80,19 +81,19 @@ describe('§22.2 authorization ticket — adversarial', () => {
 
   it('payload changed after authorization → BLOCK', () => {
     const db = getDb()
-    const { authorizationId } = issueAuthorization(db, ctx(), T0)
+    const { authorizationId } = issueAuthorization(db, ctx(), T0, {}, mintGatePermit({ allowed: true, reasons: [] }))
     expect(consumeAuthorization(db, authorizationId, ctx({ payloadHash: 'hash-2' }), T0 + 1).ok).toBe(false)
   })
 
   it('action type changed → BLOCK', () => {
     const db = getDb()
-    const { authorizationId } = issueAuthorization(db, ctx(), T0)
+    const { authorizationId } = issueAuthorization(db, ctx(), T0, {}, mintGatePermit({ allowed: true, reasons: [] }))
     expect(consumeAuthorization(db, authorizationId, ctx({ actionType: 'PAYMENT' }), T0 + 1).ok).toBe(false)
   })
 
   it('ticket aimed at a DIFFERENT action → BLOCK', () => {
     const db = getDb()
-    const { authorizationId } = issueAuthorization(db, ctx({ actionId: 'ob-1' }), T0)
+    const { authorizationId } = issueAuthorization(db, ctx({ actionId: 'ob-1' }), T0, {}, mintGatePermit({ allowed: true, reasons: [] }))
     const r = consumeAuthorization(db, authorizationId, ctx({ actionId: 'ob-2' }), T0 + 1)
     expect(r.ok).toBe(false)
     expect(r.ok === false && r.reason).toContain('issued for action')
@@ -100,7 +101,7 @@ describe('§22.2 authorization ticket — adversarial', () => {
 
   it('expired ticket → BLOCK', () => {
     const db = getDb()
-    const { authorizationId, expiresAt } = issueAuthorization(db, ctx(), T0)
+    const { authorizationId, expiresAt } = issueAuthorization(db, ctx(), T0, {}, mintGatePermit({ allowed: true, reasons: [] }))
     const r = consumeAuthorization(db, authorizationId, ctx(), expiresAt + 1)
     expect(r.ok).toBe(false)
     expect(r.ok === false && r.reason).toContain('expired')
@@ -108,7 +109,7 @@ describe('§22.2 authorization ticket — adversarial', () => {
 
   it('case version changed → BLOCK', () => {
     const db = getDb()
-    const { authorizationId } = issueAuthorization(db, ctx({ caseVersion: 1 }), T0)
+    const { authorizationId } = issueAuthorization(db, ctx({ caseVersion: 1 }), T0, {}, mintGatePermit({ allowed: true, reasons: [] }))
     expect(consumeAuthorization(db, authorizationId, ctx({ caseVersion: 2 }), T0 + 1).ok).toBe(false)
   })
 
@@ -130,7 +131,7 @@ describe('§22.2 authorization ticket — adversarial', () => {
     }, T0)
 
     const c = ctx({ actionId: d.ledgerId, approvalId: 'appr-live', payloadHash: d.renderedPayloadHash, targetReference: d.campaignId })
-    const { authorizationId } = issueAuthorization(db, c, T0)
+    const { authorizationId } = issueAuthorization(db, c, T0, {}, mintGatePermit({ allowed: true, reasons: [] }))
 
     // revoked through the real mechanism, id unchanged
     db.prepare("UPDATE campaign_approvals SET status='REVOKED' WHERE approval_id='appr-live'").run()
@@ -151,7 +152,7 @@ describe('§22.2 authorization ticket — adversarial', () => {
       approvalId: 'appr-stop',
     }, T0)
     const c = ctx({ actionId: d.ledgerId, approvalId: 'appr-stop', payloadHash: d.renderedPayloadHash, targetReference: d.campaignId })
-    const { authorizationId } = issueAuthorization(db, c, T0)
+    const { authorizationId } = issueAuthorization(db, c, T0, {}, mintGatePermit({ allowed: true, reasons: [] }))
     db.prepare("UPDATE campaign_approvals SET stopped_reason='előleget kértek' WHERE approval_id='appr-stop'").run()
     const r = consumeAuthorization(db, authorizationId, c, T0 + 1)
     expect(r.ok).toBe(false)
@@ -170,14 +171,14 @@ describe('§22.2 authorization ticket — adversarial', () => {
       approvalId: 'appr-ok',
     }, T0)
     const c = ctx({ actionId: d.ledgerId, approvalId: 'appr-ok', payloadHash: d.renderedPayloadHash, targetReference: d.campaignId })
-    const { authorizationId } = issueAuthorization(db, c, T0)
+    const { authorizationId } = issueAuthorization(db, c, T0, {}, mintGatePermit({ allowed: true, reasons: [] }))
     expect(consumeAuthorization(db, authorizationId, c, T0 + 1).ok).toBe(true)
   })
 
   it('authority revoked after issuance → BLOCK, without waiting for expiry', () => {
     const db = getDb()
     const c = ctx()
-    const { authorizationId } = issueAuthorization(db, c, T0)
+    const { authorizationId } = issueAuthorization(db, c, T0, {}, mintGatePermit({ allowed: true, reasons: [] }))
     expect(revokeAuthorizationsForAction(db, c.actionId, T0 + 1)).toBe(1)
     expect(consumeAuthorization(db, authorizationId, c, T0 + 2).ok).toBe(false)
   })
