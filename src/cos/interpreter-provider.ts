@@ -12,6 +12,7 @@
 // interpreter's prompt-injection guard to be forgotten.
 
 import { AnthropicLlmClient, DEFAULT_INTERPRETER_MODEL, type LlmClient } from './progression-interpreter.js'
+import type { ModelProfileId } from '../model-profiles.js'
 
 /** DeepSeek's Anthropic-compatible endpoint. The SDK appends /v1/messages. */
 export const DEEPSEEK_ANTHROPIC_BASE_URL = 'https://api.deepseek.com/anthropic'
@@ -26,6 +27,28 @@ export interface ResolvedInterpreter {
   /** For the log line, so a reader can see WHICH model wrote the goals. */
   provider: 'anthropic' | 'deepseek'
   model: string
+  /** Which §10 model profile this interpreter counts as, for the sensitivity
+   *  allowlist. Carried EXPLICITLY rather than inferred at the call site: a gate
+   *  that guesses which profile it is protecting is a gate nobody can audit. */
+  profile: ModelProfileId
+}
+
+/**
+ * Interpreter → model profile.
+ *
+ * Derived from the deployment's own map (`store/model-profile-map.json`), not
+ * from a guess: there `analysis_efficient` and `routine_lowcost` both resolve to
+ * a DeepSeek model, and the two Claude tiers to Opus and Sonnet. Both
+ * interpreters here are cheap-tier models — DeepSeek flash and Claude Haiku —
+ * so neither counts as `premium_reasoning`, and the §10 allowlist consequently
+ * keeps SENSITIVE_PERSONAL and above away from both.
+ *
+ * If that becomes too strict for the Reader, the fix is a decision about WHICH
+ * MODEL may read sensitive cases — an owner call — not a quieter profile here.
+ */
+export const INTERPRETER_PROFILE: Record<'anthropic' | 'deepseek', ModelProfileId> = {
+  anthropic: 'analysis_efficient',
+  deepseek: 'analysis_efficient',
 }
 
 /** Read a secret without the caller having to know where secrets live, and
@@ -47,7 +70,14 @@ export function resolveInterpreter(
   getSecret: SecretReader,
   opts: { maxTokens?: number } = {},
 ): ResolvedInterpreter | null {
-  const anthropicKey = process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN
+  // Env first, then the VAULT. The vault branch is not a nicety: Istvan handed
+  // over an Anthropic key on 2026-08-11 and it went into the vault, where the
+  // env-only lookup could not see it -- the provider would have stayed DeepSeek
+  // while every report said "switched to Anthropic". A key nobody reads is the
+  // same as no key, and it would have been invisible in the cycle output.
+  const anthropicKey = process.env.ANTHROPIC_API_KEY
+    || process.env.ANTHROPIC_AUTH_TOKEN
+    || (getSecret('ANTHROPIC_API_KEY') ?? '').trim()
   if (anthropicKey) {
     return {
       client: new AnthropicLlmClient({
@@ -55,6 +85,7 @@ export function resolveInterpreter(
       }),
       provider: 'anthropic',
       model: DEFAULT_INTERPRETER_MODEL,
+      profile: INTERPRETER_PROFILE.anthropic,
     }
   }
 
@@ -69,6 +100,7 @@ export function resolveInterpreter(
       }),
       provider: 'deepseek',
       model: DEEPSEEK_INTERPRETER_MODEL,
+      profile: INTERPRETER_PROFILE.deepseek,
     }
   }
 
@@ -85,3 +117,52 @@ export function resolveInterpreter(
  *  side was bounded at the same time (context-builder's per-item ceiling).
  *  Raising this alone would have been treating the symptom. */
 export const READER_MAX_TOKENS = 16384
+
+/**
+ * Both readers the §10 routing needs: one cleared for sensitive content and one
+ * for everything else (Istvan's decision, 2026-08-11).
+ *
+ * `contracted` is null when no Anthropic key exists anywhere — and that is a
+ * REPORTABLE state, not a fallback: sensitive cases are then skipped rather
+ * than quietly sent to the general provider. `general` is whatever
+ * resolveInterpreter picks, which is the cheap path when both keys are present.
+ */
+export function resolveReaderInterpreters(
+  getSecret: SecretReader,
+  opts: { maxTokens?: number } = {},
+): { contracted: ResolvedInterpreter | null; general: ResolvedInterpreter | null } {
+  const anthropicKey = process.env.ANTHROPIC_API_KEY
+    || process.env.ANTHROPIC_AUTH_TOKEN
+    || (getSecret('ANTHROPIC_API_KEY') ?? '').trim()
+  const contracted: ResolvedInterpreter | null = anthropicKey
+    ? {
+        client: new AnthropicLlmClient({
+          apiKey: anthropicKey, model: DEFAULT_INTERPRETER_MODEL, maxTokens: opts.maxTokens,
+        }),
+        provider: 'anthropic',
+        model: DEFAULT_INTERPRETER_MODEL,
+        profile: INTERPRETER_PROFILE.anthropic,
+      }
+    : null
+
+  // The general reader is the CHEAP one when it exists — that is the whole
+  // point of routing by tier rather than sending everything to the contracted
+  // provider. Falls back to the contracted client when no DeepSeek key exists,
+  // because a cleared provider is always acceptable for a lower tier.
+  const deepseekKey = (getSecret('DEEPSEEK_API_KEY') ?? '').trim()
+  const general: ResolvedInterpreter | null = deepseekKey
+    ? {
+        client: new AnthropicLlmClient({
+          apiKey: deepseekKey,
+          baseURL: DEEPSEEK_ANTHROPIC_BASE_URL,
+          model: DEEPSEEK_INTERPRETER_MODEL,
+          maxTokens: opts.maxTokens,
+        }),
+        provider: 'deepseek',
+        model: DEEPSEEK_INTERPRETER_MODEL,
+        profile: INTERPRETER_PROFILE.deepseek,
+      }
+    : contracted
+
+  return { contracted, general }
+}

@@ -295,7 +295,7 @@ export async function dispatchApprovedSend(
     payloadHash: input.renderedPayloadHash,
     approvalId: decision.approvalId ?? null,
   }
-  const ticket = issueAuthorization(db, authContext, now)
+  const ticket = issueAuthorization(db, authContext, now, {}, decision)
 
   try {
     const action = await executeAction(db, adapter, input.ledgerId, now, {

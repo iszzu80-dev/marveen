@@ -29,7 +29,9 @@ import Database from 'better-sqlite3'
 import { getDb, initDatabase } from '../src/db.js'
 import { assertStorePermissions, anyTooOpen } from '../src/cos/store-security.js'
 import { createEncryptedBackup, pruneBackups, restoreEncryptedBackup } from '../src/cos/backup.js'
-import { purgeExpiredAttachmentContent, deletedCasesEligibleForPurge } from '../src/cos/retention.js'
+import {
+  purgeExpiredAttachmentContent, deletedCasesEligibleForPurge, purgeExpiredEvidencePackets,
+} from '../src/cos/retention.js'
 
 const DB_PATH = process.env.MARVEEN_DB ?? 'store/claudeclaw.db'
 const BACKUP_DIR = process.env.COS_BACKUP_DIR ?? 'store/backups'
@@ -55,7 +57,15 @@ const db = getDb()
 try {
   const purged = purgeExpiredAttachmentContent(db, now)
   const deletable = deletedCasesEligibleForPurge(db, now)
-  report.retention = { attachmentContent: purged, deletedCasesEligible: deletable.length }
+  // Reader evidence packets (review #4, N4-2). The table did not exist when this
+  // step was written, and a retention policy that does not know about a table
+  // holding extracted personal data is a policy with a hole in it.
+  const packets = purgeExpiredEvidencePackets(db, now)
+  report.retention = {
+    attachmentContent: purged,
+    deletedCasesEligible: deletable.length,
+    evidencePackets: packets,
+  }
 } catch (e) {
   problems.push(`retention: ${String((e as Error)?.message ?? e)}`)
 }

@@ -94,15 +94,22 @@ if (ENRICH_PER_CYCLE > 0 || READ_PER_CYCLE > 0) {
       // is a recurring cost and the bound is the budget.
       if (READ_PER_CYCLE > 0) {
         const { runReaderPass } = await import('../src/cos/reader-cycle.js')
-        const { READER_MAX_TOKENS } = await import('../src/cos/interpreter-provider.js')
+        const { READER_MAX_TOKENS, resolveReaderInterpreters } = await import('../src/cos/interpreter-provider.js')
         // A SEPARATE client, for the ceiling only. The Reader emits a whole
         // evidence packet and reasons at length before it; enrichment returns
         // three short fields. Sharing enrichment's 2048 is what made every live
         // Reader call die inside a thinking block on the first night.
-        const readerInterp = resolveInterpreter(getSecret, { maxTokens: READER_MAX_TOKENS })
-        const read = await runReaderPass(db, (readerInterp ?? interp).client, {
-          limit: READ_PER_CYCLE, now, model: interp.model,
-        })
+        // TWO readers: one cleared for sensitive content and one cheap for the
+        // rest (Istvan's decision, 2026-08-11). The sweep picks per case from
+        // the context's effective tier — the §10 gate IS the routing here, not
+        // a veto bolted on the front.
+        const readers = resolveReaderInterpreters(getSecret, { maxTokens: READER_MAX_TOKENS })
+        const route = (r: typeof readers.general) =>
+          r ? { client: r.client, provider: r.provider, model: r.model } : null
+        const read = await runReaderPass(db, {
+          general: route(readers.general),
+          contracted: route(readers.contracted),
+        }, { limit: READ_PER_CYCLE, now })
         // NESTED under `reader`, not spread. cos-cycle.ts merges every JSON line
         // of this runner into ONE object, so a top-level `remaining`/`failures`
         // here overwrote GoalEnrichment's — the cycle report then showed one
@@ -110,7 +117,13 @@ if (ENRICH_PER_CYCLE > 0 || READ_PER_CYCLE > 0) {
         // live output and being unable to say which subsystem `remaining: 98`
         // belonged to.
         console.log('Reader:', JSON.stringify({
-          reader: { provider: interp.provider, model: interp.model, maxTokens: READER_MAX_TOKENS, ...read },
+          reader: {
+            // Which provider is available for what, so the routing split in
+            // `byProvider` can be read against what was possible.
+            contracted: readers.contracted?.model ?? null,
+            general: readers.general?.model ?? null,
+            maxTokens: READER_MAX_TOKENS, ...read,
+          },
         }))
       }
     }

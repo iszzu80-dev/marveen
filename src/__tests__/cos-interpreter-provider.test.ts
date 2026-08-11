@@ -49,11 +49,39 @@ describe('interpreter provider resolution', () => {
     expect(resolveInterpreter(() => '   ')).toBeNull()
   })
 
-  it('asks the vault for exactly one id, and does not go fishing for others', () => {
+  it('asks the vault for exactly the two ids it uses, in preference order', () => {
+    // Was ['DEEPSEEK_API_KEY'] until 2026-08-11, when the Anthropic key moved
+    // into the vault. The property being pinned is unchanged -- ask for what
+    // you use and nothing else -- so the list grew by exactly the id that is
+    // now read, in the order the preference chain checks them.
     delete process.env.ANTHROPIC_API_KEY
     delete process.env.ANTHROPIC_AUTH_TOKEN
     const asked: string[] = []
     resolveInterpreter((id) => { asked.push(id); return null })
-    expect(asked).toEqual(['DEEPSEEK_API_KEY'])
+    expect(asked).toEqual(['ANTHROPIC_API_KEY', 'DEEPSEEK_API_KEY'])
+  })
+})
+
+describe('vault-stored Anthropic key (2026-08-11)', () => {
+  it('HEADLINE: an ANTHROPIC_API_KEY in the VAULT selects Anthropic', () => {
+    // The key Istvan handed over went into the vault. The lookup read only
+    // process.env, so the provider would have stayed DeepSeek while every
+    // report said the switch had happened — a key nobody reads is no key.
+    delete process.env.ANTHROPIC_API_KEY
+    delete process.env.ANTHROPIC_AUTH_TOKEN
+    const vault = (id: string): string | null =>
+      id === 'ANTHROPIC_API_KEY' ? 'sk-ant-from-vault' : (id === 'DEEPSEEK_API_KEY' ? 'ds-key' : null)
+    const r = resolveInterpreter(vault)
+    expect(r?.provider).toBe('anthropic')
+  })
+
+  it('an empty vault entry does NOT select Anthropic', () => {
+    // Whitespace is not a key. Falling through to DeepSeek is correct; picking
+    // a client that will fail on first use is not.
+    delete process.env.ANTHROPIC_API_KEY
+    delete process.env.ANTHROPIC_AUTH_TOKEN
+    const vault = (id: string): string | null =>
+      id === 'ANTHROPIC_API_KEY' ? '   ' : (id === 'DEEPSEEK_API_KEY' ? 'ds-key' : null)
+    expect(resolveInterpreter(vault)?.provider).toBe('deepseek')
   })
 })

@@ -24,9 +24,61 @@ export const RETENTION = {
   attachmentContentDays: 90,
   /** Days to keep encrypted backups (mirror of backup.ts). */
   backupDays: BACKUP_RETENTION_DAYS,
+  /**
+   * Days to keep a Reader evidence packet (review #4, N4-2).
+   *
+   * `packet_json` holds the FACTS the Reader extracted from the emails — the
+   * same personal data as the attachments, only structured and therefore easier
+   * to read. It accumulated with no policy at three rows per cycle: 432 a day.
+   *
+   * Shorter than the case window on purpose. A packet is a READING of a case at
+   * a moment, not the case's record: the audit spine (progression runs, case
+   * events) survives the purge and remains the thing you reconstruct history
+   * from. Ninety days matches the attachment-content window, because the two
+   * hold the same class of content.
+   */
+  evidencePacketDays: 90,
 } as const
 
 export interface AttachmentPurgeResult { purged: number }
+
+export interface EvidencePacketPurgeResult { purged: number; kept: number }
+
+/**
+ * Purge the CONTENT of expired Reader evidence packets (§C, review #4 N4-2).
+ *
+ * The row survives with its §13.1 arbitration audit — reader_candidate,
+ * policy_result, conflict_reason, safe_fallback_decision — and loses
+ * `packet_json` and `plan_json`, which are the parts carrying the personal data
+ * read out of the mail. Same shape as the attachment purge: keep the evidence
+ * that a decision happened and why, drop the content it was about.
+ *
+ * `refusal_reason` is kept too: a refused reading holds no case content, and
+ * the reason is how a repeated failure stays visible.
+ *
+ * Idempotent — already-purged rows have packet_json IS NULL and are skipped.
+ */
+export function purgeExpiredEvidencePackets(
+  db: Database.Database, now: number, retentionDays = RETENTION.evidencePacketDays,
+): EvidencePacketPurgeResult {
+  const cutoff = now - retentionDays * 86400
+  try {
+    const info = db.prepare(
+      `UPDATE case_evidence_packets
+       SET packet_json = NULL, plan_json = NULL
+       WHERE created_at < @cutoff AND packet_json IS NOT NULL`,
+    ).run({ cutoff })
+    const kept = (db.prepare(
+      `SELECT COUNT(*) AS n FROM case_evidence_packets WHERE packet_json IS NOT NULL`,
+    ).get() as { n: number }).n
+    return { purged: info.changes, kept }
+  } catch {
+    // The table only exists once the progression schema has been deployed. A
+    // fresh store is not an error, but it is also not "purged 0 of many" — both
+    // numbers are zero and the caller can tell the difference from the store.
+    return { purged: 0, kept: 0 }
+  }
+}
 
 /**
  * Purge attachment CONTENT older than the retention window: NULL the bytes and

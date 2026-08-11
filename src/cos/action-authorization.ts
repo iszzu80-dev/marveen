@@ -32,6 +32,7 @@
 // re-checks the bound fields and refuses on any mismatch — the ticket is the
 // evidence, not the permission.
 import type Database from 'better-sqlite3'
+import { gatePermitRefusal } from './gate-permit.js'
 import { randomBytes, createHash } from 'node:crypto'
 
 /** Default lifetime. Short on purpose: a ticket is meant to be consumed by the
@@ -86,7 +87,14 @@ export function policyEvaluationHash(ctx: AuthorizationContext): string {
 export function issueAuthorization(
   db: Database.Database, ctx: AuthorizationContext, now: number,
   opts: { ttlSeconds?: number; singleUse?: boolean } = {},
+  // §22.2 / review #3 U-4. The ticket may only be issued against a decision the
+  // deterministic gate itself produced AND allowed. Positional-last with a
+  // default of `undefined` so the refusal is a RUNTIME one with a message,
+  // rather than a compile error a caller could satisfy with `null as never`.
+  permit?: unknown,
 ): IssuedAuthorization {
+  const refusal = gatePermitRefusal(permit)
+  if (refusal) throw new Error(`issueAuthorization refused: ${refusal}`)
   const authorizationId = randomBytes(32).toString('hex')
   const expiresAt = now + (opts.ttlSeconds ?? AUTHORIZATION_TTL_SEC)
   db.prepare(

@@ -14,6 +14,7 @@ import { setLadder, permits } from '../cos/autonomy-ladder.js'
 import { planAction, executeAction } from '../cos/executor.js'
 import { GmailSendAdapter, DryRunTransport } from '../cos/adapters/gmail-send.js'
 import { issueAuthorization } from '../cos/action-authorization.js'
+import { mintGatePermit } from '../cos/gate-permit.js'
 import { engageKillSwitch, releaseKillSwitch, killSwitchState, killSwitchRefusal } from '../cos/kill-switch.js'
 
 const T0 = 1_700_000_000
@@ -25,7 +26,7 @@ function ticket(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, 
     actionId: ledgerId, actionType: 'EMAIL_SEND', intent: 'TEST', targetReference: null,
     recipient: null, payloadHash: null, approvalId: null,
   }
-  return { authorizationId: issueAuthorization(db, ctx, now).authorizationId, authorizationContext: ctx }
+  return { authorizationId: issueAuthorization(db, ctx, now, {}, mintGatePermit({ allowed: true, reasons: [] })).authorizationId, authorizationContext: ctx }
 }
 
 describe('§22 kill switch', () => {

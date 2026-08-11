@@ -312,6 +312,16 @@ export async function tryHandleOptimization(ctx: RouteContext): Promise<boolean>
       },
       {},
     )
+    // O-7 (review 2026-08-11): report what happened, not what was attempted.
+    //
+    // This handler used to answer `{ok: true}` without looking at the write
+    // result. A read-only store/ or a full disk would have produced a green
+    // acknowledgement from an emergency stop that stopped nothing — the worst
+    // failure mode a kill switch has, because the operator walks away.
+    if (!result.ok) {
+      json(res, { ok: false, error: result.error ?? 'write failed', config: result.config }, 500)
+      return true
+    }
     json(res, { ok: true, config: result.config })
     return true
   }

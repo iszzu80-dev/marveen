@@ -29,6 +29,7 @@ import { initializeDoDVerification, canCompleteCase, type DoDProvenance } from '
 import { transitionCase } from './case-store.js'
 import { transitionZstCase } from './zst-case-store.js'
 import { scheduleNextProgression } from './progression-scheduler.js'
+import { canonicalTriggerType } from './progression-trigger.js'
 
 // ── Valid progression decisions (plan §13) ──────────────────────────────
 
@@ -726,7 +727,7 @@ export function runProgressionCycle(
     if (inOther) {
       const err = new CrossDomainReadError(domain, caseId, 'runProgressionCycle')
       return recordCrossDomainLeakageRun(db, runId, domain, caseId, err.message,
-        opts.triggerType ?? 'MANUAL', opts.triggerReference ?? 'checkpoint-b', now)
+        canonicalTriggerType(opts.triggerType ?? 'MANUAL'), opts.triggerReference ?? 'checkpoint-b', now)
     }
     throw new Error(`Case not found: ${domain}/${caseId}`)
   }
@@ -766,7 +767,7 @@ export function runProgressionCycle(
   } catch (err) {
     if (err instanceof CrossDomainReadError) {
       return recordCrossDomainLeakageRun(db, runId, domain, caseId, err.message,
-        opts.triggerType ?? 'MANUAL', opts.triggerReference ?? 'checkpoint-b', now)
+        canonicalTriggerType(opts.triggerType ?? 'MANUAL'), opts.triggerReference ?? 'checkpoint-b', now)
     }
     throw err
   }
@@ -980,7 +981,7 @@ export function runProgressionCycle(
              ?, ?)`,
   ).run(
     runId, domain, caseId,
-    opts.triggerType ?? 'MANUAL', opts.triggerReference ?? 'checkpoint-b',
+    canonicalTriggerType(opts.triggerType ?? 'MANUAL'), opts.triggerReference ?? 'checkpoint-b',
     caseVersion, caseVersion + 1, goalVersion,
     existing?.plan_version ?? 0, planVersion, decision, reason,
     JSON.stringify({ planVersion, goalVersion, nbaStep: nba.planStep, auditSummary: deepCtx.audit.summary }),
