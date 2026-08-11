@@ -185,3 +185,83 @@ function caseTitle(db: Database.Database, domain: string, caseId: string): strin
     return row?.title ?? null
   } catch { return null }
 }
+
+
+// ── The answer path ───────────────────────────────────────────────────────
+//
+// A question with nowhere to put the answer is half a channel. Istvan answers on
+// Telegram, and this is where that sentence becomes something the engine can
+// consume: the outstanding question is closed, and a case EVENT is appended so
+// the pipeline's existing owner-answer consumption picks it up on the next run.
+//
+// WHAT THIS DELIBERATELY DOES NOT DO. It does not interpret the answer into a
+// decision beyond the plainest yes/no. Card 78e81155 ("interpret the owner's
+// free-text answer AT ANSWER TIME, as a proposal he confirms") is the real
+// version of that, and guessing here would put words in his mouth on a case
+// record that is append-only. Free text is stored as INFORMATION, verbatim.
+
+const YES = /^\s*(igen|ok(é|e)?|rendben|jó|jo|persze|mehet|yes|y)\b/i
+const NO = /^\s*(nem|ne|elutasít|elutasit|no|n)\b/i
+
+export interface RecordedAnswer {
+  caseId: string
+  questionHash: string
+  eventType: 'OWNER_DECISION' | 'OWNER_INFORMATION'
+  choice: 'YES' | 'NO' | null
+}
+
+/**
+ * Record Istvan's answer to the newest outstanding question on a case.
+ *
+ * Returns null when there is no outstanding question — answering a case nobody
+ * asked about would write an event the engine cannot attribute, which is worse
+ * than losing the sentence.
+ */
+export function recordOwnerAnswer(
+  db: Database.Database,
+  input: { caseId: string; domain: string; text: string; now?: number },
+): RecordedAnswer | null {
+  const now = input.now ?? Math.floor(Date.now() / 1000)
+  const open = db.prepare(
+    `SELECT question_hash FROM cos_owner_questions
+     WHERE case_id = ? AND answered_at IS NULL ORDER BY asked_at DESC LIMIT 1`,
+  ).get(input.caseId) as { question_hash: string } | undefined
+  if (!open) return null
+
+  const choice: 'YES' | 'NO' | null = YES.test(input.text) ? 'YES' : (NO.test(input.text) ? 'NO' : null)
+  const eventType = choice ? 'OWNER_DECISION' : 'OWNER_INFORMATION'
+
+  db.prepare(
+    `UPDATE cos_owner_questions SET answered_at = ?, answer_text = ?
+     WHERE case_id = ? AND question_hash = ?`,
+  ).run(now, input.text, input.caseId, open.question_hash)
+
+  const table = input.domain === 'zst' ? 'zst_cases' : 'personal_cases'
+  const row = db.prepare(`SELECT version FROM ${table} WHERE case_id = ?`).get(input.caseId) as
+    { version: number } | undefined
+  if (row) {
+    const events = input.domain === 'zst' ? 'zst_case_events' : 'personal_case_events'
+    db.prepare(
+      `INSERT INTO ${events} (case_id, case_version, actor, event_type, reason, payload, source_system, created_at)
+       VALUES (?, ?, 'istvan', ?, ?, ?, 'telegram', ?)`,
+    ).run(
+      input.caseId, row.version, eventType,
+      input.text.slice(0, 500),
+      JSON.stringify({ choice, answer: input.text, question_hash: open.question_hash }),
+      now,
+    )
+  }
+  return { caseId: input.caseId, questionHash: open.question_hash, eventType, choice }
+}
+
+/** The questions still waiting on him — so "what did it ask me?" is a query. */
+export function outstandingOwnerQuestions(
+  db: Database.Database, limit = 20,
+): Array<{ caseId: string; domain: string; text: string; askedAt: number }> {
+  try {
+    return db.prepare(
+      `SELECT case_id AS caseId, domain, question_text AS text, asked_at AS askedAt
+       FROM cos_owner_questions WHERE answered_at IS NULL ORDER BY asked_at DESC LIMIT ?`,
+    ).all(limit) as never
+  } catch { return [] }
+}

@@ -15,7 +15,9 @@ import { join } from 'node:path'
 import { initDatabase, getDb, listAgentMessages } from '../db.js'
 import { initProgressionSchema } from '../cos/schema.js'
 import { createCase } from '../cos/case-store.js'
-import { buildOwnerQuestion, askPendingOwnerQuestions } from '../cos/owner-question.js'
+import {
+  buildOwnerQuestion, askPendingOwnerQuestions, recordOwnerAnswer, outstandingOwnerQuestions,
+} from '../cos/owner-question.js'
 import { planFromEvidence } from '../cos/evidence-planner.js'
 import type { ReaderEvidencePacket } from '../cos/reader.js'
 
@@ -136,5 +138,65 @@ describe('§10.4 owner question', () => {
     const runner = readFileSync(join(process.cwd(), 'scripts/progression-heartbeat-runner.ts'), 'utf8')
     expect(runner).toMatch(/askPendingOwnerQuestions\(db/)
     expect(runner).toMatch(/questions: asked/)
+  })
+})
+
+describe('the answer path', () => {
+  beforeEach(() => {
+    initDatabase(':memory:')
+    initProgressionSchema(getDb())
+    createCase(getDb(), { caseId: 'c1', title: 'ZST uzletresz-adasvetel', caseType: 'ADMIN' }, T0)
+  })
+
+  it('HEADLINE: an answer closes the question AND lands as a case event', () => {
+    // A question with nowhere to put the answer is half a channel. The event is
+    // the half that matters: the engine's existing owner-answer consumption
+    // reads events, not this table.
+    storePacket('c1', packet())
+    askPendingOwnerQuestions(getDb(), { limit: 5, now: T0 + 1 })
+
+    const rec = recordOwnerAnswer(getDb(), {
+      caseId: 'c1', domain: 'personal', text: '1.2 millio forint, megegyeztunk.', now: T0 + 100,
+    })!
+    expect(rec.eventType).toBe('OWNER_INFORMATION')
+    expect(rec.choice).toBeNull()
+
+    const ev = getDb().prepare(
+      `SELECT event_type, payload FROM personal_case_events WHERE case_id='c1' ORDER BY event_id DESC LIMIT 1`,
+    ).get() as { event_type: string; payload: string }
+    expect(ev.event_type).toBe('OWNER_INFORMATION')
+    expect(JSON.parse(ev.payload).answer).toContain('1.2 millio')
+  })
+
+  it('a plain yes becomes a DECISION, free text stays INFORMATION', () => {
+    // The only interpretation done here is the plainest one. Anything cleverer
+    // would put words in his mouth on an append-only record — card 78e81155 is
+    // the real version of that, as a proposal he confirms.
+    storePacket('c1', packet())
+    askPendingOwnerQuestions(getDb(), { limit: 5, now: T0 + 1 })
+    const yes = recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'Igen, mehet.', now: T0 + 2 })!
+    expect(yes.eventType).toBe('OWNER_DECISION')
+    expect(yes.choice).toBe('YES')
+  })
+
+  it('answering closes it, and the question can be asked again if it returns', () => {
+    storePacket('c1', packet())
+    askPendingOwnerQuestions(getDb(), { limit: 5, now: T0 + 1 })
+    recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'Igen', now: T0 + 2 })
+    expect(outstandingOwnerQuestions(getDb())).toHaveLength(0)
+  })
+
+  it('an answer to a case nobody asked about is refused, not invented', () => {
+    // Writing an event the engine cannot attribute is worse than losing the
+    // sentence: it would look like an answer to whatever question comes next.
+    expect(recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'Igen', now: T0 + 2 })).toBeNull()
+  })
+
+  it('outstanding questions are queryable — "what did it ask me?"', () => {
+    storePacket('c1', packet())
+    askPendingOwnerQuestions(getDb(), { limit: 5, now: T0 + 1 })
+    const open = outstandingOwnerQuestions(getDb())
+    expect(open).toHaveLength(1)
+    expect(open[0].text).toContain('Ami Tőled kell')
   })
 })
