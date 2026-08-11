@@ -59,7 +59,9 @@ RULES:
 1. Every fact you state must cite the sourceRef of the context item it came from. Do not state facts you cannot cite.
 2. If something is unreadable or missing, say so in unreadableSources or uncertainty. Do not guess.
 3. missingRequirements is what BLOCKS the case: what is missing, who has it, why it matters.
-4. ballHolder: who must act next.
+4. ballHolder: who must act next. It MUST be EXACTLY one of these four words, with no description, no name, no parentheses:
+ISTVAN, MARVEEN, EXTERNAL, UNKNOWN
+(ISTVAN = the owner. MARVEEN = this system. EXTERNAL = anyone outside. UNKNOWN = you cannot tell.)
 5. candidateDecision is a SUGGESTION. It is not executed. Choose one of:
 CONTINUE_AUTONOMOUSLY, WAIT_EXTERNAL, WAIT_TIME, ASK_INFORMATION, REQUEST_DECISION, REQUEST_APPROVAL, CALL_REQUIRED, MANUAL_ACTION_REQUIRED, RECOVERY_REQUIRED, COMPLETE
 6. confidence is 0..1. Low confidence is a correct answer when the context is thin.

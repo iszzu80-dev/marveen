@@ -77,7 +77,11 @@ export function resolveInterpreter(
 
 /** What the §10.2 Reader needs, as opposed to what goal enrichment needs.
  *
- *  Not a guess: at 2048 every live Reader call on deepseek-v4-flash burned the
- *  whole budget inside a thinking block and returned no text. The packet itself
- *  is ~600 tokens; the rest is the model reasoning over a 10-item context first. */
-export const READER_MAX_TOKENS = 8192
+ *  Not a guess, and raised twice against live measurement: at 2048 every call on
+ *  deepseek-v4-flash burned the whole budget inside a thinking block and emitted
+ *  no text; at 8192 one case reached the packet and was cut mid-JSON, another
+ *  still produced thinking only. The packet itself is ~600 tokens — the rest is
+ *  a reasoning model thinking over the context first, which is why the input
+ *  side was bounded at the same time (context-builder's per-item ceiling).
+ *  Raising this alone would have been treating the symptom. */
+export const READER_MAX_TOKENS = 16384

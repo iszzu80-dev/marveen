@@ -83,9 +83,16 @@ const SOURCES_NOT_WIRED = [
  */
 export function buildCaseContext(
   db: Database.Database, domain: 'personal' | 'zst', caseId: string, now: number,
-  opts: { maxItems?: number } = {},
+  opts: { maxItems?: number; maxCharsPerItem?: number } = {},
 ): CaseContext {
   const maxItems = opts.maxItems ?? 40
+  // A per-item ceiling as well as an item count. Live 2026-08-11: a case with 13
+  // items handed the Reader whole email threads, the model reasoned over all of
+  // it and hit its output ceiling before writing a single character of the
+  // packet. The item count was never the binding constraint — the length of one
+  // thread was. Cut visibly, per the note above: a silently shortened thread is
+  // how a Reader concludes there is no mention of the deposit.
+  const maxChars = opts.maxCharsPerItem ?? 4000
   const caseTable = domain === 'zst' ? 'zst_cases' : 'personal_cases'
   const eventTable = domain === 'zst' ? 'zst_case_events' : 'personal_case_events'
   const namespace = domain === 'zst' ? 'zst' : 'personal'
@@ -187,7 +194,17 @@ export function buildCaseContext(
     excluded.push({ reference: f.document_id, reason: `cross-domain: belongs to another namespace, not ${namespace}` })
   }
 
-  // 4. Bound the packet, visibly.
+  // 4a. Bound each item's LENGTH, visibly and in the Reader's own language, so
+  // the cut is something the model can report in unreadableSources rather than
+  // something it cannot see.
+  for (const item of items) {
+    if (item.content.length > maxChars) {
+      const dropped = item.content.length - maxChars
+      item.content = `${item.content.slice(0, maxChars)}\n[...LEVÁGVA: további ${dropped} karakter nem fért a kontextusba — ez a forrás CSONKA]`
+    }
+  }
+
+  // 4b. Bound the packet, visibly.
   if (items.length > maxItems) {
     for (const dropped of items.slice(maxItems)) {
       excluded.push({ reference: dropped.provenance.reference, reason: `over the ${maxItems}-item context bound` })
