@@ -251,5 +251,41 @@ Egy válasz olyan ügyre, amiről senki nem kérdezett, **visszautasítódik**. 
 esemény, amit a motor nem tud mihez kötni, rosszabb, mint az elveszett mondat:
 úgy nézne ki, mint a válasz a következő kérdésre.
 
+### 6.4 A csatorna plafonja, és a szám, amit előhozott
+
+A sweep-enkénti kettő önmagában engedi, hogy óránként tizenkettő legyen: hat kör,
+kettesével, és senki nem válaszol. Ami a csatornát védi, az nem az ütem, hanem a
+RÁ VÁRÓ kupac mérete — egy maroknyival túl egy újabb kérdés nem válaszolódik meg
+hamarabb, hanem a csatorna elnémul.
+
+Globális plafon a nyitott kérdésekre (5), és a visszatartás **számlálóval**
+jelentve: egy csatorna, ami a plafon miatt hallgat, nem nézhet ki úgy, mint egy
+rendszer, aminek nincs mit kérdeznie.
+
+Az első éles kör ezzel: `heldBacklogFull: 30`.
+
+**A mérés, amit ez kikényszerített.** 55 ügyről van olvasat:
+
+| labda | ügy |
+|---|---|
+| ISTVAN | 34 |
+| EXTERNAL | 18 |
+| MARVEEN | 1 |
+| UNKNOWN | 2 |
+
+A 34 Istvanra tett ügyből **27-nél a rendszer meg is tudja nevezni, mi hiányzik
+konkrétan tőle** (79%) — vagyis a visszatartott kupac nagyrészt valódi, nem a
+Reader alapértelmezése. Az átlagos magabiztosság ezeken 0,61, ami nem magas: az
+ügyek fele még a szál-szöveg javítása ELŐTT lett olvasva, üres kontextussal.
+
+A 18 EXTERNAL ügy pedig pontosan az, amiért a „csak akkor kérdez, ha a válasz
+tényleg az övé" szabály kell.
+
+**Egy saját hiba, amit a plafon tesztje hozott ki:** a `cos_owner_questions` sor
+`(case_id, question_hash)`-re kulcsolt, tehát egy megválaszolt és később újra
+időszerűvé váló kérdés a SAJÁT történetével ütközött. Upsertre javítva; a válasz
+nem vész el, mert az a case-eseményekbe került, amikor megérkezett — az az
+append-only nyilvántartás.
+
 *Marveen, 2026-08-11 — tizenkét találás, egy hibaosztály: egy felület, ami olyan
 állapotot jelent, amit nem ellenőrzött.*
