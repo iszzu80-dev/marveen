@@ -116,8 +116,19 @@ if (ENRICH_PER_CYCLE > 0 || READ_PER_CYCLE > 0) {
         // subsystem's number under both names. Found by reading my own first
         // live output and being unable to say which subsystem `remaining: 98`
         // belonged to.
+        // Step 5: §10.4 Writer, first slice — turn the readings into a question
+        // on Istvan's own channel. Without this the whole chain ends in a table
+        // nobody reads, which is precisely what he asked about on 2026-08-11.
+        //
+        // Bounded to two per sweep on purpose: a burst of twelve questions at
+        // 3am is indistinguishable from spam, and a muted channel is the same
+        // as no channel.
+        const { askPendingOwnerQuestions } = await import('../src/cos/owner-question.js')
+        const asked = askPendingOwnerQuestions(db, { limit: 2, now })
+
         console.log('Reader:', JSON.stringify({
           reader: {
+            questions: asked,
             // Which provider is available for what, so the routing split in
             // `byProvider` can be read against what was possible.
             contracted: readers.contracted?.model ?? null,
