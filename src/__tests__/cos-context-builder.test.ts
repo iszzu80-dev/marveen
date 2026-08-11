@@ -13,7 +13,7 @@ import { writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { initDatabase, getDb } from '../db.js'
 import { createCase, transitionCase } from '../cos/case-store.js'
-import { buildCaseContext, contextIntegrityViolations } from '../cos/context-builder.js'
+import { buildCaseContext, contextIntegrityViolations, stripMarkupNoise } from '../cos/context-builder.js'
 import { buildReaderPrompt, READER_SYSTEM_PROMPT } from '../cos/reader.js'
 
 const T0 = 1_700_000_000
@@ -305,5 +305,65 @@ describe('§10.1 superseded events', () => {
     // A marker with no rule explaining it is decoration. The rule and the marker
     // ship together or neither is worth anything.
     expect(READER_SYSTEM_PROMPT).toContain('[SUPERSEDED_BY=ref]')
+  })
+})
+
+// A STYLESHEET IS NOT CONTENT (measured live, 2026-08-11).
+//
+// A Booking.com thread was stored as 25 KB of raw HTML: ~2 KB of <style>, then
+// headers, then — at the very end — the booking dates, the key-safe code and the
+// reminder that the mandatory check-in form was still outstanding. The item is
+// cut at 4000 characters, so the Reader got the CSS and none of it, and asked
+// the owner "what should happen next?" about a case whose answer was in its own
+// attachment.
+describe('§10.1 markup noise', () => {
+  const CSS = '<style>' + '.x { color: #fff; line-height: 100%; }\n'.repeat(120) + '</style>'
+  const BODY = 'Bejelentkezés: Tue 11 Aug 2026\nA kulcs a 9-es ajtó mögötti széfben, kód 241978.\n'
+    + 'Kérjük töltse ki a kötelező online check-in űrlapot.'
+
+  beforeEach(() => {
+    initDatabase(':memory:')
+    createCase(getDb(), { caseId: 'c1', title: 'Valencia', caseType: 'TRAVEL' }, T0)
+  })
+
+  it('HEADLINE: the content survives the cut, the stylesheet does not', () => {
+    const html = `<html><head>${CSS}</head><body><p>${BODY.replace(/\n/g, '</p><p>')}</p></body></html>`
+    expect(html.length).toBeGreaterThan(4000)   // the live shape: over budget before stripping
+    const path = '/tmp/marveen-test-thread.html'
+    writeFileSync(path, html)
+    doc({
+      document_id: 'doc-thread', doc_kind: 'email_thread', mime_type: 'text/plain',
+      extracted_text: null, stored_path: path,
+      sha256: createHash('sha256').update(html).digest('hex'),
+    })
+    const ctx = buildCaseContext(getDb(), 'personal', 'c1', T0 + 1, { maxCharsPerItem: 4000 })
+    const item = ctx.items.find(i => i.provenance.reference === 'doc-thread')!
+    expect(item.content).toContain('Tue 11 Aug 2026')
+    expect(item.content).toContain('241978')
+    expect(item.content).toContain('check-in')
+    expect(item.content).not.toContain('line-height')
+    expect(item.content).not.toContain('[...LEVÁGVA')
+  })
+
+  it('plain text is left exactly as it is', () => {
+    // The counter-case: the stripper must not touch a document that is not
+    // markup, or it would quietly rewrite invoices and contracts.
+    const plain = 'Szamla vegosszeg: 71 474 Ft\n2 < 3 és 5 > 4\nnem markup'
+    const path = '/tmp/marveen-test-plain.txt'
+    writeFileSync(path, plain)
+    doc({
+      document_id: 'doc-plain', doc_kind: 'other', mime_type: 'text/plain',
+      extracted_text: null, stored_path: path,
+      sha256: createHash('sha256').update(plain).digest('hex'),
+    })
+    const ctx = buildCaseContext(getDb(), 'personal', 'c1', T0 + 1)
+    const item = ctx.items.find(i => i.provenance.reference === 'doc-plain')!
+    expect(item.content).toContain('71 474 Ft')
+    expect(item.content).toContain('2 < 3 és 5 > 4')
+  })
+
+  it('stripMarkupNoise keeps line structure', () => {
+    const out = stripMarkupNoise('<div>egy</div><div>ketto</div><br>harom')
+    expect(out.split('\n')).toEqual(['egy', 'ketto', 'harom'])
   })
 })

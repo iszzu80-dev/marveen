@@ -83,6 +83,44 @@ export interface CaseContext {
 
 
 /**
+ * Strip markup noise from a stored text payload.
+ *
+ * WHY THIS EXISTS, measured 2026-08-11. A Booking.com email thread was stored as
+ * 25 KB of raw HTML: about 2 KB of `<style>` rules, then headers, then — at the
+ * very END — the part that mattered (booking dates, the key-safe code, and the
+ * reminder that the mandatory online check-in form was still outstanding). The
+ * builder truncates an item at 4000 characters, so the Reader received the CSS
+ * and none of the content, and asked the owner a generic "what should happen
+ * next?" about a case whose answer was sitting in its own attachment. Its own
+ * complaint named it exactly: "the email thread's extract is not available".
+ *
+ * The budget is not the problem; spending it on stylesheets is. Deliberately
+ * crude — this is not an HTML parser, it removes the two blocks that are never
+ * content, unwraps the rest, and collapses whitespace.
+ */
+export function stripMarkupNoise(text: string): string {
+  if (!/<[a-z!/]/i.test(text)) return text          // not markup: leave it alone
+  return text
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    // Block-ish boundaries become newlines so the result still reads as lines.
+    .replace(/<\/(p|div|tr|table|h[1-6]|li|br)\s*>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;?/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .split('\n').map(l => l.trim()).filter(Boolean).join('\n')
+    .trim()
+}
+
+/**
  * The readable content of a stored document.
  *
  * Order: the extracted text column, then the stored bytes, then the label. The
@@ -100,8 +138,11 @@ function documentContent(db: Database.Database, d: Record<string, unknown>): str
   // produce noise, and noise reads to a model as content.
   if (mime.startsWith('text/') || mime === 'message/rfc822' || mime === 'application/json') {
     try {
-      const text = readDocumentBytes(db, String(d.document_id)).toString('utf8').trim()
+      const raw = readDocumentBytes(db, String(d.document_id)).toString('utf8').trim()
       // A decode that produced replacement characters is not text.
+      // Markup is stripped BEFORE the caller's size cut, or the cut spends the
+      // whole budget on a stylesheet — see stripMarkupNoise.
+      const text = stripMarkupNoise(raw)
       if (text && !text.includes('\uFFFD')) return `${kind} (${name}):\n${text}`
     } catch { /* purged, missing on disk, or unreadable — fall through to the label */ }
   }
