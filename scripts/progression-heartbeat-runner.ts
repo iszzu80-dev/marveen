@@ -73,7 +73,7 @@ if (ENRICH_PER_CYCLE > 0 || READ_PER_CYCLE > 0) {
       // cannot run either, and a silent zero here would read as "no case needed
       // reading" rather than "nothing could read them".
       console.log('Reader:', JSON.stringify({
-        read: 0, failed: true, error: 'no interpreter configured',
+        reader: { read: 0, failed: true, error: 'no interpreter configured' },
       }))
     } else {
       if (ENRICH_PER_CYCLE > 0) {
@@ -94,10 +94,24 @@ if (ENRICH_PER_CYCLE > 0 || READ_PER_CYCLE > 0) {
       // is a recurring cost and the bound is the budget.
       if (READ_PER_CYCLE > 0) {
         const { runReaderPass } = await import('../src/cos/reader-cycle.js')
-        const read = await runReaderPass(db, interp.client, {
+        const { READER_MAX_TOKENS } = await import('../src/cos/interpreter-provider.js')
+        // A SEPARATE client, for the ceiling only. The Reader emits a whole
+        // evidence packet and reasons at length before it; enrichment returns
+        // three short fields. Sharing enrichment's 2048 is what made every live
+        // Reader call die inside a thinking block on the first night.
+        const readerInterp = resolveInterpreter(getSecret, { maxTokens: READER_MAX_TOKENS })
+        const read = await runReaderPass(db, (readerInterp ?? interp).client, {
           limit: READ_PER_CYCLE, now, model: interp.model,
         })
-        console.log('Reader:', JSON.stringify({ provider: interp.provider, model: interp.model, ...read }))
+        // NESTED under `reader`, not spread. cos-cycle.ts merges every JSON line
+        // of this runner into ONE object, so a top-level `remaining`/`failures`
+        // here overwrote GoalEnrichment's — the cycle report then showed one
+        // subsystem's number under both names. Found by reading my own first
+        // live output and being unable to say which subsystem `remaining: 98`
+        // belonged to.
+        console.log('Reader:', JSON.stringify({
+          reader: { provider: interp.provider, model: interp.model, maxTokens: READER_MAX_TOKENS, ...read },
+        }))
       }
     }
   } catch (e) {
@@ -108,7 +122,7 @@ if (ENRICH_PER_CYCLE > 0 || READ_PER_CYCLE > 0) {
       enriched: 0, failed: true, error: String((e as Error)?.message ?? e),
     }))
     console.log('Reader:', JSON.stringify({
-      read: 0, failed: true, error: String((e as Error)?.message ?? e),
+      reader: { read: 0, failed: true, error: String((e as Error)?.message ?? e) },
     }))
   }
 }

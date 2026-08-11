@@ -43,11 +43,16 @@ export type SecretReader = (id: string) => string | null | undefined
  *  facts apart: "no interpreter is configured" is a different thing from "the
  *  interpreter ran and produced nothing", and only the second one means the
  *  goals are as good as they are going to get. */
-export function resolveInterpreter(getSecret: SecretReader): ResolvedInterpreter | null {
+export function resolveInterpreter(
+  getSecret: SecretReader,
+  opts: { maxTokens?: number } = {},
+): ResolvedInterpreter | null {
   const anthropicKey = process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN
   if (anthropicKey) {
     return {
-      client: new AnthropicLlmClient({ apiKey: anthropicKey, model: DEFAULT_INTERPRETER_MODEL }),
+      client: new AnthropicLlmClient({
+        apiKey: anthropicKey, model: DEFAULT_INTERPRETER_MODEL, maxTokens: opts.maxTokens,
+      }),
       provider: 'anthropic',
       model: DEFAULT_INTERPRETER_MODEL,
     }
@@ -60,6 +65,7 @@ export function resolveInterpreter(getSecret: SecretReader): ResolvedInterpreter
         apiKey: deepseekKey.trim(),
         baseURL: DEEPSEEK_ANTHROPIC_BASE_URL,
         model: DEEPSEEK_INTERPRETER_MODEL,
+        maxTokens: opts.maxTokens,
       }),
       provider: 'deepseek',
       model: DEEPSEEK_INTERPRETER_MODEL,
@@ -68,3 +74,10 @@ export function resolveInterpreter(getSecret: SecretReader): ResolvedInterpreter
 
   return null
 }
+
+/** What the §10.2 Reader needs, as opposed to what goal enrichment needs.
+ *
+ *  Not a guess: at 2048 every live Reader call on deepseek-v4-flash burned the
+ *  whole budget inside a thinking block and returned no text. The packet itself
+ *  is ~600 tokens; the rest is the model reasoning over a 10-item context first. */
+export const READER_MAX_TOKENS = 8192
