@@ -72,10 +72,26 @@ export function buildOwnerQuestion(
   }
 
   lines.push('Ami Tőled kell:')
-  const asks = missingFromHim.length > 0
+  // A question that says only "a decision is needed" does not say WHAT to
+  // decide, and an unanswerable question is noise wearing a question mark.
+  // Live 2026-08-11: two of the first four questions degenerated to exactly
+  // that, because the Reader put the ball on ISTVAN while attributing the
+  // missing items to someone else. When that happens, name what is BLOCKED and
+  // who holds it — that is the thing he is deciding about.
+  const generic = (line: string): boolean =>
+    /^[•\s]*(istvan|istván)\b.*(döntés|dontes)/i.test(line) || /döntés a következő lépésről/.test(line)
+  let asks = missingFromHim.length > 0
     ? missingFromHim.map(m => `• ${m.what}${m.why ? ` — ${m.why}` : ''}`)
     : steps.map(s => `• ${s}`)
-  lines.push(...(asks.length > 0 ? asks : ['• döntés a következő lépésről']))
+  if (asks.length === 0 || asks.every(generic)) {
+    const blocked = input.packet.missingRequirements.map(
+      m => `• ${m.what} (${m.whoHasIt})${m.why ? ` — ${m.why}` : ''}`,
+    )
+    asks = blocked.length > 0
+      ? [`• döntés arról, hogyan tovább — ez akadályozza:`, ...blocked]
+      : [`• döntés a következő lépésről (a rendszer nem talált konkrét hiányzó tételt)`]
+  }
+  lines.push(...asks)
 
   if (input.packet.uncertainty.length > 0) {
     lines.push('')

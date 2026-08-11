@@ -200,3 +200,44 @@ describe('the answer path', () => {
     expect(open[0].text).toContain('Ami Tőled kell')
   })
 })
+
+describe('a question must say WHAT to decide', () => {
+  beforeEach(() => {
+    initDatabase(':memory:')
+    initProgressionSchema(getDb())
+    createCase(getDb(), { caseId: 'c1', title: 'NAV ertesito', caseType: 'ADMIN' }, T0)
+  })
+
+  it('HEADLINE: "Istvan döntése szükséges" alone is replaced by what is BLOCKED', () => {
+    // Live 2026-08-11: two of the first four questions degenerated to exactly
+    // this, because the Reader put the ball on ISTVAN while attributing the
+    // missing items to someone else. An unanswerable question is noise wearing
+    // a question mark.
+    const p = packet({
+      ballHolder: 'ISTVAN',
+      missingRequirements: [
+        { what: 'A tarhelyen levo dokumentum tartalma', whoHasIt: 'EXTERNAL', why: 'enelkul nem eldontheto mi a teendo' },
+      ],
+    })
+    const q = buildOwnerQuestion({ caseId: 'c1', domain: 'personal', title: 'NAV', packet: p, plan: planFromEvidence(p) })!
+    expect(q.text).toContain('A tarhelyen levo dokumentum tartalma')
+    expect(q.text).toContain('EXTERNAL')
+    // The bare generic line must not be the whole ask.
+    expect(q.text).not.toMatch(/Ami Tőled kell:\n• Istvan döntése szükséges\n\n/)
+  })
+
+  it('when the ask IS specific, it is left alone', () => {
+    // The counter-case: the fallback must not overwrite a good question.
+    const q = buildOwnerQuestion({
+      caseId: 'c1', domain: 'personal', title: 't', packet: packet(), plan: planFromEvidence(packet()),
+    })!
+    expect(q.text).toContain('A vetelar megallapodasa')
+    expect(q.text).not.toContain('ez akadályozza')
+  })
+
+  it('with nothing missing at all, it says so rather than pretending', () => {
+    const p = packet({ ballHolder: 'ISTVAN', missingRequirements: [] })
+    const q = buildOwnerQuestion({ caseId: 'c1', domain: 'personal', title: 't', packet: p, plan: planFromEvidence(p) })!
+    expect(q.text).toContain('nem talált konkrét hiányzó tételt')
+  })
+})
