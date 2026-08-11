@@ -177,9 +177,19 @@ function hasOtherOpenQuestion(db: Database.Database, caseId: string, hash: strin
  * bound is per sweep, because a burst of twelve questions at 3am is
  * indistinguishable from spam and gets the channel muted.
  */
+/** Where the owner's questions go. Resolved by the caller so the domain layer
+ *  never has to know a chat id -- and so the split can be rolled out by config
+ *  rather than by editing this file. */
+export interface OwnerChannel {
+  /** 'telegram' | 'bus' | ... -- the transport family. */
+  channel: string
+  /** The address within it (a Telegram chat id). Opaque here on purpose. */
+  target: string
+}
+
 export function askPendingOwnerQuestions(
   db: Database.Database,
-  opts: { limit?: number; now?: number; maxOutstanding?: number } = {},
+  opts: { limit?: number; now?: number; maxOutstanding?: number; channel?: OwnerChannel } = {},
 ): AskResult {
   const limit = opts.limit ?? 2
   // A GLOBAL cap on unanswered questions, on top of the per-sweep bound.
@@ -279,12 +289,15 @@ export function askPendingOwnerQuestions(
     ).run(now, row.case_id, question.hash)
 
     db.prepare(
-      `INSERT INTO cos_owner_questions (case_id, domain, question_hash, question_text, asked_at)
-       VALUES (?, ?, ?, ?, ?)
+      `INSERT INTO cos_owner_questions
+         (case_id, domain, question_hash, question_text, asked_at, channel, channel_target)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (case_id, question_hash) DO UPDATE
          SET asked_at = excluded.asked_at, question_text = excluded.question_text,
-             answered_at = NULL, answer_text = NULL, superseded_at = NULL`,
-    ).run(row.case_id, row.domain, question.hash, question.text, now)
+             answered_at = NULL, answer_text = NULL, superseded_at = NULL,
+             channel = excluded.channel, channel_target = excluded.channel_target`,
+    ).run(row.case_id, row.domain, question.hash, question.text, now,
+          opts.channel?.channel ?? null, opts.channel?.target ?? null)
 
     createAgentMessage('cos-reader', 'marveen', question.text, 'cos-owner-question')
     appendDailyLog('marveen', `## COS kerdes Istvannak\n${question.text}`)
@@ -335,14 +348,30 @@ export interface RecordedAnswer {
  */
 export function recordOwnerAnswer(
   db: Database.Database,
-  input: { caseId: string; domain: string; text: string; now?: number },
+  input: { caseId: string; domain: string; text: string; now?: number; channel?: OwnerChannel },
 ): RecordedAnswer | null {
   const now = input.now ?? Math.floor(Date.now() / 1000)
-  const open = db.prepare(
-    `SELECT question_hash FROM cos_owner_questions
-     WHERE case_id = ? AND answered_at IS NULL AND superseded_at IS NULL
-     ORDER BY asked_at DESC LIMIT 1`,
-  ).get(input.caseId) as { question_hash: string } | undefined
+  // CHANNEL-AWARE MATCHING. When the answer names the channel it arrived on,
+  // only questions asked on that channel may absorb it. Without this the split
+  // would silently mis-attribute: an answer typed in the dev chat could close a
+  // question the CoS chat is still displaying, and the owner would see a
+  // question he had already answered somewhere else.
+  //
+  // A question with NO recorded channel (asked before the split) still matches
+  // anything -- it predates the distinction, and refusing it would strand every
+  // question asked today.
+  const open = input.channel
+    ? db.prepare(
+        `SELECT question_hash FROM cos_owner_questions
+         WHERE case_id = ? AND answered_at IS NULL AND superseded_at IS NULL
+           AND (channel IS NULL OR (channel = ? AND channel_target = ?))
+         ORDER BY asked_at DESC LIMIT 1`,
+      ).get(input.caseId, input.channel.channel, input.channel.target) as { question_hash: string } | undefined
+    : db.prepare(
+        `SELECT question_hash FROM cos_owner_questions
+         WHERE case_id = ? AND answered_at IS NULL AND superseded_at IS NULL
+         ORDER BY asked_at DESC LIMIT 1`,
+      ).get(input.caseId) as { question_hash: string } | undefined
   if (!open) return null
 
   const choice: 'YES' | 'NO' | null = YES.test(input.text) ? 'YES' : (NO.test(input.text) ? 'NO' : null)

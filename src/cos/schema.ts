@@ -1784,7 +1784,20 @@ export function initProgressionSchema(db: Database.Database): void {
       PRIMARY KEY (case_id, question_hash)
     )
   `)
-  ensureColumns(db, 'cos_owner_questions', { superseded_at: 'INTEGER' })
+  ensureColumns(db, 'cos_owner_questions', {
+    superseded_at: 'INTEGER',
+    // Istvan's decision (2026-08-11): the CoS gets its OWN Telegram bot and
+    // chat, and his answer there must reach the case. That only works if the
+    // question records WHERE it went out -- otherwise a reply arriving on one
+    // channel cannot be matched to a question asked on another, and the whole
+    // separation would cost him the answer path it exists to protect.
+    //
+    // Nullable on purpose: every question asked before the split has no channel,
+    // and a NULL here means "wherever the old single channel was". Backfilling a
+    // guess would invent provenance.
+    channel: 'TEXT',
+    channel_target: 'TEXT',
+  })
   db.exec(`CREATE INDEX IF NOT EXISTS idx_coq_open ON cos_owner_questions(answered_at, asked_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cep_conflict ON case_evidence_packets(conflict_reason, created_at)`)
 }
