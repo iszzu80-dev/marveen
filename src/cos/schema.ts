@@ -1776,9 +1776,15 @@ export function initProgressionSchema(db: Database.Database): void {
       asked_at       INTEGER NOT NULL,
       answered_at    INTEGER,
       answer_text    TEXT,
+      -- Set when a BETTER-WORDED question about the same case replaces this one.
+      -- Deliberately NOT answered_at: nobody answered it, and writing an answer
+      -- timestamp to close a row would make "answered" mean two different
+      -- things — the same lie SOURCE_COMMITTED told about labelling.
+      superseded_at  INTEGER,
       PRIMARY KEY (case_id, question_hash)
     )
   `)
+  ensureColumns(db, 'cos_owner_questions', { superseded_at: 'INTEGER' })
   db.exec(`CREATE INDEX IF NOT EXISTS idx_coq_open ON cos_owner_questions(answered_at, asked_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cep_conflict ON case_evidence_packets(conflict_reason, created_at)`)
 }

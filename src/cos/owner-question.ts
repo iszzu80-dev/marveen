@@ -126,7 +126,8 @@ export interface AskResult {
 function isOutstanding(db: Database.Database, caseId: string, hash: string): boolean {
   try {
     const row = db.prepare(
-      `SELECT 1 FROM cos_owner_questions WHERE case_id = ? AND question_hash = ? AND answered_at IS NULL`,
+      `SELECT 1 FROM cos_owner_questions
+       WHERE case_id = ? AND question_hash = ? AND answered_at IS NULL AND superseded_at IS NULL`,
     ).get(caseId, hash)
     return row !== undefined
   } catch {
@@ -134,6 +135,18 @@ function isOutstanding(db: Database.Database, caseId: string, hash: string): boo
     // the channel on a fresh install, which is the failure worth avoiding.
     return false
   }
+}
+
+/** Does this case already have a DIFFERENT open question? Then a new ask is a
+ *  replacement, not an addition. */
+function hasOtherOpenQuestion(db: Database.Database, caseId: string, hash: string): boolean {
+  try {
+    const row = db.prepare(
+      `SELECT 1 FROM cos_owner_questions
+       WHERE case_id = ? AND question_hash != ? AND answered_at IS NULL AND superseded_at IS NULL`,
+    ).get(caseId, hash)
+    return row !== undefined
+  } catch { return false }
 }
 
 /**
@@ -160,10 +173,13 @@ export function askPendingOwnerQuestions(
     asked: 0, alreadyAsked: 0, nothingToAsk: 0, heldBacklogFull: 0,
   }
 
+  // Questions that GREW the open pile this sweep. A superseding rewrite does
+  // not, so it must not consume a ceiling slot.
+  let netAdded = 0
   let outstanding = 0
   try {
     outstanding = (db.prepare(
-      `SELECT COUNT(*) AS n FROM cos_owner_questions WHERE answered_at IS NULL`,
+      `SELECT COUNT(*) AS n FROM cos_owner_questions WHERE answered_at IS NULL AND superseded_at IS NULL`,
     ).get() as { n: number }).n
   } catch { outstanding = 0 }
 
@@ -198,7 +214,13 @@ export function askPendingOwnerQuestions(
     })
     if (!question) { result.nothingToAsk++; continue }
     if (isOutstanding(db, row.case_id, question.hash)) { result.alreadyAsked++; continue }
-    if (outstanding + result.asked >= maxOutstanding) { result.heldBacklogFull++; continue }
+    // A REPLACEMENT is not an addition. When this case already has an open
+    // question, asking the reworded one supersedes it — the pile waiting on him
+    // does not grow, so the ceiling has nothing to protect against here.
+    // Counting it would let a full queue block the very rewrite that makes a bad
+    // question answerable, which is the opposite of what the ceiling is for.
+    const replacesOwn = hasOtherOpenQuestion(db, row.case_id, question.hash)
+    if (!replacesOwn && outstanding + netAdded >= maxOutstanding) { result.heldBacklogFull++; continue }
 
     // Record BEFORE sending. A crash between the two costs an unasked question,
     // which a later sweep re-derives; the other order costs a duplicate every
@@ -209,17 +231,35 @@ export function askPendingOwnerQuestions(
     // resets the ask and clears the previous answer here; the answer itself is
     // not lost, because it was appended to the case events when it arrived, and
     // that record is the append-only one.
+    // SUPERSEDE the case's other open questions first.
+    //
+    // The key is (case_id, question_hash), and the hash is of the ASK. So a
+    // REWORDED question about the same case does not collide — it opens a second
+    // row while the first stays unanswered. That happened on 2026-08-11: I
+    // improved the Valencia deposit question at 07:35, the vague 07:28 version
+    // ("Istvan döntése szükséges") stayed open, and the result was one case
+    // occupying two of the five ceiling slots and asking Istvan the same thing
+    // twice, once badly.
+    //
+    // One case can have at most one open question. The old row is marked
+    // superseded, not answered — see the column comment in schema.ts.
+    db.prepare(
+      `UPDATE cos_owner_questions SET superseded_at = ?
+        WHERE case_id = ? AND question_hash != ? AND answered_at IS NULL AND superseded_at IS NULL`,
+    ).run(now, row.case_id, question.hash)
+
     db.prepare(
       `INSERT INTO cos_owner_questions (case_id, domain, question_hash, question_text, asked_at)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (case_id, question_hash) DO UPDATE
          SET asked_at = excluded.asked_at, question_text = excluded.question_text,
-             answered_at = NULL, answer_text = NULL`,
+             answered_at = NULL, answer_text = NULL, superseded_at = NULL`,
     ).run(row.case_id, row.domain, question.hash, question.text, now)
 
     createAgentMessage('cos-reader', 'marveen', question.text, 'cos-owner-question')
     appendDailyLog('marveen', `## COS kerdes Istvannak\n${question.text}`)
     result.asked++
+    if (!replacesOwn) netAdded++
   }
   return result
 }
@@ -270,7 +310,8 @@ export function recordOwnerAnswer(
   const now = input.now ?? Math.floor(Date.now() / 1000)
   const open = db.prepare(
     `SELECT question_hash FROM cos_owner_questions
-     WHERE case_id = ? AND answered_at IS NULL ORDER BY asked_at DESC LIMIT 1`,
+     WHERE case_id = ? AND answered_at IS NULL AND superseded_at IS NULL
+     ORDER BY asked_at DESC LIMIT 1`,
   ).get(input.caseId) as { question_hash: string } | undefined
   if (!open) return null
 
@@ -307,7 +348,8 @@ export function outstandingOwnerQuestions(
   try {
     return db.prepare(
       `SELECT case_id AS caseId, domain, question_text AS text, asked_at AS askedAt
-       FROM cos_owner_questions WHERE answered_at IS NULL ORDER BY asked_at DESC LIMIT ?`,
+       FROM cos_owner_questions WHERE answered_at IS NULL AND superseded_at IS NULL
+       ORDER BY asked_at DESC LIMIT ?`,
     ).all(limit) as never
   } catch { return [] }
 }
