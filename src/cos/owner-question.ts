@@ -21,7 +21,7 @@
 import { createHash } from 'node:crypto'
 import type Database from 'better-sqlite3'
 import { createAgentMessage, appendDailyLog } from '../db.js'
-import type { ReaderEvidencePacket } from './reader.js'
+import { foldName, type ReaderEvidencePacket } from './reader.js'
 import type { EvidencePlan } from './evidence-planner.js'
 
 export interface OwnerQuestion {
@@ -38,7 +38,7 @@ export interface OwnerQuestion {
 /** Which steps are genuinely his to answer. */
 function ownerSteps(plan: EvidencePlan): string[] {
   return plan.steps
-    .filter(s => s.kind === 'ASK_OWNER' || (s.blockedBy ?? '').toUpperCase() === 'ISTVAN')
+    .filter(s => s.kind === 'ASK_OWNER' || foldName(s.blockedBy) === 'ISTVAN')
     .map(s => s.label)
 }
 
@@ -57,7 +57,11 @@ export function buildOwnerQuestion(
   if (steps.length === 0 && !ballIsHis) return null
 
   const missingFromHim = input.packet.missingRequirements
-    .filter(m => m.whoHasIt.toUpperCase().includes('ISTVAN'))
+    // FOLDED (review #6, H-3). `whoHasIt` is free text written by a model that
+    // was asked to answer in Hungarian, so "István" arrives with the accent
+    // roughly as often as without — and an ASCII comparison silently sorted the
+    // same case into a different question each time.
+    .filter(m => foldName(m.whoHasIt).includes('ISTVAN'))
   const lines: string[] = []
   lines.push(`❓ ${input.title}`)
   lines.push('')
@@ -230,10 +234,11 @@ export function askPendingOwnerQuestions(
     ).get() as { n: number }).n
   } catch { outstanding = 0 }
 
-  let rows: Array<{ case_id: string; domain: string; packet_json: string; plan_json: string; packet_at: number }> = []
+  let rows: Array<{ case_id: string; domain: string; packet_json: string; plan_json: string; packet_at: number; progression_run_id: string | null }> = []
   try {
     rows = db.prepare(
-      `SELECT p.case_id, p.domain, p.packet_json, p.plan_json, p.created_at AS packet_at
+      `SELECT p.case_id, p.domain, p.packet_json, p.plan_json, p.created_at AS packet_at,
+              p.progression_run_id
        FROM case_evidence_packets p
        JOIN (
          SELECT case_id, MAX(created_at) AS created_at
@@ -290,7 +295,22 @@ export function askPendingOwnerQuestions(
       caseId: row.case_id, domain: row.domain, title, packet, plan,
     })
     if (!question) { result.nothingToAsk++; continue }
-    if (isHandled(db, row.case_id, row.domain, question.hash)) { result.alreadyAsked++; continue }
+    if (isHandled(db, row.case_id, row.domain, question.hash)) {
+      // SUPPRESSED, BUT KEEP THE RUN CURRENT. The ask is unchanged, so it must
+      // not go out twice -- but the case has been read again since, in a NEWER
+      // run. If the row kept pointing at the first one, the eventual answer
+      // would name a run whose decision no longer matches the current one, and
+      // consumeOwnerAnswer would call the answer stale and drop it. That is the
+      // same H-2 loop coming back through a different door: the question the
+      // owner is looking at RIGHT NOW is the one his answer has to attach to.
+      if (row.progression_run_id) {
+        db.prepare(
+          `UPDATE cos_owner_questions SET progression_run_id = ?
+            WHERE case_id = ? AND question_hash = ? AND answered_at IS NULL AND superseded_at IS NULL`,
+        ).run(row.progression_run_id, row.case_id, question.hash)
+      }
+      result.alreadyAsked++; continue
+    }
     // A REPLACEMENT is not an addition. When this case already has an open
     // question, asking the reworded one supersedes it — the pile waiting on him
     // does not grow, so the ceiling has nothing to protect against here.
@@ -325,16 +345,23 @@ export function askPendingOwnerQuestions(
         WHERE case_id = ? AND question_hash != ? AND answered_at IS NULL AND superseded_at IS NULL`,
     ).run(now, row.case_id, question.hash)
 
+    // THE RUN ID TRAVELS WITH THE QUESTION. Without it the answer cannot name
+    // what it is answering, and the engine drops it (review #6, H-2) -- so the
+    // owner's reply closes the question and moves nothing, and the next sweep
+    // asks him the same thing again.
     db.prepare(
       `INSERT INTO cos_owner_questions
-         (case_id, domain, question_hash, question_text, asked_at, channel, channel_target)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+         (case_id, domain, question_hash, question_text, asked_at, channel, channel_target,
+          progression_run_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (case_id, question_hash) DO UPDATE
          SET asked_at = excluded.asked_at, question_text = excluded.question_text,
              answered_at = NULL, answer_text = NULL, superseded_at = NULL,
-             channel = excluded.channel, channel_target = excluded.channel_target`,
+             channel = excluded.channel, channel_target = excluded.channel_target,
+             progression_run_id = excluded.progression_run_id`,
     ).run(row.case_id, row.domain, question.hash, question.text, now,
-          opts.channel?.channel ?? null, opts.channel?.target ?? null)
+          opts.channel?.channel ?? null, opts.channel?.target ?? null,
+          row.progression_run_id ?? null)
 
     createAgentMessage('cos-reader', 'marveen', question.text, 'cos-owner-question')
     appendDailyLog('marveen', `## COS kerdes Istvannak\n${question.text}`)
@@ -412,17 +439,19 @@ export function recordOwnerAnswer(
   // question asked today.
   const open = input.channel
     ? db.prepare(
-        `SELECT question_hash FROM cos_owner_questions
+        `SELECT question_hash, progression_run_id FROM cos_owner_questions
          WHERE case_id = ? AND answered_at IS NULL AND superseded_at IS NULL
            AND (channel IS NULL OR channel = ?)
            AND asked_at <= ?
          ORDER BY asked_at DESC LIMIT 1`,
-      ).get(input.caseId, input.channel.channel, now) as { question_hash: string } | undefined
+      ).get(input.caseId, input.channel.channel, now) as
+        { question_hash: string; progression_run_id: string | null } | undefined
     : db.prepare(
-        `SELECT question_hash FROM cos_owner_questions
+        `SELECT question_hash, progression_run_id FROM cos_owner_questions
          WHERE case_id = ? AND answered_at IS NULL AND superseded_at IS NULL
          ORDER BY asked_at DESC LIMIT 1`,
-      ).get(input.caseId) as { question_hash: string } | undefined
+      ).get(input.caseId) as
+        { question_hash: string; progression_run_id: string | null } | undefined
   if (!open) return null
 
   const choice: 'YES' | 'NO' | null = YES.test(input.text) ? 'YES' : (NO.test(input.text) ? 'NO' : null)
@@ -438,13 +467,23 @@ export function recordOwnerAnswer(
     { version: number } | undefined
   if (row) {
     const events = input.domain === 'zst' ? 'zst_case_events' : 'personal_case_events'
+    // source_reference NAMES THE RUN THE QUESTION CAME FROM. consumeOwnerAnswer
+    // refuses an answer without it -- it cannot verify WHICH question was
+    // answered, so it treats the event as stale and returns null. Until this
+    // line existed, every answer arriving from Telegram was written and then
+    // silently discarded by its own consumer, and the loop closed: answer ->
+    // question released -> case unchanged -> same packet -> same question sent
+    // again (review #6, H-2, reproduced: two identical messages after
+    // answering).
     db.prepare(
-      `INSERT INTO ${events} (case_id, case_version, actor, event_type, reason, payload, source_system, created_at)
-       VALUES (?, ?, 'istvan', ?, ?, ?, 'telegram', ?)`,
+      `INSERT INTO ${events} (case_id, case_version, actor, event_type, reason, payload,
+                              source_system, source_reference, created_at)
+       VALUES (?, ?, 'istvan', ?, ?, ?, 'telegram', ?, ?)`,
     ).run(
       input.caseId, row.version, eventType,
       input.text.slice(0, 500),
       JSON.stringify({ choice, answer: input.text, question_hash: open.question_hash }),
+      open.progression_run_id ?? null,
       now,
     )
   }

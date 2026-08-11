@@ -19,7 +19,7 @@ import {
   buildOwnerQuestion, askPendingOwnerQuestions, recordOwnerAnswer, outstandingOwnerQuestions,
 } from '../cos/owner-question.js'
 import { planFromEvidence } from '../cos/evidence-planner.js'
-import type { ReaderEvidencePacket } from '../cos/reader.js'
+import { validateEvidencePacket, type ReaderEvidencePacket } from '../cos/reader.js'
 
 const T0 = 1_700_000_000
 
@@ -272,5 +272,153 @@ describe('the channel has a global cap, not just a rate', () => {
     askPendingOwnerQuestions(getDb(), { limit: 10, now: T0 + 1, maxOutstanding: 1 })
     recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'Igen', now: T0 + 2 })
     expect(askPendingOwnerQuestions(getDb(), { limit: 10, now: T0 + 3, maxOutstanding: 1 }).asked).toBe(1)
+  })
+})
+
+// H-2 (review #6): the answer was written in a shape its own consumer discards.
+//
+// `consumeOwnerAnswer` refuses any owner event without a `source_reference`
+// naming the progression run — without it there is no way to tell WHICH question
+// was answered. The answer event was written without one. So every answer that
+// arrived from Telegram was recorded, released the question, and was then
+// dropped by the engine: the case did not move, the next Reader sweep produced
+// the same packet, and the same question went out again. The review reproduced
+// it: two identical messages, after answering.
+//
+// These tests pin the carrier — the run id travelling from question to answer —
+// because that is the part that was missing, not the intent.
+describe('H-2: the answer names the run it answers', () => {
+  const RUN = 'run-abc-123'
+  beforeEach(() => {
+    initDatabase(':memory:')
+    initProgressionSchema(getDb())
+    createCase(getDb(), { caseId: 'c1', title: 'ZST uzletresz-adasvetel', caseType: 'ADMIN' }, T0)
+  })
+
+  const storePacketWithRun = (runId: string | null): void => {
+    const p = packet()
+    const plan = planFromEvidence(p)
+    getDb().prepare(
+      `INSERT INTO case_evidence_packets
+         (packet_id, domain, case_id, progression_run_id, created_at, packet_json, plan_json,
+          confidence, policy_result)
+       VALUES (?, 'personal', 'c1', ?, ?, ?, ?, ?, 'WAIT_EXTERNAL')`,
+    ).run(`pk-${runId ?? 'none'}`, runId, T0, JSON.stringify(p), JSON.stringify(plan), p.confidence)
+  }
+
+  it('the question stores the run, and the answer event carries it as source_reference', () => {
+    storePacketWithRun(RUN)
+    expect(askPendingOwnerQuestions(getDb(), { now: T0 + 1 }).asked).toBe(1)
+    expect((getDb().prepare(
+      `SELECT progression_run_id AS r FROM cos_owner_questions WHERE case_id = 'c1'`,
+    ).get() as { r: string }).r).toBe(RUN)
+
+    const rec = recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'igen', now: T0 + 2 })
+    expect(rec).not.toBeNull()
+    const ev = getDb().prepare(
+      `SELECT source_reference AS ref, event_type AS t FROM personal_case_events
+       WHERE case_id = 'c1' AND event_type IN ('OWNER_DECISION','OWNER_INFORMATION')
+       ORDER BY created_at DESC LIMIT 1`,
+    ).get() as { ref: string | null; t: string }
+    // THE ASSERTION THE OLD CODE FAILED. Everything else about the answer path
+    // worked; this one NULL is what made it a no-op.
+    expect(ev.ref).toBe(RUN)
+    expect(ev.t).toBe('OWNER_DECISION')
+  })
+
+  it('a question asked before this column existed still takes an answer', () => {
+    // Fail-safe direction: a legacy row has no run to name. Losing the sentence
+    // would be worse than an answer the engine cannot attribute, and the engine
+    // already handles the missing reference by treating it as stale.
+    storePacketWithRun(null)
+    expect(askPendingOwnerQuestions(getDb(), { now: T0 + 1 }).asked).toBe(1)
+    const rec = recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'nem', now: T0 + 2 })
+    expect(rec?.choice).toBe('NO')
+    expect((getDb().prepare(
+      `SELECT source_reference AS ref FROM personal_case_events
+       WHERE case_id = 'c1' AND event_type = 'OWNER_DECISION' ORDER BY created_at DESC LIMIT 1`,
+    ).get() as { ref: string | null }).ref).toBeNull()
+  })
+
+  it('an UNCHANGED question follows the newest run without asking twice', () => {
+    // The case gets read again every sweep. When the ask is identical the
+    // question must NOT go out a second time -- but the stored run must move,
+    // or the answer would name a run the engine no longer recognises as current
+    // and would be dropped as stale. Same H-2 loop, different door.
+    storePacketWithRun(RUN)
+    expect(askPendingOwnerQuestions(getDb(), { now: T0 + 1 }).asked).toBe(1)
+    getDb().prepare(`DELETE FROM case_evidence_packets WHERE case_id = 'c1'`).run()
+    storePacketWithRun('run-second')
+    const second = askPendingOwnerQuestions(getDb(), { now: T0 + 2 })
+    expect(second.asked).toBe(0)
+    expect(second.alreadyAsked).toBe(1)
+
+    const rows = getDb().prepare(
+      `SELECT progression_run_id AS r FROM cos_owner_questions
+       WHERE case_id = 'c1' AND answered_at IS NULL AND superseded_at IS NULL`,
+    ).all() as Array<{ r: string }>
+    expect(rows.map(x => x.r)).toEqual(['run-second'])
+
+    recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'igen', now: T0 + 3 })
+    expect((getDb().prepare(
+      `SELECT source_reference AS ref FROM personal_case_events
+       WHERE case_id = 'c1' AND event_type = 'OWNER_DECISION' ORDER BY created_at DESC LIMIT 1`,
+    ).get() as { ref: string }).ref).toBe('run-second')
+  })
+})
+
+// H-3 (review #6): "István" with the accent was not `ISTVAN`.
+//
+// The Reader prompt asks for Hungarian and `whoHasIt` is free text, so the
+// accent arrives roughly as often as it does not. The comparisons were plain
+// ASCII uppercase. On the SAME case, purely by that accent, Istvan got a
+// specific question, a generic one, or nothing at all. Either behaviour could
+// be argued; alternating between them at random cannot.
+describe('H-3: the accent must not decide what he is asked', () => {
+  beforeEach(() => {
+    initDatabase(':memory:')
+    initProgressionSchema(getDb())
+    createCase(getDb(), { caseId: 'c1', title: 'ZST uzletresz-adasvetel', caseType: 'ADMIN' }, T0)
+  })
+
+  const build = (who: string) => buildOwnerQuestion({
+    caseId: 'c1', domain: 'personal', title: 'ZST uzletresz-adasvetel',
+    packet: packet({ missingRequirements: [{ what: 'A vetelar megallapodasa', whoHasIt: who, why: 'a szerzodeshez kell' }] }),
+    plan: planFromEvidence(packet({ missingRequirements: [{ what: 'A vetelar megallapodasa', whoHasIt: who, why: 'a szerzodeshez kell' }] })),
+  })
+
+  it('accented and unaccented produce the SAME question', () => {
+    const plain = build('ISTVAN')
+    const accented = build('István')
+    expect(plain).not.toBeNull()
+    expect(accented).not.toBeNull()
+    // Same ask -> same hash. The hash is what suppresses re-asking, so if the
+    // spellings hashed differently the owner would get both versions.
+    expect(accented!.hash).toBe(plain!.hash)
+    expect(accented!.text).toContain('A vetelar megallapodasa')
+  })
+
+  it('an accented ballHolder no longer throws the whole reading away', () => {
+    // Fail-closed was not the problem: the packet was REJECTED entirely, so one
+    // accent discarded a complete reading of the case.
+    const ctx = { caseId: 'c1', domain: 'personal' as const, caseVersion: 1, items: [], excluded: [], unavailable: [] }
+    const raw = {
+      readSources: [], unreadableSources: [], facts: [], missingRequirements: [],
+      ballHolder: 'István', candidateDecision: 'REQUEST_DECISION', confidence: 0.5, uncertainty: [],
+    }
+    const res = validateEvidencePacket(raw, ctx)
+    expect(res.ok).toBe(true)
+    // Stored folded, so every downstream comparison sees one spelling.
+    expect(res.ok && res.packet.ballHolder).toBe('ISTVAN')
+  })
+
+  it('the fold does not widen the enum', () => {
+    const ctx = { caseId: 'c1', domain: 'personal' as const, caseVersion: 1, items: [], excluded: [], unavailable: [] }
+    const raw = {
+      readSources: [], unreadableSources: [], facts: [], missingRequirements: [],
+      ballHolder: 'Istvan Szabo', candidateDecision: 'REQUEST_DECISION', confidence: 0.5, uncertainty: [],
+    }
+    const res = validateEvidencePacket(raw, ctx)
+    expect(res.ok).toBe(false)
   })
 })

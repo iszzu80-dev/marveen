@@ -1797,6 +1797,19 @@ export function initProgressionSchema(db: Database.Database): void {
     // guess would invent provenance.
     channel: 'TEXT',
     channel_target: 'TEXT',
+    // WHICH PROGRESSION RUN the question came out of (review #6, H-2).
+    //
+    // The answer path writes a case event, and its consumer
+    // (consumeOwnerAnswer) refuses any answer without a source_reference naming
+    // the run -- it cannot verify question identity otherwise. The answer event
+    // was written without one, so every Telegram answer was DROPPED by the
+    // engine: the question closed, the case did not move, the next Reader sweep
+    // produced the same packet and asked the same question again. Measured: two
+    // identical messages, after answering.
+    //
+    // Nullable for the same reason as `channel`: rows asked before this column
+    // existed have no run to name, and inventing one would fabricate provenance.
+    progression_run_id: 'TEXT',
   })
   db.exec(`CREATE INDEX IF NOT EXISTS idx_coq_open ON cos_owner_questions(answered_at, asked_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cep_conflict ON case_evidence_packets(conflict_reason, created_at)`)
