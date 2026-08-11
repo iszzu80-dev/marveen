@@ -169,14 +169,39 @@ export function deriveDisplayState(input: DeriveDisplayStateInput): ApgDisplaySt
   ) {
     return 'accepted'
   }
+  // F-8 (APG 0.4 review): the kernel renamed NOT_APPLICABLE to EXCLUDED and
+  // added ERROR (kernel b2dafc5, src/checkpoints.py RESULT_VALUES), and this
+  // projection still matched the old name. An EXCLUDED gate (not applicable to
+  // this profile) and an ERROR gate (the executor returned nothing valid) both
+  // fell through to `executing` — so on screen, a gate that never ran and a
+  // gate that crashed looked like work in progress.
+  //
+  // NOT_APPLICABLE stays in the list because old rows carry it: the kernel's
+  // migration puts no CHECK on `result`, so history is not rewritten by a
+  // rename.
   if (
     input.latestCheckpointResult === 'UNKNOWN'
     || input.latestCheckpointResult === 'NOT_APPLICABLE'
+    || input.latestCheckpointResult === 'EXCLUDED'
   ) {
     return 'clarification'
   }
+  // An executor that failed is not a process that is running. Surfacing it as
+  // blocked is what gets it looked at.
+  if (input.latestCheckpointResult === 'ERROR') return 'blocked'
   return 'executing'
 }
+
+/**
+ * The kernel's checkpoint result vocabulary, mirrored here (F-8).
+ *
+ * Two repos, one contract. This list is the UI half; the contract test asserts
+ * it against the kernel's own RESULT_VALUES so a future rename fails a test
+ * instead of silently turning one state into another on screen.
+ */
+export const APG_CHECKPOINT_RESULTS = [
+  'PASS', 'FAIL', 'UNKNOWN', 'ERROR', 'EXCLUDED',
+] as const
 
 export function resolveApgKernelDbPath(): string {
   const configured = process.env.APG_KERNEL_DB_PATH
@@ -225,10 +250,37 @@ function errorSummary(nowIso: string, mode: ApgMode, error: unknown): ApgUiSumma
   }
 }
 
+/**
+ * Read errors that were swallowed, most recent first (F-9, APG 0.4 review).
+ *
+ * Module-scoped and cleared at the start of each projection build. A projection
+ * is built inside one synchronous call, so there is no interleaving to confuse
+ * this — but a caller that forgets to clear would only ever see MORE errors,
+ * never fewer, which is the safe direction for a defect channel.
+ */
+let projectionReadErrors: string[] = []
+
+export function beginProjectionErrorCapture(): void { projectionReadErrors = [] }
+export function capturedProjectionErrors(): string[] { return [...projectionReadErrors] }
+
+/**
+ * A table read that survives a missing/corrupt table — and SAYS SO.
+ *
+ * F-9: this used to swallow every read error into an empty array. If
+ * `assisted_recommendations` became unreadable, every work item silently lost
+ * its recommendation, the display state flipped, and the response still came
+ * back `enabled: true` with no `projection_error` — the exact shape §6.4 and
+ * §8.3 forbid. An empty table and an unreadable table are different facts and
+ * must not produce the same answer.
+ */
 function rowsOrEmpty<T>(db: Database.Database, sql: string): T[] {
   try {
     return db.prepare(sql).all() as T[]
-  } catch {
+  } catch (err) {
+    // The first line of the statement is enough to name the table without
+    // dumping a whole query into an API response.
+    const what = sql.trim().split('\n').slice(0, 3).join(' ').replace(/\s+/g, ' ').slice(0, 120)
+    projectionReadErrors.push(`${(err as Error)?.message ?? String(err)} [${what}]`)
     return []
   }
 }
@@ -284,6 +336,9 @@ function loadCanonicalRows(db: Database.Database): CanonicalRow[] {
 }
 
 function loadProjectionData(db: Database.Database, includeEvidence: boolean): ProjectionData {
+  // Fresh slate per build, so `capturedProjectionErrors()` describes THIS
+  // projection and not a previous request's.
+  beginProjectionErrorCapture()
   return {
     canonical: loadCanonicalRows(db),
     recommendations: rowsOrEmpty<RecommendationRow>(db, `
@@ -651,7 +706,10 @@ function summaryFor(
     accepter_agent: null,
     gate_progress: {
       passed: latestGates.filter((checkpoint) => checkpoint.result === 'PASS').length,
-      total: latestGates.length,
+      // F-8: EXCLUDED gates are not applicable to this profile, so counting
+      // them in the denominator makes progress read lower than it is —
+      // "3 of 8" when three of those eight were never going to run.
+      total: latestGates.filter((checkpoint) => checkpoint.result !== 'EXCLUDED').length,
       blocking_gate: blockingGate,
     },
     claim_counts: {
@@ -755,6 +813,10 @@ export function buildApgUiSummary(nowIso: string, mode: ApgMode): ApgUiSummary {
         deep_link: `/apg/work-items/${encodeURIComponent(candidate.id)}`,
       }))
 
+    // F-9: a table that could not be read is reported, not smoothed over. The
+    // summary still renders (partial data beats a blank page), but the caller
+    // can tell "no rows" from "could not read the rows".
+    const readErrors = capturedProjectionErrors()
     return {
       mode,
       enabled: true,
@@ -762,6 +824,9 @@ export function buildApgUiSummary(nowIso: string, mode: ApgMode): ApgUiSummary {
       projection_version: 1,
       counts,
       attention_items: attentionItems,
+      ...(readErrors.length > 0
+        ? { projection_error: `partial projection: ${readErrors.length} table(s) unreadable — ${readErrors[0]}` }
+        : {}),
     }
   } catch (error) {
     return errorSummary(nowIso, mode, error)
@@ -913,20 +978,17 @@ export function buildApgEvents(
   limit: number,
   offset: number,
 ): ApgEventsResult | { error: string } {
-  const dbPath = resolveApgKernelDbPath()
-  let db: Database.Database
-  try {
-    /* eslint-disable-next-line @typescript-eslint/no-var-requires */
-    const BetterSqlite3 = (globalThis as Record<string, unknown>).BetterSqlite3 as
-      | (new (path: string, opts?: Record<string, unknown>) => Database.Database)
-      | undefined
-    if (!BetterSqlite3) {
-      return { error: 'BetterSqlite3 binding not available' }
-    }
-    db = new BetterSqlite3(dbPath, { readonly: true, fileMustExist: true })
-  } catch {
-    return { error: 'APG sidecar not available' }
-  }
+  // F-3 (APG 0.4 review): this waited on a `globalThis.BetterSqlite3` that
+  // NOTHING in the repo ever sets — not the app, not the tests. So §13's
+  // Activity feed answered `{events: [], error: 'BetterSqlite3 binding not
+  // available'}` on every production call, while the card-level event list
+  // worked because it goes through buildApgWorkItemDetail. An empty feed with
+  // an error string nobody surfaces reads as "no activity".
+  //
+  // The module already imports the driver and already has the read-only opener
+  // the rest of the file uses; this now uses it.
+  const db = openApgKernelReadonly()
+  if (!db) return { error: 'APG sidecar not available' }
 
   try {
     const rows = rowsOrEmpty<TransitionRow>(db, `

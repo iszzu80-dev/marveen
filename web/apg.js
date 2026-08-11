@@ -1074,7 +1074,24 @@ window.Apg = window.Apg || {}
           `/api/apg/work-items?kanban_card_id=${encodeURIComponent(cardId)}&limit=1`
         )
         items = Array.isArray(result.items) ? result.items : []
-      } catch { return /* fail-open */ }
+      } catch {
+        // F-10 (APG 0.4 review): the ONLY genuinely blocking gate used to
+        // fail-OPEN here — including in enforced mode. The sidecar going down
+        // is exactly when the gate must hold: §3 says enforced is fail-closed,
+        // and an archive is not reversible from this dialog.
+        //
+        // observe/assisted keep the old behaviour: those modes are advisory by
+        // definition, and blocking on them would turn an outage into a work
+        // stoppage. Only enforced holds the line.
+        if (state.mode !== 'enforced') return
+        event.preventDefault()
+        window.alert(
+          t('apg.archive_blocked_unavailable')
+          || 'Az APG sidecar nem elérhető, és a mód "enforced". Az archiválás ilyenkor nem engedélyezett — '
+          + 'az elfogadatlan munka archiválása nem visszafordítható. Állítsd a módot vagy javítsd a sidecart.'
+        )
+        return
+      }
       const unaccepted = items.find(
         (item) =>
           item.effective_mode !== 'off'
