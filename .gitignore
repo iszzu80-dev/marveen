@@ -96,3 +96,11 @@ store/.github-classic-token
 # Claude Code Channels runtime config/session dir (sessions, history, tokens,
 # plugins, skills). Per-install runtime state -- never source, never commit.
 .channels-config/
+
+# Deploy-elotti dist mentesek. A `dist/` mar ki volt zarva, a `dist.bak-*` nem:
+# tizenket konyvtar, 7615 forditott fajl es 1,35 millio sor kerult be veluk egy
+# commitban (c7c779b) -- eppen a jogositas-jegye, a repo legbiztonsagkritikusabb
+# valtoztatasa, aminek a diffje emiatt atolvashatatlan lett. Egy review, ami ezt
+# nezi, nem tud kulonbseget tenni "megneztem" es "vegiggorgettem" kozott.
+# (review #3, U-2). A fajlok a lemezen maradnak, csak nincsenek kovetve.
+dist.bak-*/

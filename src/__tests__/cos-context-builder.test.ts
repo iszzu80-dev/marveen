@@ -88,6 +88,41 @@ describe('§10.1 Context Builder', () => {
     expect(ctx.unavailable.every(u => u.reason.length > 0)).toBe(true)
   })
 
+  it('a document reference is ATOMIC — the origin does not travel inside it', () => {
+    // Live PRI-HOME-2026-002, 2026-08-11: the ref was `doc-1 (chatgpt-cos-drive)`,
+    // the Reader cited `doc-1` — correct — and the exact-match provenance check
+    // refused the whole packet. The check is right; the format was wrong.
+    doc({ document_id: 'doc-1', source_ref: 'chatgpt-cos-drive' })
+    const ctx = buildCaseContext(getDb(), 'personal', 'c1', T0 + 1)
+    const item = ctx.items.find(i => i.kind === 'EMAIL_THREAD')!
+    expect(item.provenance.reference).toBe('doc-1')
+    expect(item.provenance.reference).not.toMatch(/[ ()]/)
+    expect(item.provenance.sourceRef).toBe('chatgpt-cos-drive')
+  })
+
+  it('a long item is cut, and the cut says so IN the content', () => {
+    // Live 2026-08-11: the item COUNT was never the binding constraint — the
+    // length of one email thread was. The Reader spent its whole output budget
+    // reasoning over it and never wrote the packet. The marker is in the content
+    // itself because that is the only place the model can see it.
+    doc({ extracted_text: 'x'.repeat(9000) })
+    const ctx = buildCaseContext(getDb(), 'personal', 'c1', T0 + 1, { maxCharsPerItem: 1000 })
+    const item = ctx.items.find(i => i.kind === 'EMAIL_THREAD')!
+    expect(item.content.length).toBeLessThan(1200)
+    expect(item.content).toContain('LEVÁGVA')
+    expect(item.content).toContain('CSONKA')
+  })
+
+  it('an item under the ceiling is untouched', () => {
+    // The counter-case: a builder that marks everything as truncated teaches the
+    // Reader to ignore the marker.
+    doc({ extracted_text: 'rovid szoveg' })
+    const ctx = buildCaseContext(getDb(), 'personal', 'c1', T0 + 1, { maxCharsPerItem: 1000 })
+    const item = ctx.items.find(i => i.kind === 'EMAIL_THREAD')!
+    expect(item.content).toContain('rovid szoveg')
+    expect(item.content).not.toContain('LEVÁGVA')
+  })
+
   it('truncation is visible', () => {
     // distinct sha256 too: the store dedups on content, which is correct and
     // would otherwise collapse these eight into one.

@@ -57,6 +57,13 @@ export interface LlmClientOptions {
   baseURL?: string
   /** Model id. Must match the provider the baseURL points at. */
   model?: string
+  /** Output ceiling. Per client, because the ceiling belongs to the CALL, not to
+   *  the provider: goal enrichment returns three short fields, the §10.2 Reader
+   *  returns a whole evidence packet and reasons at length first. One shared
+   *  number means the larger job silently truncates. Measured 2026-08-11: at
+   *  2048 the Reader spent the entire budget inside a thinking block and never
+   *  emitted text. */
+  maxTokens?: number
 }
 
 /** Anthropic-protocol LLM client implementing the LlmClient interface.
@@ -72,12 +79,14 @@ export class AnthropicLlmClient implements LlmClient {
   private readonly apiKey: string | undefined
   private readonly baseURL: string | undefined
   readonly model: string
+  readonly maxTokens: number
 
   constructor(apiKeyOrOpts?: string | LlmClientOptions) {
     const o: LlmClientOptions = typeof apiKeyOrOpts === 'string' ? { apiKey: apiKeyOrOpts } : (apiKeyOrOpts ?? {})
     this.apiKey = o.apiKey
     this.baseURL = o.baseURL
     this.model = o.model ?? DEFAULT_INTERPRETER_MODEL
+    this.maxTokens = o.maxTokens ?? 2048
   }
 
   private async getClient(): Promise<any> {
@@ -100,23 +109,29 @@ export class AnthropicLlmClient implements LlmClient {
       // run returned a correct title and summary and then hit the ceiling
       // mid-sentence, so the JSON had no closing brace and the parser reported
       // "no JSON object found" -- a truncation wearing a malformed-reply mask.
-      max_tokens: 2048,
+      max_tokens: this.maxTokens,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMessage }],
     })
+    // TRUNCATION IS CHECKED FIRST, before looking for a text block.
+    //
+    // The old order looked for text and only reported truncation if it found
+    // some. A reasoning model that spends the whole ceiling inside a thinking
+    // block emits NO text at all, so the truncation fell through to "Unexpected
+    // response -- no text block found. Content types: thinking", which reads as
+    // a protocol incompatibility and sends the next person to the wrong fix.
+    // Live 2026-08-11, all three §10.2 Reader calls, at max_tokens 2048.
+    if (resp.stop_reason === 'max_tokens') {
+      const partial = resp.content.find((b: any) => b.type === 'text')
+      throw new Error(
+        `LLM reply truncated at max_tokens (${this.maxTokens}, ${this.model}). `
+        + `Raise maxTokens or shorten the input. Blocks: ${resp.content.map((b: any) => b.type).join(', ') || 'none'}. `
+        + `Partial: ${partial ? String(partial.text).slice(0, 160) : '(no text emitted)'}`)
+    }
     // Handle extended-thinking responses: find the first text block.
     // Some model configurations return 'thinking' blocks before 'text'.
     for (const block of resp.content) {
-      if (block.type === 'text') {
-        // A reply cut off at the token ceiling is not a malformed reply, and the
-        // two need different fixes. Say which one happened.
-        if (resp.stop_reason === 'max_tokens') {
-          throw new Error(
-            `LLM reply truncated at max_tokens (${this.model}). Raise max_tokens or shorten the input. `
-            + `Partial: ${String(block.text).slice(0, 160)}`)
-        }
-        return block.text
-      }
+      if (block.type === 'text') return block.text
     }
     throw new Error(`Unexpected response — no text block found. Content types: ${resp.content.map((b: any) => b.type).join(', ')}`)
   }

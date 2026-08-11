@@ -76,9 +76,24 @@ for (const s of STEPS) {
   // {failed:true, error:"..."} and returns 0, because a missing key is not a
   // crash. Reading only the exit code would file that under "cycle fine" — the
   // dead-monitor-reports-green shape. So the payload is inspected too.
-  const p = parsed as { failed?: boolean; error?: string } | null
-  if (p && p.failed === true) {
-    problems.push(`${s.name}: ${p.error ?? 'reported failed:true'}`)
+  //
+  // NESTED payloads are inspected too, one level down. The heartbeat runner
+  // reports its subsystems under their own keys (`reader: {...}`) so that two
+  // subsystems' counters cannot overwrite each other in this merge — and a
+  // top-level-only check would then have walked straight past
+  // `reader: {failed: true}`. The nesting that fixed one silent failure would
+  // have created another one directly below it.
+  const p = parsed as Record<string, unknown> | null
+  if (p) {
+    const failedIn = (o: unknown): { failed?: boolean; error?: string } | null =>
+      (o && typeof o === 'object' && (o as { failed?: unknown }).failed === true)
+        ? (o as { failed?: boolean; error?: string }) : null
+    const self = failedIn(p)
+    if (self) problems.push(`${s.name}: ${self.error ?? 'reported failed:true'}`)
+    for (const [key, value] of Object.entries(p)) {
+      const nested = failedIn(value)
+      if (nested) problems.push(`${s.name}/${key}: ${nested.error ?? 'reported failed:true'}`)
+    }
   }
 }
 

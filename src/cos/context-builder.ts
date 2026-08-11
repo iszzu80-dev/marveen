@@ -36,13 +36,22 @@ export type TrustClass =
 export interface Provenance {
   /** Which subsystem produced it: 'case-store', 'case-events', 'documents'. */
   source: string
-  /** The identifier that lets a human find the original. */
+  /** The identifier that lets a human find the original — and the exact string
+   *  the Reader must cite. ATOMIC on purpose: no spaces, no parenthetical
+   *  suffix. It is compared by exact match in validateEvidencePacket, so any
+   *  decoration inside it becomes something a correct citation can get wrong. */
   reference: string
+  /** Where the item came from originally (a connector name, a Drive folder).
+   *  Kept OUT of `reference` so it cannot corrupt a citation. */
+  sourceRef?: string
   retrievedAt: number
 }
 
 export interface ContextItem {
-  kind: 'CASE' | 'CASE_EVENT' | 'EMAIL_THREAD' | 'DOCUMENT'
+  /** CASE = the fields this system writes. CASE_INTAKE = title/description,
+   *  which for an email-born case are the SENDER's words and are therefore
+   *  carried separately and untrusted (§10.3, review #3 Ú-1). */
+  kind: 'CASE' | 'CASE_INTAKE' | 'CASE_EVENT' | 'EMAIL_THREAD' | 'DOCUMENT'
   provenance: Provenance
   trust: TrustClass
   sensitivity: string
@@ -83,9 +92,16 @@ const SOURCES_NOT_WIRED = [
  */
 export function buildCaseContext(
   db: Database.Database, domain: 'personal' | 'zst', caseId: string, now: number,
-  opts: { maxItems?: number } = {},
+  opts: { maxItems?: number; maxCharsPerItem?: number } = {},
 ): CaseContext {
   const maxItems = opts.maxItems ?? 40
+  // A per-item ceiling as well as an item count. Live 2026-08-11: a case with 13
+  // items handed the Reader whole email threads, the model reasoned over all of
+  // it and hit its output ceiling before writing a single character of the
+  // packet. The item count was never the binding constraint — the length of one
+  // thread was. Cut visibly, per the note above: a silently shortened thread is
+  // how a Reader concludes there is no mention of the deposit.
+  const maxChars = opts.maxCharsPerItem ?? 4000
   const caseTable = domain === 'zst' ? 'zst_cases' : 'personal_cases'
   const eventTable = domain === 'zst' ? 'zst_case_events' : 'personal_case_events'
   const namespace = domain === 'zst' ? 'zst' : 'personal'
@@ -105,21 +121,52 @@ export function buildCaseContext(
 
   const sensitivity = String(c.sensitivity ?? 'UNKNOWN')
 
-  // 1. The case itself. Our own record, so TRUSTED.
+  // 1. The case's OWN fields — the ones this system and Istvan write. TRUSTED.
+  //
+  // `title` and `description` are deliberately NOT here. For a case born from an
+  // incoming email they are the SENDER's text: intake.ts writes
+  // `title: input.title ?? input.subject` and `description: From: ${input.from}`.
+  // Leaving them in this item put attacker-authored text inside the block whose
+  // trust label tells the model that instructions here are legitimate — unfenced.
+  // Found by review #3 (Ú-1, 2026-08-10) and reproduced with this module's own
+  // buildReaderPrompt before the fix.
+  //
+  // The module already made exactly this argument one item further down, about
+  // an event's `reason` text. It was true here too, and it was not applied.
   items.push({
     kind: 'CASE',
     provenance: { source: 'case-store', reference: caseId, retrievedAt: now },
     trust: 'TRUSTED_CASE_FIELD',
     sensitivity,
     content: [
-      `title: ${String(c.title ?? '')}`,
       `status: ${String(c.status ?? '')}`,
       `type: ${String(c.case_type ?? '')}`,
-      c.description ? `description: ${String(c.description)}` : '',
       c.next_action ? `next_action: ${String(c.next_action)}` : '',
       c.waiting_on ? `waiting_on: ${String(c.waiting_on)}` : '',
       c.blocked_reason ? `blocked_reason: ${String(c.blocked_reason)}` : '',
     ].filter(Boolean).join('\n'),
+  })
+
+  // 1b. The intake-authored fields, as their own UNTRUSTED item, so the Reader
+  // sees them fenced and labelled as data.
+  //
+  // A manually created case has a title Istvan wrote, and marking that untrusted
+  // costs a little caution. An email-born case has a title a stranger wrote, and
+  // NOT marking it costs the boundary. The builder cannot tell the two apart
+  // from the row — the origin is not stored on the field — so it takes the cost
+  // it can afford.
+  const intake = [
+    `title: ${String(c.title ?? '')}`,
+    c.description ? `description: ${String(c.description)}` : '',
+  ].filter(Boolean).join('\n')
+  items.push({
+    kind: 'CASE_INTAKE',
+    // A ref of its own: a fact about the subject line must be citable, and must
+    // not be attributable to the case's own trusted fields.
+    provenance: { source: 'case-store', reference: `${caseId}#intake`, retrievedAt: now },
+    trust: 'UNTRUSTED_SOURCE_DATA',
+    sensitivity,
+    content: intake,
   })
 
   // 2. The case history. Also ours — but the `reason` text on an event can
@@ -162,7 +209,18 @@ export function buildCaseContext(
       kind: String(d.doc_kind) === 'email_thread' ? 'EMAIL_THREAD' : 'DOCUMENT',
       provenance: {
         source: 'documents',
-        reference: `${String(d.document_id)}${d.source_ref ? ` (${String(d.source_ref)})` : ''}`,
+        // ATOMIC. The reference used to be `doc-abc123 (chatgpt-cos-drive)` and
+        // the provenance check is an exact string match, so a Reader that cited
+        // `doc-abc123` — the obvious thing to write, and a CORRECT citation —
+        // had its whole packet refused. Live case PRI-HOME-2026-002, 2026-08-11.
+        //
+        // The fix is the format, not the check. Loosening provenance matching to
+        // accept a prefix would weaken the one guard that stops a packet citing a
+        // document nobody supplied, in order to accommodate a model that was
+        // right. So the ref is now the identifier alone, and the origin travels
+        // beside it in its own field.
+        reference: String(d.document_id),
+        sourceRef: d.source_ref ? String(d.source_ref) : undefined,
         retrievedAt: now,
       },
       // Everything here came from outside. This is the class §10.2's Reader must
@@ -187,7 +245,17 @@ export function buildCaseContext(
     excluded.push({ reference: f.document_id, reason: `cross-domain: belongs to another namespace, not ${namespace}` })
   }
 
-  // 4. Bound the packet, visibly.
+  // 4a. Bound each item's LENGTH, visibly and in the Reader's own language, so
+  // the cut is something the model can report in unreadableSources rather than
+  // something it cannot see.
+  for (const item of items) {
+    if (item.content.length > maxChars) {
+      const dropped = item.content.length - maxChars
+      item.content = `${item.content.slice(0, maxChars)}\n[...LEVÁGVA: további ${dropped} karakter nem fért a kontextusba — ez a forrás CSONKA]`
+    }
+  }
+
+  // 4b. Bound the packet, visibly.
   if (items.length > maxItems) {
     for (const dropped of items.slice(maxItems)) {
       excluded.push({ reference: dropped.provenance.reference, reason: `over the ${maxItems}-item context bound` })
