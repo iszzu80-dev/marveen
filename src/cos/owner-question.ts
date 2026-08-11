@@ -504,8 +504,24 @@ export function recordOwnerAnswer(
     // make each run schedule the next one. Which event classes deserve a wake is
     // a real question and it is carded; an OWNER ANSWER is the one case that
     // needs no argument.
-    db.prepare(`UPDATE ${table} SET last_event_id = ? WHERE case_id = ?`)
-      .run(Number(info.lastInsertRowid), input.caseId)
+    // BOTH COLUMNS, because two different guards read them and an answer has to
+    // be visible to both.
+    //
+    // `last_event_id` is what the progression trigger hashes — without it the
+    // engine never looks at the case (found live 20:10 tonight).
+    //
+    // `updated_at` is what the READER's staleness guard compares its packet
+    // against. Found twenty minutes later, same root cause, different victim: a
+    // question went out to Istvan on a case that already carried his answer,
+    // because the reading was from 08:32, the answer landed at 18:10, and the
+    // case row still said it had last changed two days earlier. The guard was
+    // working perfectly on an input that lied.
+    //
+    // Setting it to the answer's own timestamp keeps the "answered and nothing
+    // moved since" suppression intact — that check is `updated_at <=
+    // answered_at`, and equal satisfies it.
+    db.prepare(`UPDATE ${table} SET last_event_id = ?, updated_at = ? WHERE case_id = ?`)
+      .run(Number(info.lastInsertRowid), now, input.caseId)
   }
   return { caseId: input.caseId, questionHash: open.question_hash, eventType, choice }
 }

@@ -504,3 +504,74 @@ describe('an owner answer WAKES the case', () => {
     ).get() as { e: number | null }).e).toBeNull()
   })
 })
+
+// THE SECOND VICTIM of the same root cause: the staleness guard.
+//
+// Live, 2026-08-11 20:10. Istvan's clarification landed on five sibling cases at
+// 18:10. Ten minutes past eight the Reader asked him the same thing again — on a
+// case that literally carried his answer. The guard that exists to stop exactly
+// this ("do not ask from a reading older than the case") compares the packet's
+// age against the case's `updated_at`, and the case row had not been touched
+// since two days earlier, because writing an event does not change it. The guard
+// was working perfectly on an input that lied.
+describe('an answer makes older readings STALE', () => {
+  beforeEach(() => {
+    initDatabase(':memory:')
+    initProgressionSchema(getDb())
+    createCase(getDb(), { caseId: 'c1', title: 'ZST uzletresz-adasvetel', caseType: 'ADMIN' }, T0)
+    getDb().prepare(
+      `INSERT INTO case_progression_state (domain, case_id, progression_enabled, created_at, updated_at)
+       VALUES ('personal', 'c1', 1, ?, ?)`,
+    ).run(T0, T0)
+  })
+
+  it('the case row records that the answer changed it', () => {
+    storePacket('c1', packet())
+    askPendingOwnerQuestions(getDb(), { now: T0 + 1 })
+    const before = (getDb().prepare(
+      `SELECT updated_at AS u FROM personal_cases WHERE case_id = 'c1'`,
+    ).get() as { u: number }).u
+
+    recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'igen', now: T0 + 5000 })
+
+    const after = (getDb().prepare(
+      `SELECT updated_at AS u FROM personal_cases WHERE case_id = 'c1'`,
+    ).get() as { u: number }).u
+    expect(after).toBe(T0 + 5000)
+    expect(after).toBeGreaterThan(before)
+  })
+
+  it('HEADLINE: the sweep will not ask again from a reading older than the answer', () => {
+    // The live failure, as an assertion. The packet predates the answer, so the
+    // question it would produce describes a world that has already moved.
+    storePacket('c1', packet())
+    askPendingOwnerQuestions(getDb(), { now: T0 + 1 })
+    recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'a Relacio KFT a konyvelo', now: T0 + 5000 })
+
+    const res = askPendingOwnerQuestions(getDb(), { now: T0 + 5001 })
+    expect(res.asked).toBe(0)
+    expect(res.staleReading).toBe(1)
+  })
+
+  it('a FRESH reading taken after the answer is not suppressed as stale', () => {
+    // The counter-case: the guard must not mute the channel for ever once a case
+    // has been answered. A reading taken after the answer describes the world the
+    // answer created, and a question from it is legitimate.
+    storePacket('c1', packet())
+    askPendingOwnerQuestions(getDb(), { now: T0 + 1 })
+    recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'igen', now: T0 + 5000 })
+    // A new reading, taken after the answer.
+    getDb().prepare(`DELETE FROM case_evidence_packets WHERE case_id = 'c1'`).run()
+    const p = packet({ missingRequirements: [{ what: 'A birosagi vegzes masolata', whoHasIt: 'ISTVAN', why: 'a bejegyzeshez kell' }] })
+    const plan = planFromEvidence(p)
+    getDb().prepare(
+      `INSERT INTO case_evidence_packets
+         (packet_id, domain, case_id, created_at, packet_json, plan_json, confidence, policy_result)
+       VALUES ('pk-fresh', 'personal', 'c1', ?, ?, ?, ?, 'WAIT_EXTERNAL')`,
+    ).run(T0 + 5100, JSON.stringify(p), JSON.stringify(plan), p.confidence)
+
+    const res = askPendingOwnerQuestions(getDb(), { now: T0 + 5200 })
+    expect(res.staleReading).toBe(0)
+    expect(res.asked).toBe(1)
+  })
+})
