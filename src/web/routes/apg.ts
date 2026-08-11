@@ -158,6 +158,24 @@ export async function tryHandleApg(ctx: RouteContext): Promise<boolean> {
         String(getEffectiveSettingValue('APG_REQUIRE_OWNER_DECISION')) === '1',
       apg_block_unaccepted_archive:
         String(getEffectiveSettingValue('APG_BLOCK_UNACCEPTED_ARCHIVE')) === '1',
+      // F-6 (APG 0.4 review): which of these toggles ACTUALLY enforces anything.
+      //
+      // Three of the four had no consumer: flipping "require independent
+      // acceptance" set a flag, the UI reported success, and the constraint did
+      // not exist. That is worse than the toggle being absent — an operator who
+      // switched it on would believe the rule was in force.
+      //
+      // Rather than invent enforcement semantics under time pressure, this
+      // states the truth the UI can render: the switch exists, and it is not
+      // wired yet. The list is derived from actual call sites (see the standing
+      // check in apg-enforcement-honesty.test.ts), so it cannot drift into a
+      // reassuring lie of its own.
+      apg_enforcement_wired: {
+        require_claim_receipt: false,
+        require_independent_acceptance: false,
+        require_owner_decision: false,
+        block_unaccepted_archive: true,
+      },
     })
     return true
   }
@@ -423,6 +441,22 @@ export async function tryHandleApg(ctx: RouteContext): Promise<boolean> {
 
     const action = body.action as OwnerAction
     const mappedStatus = action === 'accept' ? 'approved' : 'rejected'
+
+    // F-5 (APG 0.4 review): the same self-approval guard the generic approvals
+    // route has. §27 makes weakening it an explicit stop condition, and this
+    // path simply did not have it.
+    //
+    // What it is and is not, stated plainly: `resolved_by` is self-declared and
+    // every fleet agent shares one bearer token, so this cannot stop a lying
+    // client — the generic route's own comment calls it best-effort for exactly
+    // that reason. What it does catch is the naive/accidental case, which is
+    // what the guard was built for, and which went through here unchecked.
+    const pending = getApproval(approvalId)
+    if (pending?.agent_id && pending.agent_id === 'dashboard') {
+      json(res, { error: 'The requesting agent cannot approve its own request' }, 403)
+      return true
+    }
+
     const resolved = resolveApproval(approvalId, mappedStatus, 'dashboard', undefined)
     if (!resolved) {
       const racedApproval = getApproval(approvalId)

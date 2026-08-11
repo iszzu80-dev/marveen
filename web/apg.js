@@ -119,6 +119,9 @@ window.Apg = window.Apg || {}
         require_independent_acceptance: summary.apg_require_independent_acceptance === true,
         require_owner_decision: summary.apg_require_owner_decision === true,
         block_unaccepted_archive: summary.apg_block_unaccepted_archive === true,
+        // F-6: which toggles actually enforce. A switch that is ON but not
+        // wired must not read as a constraint in force.
+        wired: summary.apg_enforcement_wired || {},
       }
     } catch { /* keep last-known state on fetch failure */ }
   }
