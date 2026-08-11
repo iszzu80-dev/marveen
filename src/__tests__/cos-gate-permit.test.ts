@@ -13,12 +13,36 @@
 // the bottom, which fails the moment a third module starts minting.
 import { describe, it, expect, beforeEach } from 'vitest'
 import { readFileSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { initDatabase, getDb } from '../db.js'
 import { issueAuthorization, type AuthorizationContext } from '../cos/action-authorization.js'
 import { mintGatePermit, isGatePermit, gatePermitRefusal } from '../cos/gate-permit.js'
 
 const T0 = 1_700_000_000
+
+/** Every PRODUCTION TypeScript file — `src` and `scripts`, recursively, tests
+ *  excluded. The standing checks below used to read `src/cos` only (review #5,
+ *  Ö-5): a caller one directory over was invisible to them, and the point of a
+ *  standing check is tomorrow's caller, which the codebase has already shown
+ *  moves between layers. Paths are returned repo-relative so a failure names the
+ *  offender in the form a person can open. */
+const REPO = process.cwd()
+function productionSources(roots: string[] = ['src', 'scripts']): string[] {
+  const out: string[] = []
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(join(REPO, dir), { withFileTypes: true })) {
+      const rel = `${dir}/${entry.name}`
+      if (entry.isDirectory()) {
+        if (entry.name === '__tests__' || entry.name === 'node_modules') continue
+        walk(rel)
+      } else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts')) {
+        out.push(rel)
+      }
+    }
+  }
+  for (const r of roots) walk(r)
+  return out.sort()
+}
 
 const ctx: AuthorizationContext = {
   domain: 'personal', caseId: 'c1', caseVersion: 1, goalVersion: null,
@@ -77,19 +101,17 @@ describe('§22.2 gate permit', () => {
     // The half a WeakSet cannot enforce. If a third module starts minting, this
     // fails and somebody has to defend the addition — the same shape as the
     // caller check that caught the Reader island.
-    const dir = join(process.cwd(), 'src/cos')
-    const minters = readdirSync(dir)
-      .filter(f => f.endsWith('.ts') && f !== 'gate-permit.ts')
-      .filter(f => /\bmintGatePermit\s*\(/.test(readFileSync(join(dir, f), 'utf8')))
+    const minters = productionSources()
+      .filter(f => f !== 'src/cos/gate-permit.ts')
+      .filter(f => /\bmintGatePermit\s*\(/.test(readFileSync(join(REPO, f), 'utf8')))
       .sort()
-    expect(minters).toEqual(['dispatch-gate.ts', 'zst-send.ts'])
+    expect(minters).toEqual(['src/cos/dispatch-gate.ts', 'src/cos/zst-send.ts'])
   })
 
   it('STANDING CHECK: every issueAuthorization call site passes a permit', () => {
-    const dir = join(process.cwd(), 'src/cos')
     const offenders: string[] = []
-    for (const f of readdirSync(dir).filter(x => x.endsWith('.ts') && x !== 'action-authorization.ts')) {
-      const src = readFileSync(join(dir, f), 'utf8')
+    for (const f of productionSources().filter(x => x !== 'src/cos/action-authorization.ts')) {
+      const src = readFileSync(join(REPO, f), 'utf8')
       for (const line of src.split('\n')) {
         if (!/\bissueAuthorization\s*\(/.test(line)) continue
         // A call with fewer than five arguments cannot be carrying a permit.
@@ -97,5 +119,20 @@ describe('§22.2 gate permit', () => {
       }
     }
     expect(offenders).toEqual([])
+  })
+
+  it('STANDING CHECK: the scan itself reaches outside src/cos', () => {
+    // The check above is only worth what its SCAN covers. Review #5 (Ö-5) found
+    // both standing checks reading `src/cos` alone: a mintGatePermit or
+    // issueAuthorization call from `src/web/routes/` or `scripts/` would have
+    // walked past both of them. There is no such caller today — which is exactly
+    // why this needed an assertion rather than a reading, since a scan that
+    // covers nothing passes the two tests above just as quietly as a correct one.
+    const files = productionSources()
+    expect(files).toContain('src/cos/gate-permit.ts')
+    expect(files.some(f => f.startsWith('src/web/routes/'))).toBe(true)
+    expect(files.some(f => f.startsWith('scripts/'))).toBe(true)
+    // Tests are deliberately NOT scanned: this very file names both symbols.
+    expect(files.some(f => f.includes('__tests__'))).toBe(false)
   })
 })

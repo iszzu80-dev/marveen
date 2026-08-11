@@ -1153,6 +1153,24 @@ export interface MissionControlProgressionView {
   nbaDescription: string | null
   totalRunCount: number
   lastRunId: string | null  // progression_run_id of the last run (card 9193eedd: sourceReference for owner-action)
+  // WHAT THE READER FOUND, from the newest evidence packet for this case.
+  //
+  // Review #5, Ö-1: the Reader reads a whole case context, arbitrates, writes a
+  // plan — and until now not one line of production code read any of it back.
+  // `case_evidence_packets` was touched by three places: the reader writes it,
+  // the reader reads its own MAX(created_at) to know when it last looked, and
+  // retention nulls the columns after 90 days. Up to 432 model calls a day whose
+  // entire yield was a write-only table.
+  //
+  // Wiring the decision INTO the pipeline is a §13.1 arbitration question and an
+  // owner call. Showing it is not, and it is the DoD of that decision: until
+  // somebody can see what the Reader proposes and whether it agreed with policy,
+  // there is no evidence on which to decide whether to trust it.
+  readerDecision: string | null
+  readerDecidedBy: string | null
+  readerConflictReason: string | null
+  readerConfidence: number | null
+  readerReadAt: number | null
 }
 
 /** Read-only Mission Control projection that joins case_progression_state
@@ -1180,13 +1198,27 @@ export function getMissionControlProgressionView(
        s.plan_version         AS "planVersion",
        s.next_best_action_json AS "nbaDescription",
        (SELECT count(*) FROM case_progression_runs WHERE case_id = c.case_id AND domain = s.domain) AS "totalRunCount",
-       r.progression_run_id   AS "lastRunId"
+       r.progression_run_id   AS "lastRunId",
+       p.final_decision       AS "readerDecision",
+       p.decided_by           AS "readerDecidedBy",
+       p.conflict_reason      AS "readerConflictReason",
+       p.confidence           AS "readerConfidence",
+       p.created_at           AS "readerReadAt"
      FROM case_progression_state s
      JOIN ${tableName} c ON c.case_id = s.case_id
      LEFT JOIN case_progression_runs r ON r.progression_run_id = (
        SELECT progression_run_id FROM case_progression_runs
        WHERE case_id = s.case_id AND domain = s.domain
        ORDER BY started_at DESC LIMIT 1
+     )
+     -- The NEWEST packet for this case, joined by packet_id rather than by
+     -- created_at: two packets written in the same second would otherwise
+     -- multiply the row, and a duplicated case in Mission Control reads as two
+     -- cases.
+     LEFT JOIN case_evidence_packets p ON p.packet_id = (
+       SELECT packet_id FROM case_evidence_packets
+       WHERE case_id = s.case_id AND domain = s.domain
+       ORDER BY created_at DESC, packet_id DESC LIMIT 1
      )
      WHERE s.domain = ?
      ORDER BY s.last_progressed_at DESC`,

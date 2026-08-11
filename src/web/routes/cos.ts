@@ -31,7 +31,8 @@ import { linkCases, suggestLinks, linkedCases } from '../../cos/case-link.js'
 import { classifyScope, describeScope } from '../../cos/scope-gate.js'
 import { deriveAnswerOptions } from '../../cos/answer-options.js'
 import { interpretOwnerAnswer, ballMoved } from '../../cos/answer-interpretation.js'
-import { AnthropicLlmClient } from '../../cos/progression-interpreter.js'
+import { resolveInterpreter } from '../../cos/interpreter-provider.js'
+import { getSecret } from '../vault.js'
 
 /** The account the COS sends personal mail from. */
 const COS_SEND_FROM = 'iszzu80@gmail.com'
@@ -572,14 +573,38 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
       caseId: b.caseId, caseTitle: c.title, question: b.question ?? '',
       currentOwner: c.next_action_owner ?? undefined, currentStatus: c.status,
     }
+    // THE SAME RESOLVER THE REST OF THE SYSTEM USES. This endpoint used to build
+    // its own `new AnthropicLlmClient()` with no arguments, which stores
+    // `apiKey: undefined` and falls back to the ENV alone — so it could not see
+    // the vault, where Istvan's Anthropic key actually lives (e17e710). The
+    // README even tells the installer NOT to set ANTHROPIC_API_KEY next to an
+    // OAuth token, so in the recommended install the env is empty and this path
+    // could never have worked. Review #5, Ö-3.
+    const interp = resolveInterpreter(getSecret)
+    if (!interp) {
+      // "NOT CONFIGURED" AND "NOT ANSWERING" ARE DIFFERENT FACTS, and the old
+      // single message made an endpoint that never worked indistinguishable from
+      // an overloaded model. The surface still falls back to plain text entry;
+      // it just no longer misreports why.
+      json(res, {
+        ok: false,
+        reason: 'nincs konfigurált értelmező (nincs ANTHROPIC kulcs az env-ben és nincs DEEPSEEK_API_KEY a vaultban)',
+        cause: 'not_configured',
+      })
+      return true
+    }
     try {
-      const client = new AnthropicLlmClient()
-      const r = await interpretOwnerAnswer(client, ctx, b.answer)
+      const r = await interpretOwnerAnswer(interp.client, ctx, b.answer)
       json(res, r.ok ? { ...r, ballMoved: ballMoved(ctx, r.proposal!) } : r)
     } catch (e) {
-      // No model available is not an error the owner should have to solve: the
-      // surface falls back to plain text entry, which always worked.
-      json(res, { ok: false, reason: `az értelmező nem érhető el: ${(e as Error).message}` })
+      // Configured, and it failed: an overloaded or erroring model. The owner
+      // does not have to solve this either — but now it is legible as a
+      // different problem from the one above.
+      json(res, {
+        ok: false,
+        reason: `az értelmező (${interp.provider}/${interp.model}) nem válaszolt: ${(e as Error).message}`,
+        cause: 'call_failed',
+      })
     }
     return true
   }

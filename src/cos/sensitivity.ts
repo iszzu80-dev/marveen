@@ -104,6 +104,14 @@ export function effectiveSensitivity(declared: unknown, content: string): CaseSe
 // sensitive personal data only through our most-controlled profiles. Every tier
 // must be present; a missing tier would resolve to `undefined` and the
 // fail-closed helper below denies it.
+//
+// WHICH PATH THIS GOVERNS — the second half of review #5's Ö-4. This table is
+// the SENDING path's rule. The READING path (which model may be shown a case's
+// content) is decided by provider-data-policy.ts, by the provider's data-
+// handling class, because on 2026-08-11 the price tier stopped coinciding with
+// the provider and this table's answer stopped matching the question. The two
+// tables now name each other from one place each; before that, whichever a
+// reader found first looked like the whole rule.
 const PROFILE_ALLOWLIST: Record<CaseSensitivity, ReadonlySet<ModelProfileId>> = {
   PUBLIC: new Set<ModelProfileId>(MODEL_PROFILE_IDS),
   PERSONAL: new Set<ModelProfileId>(['premium_reasoning', 'build_strong', 'analysis_efficient']),

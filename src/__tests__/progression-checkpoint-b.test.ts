@@ -435,6 +435,57 @@ describe('Checkpoint B — Thin shadow vertical slice (card 4a809934)', () => {
       expect(view[0].totalRunCount).toBe(1)
     })
 
+    it('the Reader\'s finding reaches the view — decision, who decided, conflict', () => {
+      // Review #5, Ö-1: the Reader read whole cases, arbitrated and wrote plans,
+      // and not one line of production code read the result back — up to 432
+      // model calls a day into a write-only table that retention nulls after 90
+      // days. Showing it is the DoD of the later decision about whether to let
+      // the proposal into the pipeline: until someone can compare the Reader's
+      // candidate with what policy decided, there is nothing to decide on.
+      db.prepare(
+        `INSERT INTO case_evidence_packets
+           (packet_id, domain, case_id, progression_run_id, created_at, packet_json, plan_json,
+            confidence, reader_candidate, policy_result, final_decision, conflict_reason,
+            safe_fallback_decision, decided_by, model)
+         VALUES ('pk-1', 'personal', ?, NULL, 1000, '{}', '{}', 0.72,
+                 'COMPLETE', 'WAIT_EXTERNAL', 'WAIT_EXTERNAL',
+                 'reader proposed COMPLETE, deterministic policy decided WAIT_EXTERNAL',
+                 'WAIT_EXTERNAL', 'policy', 'test-model')`,
+      ).run(PRI_CASE_ID)
+
+      const row = getMissionControlProgressionView(db, 'personal')[0]
+      expect(row.readerDecision).toBe('WAIT_EXTERNAL')
+      expect(row.readerDecidedBy).toBe('policy')
+      expect(row.readerConflictReason).toContain('reader proposed COMPLETE')
+      expect(row.readerConfidence).toBeCloseTo(0.72)
+      expect(row.readerReadAt).toBe(1000)
+    })
+
+    it('the NEWEST packet wins and the case is not duplicated', () => {
+      // Two packets for one case must not become two rows: a duplicated case in
+      // Mission Control reads as two cases, which is a worse failure than the
+      // missing field this join was added to fix.
+      db.prepare(
+        `INSERT INTO case_evidence_packets
+           (packet_id, domain, case_id, created_at, packet_json, plan_json, final_decision, decided_by)
+         VALUES ('pk-2', 'personal', ?, 2000, '{}', '{}', 'CONTINUE_AUTONOMOUSLY', 'reader')`,
+      ).run(PRI_CASE_ID)
+
+      const view = getMissionControlProgressionView(db, 'personal')
+      expect(view.length).toBe(1)
+      expect(view[0].readerDecision).toBe('CONTINUE_AUTONOMOUSLY')
+      expect(view[0].readerDecidedBy).toBe('reader')
+    })
+
+    it('a case with no packet still appears, with nulls', () => {
+      // The join must not hide cases the Reader has never looked at — that would
+      // trade an invisible Reader for an invisible case.
+      const zst = getMissionControlProgressionView(db, 'zst')
+      expect(zst.length).toBe(1)
+      expect(zst[0].readerDecision).toBeNull()
+      expect(zst[0].readerConflictReason).toBeNull()
+    })
+
     it('getMissionControlProgressionView is read-only — zero writes to case tables', () => {
       // After calling getMissionControlProgressionView, verify no writes occurred
       const beforeCount = (db.prepare("SELECT count(*) as c FROM case_progression_runs").get() as { c: number }).c
