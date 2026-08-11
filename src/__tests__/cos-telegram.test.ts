@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { sendCosMessage, pollCosUpdates, redactToken, loadCosBotConfig } from '../cos/cos-telegram.js'
+import { sendCosMessage, pollCosUpdates, redactToken, loadCosBotConfig, looksLikeAQuestionBack } from '../cos/cos-telegram.js'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -96,5 +96,31 @@ describe('config', () => {
     const p = join(dir, 'c.json')
     writeFileSync(p, JSON.stringify({ token: TOKEN, chat_id: '123', bot_username: 'b' }))
     expect(loadCosBotConfig(p)).toMatchObject({ chatId: '123', botUsername: 'b' })
+  })
+})
+
+describe('a question back is not an answer', () => {
+  // Live 2026-08-11: Istvan replied "Ez melyik számla?" to the Wizz Air
+  // question. It was recorded as his answer and closed the case, so his
+  // question became his decision in the ledger.
+  it('treats the live case as a question', () => {
+    expect(looksLikeAQuestionBack('Ez melyik számla?')).toBe(true)
+  })
+
+  it('catches interrogatives even without a question mark', () => {
+    for (const t of ['Melyik számla ez', 'mennyi lett a vege', 'Which invoice', 'miert nyilt ez meg']) {
+      expect(looksLikeAQuestionBack(t), t).toBe(true)
+    }
+  })
+
+  it('lets real answers through', () => {
+    for (const t of ['Igen.', 'Nem kell vele foglalkozni.', 'Én voltam', 'Minden bérléshez megvan a kártya',
+                     'Rendben van, a mostani bérlést is megoldottam']) {
+      expect(looksLikeAQuestionBack(t), t).toBe(false)
+    }
+  })
+
+  it('refuses an empty message rather than guessing', () => {
+    expect(looksLikeAQuestionBack('   ')).toBe(true)
   })
 })

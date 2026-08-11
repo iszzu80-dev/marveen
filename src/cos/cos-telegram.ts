@@ -129,3 +129,29 @@ export async function pollCosUpdates(
   }
   return out
 }
+
+/** Is this message plausibly an ANSWER, or is the owner asking something back?
+ *
+ *  Live 2026-08-11, within minutes of the channel going up: Istvan replied
+ *  "Ez melyik számla?" to the Wizz Air question. The poller recorded it as his
+ *  answer and CLOSED the case -- so a question of his became a decision of his
+ *  in the ledger, and the real question stopped being asked.
+ *
+ *  The check is deliberately crude and fail-CLOSED: when it cannot tell, it
+ *  refuses to treat the message as an answer. Refusing costs one manual
+ *  follow-up; accepting writes a false OWNER_DECISION onto a case and silences
+ *  the question. Those are not symmetric.
+ *
+ *  It does NOT try to understand the message. A model call here would add a
+ *  second place for the meaning to drift, on the path whose whole job is to
+ *  record what the owner actually said. */
+export function looksLikeAQuestionBack(text: string): boolean {
+  const t = text.trim()
+  if (!t) return true
+  // A trailing question mark is the strongest signal and needs no language.
+  if (/\?\s*$/.test(t)) return true
+  // Hungarian interrogatives at the start, plus the English ones -- the owner
+  // writes in both.
+  if (/^\s*(mi|mit|miert|miért|melyik|hol|hogyan|hogy|ki|kinek|mikor|mennyi|milyen|van-e|lehet-e|what|which|why|how|who|when|where)\b/i.test(t)) return true
+  return false
+}

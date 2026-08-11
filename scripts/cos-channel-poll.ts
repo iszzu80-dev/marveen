@@ -19,7 +19,7 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { initDatabase, getDb } from '../src/db.js'
-import { loadCosBotConfig, pollCosUpdates } from '../src/cos/cos-telegram.js'
+import { loadCosBotConfig, pollCosUpdates, looksLikeAQuestionBack } from '../src/cos/cos-telegram.js'
 import { recordOwnerAnswer } from '../src/cos/owner-question.js'
 
 const OFFSET_PATH = 'store/.cos-telegram-offset'
@@ -42,12 +42,16 @@ async function main(): Promise<void> {
   }
 
   const updates = await pollCosUpdates(cfg, readOffset())
-  const result = { channel: cfg.channelId, read: updates.length, matched: 0, unmatched: 0, rejected: 0 }
+  const result = { channel: cfg.channelId, read: updates.length, matched: 0, unmatched: 0, rejected: 0, notAnAnswer: 0 }
   let highest = 0
 
   for (const u of updates) {
     highest = Math.max(highest, u.updateId)
     if (u.fromId !== OWNER_ID) { result.rejected++; continue }
+
+    // A question back is not an answer. Counted, not swallowed: the owner asked
+    // something and deserves a reply, and the case must stay open.
+    if (looksLikeAQuestionBack(u.text)) { result.notAnAnswer++; continue }
 
     // Prefer the explicit reply target.
     let row: { case_id: string; domain: string } | undefined
