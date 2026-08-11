@@ -36,6 +36,20 @@ export type DataHandlingClass =
  */
 export const PROVIDER_DATA_CLASS: Record<string, DataHandlingClass> = {
   anthropic: 'CONTRACTED',
+  // Istvan, 2026-08-11: "ha szenzitív akkor lehet Anthropic vagy openai."
+  //
+  // THE ENTRY IS CONDITIONAL AND THE CONDITION IS NOT DECORATION. What makes a
+  // provider CONTRACTED here is the data-processing relationship, not the brand:
+  // API business terms, with content not used for training. That holds for the
+  // OpenAI PLATFORM API behind an organisation key — the only thing
+  // OpenAiLlmClient talks to (it reads OPENAI_API_KEY and posts to
+  // api.openai.com/v1).
+  //
+  // It does NOT hold for a personal ChatGPT subscription, which is what the
+  // fleet's other OpenAI access is (the Codex CLI runs on Istvan's ChatGPT Plus
+  // login). Nothing routes sensitive content through that path today, and
+  // nothing may start to on the strength of this line.
+  openai: 'CONTRACTED',
   deepseek: 'THIRD_PARTY',
 }
 
