@@ -122,9 +122,15 @@ function whatWasHandled(db: Database.Database, domain: 'personal' | 'zst', caseI
   // What actually LEFT the machine belongs here too, and it is the half the
   // owner most needs: "I already emailed them" is the difference between him
   // writing the same mail and him waiting.
+  //
+  // BOTH LEDGERS. `outbound_ledger` references personal_cases; corporate sends
+  // go to `zst_outbound_ledger` (zst-send.ts). Querying only the first one would
+  // tell Istvan that nothing had been done on every corporate case — the exact
+  // one-namespace blindness the 2026-08-12 review named T-1.
+  const ledger = domain === 'zst' ? 'zst_outbound_ledger' : 'outbound_ledger'
   try {
     const sent = db.prepare(
-      `SELECT action_type, COUNT(*) AS n FROM outbound_ledger
+      `SELECT action_type, COUNT(*) AS n FROM ${ledger}
         WHERE case_id = ? AND status IN ('APPLIED_UNVERIFIED','VERIFIED')
         GROUP BY action_type`,
     ).all(caseId) as Array<{ action_type: string; n: number }>

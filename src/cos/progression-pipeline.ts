@@ -168,8 +168,13 @@ export function resolveContext(
     `SELECT count(*) as c FROM ${eventsTable} WHERE case_id = ?`,
   ).get(caseId) as { c: number }).c
 
+  // Same exclusion as resolveContextDeep's copy of this query: the engine's own
+  // §8 events are written at the end of every run, so without the filter "the
+  // last thing that happened" is always the engine's note about itself.
   const lastEvent = db.prepare(
-    `SELECT event_type, reason FROM ${eventsTable} WHERE case_id = ? ORDER BY created_at DESC LIMIT 1`,
+    `SELECT event_type, reason FROM ${eventsTable}
+      WHERE case_id = ? AND (source_system IS NULL OR source_system != 'progression')
+      ORDER BY created_at DESC LIMIT 1`,
   ).get(caseId) as { event_type: string; reason: string | null } | undefined
 
   const childCount = (db.prepare(

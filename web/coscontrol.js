@@ -30,9 +30,26 @@
   }
 
   // ---- Progression labels (card 969e5c3b) ----
+  //
+  // THESE ARE THE COLUMN'S OWN FOUR VALUES, AND THEY DID NOT USED TO BE.
+  //
+  // semantic_completion_status has a CHECK constraint naming exactly
+  // NOT_STARTED / IN_PROGRESS / PROPOSED / VERIFIED. This map listed COMPLETED,
+  // BLOCKED and STALLED — three values the constraint forbids, so they could
+  // never appear — and omitted PROPOSED and VERIFIED, the two that can. Every
+  // closed case therefore rendered its raw enum name in grey, and the
+  // distinction §25 exists to draw was invisible in the one place a human looks.
+  //
+  // It stayed hidden because VERIFIED had no writer either: the pipeline only
+  // ever wrote PROPOSED, and one unlabelled value in grey reads as a gap rather
+  // than as a defect. Fixing the writer is what made this legible.
+  //
+  // PROPOSED and VERIFIED get DIFFERENT colours on purpose. "Closed on paper"
+  // and "outcome proven with evidence" being the same shade of green is how 72
+  // false closures looked healthy on a dashboard for three days.
   var COMPLETION_LABEL = {
     NOT_STARTED: 'Nincs elkezdve', IN_PROGRESS: 'Folyamatban',
-    COMPLETED: 'Kész', BLOCKED: 'Blokkolva', STALLED: 'Elakadt',
+    PROPOSED: 'Lezárásra javasolt', VERIFIED: 'Igazoltan lezárva',
   }
   var DECISION_LABEL = {
     COMPLETE: 'Lezárás', RECOVERY_REQUIRED: 'Helyreállítás kell',
@@ -43,7 +60,10 @@
   }
   var COMPLETION_COLOR = {
     NOT_STARTED: '#9ca3af', IN_PROGRESS: '#60a5fa',
-    COMPLETED: '#22c55e', BLOCKED: '#ef4444', STALLED: '#f59e0b',
+    // Amber, not green: PROPOSED means the case row says closed and the outcome
+    // contract was NOT proven. Green is reserved for the side of the §25 gate
+    // that actually holds up.
+    PROPOSED: '#f59e0b', VERIFIED: '#22c55e',
   }
 
   function esc(s) {

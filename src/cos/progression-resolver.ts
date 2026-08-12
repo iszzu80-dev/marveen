@@ -402,7 +402,19 @@ export function resolveContextDeep(
   ).get(caseId) as { c: number }).c
 
   const lastEvent = db.prepare(
-    `SELECT event_type, reason FROM ${eventsTable} WHERE case_id = ? ORDER BY created_at DESC LIMIT 1`,
+    // "The last thing that happened to this case" must not be the engine's own
+    // note about the last time it looked (2026-08-12). The progression writes at
+    // the END of its run, so without this filter the newest event on every
+    // progression-enabled case is the engine describing itself, and the field
+    // stops meaning what its name says.
+    //
+    // Inert today — `lastEventType` is carried into ProgressionContext and no
+    // consumer reads it — which is exactly why it is worth fixing now: a wrong
+    // value with no reader becomes a wrong value with a reader the moment
+    // somebody uses the field, and nothing about that change would look risky.
+    `SELECT event_type, reason FROM ${eventsTable}
+      WHERE case_id = ? AND (source_system IS NULL OR source_system != 'progression')
+      ORDER BY created_at DESC LIMIT 1`,
   ).get(caseId) as { event_type: string; reason: string | null } | undefined
 
   const childCount = (db.prepare(

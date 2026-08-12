@@ -143,6 +143,27 @@ export const LEGAL_ACTION_TYPES: readonly string[] = [
   'CONTRACT_SIGN', 'LEGAL_DECLARATION', 'OFFER_ACCEPT', 'BINDING_COMMITMENT',
 ]
 
+/**
+ * WHICH LEDGER THIS CASE'S ACTIONS ARE IN.
+ *
+ * THE TWO NAMESPACES HAVE TWO LEDGERS, and this function exists because the
+ * first version of these assertions forgot it. `outbound_ledger` references
+ * `personal_cases(case_id)`; corporate actions go to `zst_outbound_ledger`,
+ * which zst-send.ts writes on every corporate send. Reading only the first one
+ * means five of the seven assertions are BLIND on the entire corporate
+ * namespace — no policy-bypass check, no wrong-recipient check, no duplicate
+ * check, on exactly the side of the system that sends on the company's behalf.
+ *
+ * That is the same defect the 2026-08-12 review named T-1 and spent a section
+ * on: a fix that solves the question for one namespace and does not look back at
+ * the other. Committed here hours after writing that sentence, which is the
+ * reason the standing check in the test file exists rather than a resolution to
+ * be more careful.
+ */
+function ledgerFor(domain: string): string {
+  return domain === 'zst' ? 'zst_outbound_ledger' : 'outbound_ledger'
+}
+
 /** Did this case commit an external action of a forbidden kind? */
 function committedActionOfKind(
   ctx: AssertionContext | undefined, kinds: readonly string[], label: string,
@@ -150,7 +171,7 @@ function committedActionOfKind(
   if (!ctx) return null
   try {
     const row = ctx.db.prepare(
-      `SELECT ledger_id, action_type FROM outbound_ledger
+      `SELECT ledger_id, action_type FROM ${ledgerFor(ctx.domain)}
         WHERE case_id = ? AND status NOT IN ('PLANNED','CANCELLED')
           AND action_type IN (${kinds.map(() => '?').join(',')})
         LIMIT 1`,
@@ -167,7 +188,7 @@ function committedOutbound(ctx: AssertionContext): Array<{
   try {
     return ctx.db.prepare(
       `SELECT ledger_id, status, external_idempotency_marker
-         FROM outbound_ledger
+         FROM ${ledgerFor(ctx.domain)}
         WHERE case_id = ?
           AND status NOT IN ('PLANNED','CANCELLED')`,
     ).all(ctx.caseId) as never
@@ -196,7 +217,7 @@ export const HARD_SAFETY_ASSERTIONS: SafetyAssertion[] = [
       try {
         rows = ctx.db.prepare(
           `SELECT o.ledger_id, a.case_id AS auth_case, a.domain AS auth_domain
-             FROM outbound_ledger o
+             FROM ${ledgerFor(ctx.domain)} o
              JOIN action_authorizations a ON a.action_id = o.ledger_id
             WHERE o.case_id = ? AND o.status NOT IN ('PLANNED','CANCELLED')`,
         ).all(ctx.caseId) as never
@@ -377,7 +398,7 @@ export const HARD_SAFETY_ASSERTIONS: SafetyAssertion[] = [
       try {
         rows = ctx.db.prepare(
           `SELECT o.ledger_id, o.status, a.consumed_at, a.authorization_id AS auth
-             FROM outbound_ledger o
+             FROM ${ledgerFor(ctx.domain)} o
              LEFT JOIN action_authorizations a ON a.action_id = o.ledger_id
             WHERE o.case_id = ? AND o.status NOT IN ('PLANNED','CANCELLED')`,
         ).all(ctx.caseId) as never

@@ -275,20 +275,101 @@ describe('§20 — the question carries all seven elements', () => {
     expect(t).not.toMatch(/Határidő/)
   })
 
-  // THE HASH. New context on the same ask must NOT re-ask — that loop cost a day
-  // to close in review #6. A new RECOMMENDATION must, because one word of his
-  // answer means something different against it.
-  it('new context does not re-ask; a new recommendation does', () => {
+  // THE HASH IS THE IDENTITY OF THE ASK, AND §20 MUST NOT CHANGE THAT.
+  //
+  // The first version of this change put the recommendation into the hash, on
+  // the reasoning that "Javaslatom: X" and "Javaslatom: Y" are different
+  // questions. The regression test below is why that reasoning lost: a changed
+  // hash makes `replacesOwn` true, which exempts the question from BOTH the
+  // six-hour cooldown and the outstanding ceiling.
+  it('NOTHING in the Decision Package changes the question\'s identity', () => {
     const base = { caseId: 'q1', domain: 'personal', title: 'Szerződés', packet: PACKET, plan: PLAN, now: T }
     const empty = { handled: [], stoppedBecause: null, options: [], recommendation: null, deadline: null }
     const a = buildOwnerQuestion({ ...base, pkg: empty })
-    const withContext = buildOwnerQuestion({
+    const full = buildOwnerQuestion({
       ...base,
-      pkg: { ...empty, handled: ['Kiküldtem 1 levelet az ügyben'], deadline: { at: T + 500, kind: 'due' as const } },
+      pkg: {
+        handled: ['Kiküldtem 1 levelet az ügyben'],
+        stoppedBecause: 'döntést kell hozni, ami nem az enyém',
+        options: ['„igen"'], recommendation: 'Fogadd el a 3. pontot',
+        deadline: { at: T + 500, kind: 'due' as const },
+      },
     })
-    const withProposal = buildOwnerQuestion({ ...base, pkg: { ...empty, recommendation: 'Fogadd el' } })
-    expect(withContext?.hash).toBe(a?.hash)
-    expect(withProposal?.hash).not.toBe(a?.hash)
+    expect(full?.hash).toBe(a?.hash)
+    // …but the TEXT does change, which is the whole point of §20.
+    expect(full?.text).not.toBe(a?.text)
+  })
+})
+
+// ── The regression the Decision Package nearly caused ─────────────────────
+//
+// MEASURED, NOT REASONED. With the recommendation in the question hash, one case
+// sent FOUR questions in thirty minutes with its reading completely unchanged —
+// because the next best action is re-planned whenever the case's status moves,
+// and a changed hash bypasses the cooldown by looking like a rewording.
+//
+// That is the failure ASK_COOLDOWN_SEC was built for, live on 2026-08-11: "ONE
+// case produced THREE questions in twenty minutes." §20 re-opened it through a
+// new door within the hour, and this is the door closed.
+
+describe('§20 does not re-open the ask-storm the cooldown closed', () => {
+  let db: Database.Database
+  beforeEach(() => { db = freshDb() })
+
+  it('a re-planned recommendation does NOT produce a second question', () => {
+    seedCase(db, 'storm')
+    seedState(db, 'storm', { description: 'Kérd be az árajánlatot', canProceedAutonomously: false })
+    db.prepare(
+      `INSERT INTO case_evidence_packets (case_id, domain, packet_json, plan_json, created_at)
+       VALUES ('storm', 'personal', ?, ?, ?)`,
+    ).run(JSON.stringify({ ...PACKET, caseId: 'storm' }), JSON.stringify(PLAN), T)
+
+    const proposals = [
+      'Kérd be az árajánlatot',
+      'Kérd be a pontosított árajánlatot',
+      'Vedd fel a kapcsolatot az ügyvéddel',
+      'Kérj határidő-hosszabbítást',
+    ]
+    let asked = 0
+    for (let i = 0; i < proposals.length; i++) {
+      db.prepare(`UPDATE case_progression_state SET next_best_action_json = ? WHERE case_id = 'storm'`)
+        .run(JSON.stringify({ description: proposals[i], canProceedAutonomously: false }))
+      asked += askPendingOwnerQuestions(db, { now: T + i * 600, limit: 5 }).asked
+    }
+
+    expect(asked).toBe(1)
+    const rows = db.prepare(`SELECT question_text FROM cos_owner_questions WHERE case_id = 'storm'`)
+      .all() as Array<{ question_text: string }>
+    expect(rows.length).toBe(1)
+
+    // AND THE STORED TEXT IS CURRENT. Suppressing the notification must not
+    // freeze the question at its first version — the dashboard and the eventual
+    // answer would then be looking at a proposal the engine no longer makes.
+    expect(rows[0].question_text).toMatch(/Javaslatom: Kérj határidő-hosszabbítást/)
+  })
+
+  // The suppression must not swallow a genuinely NEW ask. Change the reading —
+  // which is what a real development does — and the question goes out.
+  it('a changed ASK still reaches him', () => {
+    seedCase(db, 'moved')
+    seedState(db, 'moved', null)
+    db.prepare(
+      `INSERT INTO case_evidence_packets (case_id, domain, packet_json, plan_json, created_at)
+       VALUES ('moved', 'personal', ?, ?, ?)`,
+    ).run(JSON.stringify({ ...PACKET, caseId: 'moved' }), JSON.stringify(PLAN), T)
+    expect(askPendingOwnerQuestions(db, { now: T, limit: 5 }).asked).toBe(1)
+
+    db.prepare(
+      `INSERT INTO case_evidence_packets (case_id, domain, packet_json, plan_json, created_at)
+       VALUES ('moved', 'personal', ?, ?, ?)`,
+    ).run(
+      JSON.stringify({
+        ...PACKET, caseId: 'moved',
+        missingRequirements: [{ what: 'a NAV határozat másolata', whoHasIt: 'István', why: 'e nélkül nem megy tovább' }],
+      }),
+      JSON.stringify(PLAN), T + 600,
+    )
+    expect(askPendingOwnerQuestions(db, { now: T + 600, limit: 5 }).asked).toBe(1)
   })
 })
 

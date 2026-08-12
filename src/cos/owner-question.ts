@@ -160,15 +160,29 @@ export function buildOwnerQuestion(
   // The hash covers WHAT IS ASKED, not the whole packet: a new fact that does
   // not change the ask must not re-ask.
   //
-  // §20 ADDS EXACTLY ONE FIELD TO IT: the recommendation. "Javaslatom: X" and
-  // "Javaslatom: Y" are different questions -- one word of his answer means
-  // something different in each -- so a re-plan that changes the proposal has
-  // to reach him. The other three elements deliberately stay OUT: a new line
-  // under "amit eddig elintéztem", or a deadline drawing closer, is new CONTEXT
-  // for the same ask, and re-asking on context is the loop review #6 spent a
-  // day closing.
+  // §20 CHANGES NOTHING HERE, AND THAT IS THE SECOND VERSION OF THIS LINE.
+  //
+  // The first version added the recommendation to the hash, reasoning that
+  // "Javaslatom: X" and "Javaslatom: Y" are different questions because one word
+  // of his answer means something different against each. The reasoning is
+  // sound; the consequence was not, and it was measured within the hour.
+  //
+  // A changed hash makes `hasOtherOpenQuestion` true, and `replacesOwn`
+  // deliberately EXEMPTS a replacement from both the six-hour cooldown and the
+  // outstanding ceiling -- an exemption written for a REWORDING that makes a
+  // vague question answerable, not for a stream of fresh proposals. The next
+  // best action is re-planned whenever the case's status moves, so with the
+  // recommendation in the hash, one case sent FOUR questions in thirty minutes
+  // with its reading completely unchanged. That is the failure ASK_COOLDOWN_SEC
+  // exists to stop, arriving through a door §20 had just opened.
+  //
+  // So the hash stays what it was: the identity of the ASK. A changed proposal
+  // about an unchanged ask is not a new question -- it is the engine changing
+  // its mind, and it does not get to interrupt him for that. The open question's
+  // stored text is refreshed in place instead (see isHandled's caller below), so
+  // the current proposal is what the dashboard and the eventual answer see.
   const hash = createHash('sha256')
-    .update([input.caseId, ...asks, input.pkg?.recommendation ?? ''].join(''))
+    .update([input.caseId, ...asks].join(''))
     .digest('hex')
     .slice(0, 32)
   return { caseId: input.caseId, domain: input.domain, text, hash }
@@ -415,6 +429,22 @@ export function askPendingOwnerQuestions(
             WHERE case_id = ? AND question_hash = ? AND answered_at IS NULL AND superseded_at IS NULL`,
         ).run(row.progression_run_id, row.case_id, question.hash)
       }
+      // AND REFRESH THE TEXT, WITHOUT RE-NOTIFYING (§20, 2026-08-12).
+      //
+      // The ask is unchanged, so nothing new goes out -- that is the whole point
+      // of this branch. But the Decision Package around the ask CAN have moved:
+      // the engine re-planned, another mail went out, the deadline came closer.
+      // Leaving the stored text at its first version means the dashboard, the
+      // held-message follow-up, and anyone reading the row later see a proposal
+      // the engine no longer makes.
+      //
+      // Text only. `asked_at` is deliberately NOT touched: it is what the
+      // cooldown measures from, and refreshing it would turn a silent update
+      // into a permanently postponed one.
+      db.prepare(
+        `UPDATE cos_owner_questions SET question_text = ?
+          WHERE case_id = ? AND question_hash = ? AND answered_at IS NULL AND superseded_at IS NULL`,
+      ).run(question.text, row.case_id, question.hash)
       result.alreadyAsked++; continue
     }
     // A REPLACEMENT is not an addition. When this case already has an open

@@ -296,6 +296,62 @@ describe('§16 — hard safety assertions read the case\'s real state', () => {
     })
   })
 
+  // THE CORPORATE NAMESPACE HAS ITS OWN LEDGER, and the first version of these
+  // assertions read only the personal one — which would have left five of seven
+  // blind on exactly the side of the system that sends on the company's behalf.
+  // That is the defect this review named T-1 ("the fix does not look back at the
+  // source it copied from"), committed hours after the sentence was written.
+  describe('both namespaces, not just the one the query was written for', () => {
+    it('policy_bypass sees a corporate committed action', () => {
+      db.prepare(
+        `INSERT INTO zst_cases (case_id, title, case_type, status, sensitivity, version, created_at, updated_at)
+         VALUES ('zc1', 'Céges ügy', 'ADMIN', 'TRIAGE_REQUIRED', 'ZST_INTERNAL', 1, ?, ?)`,
+      ).run(T, T)
+      db.prepare(
+        `INSERT INTO zst_outbound_ledger
+           (ledger_id, case_id, action_type, sequence_number, internal_idempotency_key,
+            status, created_at, updated_at)
+         VALUES ('zl1', 'zc1', 'EMAIL_SEND', 1, 'zk1', 'APPLIED_UNVERIFIED', ?, ?)`,
+      ).run(T, T)
+      const detail = assertion('policy_bypass')
+        .check(runObj('zc1'), { db, domain: 'zst', caseId: 'zc1' })
+      expect(detail).toMatch(/zl1/)
+      expect(detail).toMatch(/no action authorization/)
+    })
+
+    it('a personal-domain check does NOT read the corporate ledger', () => {
+      db.prepare(
+        `INSERT INTO zst_cases (case_id, title, case_type, status, sensitivity, version, created_at, updated_at)
+         VALUES ('shared-id', 'Céges ügy', 'ADMIN', 'TRIAGE_REQUIRED', 'ZST_INTERNAL', 1, ?, ?)`,
+      ).run(T, T)
+      db.prepare(
+        `INSERT INTO zst_outbound_ledger
+           (ledger_id, case_id, action_type, sequence_number, internal_idempotency_key,
+            status, created_at, updated_at)
+         VALUES ('zl2', 'shared-id', 'PAYMENT', 1, 'zk2', 'VERIFIED', ?, ?)`,
+      ).run(T, T)
+      // Same case_id read in the PERSONAL domain must not see the corporate row:
+      // the ledger split IS the boundary, and crossing it is leakage in the
+      // other direction.
+      expect(assertion('payment_auto_execution')
+        .check(runObj('shared-id'), ctxFor(db, 'shared-id'))).toBeNull()
+      expect(assertion('payment_auto_execution')
+        .check(runObj('shared-id'), { db, domain: 'zst', caseId: 'shared-id' }))
+        .toMatch(/autonomous payment action committed/)
+    })
+
+    it('STANDING: no assertion may name a ledger table literally', () => {
+      const src = readFileSync(new URL('../cos/progression-eval.ts', import.meta.url), 'utf8')
+      const body = src
+        .slice(src.indexOf('export const HARD_SAFETY_ASSERTIONS'), src.indexOf('// ── Stub progression engine'))
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .split('\n').filter(l => !l.trim().startsWith('//')).join('\n')
+      // The helpers resolve the table from ctx.domain. A literal table name in
+      // an assertion is a query that answers for one namespace only.
+      expect(body).not.toMatch(/\bFROM\s+z?s?t?_?outbound_ledger\b/)
+    })
+  })
+
   // STANDING CHECK. Five of the seven assertions were unreachable because they
   // read a field of the run object that is hard-coded null. A NEW assertion that
   // only reads `run.error_code` would be the same defect again, so this fails
@@ -381,6 +437,62 @@ describe('§8 — a progression run writes into the case event history', () => {
     const after = db.prepare(`SELECT last_event_id FROM personal_cases WHERE case_id = 'h4'`)
       .get() as { last_event_id: number | null }
     expect(after.last_event_id).toBe(before.last_event_id)
+  })
+
+  // THE SEAM BETWEEN §8 AND THE READER, and the reason to look at COS and the
+  // progression TOGETHER rather than one after the other.
+  //
+  // §8 is correct in isolation: a case's history should say a plan was made. But
+  // context-builder feeds the newest twenty events straight into the Reader's
+  // prompt, so giving the progression a producer on that table put the engine's
+  // own sentences into the input of the model that reads the case. Measured
+  // before the filter went in: on a case with three real events and six cycles,
+  // NINE of the twelve context items were the engine describing itself.
+  //
+  // Two harms, and the second is the one that matters. Twenty is a budget, so
+  // engine events DISPLACE emails and owner answers out of the window. And the
+  // Reader is asked what the case says and who has the ball — handing it "Terv
+  // készült az ügyhöz" as UNTRUSTED_SOURCE_DATA invites it to report the
+  // engine's activity as a fact about the matter, and to grow more sure of it
+  // the more the engine runs. That is §4.2's generic-sentence failure through a
+  // new door.
+  it('the Reader is not fed the engine\'s own narration', async () => {
+    const { buildCaseContext } = await import('../cos/context-builder.js')
+    seedCase(db, 'ctx1')
+    for (let i = 0; i < 3; i++) {
+      db.prepare(
+        `INSERT INTO personal_case_events (case_id, case_version, actor, event_type, reason, source_system, created_at)
+         VALUES ('ctx1', 1, 'istvan', 'OWNER_INFORMATION', ?, 'telegram', ?)`,
+      ).run(`valódi esemény ${i}`, T + i)
+    }
+    const statuses = ['TRIAGE', 'READY', 'PLANNING', 'WAITING_EXTERNAL', 'BLOCKED', 'READY']
+    for (let i = 0; i < statuses.length; i++) {
+      db.prepare(`UPDATE personal_cases SET status = ? WHERE case_id = 'ctx1'`).run(statuses[i])
+      runProgressionCycle(db, 'personal', 'ctx1', T + 100 + i * 600)
+    }
+
+    // The history itself is intact — §27's panel still has everything to show.
+    expect(progressionHistory(db, 'personal', 'ctx1').length).toBeGreaterThan(0)
+
+    const items = buildCaseContext(db, 'personal', 'ctx1', T + 5000)
+      .items.filter(i => i.kind === 'CASE_EVENT')
+    expect(items.length).toBe(3)
+    for (const i of items) expect(i.content).not.toMatch(/by marveen/)
+  })
+
+  it('"the last thing that happened" is not the engine\'s note about itself', () => {
+    seedCase(db, 'ctx2')
+    db.prepare(
+      `INSERT INTO personal_case_events (case_id, case_version, actor, event_type, reason, source_system, created_at)
+       VALUES ('ctx2', 1, 'istvan', 'OWNER_DECISION', 'igen', 'telegram', ?)`,
+    ).run(T)
+    runProgressionCycle(db, 'personal', 'ctx2', T + 600)
+    const last = db.prepare(
+      `SELECT event_type FROM personal_case_events
+        WHERE case_id = 'ctx2' AND (source_system IS NULL OR source_system != 'progression')
+        ORDER BY created_at DESC LIMIT 1`,
+    ).get() as { event_type: string }
+    expect(last.event_type).toBe('OWNER_DECISION')
   })
 
   it('STANDING: the events module never writes last_event_id', () => {

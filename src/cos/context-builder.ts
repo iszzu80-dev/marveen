@@ -337,9 +337,38 @@ export function buildCaseContext(
   // ORIGINATE outside (an intake writes what the sender wrote), so events are
   // marked untrusted. Over-marking costs a little caution; under-marking costs
   // the boundary.
+  // THE ENGINE'S OWN NARRATION IS NOT PART OF THE CASE (2026-08-12).
+  //
+  // §8 gave the progression a producer on this table, which is right — a case's
+  // history should say that a plan was made and that it started waiting. It also
+  // put the engine's sentences straight into the READER's prompt, because this
+  // query takes the newest twenty events with no filter, and the progression
+  // writes at the end of every run.
+  //
+  // Measured on a case with three real events and six cycles: NINE of the twelve
+  // context items were the engine describing itself. Two ways that hurts, and
+  // the second is the one that matters:
+  //
+  //   - DISPLACEMENT. Twenty is a budget. Engine events push real ones — emails,
+  //     owner answers, status changes — out of the window the Reader can see.
+  //   - SELF-REINFORCEMENT. The Reader is asked what the case says, what is
+  //     missing, and who has the ball. Handing it "Terv készült az ügyhöz" as
+  //     UNTRUSTED_SOURCE_DATA invites it to report the engine's activity as a
+  //     fact about the matter, and to grow more confident the more the engine
+  //     runs. That is §4.2's failure — generic sentences propagating — arriving
+  //     through a new door.
+  //
+  // The pipeline does not lose anything: what the engine did is in
+  // case_progression_state and the run ledger, which it reads directly.
+  //
+  // NULL-SAFE on purpose: source_system defaults to NULL (case-engine-core), so
+  // `!= 'progression'` alone would drop every event that predates the column
+  // being set — which is most of them.
   const events = db.prepare(
     `SELECT event_id, event_type, previous_status, new_status, reason, actor, source_system, created_at
-     FROM ${eventTable} WHERE case_id = ? ORDER BY event_id DESC LIMIT 20`
+     FROM ${eventTable}
+     WHERE case_id = ? AND (source_system IS NULL OR source_system != 'progression')
+     ORDER BY event_id DESC LIMIT 20`
   ).all(caseId) as Array<Record<string, unknown>>
   const superseded = markSupersededEvents(events)
   for (const e of events) {
