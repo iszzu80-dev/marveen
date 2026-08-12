@@ -1976,6 +1976,7 @@ window._i18n.en = {
   'apg.kanban.filter.done_not_accepted':  'APG: Done, not accepted',
   'apg.kanban.badge.label':               'APG · {state}',
   'apg.kanban.badge.accepted':            'Independently accepted',
+  'apg.kanban.badge.gates_passed':        'Gates passed · not yet accepted',
   'apg.kanban.badge.done_not_accepted':   'Done · not yet accepted',
 
   'apg.detail.risk':                  'Risk',
