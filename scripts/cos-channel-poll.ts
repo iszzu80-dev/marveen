@@ -14,7 +14,10 @@
 //
 // SENDER CHECK: only the owner's own user id is accepted. The bot is reachable
 // by anyone who finds it, and an owner-answer is an authorisation-bearing act --
-// it closes questions and writes OWNER_DECISION events onto cases.
+// it closes questions and writes OWNER_DECISION events onto cases. The id comes
+// from the bot config (`owner_id`), not from a literal in this file: it is
+// deployment-local identity, and a constant buried in a poller is the line
+// nobody finds on the next install.
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
@@ -23,7 +26,6 @@ import { loadCosBotConfig, pollCosUpdates, looksLikeAQuestionBack } from '../src
 import { recordOwnerAnswer, matchAnswerTarget, holdOwnerMessage } from '../src/cos/owner-question.js'
 
 const OFFSET_PATH = 'store/.cos-telegram-offset'
-const OWNER_ID = '8942301795'
 
 function readOffset(): number {
   try { return Number(readFileSync(OFFSET_PATH, 'utf8').trim()) || 0 } catch { return 0 }
@@ -41,6 +43,17 @@ async function main(): Promise<void> {
     console.log('CosInbox:', JSON.stringify({ read: 0, failed: true, error: 'CoS bot not configured' })); return
   }
 
+  // WHOSE replies count, from config (review 2026-08-12, T-4). No owner id means
+  // no owner answers: refusing everything is the only safe reading of "nobody
+  // said who may decide", and it is reported rather than looking like silence.
+  if (!cfg.ownerId) {
+    console.log('CosInbox:', JSON.stringify({
+      read: 0, failed: true,
+      error: 'no owner_id in the CoS bot config — owner answers cannot be authorised',
+    }))
+    return
+  }
+
   const updates = await pollCosUpdates(cfg, readOffset())
   // `ambiguous`: the owner wrote a plain message while SEVERAL questions were
   // open, so which case he meant cannot be known. Counted separately from
@@ -51,11 +64,26 @@ async function main(): Promise<void> {
 
   for (const u of updates) {
     highest = Math.max(highest, u.updateId)
-    if (u.fromId !== OWNER_ID) { result.rejected++; continue }
+    if (u.fromId !== cfg.ownerId) { result.rejected++; continue }
 
     // A question back is not an answer. Counted, not swallowed: the owner asked
     // something and deserves a reply, and the case must stay open.
-    if (looksLikeAQuestionBack(u.text)) { result.notAnAnswer++; continue }
+    //
+    // AND HELD, for the same reason the ambiguity branch below holds (review
+    // 2026-08-12, T-2). This branch used to `continue` with only a counter, and
+    // the cursor moves at the bottom of the loop — so the sentence was gone,
+    // which is exactly the bug that was fixed three lines further down and not
+    // here. The detector is deliberately crude and fail-CLOSED, so it fires on
+    // ordinary answers too: `hogy`, `ki`, `mennyi` and `milyen` are as common as
+    // conjunctions in Hungarian as they are as question words. Refusing to read
+    // those as decisions is right; losing them is not.
+    if (looksLikeAQuestionBack(u.text)) {
+      holdOwnerMessage(db, {
+        channel: cfg.channelId!, chatId: u.chatId, messageId: u.messageId, text: u.text,
+        reason: 'visszakerdezesnek tunt, ezert nem lett dontesnek olvasva',
+      })
+      result.notAnAnswer++; continue
+    }
 
     // WHICH CASE this message answers is decided by one tested function, not by
     // a rule inlined in a script: the guess it replaced wrote the owner's words

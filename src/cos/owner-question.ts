@@ -490,20 +490,28 @@ export function recordOwnerAnswer(
   // A question with NO recorded channel (asked before the split) still matches
   // anything -- it predates the distinction, and refusing it would strand every
   // question asked today.
+  //
+  // THE DOMAIN IS PART OF THE MATCH (review 2026-08-12, T-5). It used to be
+  // ignored here while the EVENT was written to the domain's own table, so a
+  // caller that passed the wrong domain closed the question and wrote nothing:
+  // the answer vanished and the question looked answered. The live caller reads
+  // the domain off the matched row, so this could not fire today — but the next
+  // caller (an HTTP route, a CLI) is under no obligation to be that careful, and
+  // a guard that depends on every future caller being careful is not a guard.
   const open = input.channel
     ? db.prepare(
         `SELECT question_hash, progression_run_id FROM cos_owner_questions
-         WHERE case_id = ? AND answered_at IS NULL AND superseded_at IS NULL
+         WHERE case_id = ? AND domain = ? AND answered_at IS NULL AND superseded_at IS NULL
            AND (channel IS NULL OR channel = ?)
            AND asked_at <= ?
          ORDER BY asked_at DESC LIMIT 1`,
-      ).get(input.caseId, input.channel.channel, now) as
+      ).get(input.caseId, input.domain, input.channel.channel, now) as
         { question_hash: string; progression_run_id: string | null } | undefined
     : db.prepare(
         `SELECT question_hash, progression_run_id FROM cos_owner_questions
-         WHERE case_id = ? AND answered_at IS NULL AND superseded_at IS NULL
+         WHERE case_id = ? AND domain = ? AND answered_at IS NULL AND superseded_at IS NULL
          ORDER BY asked_at DESC LIMIT 1`,
-      ).get(input.caseId) as
+      ).get(input.caseId, input.domain) as
         { question_hash: string; progression_run_id: string | null } | undefined
   if (!open) return null
 
@@ -512,8 +520,8 @@ export function recordOwnerAnswer(
 
   db.prepare(
     `UPDATE cos_owner_questions SET answered_at = ?, answer_text = ?
-     WHERE case_id = ? AND question_hash = ?`,
-  ).run(now, input.text, input.caseId, open.question_hash)
+     WHERE case_id = ? AND domain = ? AND question_hash = ?`,
+  ).run(now, input.text, input.caseId, input.domain, open.question_hash)
 
   const table = input.domain === 'zst' ? 'zst_cases' : 'personal_cases'
   const row = db.prepare(`SELECT version FROM ${table} WHERE case_id = ?`).get(input.caseId) as
@@ -652,6 +660,74 @@ export function heldOwnerMessages(
          ORDER BY received_at ASC LIMIT ?`,
     ).all(limit) as never
   } catch { return [] }
+}
+
+/**
+ * What to send back about a message that could not be placed (review
+ * 2026-08-12, T-3).
+ *
+ * WHY A REPLY AND NOT JUST A ROW. `holdOwnerMessage` kept the words, which was
+ * the fix for losing them — but nothing read the table, nothing set
+ * `resolved_at`, and the owner got NO answer at all. From his side: he replies,
+ * nothing happens, and he is not told the message was not understood. A held
+ * message with no reply is the same silence as a dropped one, with a better
+ * audit trail.
+ *
+ * WHAT THE TEXT HAS TO DO. Not apologise — hand him the one action that
+ * resolves it. `matchAnswerTarget` already treats a Telegram reply-to as the
+ * exact, unambiguous signal, so the follow-up quotes what he wrote and lists the
+ * open questions by name: replying to one of THOSE messages lands the answer
+ * without any guessing.
+ *
+ * Pure on purpose: it takes the rows, returns the string, and touches nothing.
+ * The sending and the marking are the caller's, so a delivery failure leaves the
+ * row open for the next sweep instead of marking it dealt-with.
+ */
+export function buildHeldFollowUp(
+  held: { text: string; reason: string },
+  open: Array<{ caseId: string; text: string }>,
+): string {
+  const quoted = held.text.length > 200 ? `${held.text.slice(0, 200)}…` : held.text
+  const lines = [
+    '❓ Ezt nem tudtam ügyhöz kötni:',
+    `„${quoted}"`,
+    '',
+    `Ok: ${held.reason}`,
+  ]
+  if (open.length > 0) {
+    lines.push('')
+    // The titles are what he sees in the channel, so naming them is enough to
+    // pick one. The instruction is the point: reply-to is the only signal that
+    // needs no guessing, and it is the one the matcher prefers.
+    lines.push('Nyitott kérdések — válaszolj közvetlenül arra az üzenetre (reply):')
+    for (const q of open.slice(0, 5)) {
+      lines.push(`• ${firstLine(q.text)} (${q.caseId})`)
+    }
+  } else {
+    // Saying so matters: "I could not place it" reads very differently when
+    // there is nothing open at all, and that is a different bug to report.
+    lines.push('')
+    lines.push('Jelenleg nincs nyitott kérdés, amihez köthetném.')
+  }
+  return lines.join('\n')
+}
+
+/** The question's own first line — its title as it appeared in the channel. */
+function firstLine(text: string): string {
+  const line = (text.split('\n')[0] ?? '').replace(/^❓\s*/, '').trim()
+  return line.length > 80 ? `${line.slice(0, 80)}…` : (line || '(cím nélkül)')
+}
+
+/** Mark a held message as dealt with. Called only AFTER the reply left the
+ *  machine — the other order turns one delivery failure into a lost message,
+ *  which is the exact bug this whole table exists to prevent. */
+export function markHeldResolved(
+  db: Database.Database, heldId: number, resolution: string, now?: number,
+): void {
+  db.prepare(
+    `UPDATE cos_channel_held SET resolved_at = ?, resolution = ?
+      WHERE held_id = ? AND resolved_at IS NULL`,
+  ).run(now ?? Math.floor(Date.now() / 1000), resolution, heldId)
 }
 
 /** The questions still waiting on him — so "what did it ask me?" is a query. */
