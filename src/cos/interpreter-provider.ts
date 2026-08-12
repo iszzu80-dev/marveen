@@ -12,7 +12,7 @@
 // interpreter's prompt-injection guard to be forgotten.
 
 import { AnthropicLlmClient, DEFAULT_INTERPRETER_MODEL, type LlmClient } from './progression-interpreter.js'
-import type { ModelProfileId } from '../model-profiles.js'
+import { OpenAiLlmClient, DEFAULT_OPENAI_MODEL } from './openai-interpreter.js'
 
 /** DeepSeek's Anthropic-compatible endpoint. The SDK appends /v1/messages. */
 export const DEEPSEEK_ANTHROPIC_BASE_URL = 'https://api.deepseek.com/anthropic'
@@ -25,31 +25,32 @@ export const DEEPSEEK_INTERPRETER_MODEL = 'deepseek-v4-flash'
 export interface ResolvedInterpreter {
   client: LlmClient
   /** For the log line, so a reader can see WHICH model wrote the goals. */
-  provider: 'anthropic' | 'deepseek'
+  provider: 'anthropic' | 'openai' | 'deepseek'
   model: string
-  /** Which §10 model profile this interpreter counts as, for the sensitivity
-   *  allowlist. Carried EXPLICITLY rather than inferred at the call site: a gate
-   *  that guesses which profile it is protecting is a gate nobody can audit. */
-  profile: ModelProfileId
+  // NO `profile` FIELD. It used to be here, filled at five call sites and read
+  // at none (review #5, Ö-4). A field that carries a POLICY CLAIM and is never
+  // checked is worse than an absent one: the next reader concludes from its
+  // presence that the profile gate runs on this path, and it does not. The
+  // reading path's rule is provider-data-policy.ts (WHICH PROVIDER may see which
+  // tier); the profile allowlist in sensitivity.ts governs the SENDING path.
 }
 
-/**
- * Interpreter → model profile.
- *
- * Derived from the deployment's own map (`store/model-profile-map.json`), not
- * from a guess: there `analysis_efficient` and `routine_lowcost` both resolve to
- * a DeepSeek model, and the two Claude tiers to Opus and Sonnet. Both
- * interpreters here are cheap-tier models — DeepSeek flash and Claude Haiku —
- * so neither counts as `premium_reasoning`, and the §10 allowlist consequently
- * keeps SENSITIVE_PERSONAL and above away from both.
- *
- * If that becomes too strict for the Reader, the fix is a decision about WHICH
- * MODEL may read sensitive cases — an owner call — not a quieter profile here.
- */
-export const INTERPRETER_PROFILE: Record<'anthropic' | 'deepseek', ModelProfileId> = {
-  anthropic: 'analysis_efficient',
-  deepseek: 'analysis_efficient',
-}
+// WHERE THE READING PATH'S RULE LIVES — and why there is no profile table here.
+//
+// There used to be an `INTERPRETER_PROFILE` map declaring which §10 model
+// profile each interpreter counts as. Nothing read it (review #5, Ö-4), and it
+// stated a rule that does NOT govern this path: it said the cheap interpreters
+// are `analysis_efficient`, which the profile allowlist forbids for
+// SENSITIVE_PERSONAL and above — while the reader sweep happily routes those
+// cases by provider instead. Two tables, two answers, one of them unread.
+//
+// The two rules, each named once, so the next reader finds both:
+//   - READING path (what a model may be shown): provider-data-policy.ts —
+//     WHICH PROVIDER is cleared for which tier (Istvan, 2026-08-11).
+//   - SENDING path (what may go out of the system): PROFILE_ALLOWLIST in
+//     sensitivity.ts.
+// Reinstating a profile claim here means wiring it to a check, not writing the
+// field back.
 
 /** Read a secret without the caller having to know where secrets live, and
  *  without importing the web layer into the cos domain at module load. */
@@ -85,7 +86,6 @@ export function resolveInterpreter(
       }),
       provider: 'anthropic',
       model: DEFAULT_INTERPRETER_MODEL,
-      profile: INTERPRETER_PROFILE.anthropic,
     }
   }
 
@@ -100,7 +100,6 @@ export function resolveInterpreter(
       }),
       provider: 'deepseek',
       model: DEEPSEEK_INTERPRETER_MODEL,
-      profile: INTERPRETER_PROFILE.deepseek,
     }
   }
 
@@ -134,6 +133,13 @@ export function resolveReaderInterpreters(
   const anthropicKey = process.env.ANTHROPIC_API_KEY
     || process.env.ANTHROPIC_AUTH_TOKEN
     || (getSecret('ANTHROPIC_API_KEY') ?? '').trim()
+  // TWO contracted providers, tried in order (Istvan, 2026-08-11: sensitive may
+  // go to Anthropic or OpenAI). The second one is not redundancy for its own
+  // sake: with a single cleared provider, an expired key means every sensitive
+  // case is refused — correct, and it stops the work. With two, the sweep
+  // degrades instead of halting, and the refusal that remains means "neither
+  // cleared provider is available", which is a different and much rarer fact.
+  const openaiKey = (process.env.OPENAI_API_KEY || (getSecret('OPENAI_API_KEY') ?? '')).trim()
   const contracted: ResolvedInterpreter | null = anthropicKey
     ? {
         client: new AnthropicLlmClient({
@@ -141,9 +147,16 @@ export function resolveReaderInterpreters(
         }),
         provider: 'anthropic',
         model: DEFAULT_INTERPRETER_MODEL,
-        profile: INTERPRETER_PROFILE.anthropic,
       }
-    : null
+    : openaiKey
+      ? {
+          client: new OpenAiLlmClient({
+            apiKey: openaiKey, model: DEFAULT_OPENAI_MODEL, maxTokens: opts.maxTokens,
+          }),
+          provider: 'openai',
+          model: DEFAULT_OPENAI_MODEL,
+        }
+      : null
 
   // The general reader is the CHEAP one when it exists — that is the whole
   // point of routing by tier rather than sending everything to the contracted
@@ -160,7 +173,6 @@ export function resolveReaderInterpreters(
         }),
         provider: 'deepseek',
         model: DEEPSEEK_INTERPRETER_MODEL,
-        profile: INTERPRETER_PROFILE.deepseek,
       }
     : contracted
 

@@ -21,7 +21,7 @@
 import { createHash } from 'node:crypto'
 import type Database from 'better-sqlite3'
 import { createAgentMessage, appendDailyLog } from '../db.js'
-import type { ReaderEvidencePacket } from './reader.js'
+import { foldName, type ReaderEvidencePacket } from './reader.js'
 import type { EvidencePlan } from './evidence-planner.js'
 
 export interface OwnerQuestion {
@@ -38,7 +38,7 @@ export interface OwnerQuestion {
 /** Which steps are genuinely his to answer. */
 function ownerSteps(plan: EvidencePlan): string[] {
   return plan.steps
-    .filter(s => s.kind === 'ASK_OWNER' || (s.blockedBy ?? '').toUpperCase() === 'ISTVAN')
+    .filter(s => s.kind === 'ASK_OWNER' || foldName(s.blockedBy) === 'ISTVAN')
     .map(s => s.label)
 }
 
@@ -57,7 +57,11 @@ export function buildOwnerQuestion(
   if (steps.length === 0 && !ballIsHis) return null
 
   const missingFromHim = input.packet.missingRequirements
-    .filter(m => m.whoHasIt.toUpperCase().includes('ISTVAN'))
+    // FOLDED (review #6, H-3). `whoHasIt` is free text written by a model that
+    // was asked to answer in Hungarian, so "István" arrives with the accent
+    // roughly as often as without — and an ASCII comparison silently sorted the
+    // same case into a different question each time.
+    .filter(m => foldName(m.whoHasIt).includes('ISTVAN'))
   const lines: string[] = []
   lines.push(`❓ ${input.title}`)
   lines.push('')
@@ -120,20 +124,111 @@ export interface AskResult {
   alreadyAsked: number
   /** Cases read this pass with nothing to ask the owner. */
   nothingToAsk: number
+  /** Cases whose stored reading is OLDER than the case itself — asked from such
+   *  a packet, the question describes a world that has moved on. Counted, not
+   *  silent: the next reader pass refreshes them. */
+  staleReading: number
+  /** Cases held back because they asked recently and got no answer. Counted for
+   *  the same reason as everything else here: a channel that went quiet because
+   *  of a rule must not look like a system with nothing to say. */
+  cooldown: number
 }
 
-/** Has this exact question already gone out and not yet been answered? */
-function isOutstanding(db: Database.Database, caseId: string, hash: string): boolean {
+/** Has this exact question already been HANDLED — either still waiting for an
+ *  answer, or answered and nothing has moved since?
+ *
+ *  The second half is the 2026-08-11 fix. The old check only suppressed
+ *  UNANSWERED questions, on the reasoning that "once an answer is recorded, the
+ *  same question may legitimately be asked again if the situation returns". The
+ *  situation returning is the right trigger; the code never checked for it. So
+ *  within twenty minutes of Istvan answering five questions, two came straight
+ *  back — same case, same ask, nothing changed — and the UPSERT below wiped
+ *  `answered_at` on the way, making them look like they had never been answered.
+ *
+ *  Getting an answer must not be what causes the question to reappear. That is
+ *  the fastest way to teach someone to stop answering.
+ *
+ *  "Moved since" is the case's own updated_at: if the case has not changed since
+ *  the answer landed, there is nothing new to ask about. */
+function isHandled(db: Database.Database, caseId: string, domain: string, hash: string): boolean {
   try {
     const row = db.prepare(
-      `SELECT 1 FROM cos_owner_questions WHERE case_id = ? AND question_hash = ? AND answered_at IS NULL`,
-    ).get(caseId, hash)
-    return row !== undefined
+      `SELECT answered_at FROM cos_owner_questions
+       WHERE case_id = ? AND question_hash = ? AND superseded_at IS NULL`,
+    ).get(caseId, hash) as { answered_at: number | null } | undefined
+    if (!row) return false
+    if (row.answered_at == null) return true          // still waiting on him
+    const table = domain === 'zst' ? 'zst_cases' : 'personal_cases'
+    const c = db.prepare(`SELECT updated_at FROM ${table} WHERE case_id = ?`).get(caseId) as
+      { updated_at: number } | undefined
+    // Answered and the case has not moved since -> nothing new to ask.
+    return c == null || c.updated_at <= row.answered_at
   } catch {
     // No table yet: nothing can be outstanding. Returning true here would mute
     // the channel on a fresh install, which is the failure worth avoiding.
     return false
   }
+}
+
+/** Seconds a stored reading may lag the case before it counts as stale. */
+export const STALE_READING_GRACE_SEC = 120
+
+/** How long one case must stay quiet after asking, unless the owner answers.
+ *
+ *  Live on 2026-08-11: ONE case produced THREE questions in twenty minutes.
+ *  20:20 "what should be done with this invoice?", answered at 20:21; 20:30
+ *  "does 'parking' mean a line item on the invoice?", which I resolved myself;
+ *  20:40 "please confirm the follow-up date Marveen proposed" — the Reader had
+ *  read my own note, which said in so many words that Istvan could override the
+ *  date, and turned it into a question.
+ *
+ *  Each one was individually defensible. Together they are a case talking to its
+ *  owner every ten minutes, which is how a channel gets muted — and the ceiling
+ *  does not catch it, because the ceiling bounds the PILE, not the RATE per case.
+ *
+ *  Six hours is not a magic number: it is "not again this working session". An
+ *  ANSWER clears it immediately, so a conversation the owner is actually having
+ *  is never slowed down — only a case talking to itself is. */
+export const ASK_COOLDOWN_SEC = 6 * 3600
+
+/** Has this case already asked recently, with no answer since?
+ *
+ *  Deliberately NOT keyed on the question's hash: the failure is a case that
+ *  keeps finding new things to ask, so a rule that only suppressed IDENTICAL
+ *  questions would have stopped none of the three. */
+function askedRecently(db: Database.Database, caseId: string, now: number): boolean {
+  try {
+    const row = db.prepare(
+      `SELECT MAX(asked_at) AS last_ask, MAX(COALESCE(answered_at, 0)) AS last_answer
+         FROM cos_owner_questions WHERE case_id = ?`,
+    ).get(caseId) as { last_ask: number | null; last_answer: number } | undefined
+    if (!row?.last_ask) return false
+    // An answer since the last ask means the owner is engaged with this case;
+    // the next question is part of that exchange, not noise on top of it.
+    if (row.last_answer >= row.last_ask) return false
+    return now - row.last_ask < ASK_COOLDOWN_SEC
+  } catch { return false }
+}
+
+function caseUpdatedAt(db: Database.Database, domain: string, caseId: string): number {
+  const table = domain === 'zst' ? 'zst_cases' : 'personal_cases'
+  try {
+    const r = db.prepare(`SELECT updated_at FROM ${table} WHERE case_id = ?`).get(caseId) as
+      { updated_at: number } | undefined
+    return r?.updated_at ?? 0
+  } catch { return 0 }
+}
+
+/** Does this case already have a DIFFERENT open question? Then a new ask is a
+ *  replacement, not an addition. */
+function hasOtherOpenQuestion(db: Database.Database, caseId: string, hash: string): boolean {
+  try {
+    const row = db.prepare(
+      `SELECT 1 FROM cos_owner_questions
+       WHERE case_id = ? AND question_hash != ? AND answered_at IS NULL AND superseded_at IS NULL`,
+    ).get(caseId, hash)
+    return row !== undefined
+  } catch { return false }
 }
 
 /**
@@ -143,9 +238,19 @@ function isOutstanding(db: Database.Database, caseId: string, hash: string): boo
  * bound is per sweep, because a burst of twelve questions at 3am is
  * indistinguishable from spam and gets the channel muted.
  */
+/** Where the owner's questions go. Resolved by the caller so the domain layer
+ *  never has to know a chat id -- and so the split can be rolled out by config
+ *  rather than by editing this file. */
+export interface OwnerChannel {
+  /** 'telegram' | 'bus' | ... -- the transport family. */
+  channel: string
+  /** The address within it (a Telegram chat id). Opaque here on purpose. */
+  target: string
+}
+
 export function askPendingOwnerQuestions(
   db: Database.Database,
-  opts: { limit?: number; now?: number; maxOutstanding?: number } = {},
+  opts: { limit?: number; now?: number; maxOutstanding?: number; channel?: OwnerChannel } = {},
 ): AskResult {
   const limit = opts.limit ?? 2
   // A GLOBAL cap on unanswered questions, on top of the per-sweep bound.
@@ -157,26 +262,39 @@ export function askPendingOwnerQuestions(
   const maxOutstanding = opts.maxOutstanding ?? 5
   const now = opts.now ?? Math.floor(Date.now() / 1000)
   const result: AskResult = {
-    asked: 0, alreadyAsked: 0, nothingToAsk: 0, heldBacklogFull: 0,
+    asked: 0, alreadyAsked: 0, nothingToAsk: 0, heldBacklogFull: 0, staleReading: 0, cooldown: 0,
   }
 
+  // Questions that GREW the open pile this sweep. A superseding rewrite does
+  // not, so it must not consume a ceiling slot.
+  let netAdded = 0
   let outstanding = 0
   try {
     outstanding = (db.prepare(
-      `SELECT COUNT(*) AS n FROM cos_owner_questions WHERE answered_at IS NULL`,
+      `SELECT COUNT(*) AS n FROM cos_owner_questions WHERE answered_at IS NULL AND superseded_at IS NULL`,
     ).get() as { n: number }).n
   } catch { outstanding = 0 }
 
-  let rows: Array<{ case_id: string; domain: string; packet_json: string; plan_json: string }> = []
+  let rows: Array<{ case_id: string; domain: string; packet_json: string; plan_json: string; packet_at: number; progression_run_id: string | null }> = []
   try {
     rows = db.prepare(
-      `SELECT p.case_id, p.domain, p.packet_json, p.plan_json
+      `SELECT p.case_id, p.domain, p.packet_json, p.plan_json, p.created_at AS packet_at,
+              p.progression_run_id
        FROM case_evidence_packets p
        JOIN (
          SELECT case_id, MAX(created_at) AS created_at
          FROM case_evidence_packets WHERE packet_json IS NOT NULL GROUP BY case_id
        ) latest ON latest.case_id = p.case_id AND latest.created_at = p.created_at
        WHERE p.packet_json IS NOT NULL AND p.plan_json IS NOT NULL
+         -- A finished case has no open question. Live 2026-08-11: a COMPLETED
+         -- rental case produced one anyway, because this query only ever looked
+         -- at packets and never at the case behind them.
+         AND NOT EXISTS (
+           SELECT 1 FROM personal_cases pc WHERE pc.case_id = p.case_id
+             AND (pc.status IN ('COMPLETED','CANCELLED','ARCHIVED') OR pc.archived_at IS NOT NULL))
+         AND NOT EXISTS (
+           SELECT 1 FROM zst_cases zc WHERE zc.case_id = p.case_id
+             AND (zc.status IN ('COMPLETED','CANCELLED','ARCHIVED') OR zc.archived_at IS NOT NULL))
        ORDER BY p.created_at DESC LIMIT 50`,
     ).all() as never
   } catch {
@@ -192,13 +310,67 @@ export function askPendingOwnerQuestions(
       plan = JSON.parse(row.plan_json) as EvidencePlan
     } catch { continue }
 
+    // A READING OLDER THAN THE CASE IS NOT A READING OF THIS CASE.
+    //
+    // Live 2026-08-11: I read a contract case's email body and wrote its real
+    // content onto the case at 16:51. Minutes later the sweep asked Istvan the
+    // ORIGINAL question -- "the intake is only an email reference, it contains
+    // no contract information" -- because the question is composed from the
+    // stored packet, and that packet was from 08:40. Eight hours of new facts,
+    // invisible to the sentence he would have read.
+    //
+    // The grace window is not decoration: intake, reading and the case's own
+    // updated_at land within the same cycle, seconds apart in arbitrary order
+    // (one live pair was 22 seconds). A strict comparison would call that
+    // staleness and silence a perfectly fresh question. Measured before writing
+    // this: 11% of cases with packets were genuinely stale, almost all because
+    // an owner answer or a correction had landed since -- exactly the ones that
+    // must NOT be asked from the old reading.
+    if (row.packet_at + STALE_READING_GRACE_SEC < caseUpdatedAt(db, row.domain, row.case_id)) {
+      result.staleReading++
+      continue
+    }
+
     const title = caseTitle(db, row.domain, row.case_id) ?? row.case_id
     const question = buildOwnerQuestion({
       caseId: row.case_id, domain: row.domain, title, packet, plan,
     })
     if (!question) { result.nothingToAsk++; continue }
-    if (isOutstanding(db, row.case_id, question.hash)) { result.alreadyAsked++; continue }
-    if (outstanding + result.asked >= maxOutstanding) { result.heldBacklogFull++; continue }
+    if (isHandled(db, row.case_id, row.domain, question.hash)) {
+      // SUPPRESSED, BUT KEEP THE RUN CURRENT. The ask is unchanged, so it must
+      // not go out twice -- but the case has been read again since, in a NEWER
+      // run. If the row kept pointing at the first one, the eventual answer
+      // would name a run whose decision no longer matches the current one, and
+      // consumeOwnerAnswer would call the answer stale and drop it. That is the
+      // same H-2 loop coming back through a different door: the question the
+      // owner is looking at RIGHT NOW is the one his answer has to attach to.
+      if (row.progression_run_id) {
+        db.prepare(
+          `UPDATE cos_owner_questions SET progression_run_id = ?
+            WHERE case_id = ? AND question_hash = ? AND answered_at IS NULL AND superseded_at IS NULL`,
+        ).run(row.progression_run_id, row.case_id, question.hash)
+      }
+      result.alreadyAsked++; continue
+    }
+    // A REPLACEMENT is not an addition. When this case already has an open
+    // question, asking the reworded one supersedes it — the pile waiting on him
+    // does not grow, so the ceiling has nothing to protect against here.
+    // Counting it would let a full queue block the very rewrite that makes a bad
+    // question answerable, which is the opposite of what the ceiling is for.
+    const replacesOwn = hasOtherOpenQuestion(db, row.case_id, question.hash)
+
+    // ONE CASE, ONE NEW QUESTION PER SESSION — unless he answered.
+    //
+    // Placed HERE, after both earlier checks, on purpose:
+    //   - after `isHandled`, so an identical repeat is still reported as
+    //     `alreadyAsked`; the more specific diagnosis is the more useful one.
+    //   - and exempting `replacesOwn`, because a REWRITE of a question he is
+    //     already looking at does not add anything to his pile — it makes a
+    //     vague question answerable, which is the opposite of noise. Holding
+    //     that back would leave him with the worse wording and call it quiet.
+    if (!replacesOwn && askedRecently(db, row.case_id, now)) { result.cooldown++; continue }
+
+    if (!replacesOwn && outstanding + netAdded >= maxOutstanding) { result.heldBacklogFull++; continue }
 
     // Record BEFORE sending. A crash between the two costs an unasked question,
     // which a later sweep re-derives; the other order costs a duplicate every
@@ -209,17 +381,45 @@ export function askPendingOwnerQuestions(
     // resets the ask and clears the previous answer here; the answer itself is
     // not lost, because it was appended to the case events when it arrived, and
     // that record is the append-only one.
+    // SUPERSEDE the case's other open questions first.
+    //
+    // The key is (case_id, question_hash), and the hash is of the ASK. So a
+    // REWORDED question about the same case does not collide — it opens a second
+    // row while the first stays unanswered. That happened on 2026-08-11: I
+    // improved the Valencia deposit question at 07:35, the vague 07:28 version
+    // ("Istvan döntése szükséges") stayed open, and the result was one case
+    // occupying two of the five ceiling slots and asking Istvan the same thing
+    // twice, once badly.
+    //
+    // One case can have at most one open question. The old row is marked
+    // superseded, not answered — see the column comment in schema.ts.
     db.prepare(
-      `INSERT INTO cos_owner_questions (case_id, domain, question_hash, question_text, asked_at)
-       VALUES (?, ?, ?, ?, ?)
+      `UPDATE cos_owner_questions SET superseded_at = ?
+        WHERE case_id = ? AND question_hash != ? AND answered_at IS NULL AND superseded_at IS NULL`,
+    ).run(now, row.case_id, question.hash)
+
+    // THE RUN ID TRAVELS WITH THE QUESTION. Without it the answer cannot name
+    // what it is answering, and the engine drops it (review #6, H-2) -- so the
+    // owner's reply closes the question and moves nothing, and the next sweep
+    // asks him the same thing again.
+    db.prepare(
+      `INSERT INTO cos_owner_questions
+         (case_id, domain, question_hash, question_text, asked_at, channel, channel_target,
+          progression_run_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (case_id, question_hash) DO UPDATE
          SET asked_at = excluded.asked_at, question_text = excluded.question_text,
-             answered_at = NULL, answer_text = NULL`,
-    ).run(row.case_id, row.domain, question.hash, question.text, now)
+             answered_at = NULL, answer_text = NULL, superseded_at = NULL,
+             channel = excluded.channel, channel_target = excluded.channel_target,
+             progression_run_id = excluded.progression_run_id`,
+    ).run(row.case_id, row.domain, question.hash, question.text, now,
+          opts.channel?.channel ?? null, opts.channel?.target ?? null,
+          row.progression_run_id ?? null)
 
     createAgentMessage('cos-reader', 'marveen', question.text, 'cos-owner-question')
     appendDailyLog('marveen', `## COS kerdes Istvannak\n${question.text}`)
     result.asked++
+    if (!replacesOwn) netAdded++
   }
   return result
 }
@@ -265,13 +465,46 @@ export interface RecordedAnswer {
  */
 export function recordOwnerAnswer(
   db: Database.Database,
-  input: { caseId: string; domain: string; text: string; now?: number },
+  input: { caseId: string; domain: string; text: string; now?: number; channel?: OwnerChannel },
 ): RecordedAnswer | null {
   const now = input.now ?? Math.floor(Date.now() / 1000)
-  const open = db.prepare(
-    `SELECT question_hash FROM cos_owner_questions
-     WHERE case_id = ? AND answered_at IS NULL ORDER BY asked_at DESC LIMIT 1`,
-  ).get(input.caseId) as { question_hash: string } | undefined
+  // CHANNEL-AWARE MATCHING. When the answer names the channel it arrived on,
+  // only questions asked on that channel may absorb it. Without this the split
+  // would silently mis-attribute: an answer typed in the dev chat could close a
+  // question the CoS chat is still displaying, and the owner would see a
+  // question he had already answered somewhere else.
+  //
+  // MATCHES ON `channel`, NOT on `channel_target`. The two columns answer
+  // different questions: `channel` is WHICH CHANNEL, `channel_target` is WHICH
+  // MESSAGE on it (chatId:messageId, written by the sender so a Telegram
+  // reply-to can name one question exactly). The first version compared the
+  // answer's channel address against channel_target and therefore matched
+  // nothing at all -- caught live on the first poll, which reported
+  // `unmatched: 2` instead of mis-attributing. Failing closed is why it was
+  // merely wrong and not damaging.
+  //
+  // `asked_at <= now` keeps a message that arrived BEFORE the question from
+  // being read as its answer -- the first two updates on the new bot were
+  // "/start" and "Hi", sent while the questions were still queued.
+  //
+  // A question with NO recorded channel (asked before the split) still matches
+  // anything -- it predates the distinction, and refusing it would strand every
+  // question asked today.
+  const open = input.channel
+    ? db.prepare(
+        `SELECT question_hash, progression_run_id FROM cos_owner_questions
+         WHERE case_id = ? AND answered_at IS NULL AND superseded_at IS NULL
+           AND (channel IS NULL OR channel = ?)
+           AND asked_at <= ?
+         ORDER BY asked_at DESC LIMIT 1`,
+      ).get(input.caseId, input.channel.channel, now) as
+        { question_hash: string; progression_run_id: string | null } | undefined
+    : db.prepare(
+        `SELECT question_hash, progression_run_id FROM cos_owner_questions
+         WHERE case_id = ? AND answered_at IS NULL AND superseded_at IS NULL
+         ORDER BY asked_at DESC LIMIT 1`,
+      ).get(input.caseId) as
+        { question_hash: string; progression_run_id: string | null } | undefined
   if (!open) return null
 
   const choice: 'YES' | 'NO' | null = YES.test(input.text) ? 'YES' : (NO.test(input.text) ? 'NO' : null)
@@ -287,17 +520,138 @@ export function recordOwnerAnswer(
     { version: number } | undefined
   if (row) {
     const events = input.domain === 'zst' ? 'zst_case_events' : 'personal_case_events'
-    db.prepare(
-      `INSERT INTO ${events} (case_id, case_version, actor, event_type, reason, payload, source_system, created_at)
-       VALUES (?, ?, 'istvan', ?, ?, ?, 'telegram', ?)`,
+    // source_reference NAMES THE RUN THE QUESTION CAME FROM. consumeOwnerAnswer
+    // refuses an answer without it -- it cannot verify WHICH question was
+    // answered, so it treats the event as stale and returns null. Until this
+    // line existed, every answer arriving from Telegram was written and then
+    // silently discarded by its own consumer, and the loop closed: answer ->
+    // question released -> case unchanged -> same packet -> same question sent
+    // again (review #6, H-2, reproduced: two identical messages after
+    // answering).
+    const info = db.prepare(
+      `INSERT INTO ${events} (case_id, case_version, actor, event_type, reason, payload,
+                              source_system, source_reference, created_at)
+       VALUES (?, ?, 'istvan', ?, ?, ?, 'telegram', ?, ?)`,
     ).run(
       input.caseId, row.version, eventType,
       input.text.slice(0, 500),
       JSON.stringify({ choice, answer: input.text, question_hash: open.question_hash }),
+      open.progression_run_id ?? null,
       now,
     )
+
+    // AND WAKE THE CASE. Found live on 2026-08-11, twenty minutes after the
+    // source_reference fix went in: Istvan answered a question, the event was
+    // written and correctly attached — and `decideTrigger` still said "nothing
+    // has changed and no new deadline has arrived", so the engine was never
+    // going to look at it.
+    //
+    // The trigger's state hash reads `last_event_id` from the case row. That
+    // column was written by NOTHING: zero cases out of 106 had it set, and a
+    // grep found no writer at all. So an EVENT-ONLY change — which is exactly
+    // what an owner answer is — could not make a case eligible. The answer path
+    // had three doors in a row: no caller, then no reference, and then no wake.
+    //
+    // Set here rather than in the shared event-append helper on purpose: the
+    // engine writes its own events during a run, so waking on EVERY event would
+    // make each run schedule the next one. Which event classes deserve a wake is
+    // a real question and it is carded; an OWNER ANSWER is the one case that
+    // needs no argument.
+    // BOTH COLUMNS, because two different guards read them and an answer has to
+    // be visible to both.
+    //
+    // `last_event_id` is what the progression trigger hashes — without it the
+    // engine never looks at the case (found live 20:10 tonight).
+    //
+    // `updated_at` is what the READER's staleness guard compares its packet
+    // against. Found twenty minutes later, same root cause, different victim: a
+    // question went out to Istvan on a case that already carried his answer,
+    // because the reading was from 08:32, the answer landed at 18:10, and the
+    // case row still said it had last changed two days earlier. The guard was
+    // working perfectly on an input that lied.
+    //
+    // Setting it to the answer's own timestamp keeps the "answered and nothing
+    // moved since" suppression intact — that check is `updated_at <=
+    // answered_at`, and equal satisfies it.
+    db.prepare(`UPDATE ${table} SET last_event_id = ?, updated_at = ? WHERE case_id = ?`)
+      .run(Number(info.lastInsertRowid), now, input.caseId)
   }
   return { caseId: input.caseId, questionHash: open.question_hash, eventType, choice }
+}
+
+
+/** Which case an incoming channel message answers.
+ *
+ *  `{ caseId, domain }` when it is knowable, `'AMBIGUOUS'` when several
+ *  questions are open and the message names none of them, `null` when nothing
+ *  is open at all.
+ *
+ *  THE GUESS THAT USED TO LIVE HERE COST A REAL MISATTRIBUTION. On 2026-08-11 at
+ *  16:40 Istvan answered about the Wizz Air invoice; the rule was "take the
+ *  newest open question", the newest happened to be the NAV mailbox case, and
+ *  his sentence was written onto that case. Everything downstream then treated
+ *  the guess as his word — including me, who built a card on it and reported it
+ *  back to him. He corrected it five hours later.
+ *
+ *  A wrong attribution is worse than none: the wrong case gains a decision he
+ *  never made, and the right one stays open. So ambiguity is now reported, not
+ *  resolved. */
+export type AnswerTarget = { caseId: string; domain: string } | 'AMBIGUOUS' | null
+
+export function matchAnswerTarget(
+  db: Database.Database,
+  input: { channel: string; chatId?: string; replyToMessageId?: number },
+): AnswerTarget {
+  // An explicit Telegram reply names the question exactly — no ambiguity to
+  // resolve, however many are open.
+  if (input.replyToMessageId && input.chatId) {
+    const exact = db.prepare(
+      `SELECT case_id AS caseId, domain FROM cos_owner_questions
+        WHERE channel = ? AND channel_target = ? AND answered_at IS NULL AND superseded_at IS NULL`,
+    ).get(input.channel, `${input.chatId}:${input.replyToMessageId}`) as
+      { caseId: string; domain: string } | undefined
+    if (exact) return exact
+  }
+  const open = db.prepare(
+    `SELECT case_id AS caseId, domain FROM cos_owner_questions
+      WHERE channel = ? AND answered_at IS NULL AND superseded_at IS NULL
+      ORDER BY asked_at DESC LIMIT 2`,
+  ).all(input.channel) as Array<{ caseId: string; domain: string }>
+  if (open.length === 0) return null
+  if (open.length === 1) return open[0]
+  return 'AMBIGUOUS'
+}
+
+
+/** Keep an owner message that could not be attributed to a case.
+ *
+ *  Because "held" has to mean the WORDS are kept, not just a counter. The first
+ *  live firing of the ambiguity rule counted the message and let the Telegram
+ *  cursor move past it, and Telegram does not re-serve an update once a higher
+ *  offset is requested — so the sentence was gone. Idempotent per message. */
+export function holdOwnerMessage(
+  db: Database.Database,
+  input: { channel: string; chatId?: string; messageId?: number; text: string; reason: string; now?: number },
+): void {
+  const now = input.now ?? Math.floor(Date.now() / 1000)
+  db.prepare(
+    `INSERT INTO cos_channel_held (channel, chat_id, message_id, text, reason, received_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT (channel, message_id) DO NOTHING`,
+  ).run(input.channel, input.chatId ?? null, input.messageId ?? null, input.text, input.reason, now)
+}
+
+/** Owner messages still waiting to be placed. */
+export function heldOwnerMessages(
+  db: Database.Database, limit = 20,
+): Array<{ heldId: number; channel: string; text: string; reason: string; receivedAt: number }> {
+  try {
+    return db.prepare(
+      `SELECT held_id AS heldId, channel, text, reason, received_at AS receivedAt
+         FROM cos_channel_held WHERE resolved_at IS NULL
+         ORDER BY received_at ASC LIMIT ?`,
+    ).all(limit) as never
+  } catch { return [] }
 }
 
 /** The questions still waiting on him — so "what did it ask me?" is a query. */
@@ -307,7 +661,8 @@ export function outstandingOwnerQuestions(
   try {
     return db.prepare(
       `SELECT case_id AS caseId, domain, question_text AS text, asked_at AS askedAt
-       FROM cos_owner_questions WHERE answered_at IS NULL ORDER BY asked_at DESC LIMIT ?`,
+       FROM cos_owner_questions WHERE answered_at IS NULL AND superseded_at IS NULL
+       ORDER BY asked_at DESC LIMIT ?`,
     ).all(limit) as never
   } catch { return [] }
 }

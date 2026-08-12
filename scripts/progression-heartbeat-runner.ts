@@ -77,8 +77,20 @@ if (ENRICH_PER_CYCLE > 0 || READ_PER_CYCLE > 0) {
       }))
     } else {
       if (ENRICH_PER_CYCLE > 0) {
-        const enrich = await enrichPendingGoals(db, interp.client, ENRICH_PER_CYCLE)
-        console.log('GoalEnrichment:', JSON.stringify({ provider: interp.provider, model: interp.model, ...enrich }))
+        // §10 / review #5 Ö-2: hand the sweep the ROUTE PAIR, not one client.
+        // `interp` is whatever resolveInterpreter happened to find, and its
+        // order ends in DeepSeek — so passing interp.client alone let the same
+        // email thread the Reader refuses in this very cycle go out here. The
+        // pair is resolved once and shared with the Reader below.
+        const { resolveReaderInterpreters, READER_MAX_TOKENS } =
+          await import('../src/cos/interpreter-provider.js')
+        const enrichRoutes = resolveReaderInterpreters(getSecret, { maxTokens: READER_MAX_TOKENS })
+        const enrich = await enrichPendingGoals(db, enrichRoutes, ENRICH_PER_CYCLE)
+        console.log('GoalEnrichment:', JSON.stringify({
+          general: enrichRoutes.general?.provider ?? null,
+          contracted: enrichRoutes.contracted?.provider ?? null,
+          ...enrich,
+        }))
       }
 
       // Step 4: §10.1 → §10.2 → §12 → §13.1, on the live path (2026-08-11).

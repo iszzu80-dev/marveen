@@ -32,6 +32,13 @@ const STEPS: Step[] = [
   { name: 'batches', args: ['scripts/cos-close-batches.ts'] },
   { name: 'threads', args: ['scripts/cos-fetch-threads.ts', '--limit', '10'] },
   { name: 'followups', args: ['scripts/cos-draft-followups.ts', '--limit', '5'] },
+  // A kerdes megirasa es a KIKULDESE ket kulon lepes: ha egybe lennenek, egy
+  // kezbesitesi hiba ugy nezne ki, mint "nincs mit kerdezni".
+  { name: 'channel', args: ['scripts/cos-channel-send.ts'] },
+  // A bejovo oldal: Istvan valasza a CoS-csatornarol visszaer az ugyhez.
+  // Enelkul a szetvalasztas rosszabb lenne az egycsatornas vilagnal --
+  // egy chatbe valaszolna, amit senki nem olvas.
+  { name: 'inbox', args: ['scripts/cos-channel-poll.ts'] },
 ]
 
 const problems: string[] = []
@@ -88,11 +95,41 @@ for (const s of STEPS) {
     const failedIn = (o: unknown): { failed?: boolean; error?: string } | null =>
       (o && typeof o === 'object' && (o as { failed?: unknown }).failed === true)
         ? (o as { failed?: boolean; error?: string }) : null
+
+    // A NON-EMPTY `failures` ARRAY IS ALSO A FAILURE.
+    //
+    // Found live on 2026-08-11, by this runner's own output: the channel step
+    // could not deliver an owner question ("telegram sendMessage failed: fetch
+    // failed"), reported `{pending: 1, sent: 0, failures: [1]}`, exited 0 — and
+    // the cycle printed `problems: []`. A question that never reached Istvan was
+    // filed under "cycle fine".
+    //
+    // The old check looked for `failed: true` alone, which is the shape ONE step
+    // uses. Three others (channel, reader, goal enrichment) report per-item
+    // errors in a `failures` array instead, precisely because one bad case must
+    // not stop the batch — and that design turned every one of those errors
+    // invisible at this level. The same doctrine this file's own header states:
+    // a cycle that half-ran must not look like one that ran clean.
+    const failureList = (o: unknown): Array<{ caseId?: string; error?: string }> | null => {
+      if (!o || typeof o !== 'object') return null
+      const f = (o as { failures?: unknown }).failures
+      return Array.isArray(f) && f.length > 0 ? f as Array<{ caseId?: string; error?: string }> : null
+    }
+    const describe = (list: Array<{ caseId?: string; error?: string }>): string => {
+      const first = list[0]
+      const rest = list.length > 1 ? ` (+${list.length - 1} more)` : ''
+      return `${list.length} failed: ${first?.caseId ?? '?'}: ${first?.error ?? 'no error text'}${rest}`
+    }
+
     const self = failedIn(p)
     if (self) problems.push(`${s.name}: ${self.error ?? 'reported failed:true'}`)
+    const selfFailures = failureList(p)
+    if (selfFailures) problems.push(`${s.name}: ${describe(selfFailures)}`)
     for (const [key, value] of Object.entries(p)) {
       const nested = failedIn(value)
       if (nested) problems.push(`${s.name}/${key}: ${nested.error ?? 'reported failed:true'}`)
+      const nestedFailures = failureList(value)
+      if (nestedFailures) problems.push(`${s.name}/${key}: ${describe(nestedFailures)}`)
     }
   }
 }

@@ -273,11 +273,34 @@ export interface WriteOptimizationConfigResult {
   ok: boolean
   config: OptimizationConfig
   error: string | null
+  /** Did the OFF direction reach the capacity-routing flag?
+   *
+   *  `true` when it was propagated, `false` when the propagation itself failed,
+   *  and `null` when there was nothing to propagate (routing stays on, or a
+   *  caller-supplied path means this is not the live config).
+   *
+   *  Separate from `ok` on purpose — see the comment at the call site: the two
+   *  writes can land independently, and reporting one verdict for both is what
+   *  made the emergency stop lie in the more dangerous direction. */
+  routingFlagPropagated?: boolean | null
+  /** Human-readable note when the config WAS written but the propagation was
+   *  not. Not an `error`: the write happened, and calling it an error is the
+   *  bug this field exists to prevent. */
+  warning?: string | null
 }
 
 export function writeOptimizationConfig(
   next: Omit<OptimizationConfig, 'version' | 'lastEnabledConfiguration'>,
-  opts: { expectedVersion?: number; path?: string } = {},
+  opts: {
+    expectedVersion?: number
+    path?: string
+    /** The OFF-propagation, injectable so BOTH outcomes can be driven in a test.
+     *  Default: the real setter, and only when the live path is in use — a
+     *  caller writing to its own file must not touch the machine's routing flag.
+     *  Without this seam the failure branch was untestable, and an untested
+     *  failure branch on an emergency stop is the branch that matters. */
+    propagate?: (enabled: boolean) => void
+  } = {},
 ): WriteOptimizationConfigResult {
   const path = opts.path ?? OPTIMIZATION_CONFIG_PATH
   const current = readOptimizationConfig(path).config
@@ -321,16 +344,43 @@ export function writeOptimizationConfig(
     // Only the OFF direction is propagated automatically, and only when the
     // default path is in use. Arming routing is an owner decision (Phase 3);
     // a dashboard toggle may stop it, never start it.
-    if (!opts.path) {
+    // THE CONFIG IS NOW WRITTEN. Whatever happens below, that is a fact, and
+    // the caller must not be told otherwise.
+    //
+    // Review #2 (Ó-2, 2026-08-11): the propagation used to sit inside this same
+    // try, so a failure to flip the routing flag returned `{ok: false, config:
+    // <the PRE-write config>}`. At the emergency stop that is the worse
+    // direction of lying: the operator is told "the stop failed" and handed the
+    // OLD state, while the master switch has in fact been turned off and only
+    // the routing flag is still on. Half-landed, reported as not-landed.
+    //
+    // So the propagation gets its own try, and its outcome travels in its own
+    // field. "The switch was written, the flag was not" is a state the caller
+    // can act on; `ok: false` with stale config is not.
+    let routingFlagPropagated: boolean | null = null
+    let warning: string | null = null
+    const propagate = opts.propagate ?? (opts.path ? null : setCapacityRoutingEnabled)
+    if (propagate) {
       const shouldRun = config.masterEnabled && config.modules.runtimeRouting === true
-      if (!shouldRun) setCapacityRoutingEnabled(false)
+      if (!shouldRun) {
+        try {
+          propagate(false)
+          routingFlagPropagated = true
+        } catch (error) {
+          routingFlagPropagated = false
+          warning = 'az optimalizacio-config KIIRODOTT, de a capacity-routing kapcsolo NEM lett kikapcsolva: '
+            + (error instanceof Error ? error.message : String(error))
+        }
+      }
     }
-    return { ok: true, config, error: null }
+    return { ok: true, config, error: null, routingFlagPropagated, warning }
   } catch (error) {
     return {
       ok: false,
       config: current,
       error: error instanceof Error ? error.message : String(error),
+      routingFlagPropagated: null,
+      warning: null,
     }
   }
 }

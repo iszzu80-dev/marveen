@@ -9,6 +9,8 @@
 
 import type Database from 'better-sqlite3'
 import { createAgentMessage, appendDailyLog } from '../db.js'
+import { enqueueOutbox } from './channel-outbox.js'
+import { channelForRoute, ROUTE_RADAR } from './cos-telegram.js'
 
 interface ItemRow { label: string; kind: string; target_price: number | null; currency: string | null; best_seen_price: number | null; notification_reason: string | null }
 interface ObsRow {
@@ -59,10 +61,62 @@ export function buildRadarHitAlert(db: Database.Database, radarId: string): stri
 }
 
 /** Surface a HIT: post it to the bus (marveen relays to Telegram) and the daily
- *  log. Uses the singleton DB helpers, so pass the same live/getDb() handle. */
-export function alertRadarHit(db: Database.Database, radarId: string): void {
+ *  log. Uses the singleton DB helpers, so pass the same live/getDb() handle.
+ *
+ *  STAYS SYNCHRONOUS. This runs inside the radar tick, so it may not await a
+ *  network call: a Telegram send here would put an HTTPS round trip inside a
+ *  loop that must not block, and a hit lost to a transient failure would be lost
+ *  for good — a price falls below target once. When the owner's channel carries
+ *  radar (config `routes`), the hit is ENQUEUED instead, one INSERT, and the
+ *  channel step delivers it with the retry behaviour that path already has. */
+export function alertRadarHit(
+  db: Database.Database, radarId: string,
+  // The channel lookup is injectable so the ROUTED and UNROUTED behaviours can
+  // both be driven in a test. Reading the real files would make the enabled path
+  // untestable without planting a bot token on disk — and an unrouted default
+  // that nothing ever exercises is how a route ships silently on.
+  opts: { loadConfig?: typeof channelForRoute } = {},
+): void {
   const content = buildRadarHitAlert(db, radarId)
   if (!content) return
   createAgentMessage('cos-radar', 'marveen', content, 'cos-autonomous-radar')
   appendDailyLog('marveen', `## COS RADAR HIT\n${content}`)
+
+  // The bus post above is NOT replaced. It is what reaches Marveen, and the
+  // daily log is the record; the outbox is an additional, direct path to the
+  // owner's own channel. Removing the bus post would trade one delivery route
+  // for another rather than adding one.
+  try {
+    // WHICH CHANNEL CARRIES RADAR is a property of the channels, not of this
+    // module: it asks for the route and gets whichever bot declares it. Istvan
+    // chose a third bot (2026-08-11); the code does not know or care which one
+    // answers, only that exactly one does.
+    const cfg = (opts.loadConfig ?? channelForRoute)(ROUTE_RADAR)
+    if (!cfg?.channelId) return
+    enqueueOutbox(db, {
+      channel: cfg.channelId,
+      kind: ROUTE_RADAR,
+      // The ITEM and its newest observation, not the tick: two ticks over the
+      // same observation are the same news, and the owner must not be told twice
+      // that the same price fell.
+      dedupeKey: `radar:${radarId}:${newestObservationStamp(db, radarId)}`,
+      text: content,
+    })
+  } catch {
+    // A queueing failure must not take down the radar tick. The bus post and the
+    // daily-log entry above already happened, so the hit is not lost.
+  }
+}
+
+/** The newest observation's timestamp for a radar item, or 0 when there is none.
+ *  Part of the dedupe key so a NEW price movement is new news, while repeated
+ *  ticks over the same observation are not. */
+function newestObservationStamp(db: Database.Database, radarId: string): number {
+  try {
+    const r = db.prepare(
+      `SELECT observed_at FROM radar_observations WHERE radar_id = ?
+        ORDER BY observed_at DESC LIMIT 1`,
+    ).get(radarId) as { observed_at: number } | undefined
+    return r?.observed_at ?? 0
+  } catch { return 0 }
 }

@@ -139,6 +139,84 @@ def _references_outside_comments(path, symbol):
     return False
 
 
+_SCRIPT_REF = re.compile(r"scripts/([A-Za-z0-9._-]+\.(?:ts|py|js))")
+_IMPORT_REF = re.compile(r"""from\s+['"]([^'"]+)['"]""")
+
+
+def _resolve_ref(ref, from_path):
+    """Map a TS import specifier or a scripts/ path to a real file, or None."""
+    if ref.startswith("scripts/"):
+        p = os.path.join(REPO, ref)
+        return p if os.path.exists(p) else None
+    if not ref.startswith("."):
+        return None                      # a package, not our code
+    base = os.path.normpath(os.path.join(os.path.dirname(from_path), ref))
+    for cand in (base, base[:-3] + ".ts" if base.endswith(".js") else base + ".ts",
+                 base + ".ts", os.path.join(base, "index.ts")):
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+def schedule_reaches(task_name, symbol, max_depth=4):
+    """(reached, detail). Does the scheduled task's entry point transitively
+    reach `symbol`?
+
+    HETEDIK alkalom, hogy egy kriteriumom rossz dolgot mert, es ez a legtanulsagosabb:
+    a regi valtozat a SKILL.md-ben KERESTE a 'cos-draft-followups' szoveget. Ez
+    igaz volt addig, amig a feladat negy kulon `npx tsx` sort sorolt fel -- es
+    hamissa valt az F-17 osszevonaskor, ami EGYETLEN runnerre cserelte oket. A
+    bekotes nem romlott el; a MEROESZKOZ romlott el. Egy kriterium, ami egy
+    fajlnevet grepel egy prompt-fajlban, azt meri, hogyan VAN LEIRVA a lanc, nem
+    azt, hogy letezik-e.
+    Ezert ez a valtozat VEGIGMEGY a lancon: SKILL.md -> a benne nevezett
+    scripts/ belepesi pont -> annak import- es script-hivatkozasai -> ... amig
+    meg nem talalja a szimbolumot. Ha barmelyik lancszem kiesik (pl. valaki
+    kiveszi a followups lepest a cos-cycle.ts-bol), ez PIROSRA valt."""
+    try:
+        with open(os.path.join(TASKS, task_name, "SKILL.md"), encoding="utf-8", errors="replace") as f:
+            skill = f.read()
+    except OSError:
+        return False, "a SKILL.md nem olvashato"
+    entries = {os.path.join(REPO, "scripts", m) for m in _SCRIPT_REF.findall(skill)}
+    entries = {p for p in entries if os.path.exists(p)}
+    if not entries:
+        return False, "a SKILL.md egyetlen letezo scripts/ belepesi pontot sem nevez meg"
+
+    seen, frontier, chain = set(), list(entries), []
+    for _ in range(max_depth):
+        nxt = []
+        for path in frontier:
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    body = f.read()
+            except OSError:
+                continue
+            if _references_outside_comments(path, symbol):
+                chain.append(os.path.basename(path))
+                return True, "%s -> ... -> %s" % (
+                    ", ".join(sorted(os.path.basename(e) for e in entries)), os.path.basename(path))
+            # Two REF KINDS, kept apart on purpose. _SCRIPT_REF captures only the
+            # basename ('cos-draft-followups.ts'), so it must be re-prefixed; an
+            # import specifier ('../src/cos/x.js') must NOT be. Folding them into
+            # one list with a ternary is how the first version of this walk
+            # silently resolved nothing and reported a false RED.
+            refs = {"scripts/" + m for m in _SCRIPT_REF.findall(body)}
+            refs |= {m for m in _IMPORT_REF.findall(body) if m.startswith(".")}
+            for ref in refs:
+                r = _resolve_ref(ref, path)
+                if r and r not in seen:
+                    nxt.append(r)
+        frontier = nxt
+        if not frontier:
+            break
+    return False, "a(z) %s belepesi pontbol %d fajlon at nem vezet ut a %s-ig" % (
+        ", ".join(sorted(os.path.basename(e) for e in entries)), len(seen), symbol)
+
+
 def has_prod_caller(symbol, defining_file):
     """True when `symbol` is referenced by production CODE (not comments) in a
     file other than the one defining it. The built-but-never-invoked check."""
@@ -456,14 +534,9 @@ def _lv3():
         return ERROR, detail
     if not ok:
         return FAIL, "nincs keres nelkuli javaslat-ut (utankovetes-sopres)"
-    wired = False
-    try:
-        p = os.path.join(TASKS, "personal-case-wake", "SKILL.md")
-        wired = "cos-draft-followups" in open(p, encoding="utf-8", errors="replace").read()
-    except OSError:
-        pass
+    wired, why = schedule_reaches("personal-case-wake", "sweepFollowUpCandidates")
     if not wired:
-        return FAIL, "a javaslat-ut letezik, de nincs bekotve az utemezesbe"
+        return FAIL, "a javaslat-ut letezik, de nincs bekotve az utemezesbe (%s)" % why
     ever = one("SELECT COUNT(*) FROM outbound_ledger WHERE status NOT IN ('CANCELLED')")
     return PASS, "javaslat-ut bekotve (%s); a ledgerben %d kimeno tetel" % (detail, ever or 0)
 

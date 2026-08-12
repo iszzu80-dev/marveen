@@ -6,7 +6,7 @@
 // of alerts.ts/optimization.ts, since GAP-14 is fundamentally about WRITE
 // events: recording an invoice, applying a credit/refund, voiding a mistake).
 // No db.ts/web.ts/schema.ts edits: `initInvoiceSchema` is a schema DEFINER
-// only, not mounted anywhere -- the seam aggregator calls it.
+// only. MOUNTED: initCostOpsSchema (src/costops/schema.ts) calls initInvoiceSchema.
 //
 // `costops_invoices` is a NEW entity, separate from `cost_line_items`: a
 // ledger line only ever carries one number (billed_cost); an invoice needs
@@ -379,10 +379,10 @@ export async function buildInvoiceReconciliation(db: Database.Database, now: num
   })
 }
 
-// ---- schema (DEFINER ONLY -- not mounted; see file header) --------------------------------------
+// ---- schema (DEFINER; mounted via initCostOpsSchema -- see file header) -------------------------
 
 /**
- * Schema DEFINER only. NOT called from db.ts or src/costops/schema.ts.
+ * Schema DEFINER. CALLED from src/costops/schema.ts (initCostOpsSchema).
  * Partial unique index (`WHERE status != 'voided'`) enforces "duplicate
  * invoice not counted twice" at the DB level too, while still allowing the
  * SAME dedup_key to be re-recorded after a voided (mistaken) entry.

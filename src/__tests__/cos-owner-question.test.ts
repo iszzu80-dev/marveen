@@ -17,9 +17,10 @@ import { initProgressionSchema } from '../cos/schema.js'
 import { createCase } from '../cos/case-store.js'
 import {
   buildOwnerQuestion, askPendingOwnerQuestions, recordOwnerAnswer, outstandingOwnerQuestions,
+  ASK_COOLDOWN_SEC,
 } from '../cos/owner-question.js'
 import { planFromEvidence } from '../cos/evidence-planner.js'
-import type { ReaderEvidencePacket } from '../cos/reader.js'
+import { validateEvidencePacket, type ReaderEvidencePacket } from '../cos/reader.js'
 
 const T0 = 1_700_000_000
 
@@ -272,5 +273,424 @@ describe('the channel has a global cap, not just a rate', () => {
     askPendingOwnerQuestions(getDb(), { limit: 10, now: T0 + 1, maxOutstanding: 1 })
     recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'Igen', now: T0 + 2 })
     expect(askPendingOwnerQuestions(getDb(), { limit: 10, now: T0 + 3, maxOutstanding: 1 }).asked).toBe(1)
+  })
+})
+
+// H-2 (review #6): the answer was written in a shape its own consumer discards.
+//
+// `consumeOwnerAnswer` refuses any owner event without a `source_reference`
+// naming the progression run — without it there is no way to tell WHICH question
+// was answered. The answer event was written without one. So every answer that
+// arrived from Telegram was recorded, released the question, and was then
+// dropped by the engine: the case did not move, the next Reader sweep produced
+// the same packet, and the same question went out again. The review reproduced
+// it: two identical messages, after answering.
+//
+// These tests pin the carrier — the run id travelling from question to answer —
+// because that is the part that was missing, not the intent.
+describe('H-2: the answer names the run it answers', () => {
+  const RUN = 'run-abc-123'
+  beforeEach(() => {
+    initDatabase(':memory:')
+    initProgressionSchema(getDb())
+    createCase(getDb(), { caseId: 'c1', title: 'ZST uzletresz-adasvetel', caseType: 'ADMIN' }, T0)
+  })
+
+  const storePacketWithRun = (runId: string | null): void => {
+    const p = packet()
+    const plan = planFromEvidence(p)
+    getDb().prepare(
+      `INSERT INTO case_evidence_packets
+         (packet_id, domain, case_id, progression_run_id, created_at, packet_json, plan_json,
+          confidence, policy_result)
+       VALUES (?, 'personal', 'c1', ?, ?, ?, ?, ?, 'WAIT_EXTERNAL')`,
+    ).run(`pk-${runId ?? 'none'}`, runId, T0, JSON.stringify(p), JSON.stringify(plan), p.confidence)
+  }
+
+  it('the question stores the run, and the answer event carries it as source_reference', () => {
+    storePacketWithRun(RUN)
+    expect(askPendingOwnerQuestions(getDb(), { now: T0 + 1 }).asked).toBe(1)
+    expect((getDb().prepare(
+      `SELECT progression_run_id AS r FROM cos_owner_questions WHERE case_id = 'c1'`,
+    ).get() as { r: string }).r).toBe(RUN)
+
+    const rec = recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'igen', now: T0 + 2 })
+    expect(rec).not.toBeNull()
+    const ev = getDb().prepare(
+      `SELECT source_reference AS ref, event_type AS t FROM personal_case_events
+       WHERE case_id = 'c1' AND event_type IN ('OWNER_DECISION','OWNER_INFORMATION')
+       ORDER BY created_at DESC LIMIT 1`,
+    ).get() as { ref: string | null; t: string }
+    // THE ASSERTION THE OLD CODE FAILED. Everything else about the answer path
+    // worked; this one NULL is what made it a no-op.
+    expect(ev.ref).toBe(RUN)
+    expect(ev.t).toBe('OWNER_DECISION')
+  })
+
+  it('a question asked before this column existed still takes an answer', () => {
+    // Fail-safe direction: a legacy row has no run to name. Losing the sentence
+    // would be worse than an answer the engine cannot attribute, and the engine
+    // already handles the missing reference by treating it as stale.
+    storePacketWithRun(null)
+    expect(askPendingOwnerQuestions(getDb(), { now: T0 + 1 }).asked).toBe(1)
+    const rec = recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'nem', now: T0 + 2 })
+    expect(rec?.choice).toBe('NO')
+    expect((getDb().prepare(
+      `SELECT source_reference AS ref FROM personal_case_events
+       WHERE case_id = 'c1' AND event_type = 'OWNER_DECISION' ORDER BY created_at DESC LIMIT 1`,
+    ).get() as { ref: string | null }).ref).toBeNull()
+  })
+
+  it('an UNCHANGED question follows the newest run without asking twice', () => {
+    // The case gets read again every sweep. When the ask is identical the
+    // question must NOT go out a second time -- but the stored run must move,
+    // or the answer would name a run the engine no longer recognises as current
+    // and would be dropped as stale. Same H-2 loop, different door.
+    storePacketWithRun(RUN)
+    expect(askPendingOwnerQuestions(getDb(), { now: T0 + 1 }).asked).toBe(1)
+    getDb().prepare(`DELETE FROM case_evidence_packets WHERE case_id = 'c1'`).run()
+    storePacketWithRun('run-second')
+    const second = askPendingOwnerQuestions(getDb(), { now: T0 + 2 })
+    expect(second.asked).toBe(0)
+    expect(second.alreadyAsked).toBe(1)
+
+    const rows = getDb().prepare(
+      `SELECT progression_run_id AS r FROM cos_owner_questions
+       WHERE case_id = 'c1' AND answered_at IS NULL AND superseded_at IS NULL`,
+    ).all() as Array<{ r: string }>
+    expect(rows.map(x => x.r)).toEqual(['run-second'])
+
+    recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'igen', now: T0 + 3 })
+    expect((getDb().prepare(
+      `SELECT source_reference AS ref FROM personal_case_events
+       WHERE case_id = 'c1' AND event_type = 'OWNER_DECISION' ORDER BY created_at DESC LIMIT 1`,
+    ).get() as { ref: string }).ref).toBe('run-second')
+  })
+})
+
+// H-3 (review #6): "István" with the accent was not `ISTVAN`.
+//
+// The Reader prompt asks for Hungarian and `whoHasIt` is free text, so the
+// accent arrives roughly as often as it does not. The comparisons were plain
+// ASCII uppercase. On the SAME case, purely by that accent, Istvan got a
+// specific question, a generic one, or nothing at all. Either behaviour could
+// be argued; alternating between them at random cannot.
+describe('H-3: the accent must not decide what he is asked', () => {
+  beforeEach(() => {
+    initDatabase(':memory:')
+    initProgressionSchema(getDb())
+    createCase(getDb(), { caseId: 'c1', title: 'ZST uzletresz-adasvetel', caseType: 'ADMIN' }, T0)
+  })
+
+  const build = (who: string) => buildOwnerQuestion({
+    caseId: 'c1', domain: 'personal', title: 'ZST uzletresz-adasvetel',
+    packet: packet({ missingRequirements: [{ what: 'A vetelar megallapodasa', whoHasIt: who, why: 'a szerzodeshez kell' }] }),
+    plan: planFromEvidence(packet({ missingRequirements: [{ what: 'A vetelar megallapodasa', whoHasIt: who, why: 'a szerzodeshez kell' }] })),
+  })
+
+  it('accented and unaccented produce the SAME question', () => {
+    const plain = build('ISTVAN')
+    const accented = build('István')
+    expect(plain).not.toBeNull()
+    expect(accented).not.toBeNull()
+    // Same ask -> same hash. The hash is what suppresses re-asking, so if the
+    // spellings hashed differently the owner would get both versions.
+    expect(accented!.hash).toBe(plain!.hash)
+    expect(accented!.text).toContain('A vetelar megallapodasa')
+  })
+
+  it('an accented ballHolder no longer throws the whole reading away', () => {
+    // Fail-closed was not the problem: the packet was REJECTED entirely, so one
+    // accent discarded a complete reading of the case.
+    const ctx = { caseId: 'c1', domain: 'personal' as const, caseVersion: 1, items: [], excluded: [], unavailable: [] }
+    const raw = {
+      readSources: [], unreadableSources: [], facts: [], missingRequirements: [],
+      ballHolder: 'István', candidateDecision: 'REQUEST_DECISION', confidence: 0.5, uncertainty: [],
+    }
+    const res = validateEvidencePacket(raw, ctx)
+    expect(res.ok).toBe(true)
+    // Stored folded, so every downstream comparison sees one spelling.
+    expect(res.ok && res.packet.ballHolder).toBe('ISTVAN')
+  })
+
+  it('the fold does not widen the enum', () => {
+    const ctx = { caseId: 'c1', domain: 'personal' as const, caseVersion: 1, items: [], excluded: [], unavailable: [] }
+    const raw = {
+      readSources: [], unreadableSources: [], facts: [], missingRequirements: [],
+      ballHolder: 'Istvan Szabo', candidateDecision: 'REQUEST_DECISION', confidence: 0.5, uncertainty: [],
+    }
+    const res = validateEvidencePacket(raw, ctx)
+    expect(res.ok).toBe(false)
+  })
+})
+
+// THE THIRD DOOR: the answer landed, named its question — and the engine still
+// never looked at it.
+//
+// Live, 2026-08-11 20:10, twenty minutes after the source_reference fix went in.
+// Istvan answered on the CoS bot, the event was written with the right run
+// reference, and `decideTrigger` returned {shouldRun: false, reason: "nothing has
+// changed and no new deadline has arrived"}. The trigger's state hash reads the
+// case row's `last_event_id`, and that column had never been written by anything
+// — zero of 106 cases had it set. So an EVENT-ONLY change, which is exactly what
+// an answer is, could not make a case eligible.
+describe('an owner answer WAKES the case', () => {
+  beforeEach(() => {
+    initDatabase(':memory:')
+    initProgressionSchema(getDb())
+    createCase(getDb(), { caseId: 'c1', title: 'ZST uzletresz-adasvetel', caseType: 'ADMIN' }, T0)
+    storePacket('c1', packet())
+    // The case has to have been progressed once, or the trigger's first rule
+    // ("never reasoned -> reason now") answers before the one under test.
+    getDb().prepare(
+      `INSERT INTO case_progression_state (domain, case_id, progression_enabled, created_at, updated_at)
+       VALUES ('personal', 'c1', 1, ?, ?)`,
+    ).run(T0, T0)
+  })
+
+  const triggerFor = async (): Promise<{ shouldRun: boolean; reason: string }> => {
+    const { decideTrigger } = await import('../cos/progression-trigger.js')
+    const d = decideTrigger(getDb(), 'personal', 'c1', T0 + 100)
+    return { shouldRun: d.shouldRun, reason: d.reason }
+  }
+
+  it('the answer advances last_event_id to the event it wrote', () => {
+    askPendingOwnerQuestions(getDb(), { now: T0 + 1 })
+    expect((getDb().prepare(
+      `SELECT last_event_id AS e FROM personal_cases WHERE case_id = 'c1'`,
+    ).get() as { e: number | null }).e).toBeNull()
+
+    recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'igen', now: T0 + 2 })
+
+    const { e } = getDb().prepare(
+      `SELECT last_event_id AS e FROM personal_cases WHERE case_id = 'c1'`,
+    ).get() as { e: number | null }
+    const newest = (getDb().prepare(
+      `SELECT MAX(event_id) AS m FROM personal_case_events WHERE case_id = 'c1'`,
+    ).get() as { m: number }).m
+    expect(e).toBe(newest)
+  })
+
+  it('HEADLINE: the case becomes eligible to run BECAUSE of the answer', () => {
+    // The assertion the live system failed. Everything else about the answer
+    // path worked; this is what made it a no-op anyway.
+    askPendingOwnerQuestions(getDb(), { now: T0 + 1 })
+    // Pin the pre-answer state as "already reasoned about", so the only thing
+    // that can change the verdict below is the answer itself.
+    return (async () => {
+      const { decideTrigger, recordProgressionState } = await import('../cos/progression-trigger.js')
+      // Record the CURRENT state as already reasoned about, so the only thing
+      // that can change the verdict below is the answer itself.
+      recordProgressionState(
+        getDb(), 'personal', 'c1',
+        decideTrigger(getDb(), 'personal', 'c1', T0 + 100).effectiveStateHash, T0 + 100,
+      )
+      expect((await triggerFor()).shouldRun).toBe(false)
+
+      recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'igen', now: T0 + 200 })
+
+      const after = await triggerFor()
+      expect(after.shouldRun).toBe(true)
+      expect(after.reason).toMatch(/changed/)
+    })()
+  })
+
+  it('answering a case nobody asked about changes nothing', () => {
+    // The counter-case. recordOwnerAnswer returns null when no question is
+    // outstanding, and it must not wake a case on the way out — a wake with no
+    // answer behind it is a run with nothing to run on.
+    expect(recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'igen', now: T0 + 2 })).toBeNull()
+    expect((getDb().prepare(
+      `SELECT last_event_id AS e FROM personal_cases WHERE case_id = 'c1'`,
+    ).get() as { e: number | null }).e).toBeNull()
+  })
+})
+
+// THE SECOND VICTIM of the same root cause: the staleness guard.
+//
+// Live, 2026-08-11 20:10. Istvan's clarification landed on five sibling cases at
+// 18:10. Ten minutes past eight the Reader asked him the same thing again — on a
+// case that literally carried his answer. The guard that exists to stop exactly
+// this ("do not ask from a reading older than the case") compares the packet's
+// age against the case's `updated_at`, and the case row had not been touched
+// since two days earlier, because writing an event does not change it. The guard
+// was working perfectly on an input that lied.
+describe('an answer makes older readings STALE', () => {
+  beforeEach(() => {
+    initDatabase(':memory:')
+    initProgressionSchema(getDb())
+    createCase(getDb(), { caseId: 'c1', title: 'ZST uzletresz-adasvetel', caseType: 'ADMIN' }, T0)
+    getDb().prepare(
+      `INSERT INTO case_progression_state (domain, case_id, progression_enabled, created_at, updated_at)
+       VALUES ('personal', 'c1', 1, ?, ?)`,
+    ).run(T0, T0)
+  })
+
+  it('the case row records that the answer changed it', () => {
+    storePacket('c1', packet())
+    askPendingOwnerQuestions(getDb(), { now: T0 + 1 })
+    const before = (getDb().prepare(
+      `SELECT updated_at AS u FROM personal_cases WHERE case_id = 'c1'`,
+    ).get() as { u: number }).u
+
+    recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'igen', now: T0 + 5000 })
+
+    const after = (getDb().prepare(
+      `SELECT updated_at AS u FROM personal_cases WHERE case_id = 'c1'`,
+    ).get() as { u: number }).u
+    expect(after).toBe(T0 + 5000)
+    expect(after).toBeGreaterThan(before)
+  })
+
+  it('HEADLINE: the sweep will not ask again from a reading older than the answer', () => {
+    // The live failure, as an assertion. The packet predates the answer, so the
+    // question it would produce describes a world that has already moved.
+    storePacket('c1', packet())
+    askPendingOwnerQuestions(getDb(), { now: T0 + 1 })
+    recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'a Relacio KFT a konyvelo', now: T0 + 5000 })
+
+    const res = askPendingOwnerQuestions(getDb(), { now: T0 + 5001 })
+    expect(res.asked).toBe(0)
+    expect(res.staleReading).toBe(1)
+  })
+
+  it('a FRESH reading taken after the answer is not suppressed as stale', () => {
+    // The counter-case: the guard must not mute the channel for ever once a case
+    // has been answered. A reading taken after the answer describes the world the
+    // answer created, and a question from it is legitimate.
+    storePacket('c1', packet())
+    askPendingOwnerQuestions(getDb(), { now: T0 + 1 })
+    recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'igen', now: T0 + 5000 })
+    // A new reading, taken after the answer.
+    getDb().prepare(`DELETE FROM case_evidence_packets WHERE case_id = 'c1'`).run()
+    const p = packet({ missingRequirements: [{ what: 'A birosagi vegzes masolata', whoHasIt: 'ISTVAN', why: 'a bejegyzeshez kell' }] })
+    const plan = planFromEvidence(p)
+    getDb().prepare(
+      `INSERT INTO case_evidence_packets
+         (packet_id, domain, case_id, created_at, packet_json, plan_json, confidence, policy_result)
+       VALUES ('pk-fresh', 'personal', 'c1', ?, ?, ?, ?, 'WAIT_EXTERNAL')`,
+    ).run(T0 + 5100, JSON.stringify(p), JSON.stringify(plan), p.confidence)
+
+    const res = askPendingOwnerQuestions(getDb(), { now: T0 + 5200 })
+    expect(res.staleReading).toBe(0)
+    expect(res.asked).toBe(1)
+  })
+})
+
+// ONE CASE, ONE QUESTION PER SESSION — unless he answers.
+//
+// Live 2026-08-11: one case produced THREE questions in twenty minutes. 20:20
+// "what should be done with this invoice?" (answered at 20:21); 20:30 "does
+// 'parking' mean a line item?" (a misreading of his answer, which I resolved
+// myself); 20:40 "please confirm the follow-up date Marveen proposed" — the
+// Reader had read MY OWN note, which said Istvan could override the date, and
+// turned it into a question for him.
+//
+// Every one of them was individually defensible. Together they are a case
+// talking to its owner every ten minutes. The existing ceiling does not catch
+// this: it bounds the PILE of open questions, not the RATE at which one case
+// produces them.
+describe('per-case ask cooldown', () => {
+  beforeEach(() => {
+    initDatabase(':memory:')
+    initProgressionSchema(getDb())
+    createCase(getDb(), { caseId: 'c1', title: 'ZST szamla', caseType: 'ADMIN' }, T0)
+    getDb().prepare(
+      `INSERT INTO case_progression_state (domain, case_id, progression_enabled, created_at, updated_at)
+       VALUES ('personal', 'c1', 1, ?, ?)`,
+    ).run(T0, T0)
+  })
+
+  /** A fresh packet with a DIFFERENT ask, so the suppression under test is the
+   *  cooldown and not the identical-question check. */
+  const freshPacket = (what: string, at: number): void => {
+    getDb().prepare(`DELETE FROM case_evidence_packets WHERE case_id = 'c1'`).run()
+    const p = packet({ missingRequirements: [{ what, whoHasIt: 'ISTVAN', why: 'ehhez kell' }] })
+    getDb().prepare(
+      `INSERT INTO case_evidence_packets
+         (packet_id, domain, case_id, created_at, packet_json, plan_json, confidence, policy_result)
+       VALUES (?, 'personal', 'c1', ?, ?, ?, ?, 'WAIT_EXTERNAL')`,
+    ).run(`pk-${at}`, at, JSON.stringify(p), JSON.stringify(planFromEvidence(p)), p.confidence)
+  }
+
+  it('HEADLINE: a NEW question ten minutes after an unanswered one is held', () => {
+    // The live shape, exactly: the case asked, the question was closed WITHOUT
+    // an answer from him (I resolved it myself), and ten minutes later the case
+    // had something new to ask. That third message is the one that turns a
+    // channel into noise.
+    freshPacket('A szamla kezelesenek szabalya', T0)
+    expect(askPendingOwnerQuestions(getDb(), { now: T0 + 1 }).asked).toBe(1)
+    // Closed without an answer — superseded, the way I closed the live one.
+    getDb().prepare(
+      `UPDATE cos_owner_questions SET superseded_at = ? WHERE case_id = 'c1'`,
+    ).run(T0 + 100)
+
+    freshPacket('A parkolasi datum megerositese', T0 + 600)
+    const second = askPendingOwnerQuestions(getDb(), { now: T0 + 601 })
+    expect(second.asked).toBe(0)
+    // Counted, not silent. A channel that went quiet because of a rule must not
+    // look like a system with nothing to say.
+    expect(second.cooldown).toBe(1)
+  })
+
+  it('a REWRITE of a question he is still looking at is NOT held', () => {
+    // The exemption, stated as its own test so the next reader sees it is
+    // deliberate: a rewrite replaces the open question rather than adding to his
+    // pile, and holding it back would leave him with the vaguer wording.
+    freshPacket('Istvan dontese szukseges', T0)
+    expect(askPendingOwnerQuestions(getDb(), { now: T0 + 1 }).asked).toBe(1)
+    freshPacket('A 404/800 tulajdoni hanyad tisztazasa', T0 + 600)
+    const rewrite = askPendingOwnerQuestions(getDb(), { now: T0 + 601 })
+    expect(rewrite.asked).toBe(1)
+    expect(rewrite.cooldown).toBe(0)
+    // And it replaced rather than added: one open question on the case.
+    expect((getDb().prepare(
+      `SELECT COUNT(*) AS n FROM cos_owner_questions
+        WHERE case_id = 'c1' AND answered_at IS NULL AND superseded_at IS NULL`,
+    ).get() as { n: number }).n).toBe(1)
+  })
+
+  it('an ANSWER clears it immediately', () => {
+    // The exchange the owner is actually having must never be slowed down —
+    // only a case talking to itself is.
+    freshPacket('A szamla kezelesenek szabalya', T0)
+    askPendingOwnerQuestions(getDb(), { now: T0 + 1 })
+    recordOwnerAnswer(getDb(), { caseId: 'c1', domain: 'personal', text: 'parkolas', now: T0 + 60 })
+
+    freshPacket('A parkolasi datum megerositese', T0 + 600)
+    const after = askPendingOwnerQuestions(getDb(), { now: T0 + 601 })
+    expect(after.asked).toBe(1)
+    expect(after.cooldown).toBe(0)
+  })
+
+  it('after the window the case may speak again', () => {
+    // The counter-case: this is a cooldown, not a gag. A case that still needs
+    // something tomorrow must be able to say so.
+    freshPacket('A szamla kezelesenek szabalya', T0)
+    askPendingOwnerQuestions(getDb(), { now: T0 + 1 })
+
+    freshPacket('A parkolasi datum megerositese', T0 + ASK_COOLDOWN_SEC + 10)
+    const later = askPendingOwnerQuestions(getDb(), { now: T0 + ASK_COOLDOWN_SEC + 11 })
+    expect(later.asked).toBe(1)
+  })
+
+  it('a DIFFERENT case is not held by its neighbour', () => {
+    // The cooldown is per case. One noisy case must not mute the rest.
+    createCase(getDb(), { caseId: 'c2', title: 'Masik ugy', caseType: 'ADMIN' }, T0)
+    getDb().prepare(
+      `INSERT INTO case_progression_state (domain, case_id, progression_enabled, created_at, updated_at)
+       VALUES ('personal', 'c2', 1, ?, ?)`,
+    ).run(T0, T0)
+    freshPacket('A szamla kezelesenek szabalya', T0)
+    askPendingOwnerQuestions(getDb(), { now: T0 + 1 })
+
+    const p2 = packet({ caseId: 'c2' })
+    getDb().prepare(
+      `INSERT INTO case_evidence_packets
+         (packet_id, domain, case_id, created_at, packet_json, plan_json, confidence, policy_result)
+       VALUES ('pk-c2', 'personal', 'c2', ?, ?, ?, ?, 'WAIT_EXTERNAL')`,
+    ).run(T0 + 600, JSON.stringify(p2), JSON.stringify(planFromEvidence(p2)), p2.confidence)
+    const res = askPendingOwnerQuestions(getDb(), { now: T0 + 601 })
+    expect(res.asked).toBe(1)
   })
 })

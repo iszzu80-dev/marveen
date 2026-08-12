@@ -327,6 +327,35 @@
       if (prog.lastDecisionReason) {
         progParts.push('<div class="cos-detail-prog-reason">' + esc(prog.lastDecisionReason) + '</div>')
       }
+      // WHAT THE READER FOUND (review #5, O-1). The Reader read the whole case,
+      // proposed a decision and wrote a plan -- and nothing displayed any of it,
+      // so the most expensive part of the cycle was invisible. Shown here, next
+      // to the deterministic decision, precisely so the two can be COMPARED:
+      // that comparison is the evidence needed before anyone decides whether to
+      // let the Reader's proposal into the pipeline.
+      if (prog.readerDecision) {
+        var readerLabel = DECISION_LABEL[prog.readerDecision] || prog.readerDecision
+        var readerLine = '<span class="cos-detail-prog-meta">Reader: </span>' +
+          '<strong>' + esc(readerLabel) + '</strong>'
+        if (prog.readerDecidedBy) {
+          readerLine += ' <span class="cos-detail-prog-meta">(' + esc(prog.readerDecidedBy) + ')</span>'
+        }
+        if (prog.readerConfidence != null) {
+          readerLine += ' <span class="cos-detail-prog-meta">· magabiztosság ' +
+            esc(Number(prog.readerConfidence).toFixed(2)) + '</span>'
+        }
+        if (prog.readerReadAt) {
+          readerLine += ' <span class="cos-detail-prog-meta">· ' + fmtDate(prog.readerReadAt) + '</span>'
+        }
+        progParts.push('<div class="cos-detail-prog-reader">' + readerLine + '</div>')
+        // A DISAGREEMENT IS THE INTERESTING CASE, so it is not folded into the
+        // line above: when the deterministic policy overruled the Reader, the
+        // reason is the one sentence worth reading on this whole panel.
+        if (prog.readerConflictReason) {
+          progParts.push('<div class="cos-detail-prog-reader-conflict" ' +
+            'style="color:#f59e0b;font-size:12px;">⚠ ' + esc(prog.readerConflictReason) + '</div>')
+        }
+      }
       parts.push('<div class="cos-detail-progression">' + progParts.join('') + '</div>')
     }
 

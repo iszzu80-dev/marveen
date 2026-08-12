@@ -117,6 +117,22 @@ export interface ObservationResult {
 export function decideNotify(item: RadarItemRow, best: number | null, offerId: string | null, hit: boolean): NotifyDecision {
   if (!hit) return { should: false, reason: null }
   if (item.last_notified_at == null) return { should: true, reason: 'NEW_HIT' }
+  // RE-ENTRY. The item was NOT in HIT before this observation, so the price had
+  // left the target zone and has now come back under it. That is news, whatever
+  // was notified before.
+  //
+  // Without this, a single freak low permanently silences the radar: on
+  // 2026-08-10 radar-spain-rental saw 64 471 HUF once, was back at 91 072 six
+  // hours later, and stayed there. A later drop to 80 000 — genuinely under the
+  // 85 000 target — would have matched the same offerId and been >= the notified
+  // 64 471, so every branch below returns false and the owner is never told. The
+  // memory of one better past state suppresses reporting of a true present one.
+  //
+  // This rule is only correct because recordObservation now lets the status LEAVE
+  // HIT (see below); while status was latched at HIT forever, `item.status` could
+  // never be anything else and this branch would be dead. The two changes are one
+  // fix in two places.
+  if (item.status !== 'HIT') return { should: true, reason: 'NEW_HIT' }
   // A different offer now meets the target (includes the prior offer expiring and
   // being replaced) → worth surfacing.
   if (offerId != null && offerId !== item.last_notified_offer_id) return { should: true, reason: 'NEW_OFFER' }
@@ -163,7 +179,19 @@ export function recordObservation(db: Database.Database, radarId: string, obs: O
     const isNewLow = obs.bestPrice != null && (item.best_seen_price == null || obs.bestPrice < item.best_seen_price)
     const newLow = isNewLow ? obs.bestPrice! : item.best_seen_price
     const hit = obs.bestPrice != null && item.target_price != null && obs.bestPrice <= item.target_price
-    const status: RadarStatus = hit ? 'HIT' : item.status
+    // The status reports THIS observation, not the best moment in the item's
+    // history. It used to be `hit ? 'HIT' : item.status`, which could enter HIT
+    // and never leave: radar-spain-rental still read HIT at 91 241 HUF against
+    // an 85 000 target because it had touched 64 471 once, a day earlier. A
+    // surface that says "found one" while today's price is above target is the
+    // stale-green failure this system keeps producing.
+    //
+    // Only HIT is reversed, and only back to ACTIVE. PAUSED and CLOSED are owner
+    // decisions about whether to watch at all; a price observation must not
+    // quietly resurrect a radar the owner switched off. `best_seen_price` keeps
+    // the historical minimum — that number is still true, it just is not the
+    // status.
+    const status: RadarStatus = hit ? 'HIT' : (item.status === 'HIT' ? 'ACTIVE' : item.status)
     const notify = decideNotify(item, obs.bestPrice, obs.offerId ?? null, hit)
     db.prepare(
       `UPDATE radar_items SET best_seen_price=@newLow, status=@status, next_check_at=@next, updated_at=@now WHERE radar_id=@radarId`

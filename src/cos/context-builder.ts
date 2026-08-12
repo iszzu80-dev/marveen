@@ -59,6 +59,10 @@ export interface ContextItem {
   trust: TrustClass
   sensitivity: string
   content: string
+  /** Set when a LATER event in this case explicitly corrects this one. The
+   *  statement in this item is then HISTORY, not a live claim — see
+   *  `markSupersededEvents`. */
+  supersededBy?: { reference: string; reason: string }
 }
 
 export interface CaseContext {
@@ -79,6 +83,44 @@ export interface CaseContext {
 
 
 /**
+ * Strip markup noise from a stored text payload.
+ *
+ * WHY THIS EXISTS, measured 2026-08-11. A Booking.com email thread was stored as
+ * 25 KB of raw HTML: about 2 KB of `<style>` rules, then headers, then — at the
+ * very END — the part that mattered (booking dates, the key-safe code, and the
+ * reminder that the mandatory online check-in form was still outstanding). The
+ * builder truncates an item at 4000 characters, so the Reader received the CSS
+ * and none of the content, and asked the owner a generic "what should happen
+ * next?" about a case whose answer was sitting in its own attachment. Its own
+ * complaint named it exactly: "the email thread's extract is not available".
+ *
+ * The budget is not the problem; spending it on stylesheets is. Deliberately
+ * crude — this is not an HTML parser, it removes the two blocks that are never
+ * content, unwraps the rest, and collapses whitespace.
+ */
+export function stripMarkupNoise(text: string): string {
+  if (!/<[a-z!/]/i.test(text)) return text          // not markup: leave it alone
+  return text
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    // Block-ish boundaries become newlines so the result still reads as lines.
+    .replace(/<\/(p|div|tr|table|h[1-6]|li|br)\s*>/gi, '\n')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;?/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .split('\n').map(l => l.trim()).filter(Boolean).join('\n')
+    .trim()
+}
+
+/**
  * The readable content of a stored document.
  *
  * Order: the extracted text column, then the stored bytes, then the label. The
@@ -96,8 +138,11 @@ function documentContent(db: Database.Database, d: Record<string, unknown>): str
   // produce noise, and noise reads to a model as content.
   if (mime.startsWith('text/') || mime === 'message/rfc822' || mime === 'application/json') {
     try {
-      const text = readDocumentBytes(db, String(d.document_id)).toString('utf8').trim()
+      const raw = readDocumentBytes(db, String(d.document_id)).toString('utf8').trim()
       // A decode that produced replacement characters is not text.
+      // Markup is stripped BEFORE the caller's size cut, or the cut spends the
+      // whole budget on a stylesheet — see stripMarkupNoise.
+      const text = stripMarkupNoise(raw)
       if (text && !text.includes('\uFFFD')) return `${kind} (${name}):\n${text}`
     } catch { /* purged, missing on disk, or unreadable — fall through to the label */ }
   }
@@ -112,6 +157,85 @@ export function docSensitivity(own: unknown, caseTier: string): string {
   // Both declared: the MORE sensitive wins. A document may be more sensitive
   // than the case it hangs off; it may never make the case less sensitive.
   return escalateSensitivity(own as CaseSensitivity, coerceSensitivity(caseTier))
+}
+
+/** How a later event says, in machine-readable form, that it CORRECTS an earlier
+ *  one. Deliberately narrow: an explicit verb plus the earlier event's own id.
+ *  "Restored from event 106" is the phrasing the 2026-08-09 incident cleanup
+ *  wrote onto 26 cases; the others are here so a future writer has a vocabulary
+ *  rather than an accident. */
+const SUPERSEDE_PATTERNS: RegExp[] = [
+  /\brestored from event:?\s*#?(\d+)/i,
+  /\bsupersedes event:?\s*#?(\d+)/i,
+  /\bcorrects event:?\s*#?(\d+)/i,
+  /\breplaces event:?\s*#?(\d+)/i,
+]
+
+/** Which events may declare a correction. An event whose `reason` came from
+ *  OUTSIDE may not: "Restored from event 12" is four words, and an incoming
+ *  email that contains them must not be able to blank out this case's real
+ *  history from the Reader's view. The check is on where the row came from, not
+ *  on what it says — the text is exactly the part an attacker controls. */
+const INTERNAL_EVENT_SOURCES = new Set(['manual_restore', 'mission_control', 'marveen', 'progression-engine'])
+
+function isInternalEvent(e: Record<string, unknown>): boolean {
+  const src = e.source_system == null ? '' : String(e.source_system)
+  return src === '' || INTERNAL_EVENT_SOURCES.has(src)
+}
+
+/**
+ * Find the events that a LATER event has explicitly corrected.
+ *
+ * WHY THIS IS CODE AND NOT A PROMPT SENTENCE. Live on 2026-08-11 the Reader read
+ * both halves of exactly this pair — event:106 "the DoD criteria were met" and
+ * event:122 "Restored from event 106: closed by the progression engine on a
+ * generic, self-certified DoD ... the case was never finished" — noticed they
+ * disagree, and escalated the disagreement to Istvan as an open contradiction he
+ * had to rule on. It is not a contradiction. The second event IS the resolution
+ * of the first, it names which event it corrects, why, and the incident and card
+ * behind it. The question cost one of the five ceiling slots and asked the owner
+ * to adjudicate a bug his own system had already diagnosed.
+ *
+ * The same cleanup wrote that reason onto 26 cases, so the misreading was not a
+ * one-off: it was pending on every one of them.
+ *
+ * A model can be TOLD to notice this. It cannot be PROVEN to, and a rule that
+ * lives only in a prompt is the trap I fixed twice today already. So the pairing
+ * is computed here, deterministically, and the Reader is handed the conclusion
+ * instead of the puzzle.
+ *
+ * Returns: earlier event id -> the correcting reference and its reason.
+ */
+export function markSupersededEvents(
+  events: Array<Record<string, unknown>>,
+): Map<number, { reference: string; reason: string }> {
+  const out = new Map<number, { reference: string; reason: string }>()
+  for (const e of events) {
+    if (!isInternalEvent(e)) continue
+    const reason = e.reason == null ? '' : String(e.reason)
+    if (!reason) continue
+    const id = Number(e.event_id)
+    if (!Number.isFinite(id)) continue
+    for (const pattern of SUPERSEDE_PATTERNS) {
+      const m = pattern.exec(reason)
+      if (!m) continue
+      const target = Number(m[1])
+      // FORWARD ONLY. An event may correct the past; it may not annul the
+      // future, and it may not annul itself. Without this a self-referential or
+      // reversed reason would let one row erase a later, truer one.
+      if (!Number.isFinite(target) || target >= id) continue
+      // If two later events both correct the same earlier one, the NEWEST
+      // correction is the current reading. Decided by comparing ids rather than
+      // by the order the caller happened to pass the rows in, so the result does
+      // not depend on a query's ORDER BY.
+      const held = out.get(target)
+      if (!held || Number(held.reference.slice('event:'.length)) < id) {
+        out.set(target, { reference: `event:${id}`, reason })
+      }
+      break
+    }
+  }
+  return out
 }
 
 const SOURCES_NOT_WIRED = [
@@ -217,7 +341,9 @@ export function buildCaseContext(
     `SELECT event_id, event_type, previous_status, new_status, reason, actor, source_system, created_at
      FROM ${eventTable} WHERE case_id = ? ORDER BY event_id DESC LIMIT 20`
   ).all(caseId) as Array<Record<string, unknown>>
+  const superseded = markSupersededEvents(events)
   for (const e of events) {
+    const by = superseded.get(Number(e.event_id))
     items.push({
       kind: 'CASE_EVENT',
       provenance: { source: 'case-events', reference: `event:${String(e.event_id)}`, retrievedAt: now },
@@ -225,6 +351,7 @@ export function buildCaseContext(
       sensitivity,
       content: `${String(e.event_type ?? '')} ${String(e.previous_status ?? '')}→${String(e.new_status ?? '')} `
         + `by ${String(e.actor ?? '')}${e.reason ? `: ${String(e.reason)}` : ''}`,
+      ...(by ? { supersededBy: by } : {}),
     })
   }
 

@@ -13,7 +13,8 @@ import { writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { initDatabase, getDb } from '../db.js'
 import { createCase, transitionCase } from '../cos/case-store.js'
-import { buildCaseContext, contextIntegrityViolations } from '../cos/context-builder.js'
+import { buildCaseContext, contextIntegrityViolations, stripMarkupNoise } from '../cos/context-builder.js'
+import { buildReaderPrompt, READER_SYSTEM_PROMPT } from '../cos/reader.js'
 
 const T0 = 1_700_000_000
 
@@ -204,5 +205,165 @@ describe('document content: the bytes on disk are content too', () => {
     const ctx = buildCaseContext(getDb(), 'personal', 'c1', T0 + 1)
     const item = ctx.items.find(i => i.provenance.reference === 'doc-gone')!
     expect(item.content).toContain('[no extracted text]')
+  })
+})
+
+// A CORRECTION IS NOT A CONTRADICTION (card 92843ee8).
+//
+// Live 2026-08-11: the Reader read event:106 ("the DoD criteria were met") and
+// event:122 ("Restored from event 106: closed by the progression engine on a
+// generic, self-certified DoD ... the case was never finished"), saw that they
+// disagree, and escalated the disagreement to Istvan as an open contradiction —
+// asking the owner to adjudicate a bug his own system had already diagnosed, and
+// spending one of the five channel slots on it. The same cleanup wrote that
+// reason onto 26 cases, so it was pending on all of them.
+//
+// The pairing is now computed here, deterministically, BEFORE the model sees the
+// events. These tests are what makes that claim checkable: a prompt sentence
+// asking a model to notice the pairing cannot be run red.
+describe('§10.1 superseded events', () => {
+  const ev = (over: Record<string, unknown> = {}) => {
+    const row = {
+      event_id: 1, case_id: 'c1', case_version: 1, actor: 'marveen', source_system: null,
+      source_reference: null, event_type: 'STATUS_CHANGED', previous_status: 'NEW',
+      new_status: 'COMPLETED', reason: null, payload: null, correlation_id: null, created_at: T0,
+      ...over,
+    }
+    const cols = Object.keys(row).join(', ')
+    const ph = Object.keys(row).map(k => '@' + k).join(', ')
+    getDb().prepare(`INSERT INTO personal_case_events (${cols}) VALUES (${ph})`).run(row)
+  }
+  const RESTORE = 'Restored from event 106: closed by the progression engine on a generic, '
+    + 'self-certified DoD (incident 2026-08-09, card 0a7574db). The case was never finished.'
+
+  beforeEach(() => {
+    initDatabase(':memory:')
+    // No cleanup of the case's own creation event: personal_case_events is
+    // append-only and the trigger enforces it. The ids below start at 100 so
+    // they cannot collide with it.
+    createCase(getDb(), { caseId: 'c1', title: 'AWS Activate', caseType: 'ADMIN' }, T0)
+  })
+
+  it('marks the corrected event, and only it', () => {
+    ev({ event_id: 106, reason: 'DoD criteria met, closing.' })
+    ev({ event_id: 122, reason: RESTORE, new_status: 'IN_PROGRESS' })
+    const ctx = buildCaseContext(getDb(), 'personal', 'c1', T0 + 1)
+    const corrected = ctx.items.find(i => i.provenance.reference === 'event:106')!
+    const corrector = ctx.items.find(i => i.provenance.reference === 'event:122')!
+    expect(corrected.supersededBy?.reference).toBe('event:122')
+    expect(corrected.supersededBy?.reason).toContain('never finished')
+    // The correction itself is the current state. Marking it too would erase the
+    // whole pair and leave the Reader with nothing to stand on.
+    expect(corrector.supersededBy).toBeUndefined()
+  })
+
+  it('a case with no correction marks nothing', () => {
+    // The inverse of the assertion above: if the marker appeared here it would
+    // "pass" the test above for a reason that has nothing to do with the fix.
+    ev({ event_id: 106, reason: 'DoD criteria met, closing.' })
+    ev({ event_id: 122, reason: 'Reopened after a call.', new_status: 'IN_PROGRESS' })
+    const ctx = buildCaseContext(getDb(), 'personal', 'c1', T0 + 1)
+    expect(ctx.items.filter(i => i.supersededBy).length).toBe(0)
+  })
+
+  it('an event cannot correct itself or anything after it', () => {
+    // Backwards and self-referential claims are how one row would annul a later,
+    // truer one — the exact damage the fix is supposed to prevent.
+    ev({ event_id: 10, reason: 'Restored from event 99: nonsense.' })
+    ev({ event_id: 20, reason: 'Restored from event 20: itself.' })
+    ev({ event_id: 99, reason: 'DoD criteria met.' })
+    const ctx = buildCaseContext(getDb(), 'personal', 'c1', T0 + 1)
+    expect(ctx.items.filter(i => i.supersededBy).length).toBe(0)
+  })
+
+  it('EXTERNAL text cannot declare a correction', () => {
+    // "Restored from event 106" is four words. An incoming email containing them
+    // must not be able to strike this case's real history out of the Reader's
+    // view — the check is on where the row came from, not on what it says.
+    ev({ event_id: 106, reason: 'DoD criteria met, closing.' })
+    ev({ event_id: 122, reason: RESTORE, source_system: 'gmail', actor: 'sender@example.com' })
+    const ctx = buildCaseContext(getDb(), 'personal', 'c1', T0 + 1)
+    expect(ctx.items.find(i => i.provenance.reference === 'event:106')!.supersededBy).toBeUndefined()
+  })
+
+  it('the newest correction wins when two events correct the same one', () => {
+    ev({ event_id: 106, reason: 'DoD criteria met.' })
+    ev({ event_id: 122, reason: 'Restored from event 106: first pass.' })
+    ev({ event_id: 140, reason: 'Restored from event 106: and this is the final reading.' })
+    const ctx = buildCaseContext(getDb(), 'personal', 'c1', T0 + 1)
+    const corrected = ctx.items.find(i => i.provenance.reference === 'event:106')!
+    expect(corrected.supersededBy?.reference).toBe('event:140')
+  })
+
+  it('the marker reaches the prompt in the HEADER, outside the untrusted fence', () => {
+    ev({ event_id: 106, reason: 'DoD criteria met, closing.' })
+    ev({ event_id: 122, reason: RESTORE, new_status: 'IN_PROGRESS' })
+    const ctx = buildCaseContext(getDb(), 'personal', 'c1', T0 + 1)
+    const prompt = buildReaderPrompt(ctx)
+    const header = prompt.split('\n').find(l => l.includes('[ref=event:106]'))!
+    expect(header).toContain('[SUPERSEDED_BY=event:122]')
+    // A marker with no rule explaining it is decoration. The rule and the marker
+    // ship together or neither is worth anything.
+    expect(READER_SYSTEM_PROMPT).toContain('[SUPERSEDED_BY=ref]')
+  })
+})
+
+// A STYLESHEET IS NOT CONTENT (measured live, 2026-08-11).
+//
+// A Booking.com thread was stored as 25 KB of raw HTML: ~2 KB of <style>, then
+// headers, then — at the very end — the booking dates, the key-safe code and the
+// reminder that the mandatory check-in form was still outstanding. The item is
+// cut at 4000 characters, so the Reader got the CSS and none of it, and asked
+// the owner "what should happen next?" about a case whose answer was in its own
+// attachment.
+describe('§10.1 markup noise', () => {
+  const CSS = '<style>' + '.x { color: #fff; line-height: 100%; }\n'.repeat(120) + '</style>'
+  const BODY = 'Bejelentkezés: Tue 11 Aug 2026\nA kulcs a 9-es ajtó mögötti széfben, kód 241978.\n'
+    + 'Kérjük töltse ki a kötelező online check-in űrlapot.'
+
+  beforeEach(() => {
+    initDatabase(':memory:')
+    createCase(getDb(), { caseId: 'c1', title: 'Valencia', caseType: 'TRAVEL' }, T0)
+  })
+
+  it('HEADLINE: the content survives the cut, the stylesheet does not', () => {
+    const html = `<html><head>${CSS}</head><body><p>${BODY.replace(/\n/g, '</p><p>')}</p></body></html>`
+    expect(html.length).toBeGreaterThan(4000)   // the live shape: over budget before stripping
+    const path = '/tmp/marveen-test-thread.html'
+    writeFileSync(path, html)
+    doc({
+      document_id: 'doc-thread', doc_kind: 'email_thread', mime_type: 'text/plain',
+      extracted_text: null, stored_path: path,
+      sha256: createHash('sha256').update(html).digest('hex'),
+    })
+    const ctx = buildCaseContext(getDb(), 'personal', 'c1', T0 + 1, { maxCharsPerItem: 4000 })
+    const item = ctx.items.find(i => i.provenance.reference === 'doc-thread')!
+    expect(item.content).toContain('Tue 11 Aug 2026')
+    expect(item.content).toContain('241978')
+    expect(item.content).toContain('check-in')
+    expect(item.content).not.toContain('line-height')
+    expect(item.content).not.toContain('[...LEVÁGVA')
+  })
+
+  it('plain text is left exactly as it is', () => {
+    // The counter-case: the stripper must not touch a document that is not
+    // markup, or it would quietly rewrite invoices and contracts.
+    const plain = 'Szamla vegosszeg: 71 474 Ft\n2 < 3 és 5 > 4\nnem markup'
+    const path = '/tmp/marveen-test-plain.txt'
+    writeFileSync(path, plain)
+    doc({
+      document_id: 'doc-plain', doc_kind: 'other', mime_type: 'text/plain',
+      extracted_text: null, stored_path: path,
+      sha256: createHash('sha256').update(plain).digest('hex'),
+    })
+    const ctx = buildCaseContext(getDb(), 'personal', 'c1', T0 + 1)
+    const item = ctx.items.find(i => i.provenance.reference === 'doc-plain')!
+    expect(item.content).toContain('71 474 Ft')
+    expect(item.content).toContain('2 < 3 és 5 > 4')
+  })
+
+  it('stripMarkupNoise keeps line structure', () => {
+    const out = stripMarkupNoise('<div>egy</div><div>ketto</div><br>harom')
+    expect(out.split('\n')).toEqual(['egy', 'ketto', 'harom'])
   })
 })

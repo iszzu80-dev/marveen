@@ -11,12 +11,24 @@ import type Database from 'better-sqlite3'
 import type { CostOpsConfig } from './config.js'
 import { deriveSourceLifecycle, deriveProvenance, type SourceLifecycle, type SourceProvenance } from './lifecycle.js'
 import { getSecret } from '../web/vault.js'
+import { buildCollectorPlan } from './collectors/scheduled-sync.js'
 
 export type Freshness = 'fresh' | 'aging' | 'stale' | 'unknown'
-// Honest today: no collector in this codebase is wired to an automatic boot-time
-// interval (verified 2026-07-15 -- only syncFixedCostsToLedger is; every provider
-// collector is POST /api/costs/sync-triggered only). 'automatic_interval' is kept
-// in the enum for the day that changes, not fabricated as the current state.
+// 'automatic_interval' is DERIVED, never asserted. The comment that used to stand
+// here said no collector runs on a boot-time interval -- true when written on
+// 2026-07-15, false since the scheduled sync landed: web.ts:465 calls
+// startCostOpsBackgroundTasks(), which runs collectorSyncTickSafely immediately
+// and then every COLLECTOR_TICK_MS.
+//
+// The cost of that stale sentence was not cosmetic. The cadence below was
+// hard-coded to `manual | config_driven`, so the dashboard showed every
+// automatically synced provider as MANUAL -- a wrong answer to a user-facing
+// question, justified by a comment nobody re-checked.
+//
+// The fix is not a better comment. buildCollectorPlan() is the single place that
+// decides which providers are on the automatic schedule, so the cadence is read
+// FROM it. If a provider is added to or removed from the plan, this follows on
+// its own and cannot drift again.
 export type SyncCadence = 'manual' | 'automatic_interval' | 'config_driven'
 export type OperationalInclusionRule = 'operational' | 'advisory_plan_estimate' | 'pending_permission_excluded' | 'no_data_yet'
 
@@ -122,6 +134,12 @@ export function buildSourceInventory(
 ): SourceInventoryEntry[] {
   const checkCredential = deps.credentialChecker ?? realCredentialChecker()
 
+  // The providers that the boot-time sweep actually runs. Read from the plan
+  // itself rather than restated here -- see the SyncCadence note above for what
+  // the restated version cost. Building the plan is side-effect free: each entry
+  // only holds a lazy `import()` inside its `run`.
+  const scheduledProviders = new Set(buildCollectorPlan().map(e => e.provider))
+
   const sources = db.prepare(`SELECT id, name, provider, source_type FROM cost_sources WHERE active = 1 AND lifecycle_state != 'decommissioned' ORDER BY name`).all() as SourceRow[]
 
   // Latest run + last successful run + last failed run, per provider.
@@ -216,7 +234,9 @@ export function buildSourceInventory(
       collection_method,
       freshness: classifyFreshness(agg?.max_freshness ?? null, now),
       last_data_freshness: agg?.max_freshness ?? null,
-      sync_cadence: credentialRequired ? 'manual' : 'config_driven',
+      sync_cadence: scheduledProviders.has(s.provider)
+        ? 'automatic_interval'
+        : (credentialRequired ? 'manual' : 'config_driven'),
       owner: override?.owner ?? DEFAULT_OWNER,
       operational_inclusion_rule,
       manual_fallback: !credentialRequired,

@@ -76,8 +76,18 @@ describe('runtime routing kill switch', () => {
   it('STANDING CHECK: the optimization write path calls the setter', () => {
     // The property that was missing was not the setter — it was the CALL. A
     // switch nothing wires is the same switch as before.
+    //
+    // UPDATED 2026-08-11 (Ó-2 fix), and deliberately NOT loosened. The call is
+    // now made through an injectable `propagate` so the FAILURE branch can be
+    // driven in a test — an untested failure branch on an emergency stop is the
+    // one branch that matters. The property this check exists for is unchanged
+    // and is asserted in three parts: the setter is still the DEFAULT binding,
+    // the propagation is still invoked, and it is still gated on the routing
+    // module. A refactor that dropped the wiring would fail on the first line
+    // exactly as before.
     const src = readFileSync(join(process.cwd(), 'src/optimization/optimization-config.ts'), 'utf8')
-    expect(src).toMatch(/setCapacityRoutingEnabled\(false\)/)
+    expect(src).toMatch(/opts\.propagate \?\?[^\n]*setCapacityRoutingEnabled/)
+    expect(src).toMatch(/propagate\(false\)/)
     expect(src).toMatch(/config\.modules\.runtimeRouting/)
   })
 

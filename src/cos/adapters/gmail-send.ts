@@ -38,7 +38,11 @@ export interface OutboundEmail {
  *  preserve the X-Marveen-Idempotency-Key header on send and be able to find a
  *  sent message by it. */
 export interface MailTransport {
-  send(email: OutboundEmail): Promise<{ messageId: string }>
+  /** `threadId` is the conversation the message actually landed in, as the
+   *  provider assigned it. Optional because a transport may not know it; when it
+   *  is known it must be returned, because it is the only handle that lets a
+   *  later REPLY be recognised as belonging to this case. */
+  send(email: OutboundEmail): Promise<{ messageId: string; threadId?: string }>
   /** Find a message in Sent carrying header `name: value`. `available:false`
    *  means the search itself could not run (e.g. Sent unreachable) and must NOT
    *  be read as "absent" — the executor keeps the action unverified rather than
@@ -78,7 +82,7 @@ export class GmailSendAdapter implements OutboundAdapter {
     private readonly attachmentResolver?: AttachmentResolver,
   ) {}
 
-  async send(action: OutboundAction): Promise<{ externalRef: string }> {
+  async send(action: OutboundAction): Promise<{ externalRef: string; threadRef?: string }> {
     // PRE-FLIGHT (F-3). Everything below this line and above the transport call
     // fails BEFORE any byte leaves this process, so it must be reported as
     // reachedProvider:false. A bare Error here made the executor fall through to
@@ -122,8 +126,14 @@ export class GmailSendAdapter implements OutboundAdapter {
       },
       ...(attachments ? { attachments } : {}),
     }
-    const { messageId } = await this.transport.send(email)
-    return { externalRef: messageId }
+    const { messageId, threadId } = await this.transport.send(email)
+    // The thread the letter landed in. Recorded because a case that does not
+    // know its own thread cannot recognise the answer to its own letter: the
+    // reply arrives on a thread nothing is linked to, and intake opens a SECOND
+    // case for a matter already WAITING_EXTERNAL. That is not hypothetical —
+    // the 2026-08-09 Modivo pilot send had no thread recorded anywhere, and the
+    // reply would have duplicated the case it belongs to.
+    return { externalRef: messageId, ...(threadId ? { threadRef: threadId } : {}) }
   }
 
   async readback(externalIdempotencyMarker: string, knownRef?: string): Promise<ReadbackResult> {

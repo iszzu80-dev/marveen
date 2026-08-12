@@ -58,6 +58,9 @@ const LEDGER_SHARED_COLUMNS: Record<string, string> = {
   provider_message_id: 'TEXT',
   rfc_message_id: 'TEXT',
   rendered_variables_hash: 'TEXT',
+  /** §8 / IN-2: the provider thread this action landed in. Without it a case
+   *  cannot recognise the reply to its own letter — see gmail-send.send. */
+  thread_ref: 'TEXT',
 }
 
 /**
@@ -530,6 +533,9 @@ export function initCosSchema(db: Database.Database): void {
       content_hash     TEXT,
       self_event_count INTEGER NOT NULL DEFAULT 0,
       last_self_event_at INTEGER,
+      -- IN-2 / §8: 1 = the thread id was DERIVED (no producer value, so the
+      -- message was filed as its own thread), 0 = observed from the source.
+      thread_id_derived INTEGER NOT NULL DEFAULT 0,
       created_at       INTEGER NOT NULL,
       updated_at       INTEGER NOT NULL,
       UNIQUE(gmail_account_id, thread_id, message_id),
@@ -559,6 +565,14 @@ export function initCosSchema(db: Database.Database): void {
     `)
     db.exec(`DROP TABLE email_processing_pre_a3`)
   }
+  // IN-2 / §8, and it belongs HERE, after the rebuild, for the reason the block
+  // above states about itself: a column added before the A.3 rename lands on the
+  // table that gets renamed away, so on a fresh database it silently does not
+  // exist. (That is not a hypothetical — it is how this very column was written
+  // the first time, and eight tests caught it.) A database that already has the
+  // wide key never enters the rebuild, so it needs the ALTER; a fresh one gets
+  // the column from EPROC_A3_DDL and this is a no-op.
+  ensureColumns(db, 'email_processing', { thread_id_derived: 'INTEGER NOT NULL DEFAULT 0' })
   // F-8: an existing database that did NOT go through the A.3 rebuild still has
   // the narrow CHECK. Widen it here, where the surviving definition is known.
   widenCheckConstraint(db, 'email_processing', 'SOURCE_COMMIT_SKIPPED', EPROC_A3_DDL)
@@ -1762,9 +1776,99 @@ export function initProgressionSchema(db: Database.Database): void {
       asked_at       INTEGER NOT NULL,
       answered_at    INTEGER,
       answer_text    TEXT,
+      -- Set when a BETTER-WORDED question about the same case replaces this one.
+      -- Deliberately NOT answered_at: nobody answered it, and writing an answer
+      -- timestamp to close a row would make "answered" mean two different
+      -- things — the same lie SOURCE_COMMITTED told about labelling.
+      superseded_at  INTEGER,
       PRIMARY KEY (case_id, question_hash)
     )
   `)
+  ensureColumns(db, 'cos_owner_questions', {
+    superseded_at: 'INTEGER',
+    // Istvan's decision (2026-08-11): the CoS gets its OWN Telegram bot and
+    // chat, and his answer there must reach the case. That only works if the
+    // question records WHERE it went out -- otherwise a reply arriving on one
+    // channel cannot be matched to a question asked on another, and the whole
+    // separation would cost him the answer path it exists to protect.
+    //
+    // Nullable on purpose: every question asked before the split has no channel,
+    // and a NULL here means "wherever the old single channel was". Backfilling a
+    // guess would invent provenance.
+    channel: 'TEXT',
+    channel_target: 'TEXT',
+    // WHICH PROGRESSION RUN the question came out of (review #6, H-2).
+    //
+    // The answer path writes a case event, and its consumer
+    // (consumeOwnerAnswer) refuses any answer without a source_reference naming
+    // the run -- it cannot verify question identity otherwise. The answer event
+    // was written without one, so every Telegram answer was DROPPED by the
+    // engine: the question closed, the case did not move, the next Reader sweep
+    // produced the same packet and asked the same question again. Measured: two
+    // identical messages, after answering.
+    //
+    // Nullable for the same reason as `channel`: rows asked before this column
+    // existed have no run to name, and inventing one would fabricate provenance.
+    progression_run_id: 'TEXT',
+  })
   db.exec(`CREATE INDEX IF NOT EXISTS idx_coq_open ON cos_owner_questions(answered_at, asked_at)`)
+
+  // ── cos_channel_outbox ───────────────────────────────────────────────────
+  //
+  // Messages waiting to LEAVE on a channel. The owner-question path keeps its
+  // own table (the question IS the state there); this is for producers that have
+  // something to say and no state of their own to hang it on — the radar first.
+  //
+  // `dedupe_key` is the identity of the THING announced, not of the attempt, and
+  // it is UNIQUE: a retry, a second radar tick or a restarted process must not
+  // send the same hit twice. `sent_at IS NULL` is the whole queue semantics — a
+  // failed send leaves the row alone, so the next drain retries rather than
+  // losing it. A price falls below target once.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cos_channel_outbox (
+      outbox_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+      channel        TEXT NOT NULL,
+      kind           TEXT NOT NULL,
+      dedupe_key     TEXT NOT NULL UNIQUE,
+      text           TEXT NOT NULL,
+      created_at     INTEGER NOT NULL,
+      sent_at        INTEGER,
+      channel_target TEXT,
+      attempts       INTEGER NOT NULL DEFAULT 0,
+      last_error     TEXT
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_outbox_pending
+             ON cos_channel_outbox(channel, sent_at, created_at)`)
+
+  // ── cos_channel_held ─────────────────────────────────────────────────────
+  //
+  // Owner messages that arrived on a channel and could NOT be attributed to a
+  // case. Written 2026-08-11, an hour after the rule that produces them.
+  //
+  // The rule (matchAnswerTarget) refuses to guess when several questions are
+  // open — correct, because a wrong attribution puts the owner's words on a case
+  // he never mentioned. But the first live firing showed the hole in it: the
+  // poll counted `ambiguous: 1`, advanced the Telegram offset, and the SENTENCE
+  // WAS GONE. Telegram does not re-serve an update once a higher offset is
+  // requested. "Held, not lost" was only true of the counter, not of the words.
+  //
+  // So the text is stored here before the cursor moves. `resolved_at` is set
+  // when it has been dealt with -- attached to a case, or answered directly.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cos_channel_held (
+      held_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+      channel      TEXT NOT NULL,
+      chat_id      TEXT,
+      message_id   INTEGER,
+      text         TEXT NOT NULL,
+      reason       TEXT NOT NULL,
+      received_at  INTEGER NOT NULL,
+      resolved_at  INTEGER,
+      resolution   TEXT,
+      UNIQUE (channel, message_id)
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_held_open ON cos_channel_held(resolved_at, received_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cep_conflict ON case_evidence_packets(conflict_reason, created_at)`)
 }

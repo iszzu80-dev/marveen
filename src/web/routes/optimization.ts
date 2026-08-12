@@ -322,7 +322,24 @@ export async function tryHandleOptimization(ctx: RouteContext): Promise<boolean>
       json(res, { ok: false, error: result.error ?? 'write failed', config: result.config }, 500)
       return true
     }
-    json(res, { ok: true, config: result.config })
+    // Ó-2 (review #2, 2026-08-11): the stop has TWO halves — this config and the
+    // capacity-routing flag — and they can land separately. Reporting a single
+    // verdict for both is how an operator walks away from a half-stopped system.
+    //
+    // The config write succeeded, so this is not a 500. But if the flag did not
+    // follow, the response says so in the same breath, because "stopped" and
+    // "stopped except for the part that keeps dispatching" are different states.
+    if (result.routingFlagPropagated === false) {
+      json(res, {
+        ok: true,
+        partial: true,
+        config: result.config,
+        warning: result.warning,
+        stillRunning: 'capacity-routing',
+      })
+      return true
+    }
+    json(res, { ok: true, partial: false, config: result.config })
     return true
   }
 

@@ -35,7 +35,42 @@ export interface OpenBatchInput {
   accountId: string
   cursorBefore: string | null
   cursorAfter: string
+  /** Still optional at the type level, deliberately — see resolveThreadId. */
   messages: Array<{ messageId: string; threadId?: string }>
+}
+
+/** IN-2 / §8: every processed message carries a thread id — and none is dropped.
+ *
+ *  `thread_id` used to default to NULL whenever a caller omitted it, and the
+ *  only thing keeping §8 alive was a sentence in a feeder's prompt telling it to
+ *  "leave it out if you don't have it". On 2026-08-10 a feeder did exactly that
+ *  for one message and the criterion went from PASS to FAIL. A NULL there is not
+ *  cosmetic:
+ *  the thread id is what links a later reply to an existing case
+ *  (intake.findActiveCaseByThread), so a NULL row means the reply opens a SECOND
+ *  case for a matter already in flight.
+ *
+ *  (It also sits in UNIQUE(gmail_account_id, thread_id, message_id), where
+ *  SQLite treats every NULL as distinct — but that hole is already closed by the
+ *  separate uq_email_processing_msg index on (account, message_id), which the
+ *  A.3 migration added for exactly this reason. Dedup was never the damage
+ *  here; linking was.)
+ *
+ *  The first version of this fix THREW on a missing thread id. That was wrong,
+ *  and a test said so in its own words: "a producer that fails to supply the
+ *  thread must degrade to unlinked case, never to dropped mail". Refusing the
+ *  batch would have traded a linking defect for mail loss, which is the worse
+ *  failure by a wide margin.
+ *
+ *  So it degrades instead: a message with no thread id becomes its own thread.
+ *  In Gmail a thread-opening message genuinely has threadId == its own id, so
+ *  this is usually the CORRECT value and never a NULL. What it is not is
+ *  OBSERVED, and a derived value that reads like an observed one is its own kind
+ *  of lie — so the row records which it was (`thread_id_derived`). Derived rows
+ *  stay countable, alertable, and correctable later; nothing has to trust that
+ *  the fallback was rare. */
+function resolveThreadId(m: { messageId: string; threadId?: string }): { threadId: string; derived: 0 | 1 } {
+  return m.threadId ? { threadId: m.threadId, derived: 0 } : { threadId: m.messageId, derived: 1 }
 }
 
 /** Record a fetched batch + its messages as DISCOVERED. Re-discovering a message
@@ -47,11 +82,12 @@ export function openBatch(db: Database.Database, input: OpenBatchInput, now: num
        VALUES (@batchId, @accountId, @cursorBefore, @cursorAfter, 'OPEN', @now, @now)`
     ).run({ batchId: input.batchId, accountId: input.accountId, cursorBefore: input.cursorBefore, cursorAfter: input.cursorAfter, now })
     const ins = db.prepare(
-      `INSERT OR IGNORE INTO email_processing (gmail_account_id, message_id, thread_id, batch_id, status, created_at, updated_at)
-       VALUES (@accountId, @messageId, @threadId, @batchId, 'DISCOVERED', @now, @now)`
+      `INSERT OR IGNORE INTO email_processing (gmail_account_id, message_id, thread_id, thread_id_derived, batch_id, status, created_at, updated_at)
+       VALUES (@accountId, @messageId, @threadId, @derived, @batchId, 'DISCOVERED', @now, @now)`
     )
     for (const m of input.messages) {
-      ins.run({ accountId: input.accountId, messageId: m.messageId, threadId: m.threadId ?? null, batchId: input.batchId, now })
+      const { threadId, derived } = resolveThreadId(m)
+      ins.run({ accountId: input.accountId, messageId: m.messageId, threadId, derived, batchId: input.batchId, now })
     }
   })
   tx()

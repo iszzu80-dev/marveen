@@ -19,6 +19,10 @@ import type { CaseSensitivity } from './schema.js'
 export interface TriagedEmail {
   accountId: string
   messageId: string
+  /** §8 / IN-2: supply it whenever the source has it. Omitting it no longer
+   *  writes a NULL — the message is filed as its own thread and flagged derived
+   *  (see openBatch/resolveThreadId) — but a derived thread cannot link a later
+   *  reply back to this case, so omitting it still costs something real. */
   threadId?: string
   subject: string
   from: string

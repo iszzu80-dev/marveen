@@ -88,19 +88,26 @@ describe('COS source commit + batch closure', () => {
     // through silently. An exception nobody is told about is indistinguishable
     // from a bug.
     const db = seed()
-    const alerts: string[] = []
-    const tasks: string[] = []
+    //
+    // 2026-08-11: the two assertions below used to regex the REASON string for
+    // "source-commit skipped" — a proxy for "which branch raised this". The
+    // branch is now stated outright by the `kind` argument, so they assert that
+    // instead. Same intent, checked against an enum rather than prose. (The
+    // wording had to move because the shared implementation was labelling this
+    // fully-processed message a quarantine.)
+    const alerts: Array<{ mid: string; reason: string; kind: string }> = []
+    const tasks: Array<{ mid: string; reason: string; kind: string }> = []
     const r = await closeBatch(db, 'b1', new NoSourceWriteCommitter(), NOW, {
       allowCursorAdvanceWithoutSourceWrite: true,
       quarantine: {
-        raiseAlert: (_a, m, reason) => { alerts.push(`${m}:${reason}`); return true },
-        createReviewTask: (_a, m, reason) => { tasks.push(`${m}:${reason}`); return true },
+        raiseAlert: (_a, mid, reason, kind) => { alerts.push({ mid, reason, kind }); return true },
+        createReviewTask: (_a, mid, reason, kind) => { tasks.push({ mid, reason, kind }); return true },
         policyAllowsCursorAdvance: () => true,
       },
     })
     expect(r.batchClosed).toBe(true)
-    expect(alerts.some(a => a.startsWith('m1:') && /source-commit skipped/.test(a))).toBe(true)
-    expect(tasks.some(a => a.startsWith('m1:') && /source-commit skipped/.test(a))).toBe(true)
+    expect(alerts.some(a => a.mid === 'm1' && a.kind === 'SOURCE_COMMIT_SKIPPED' && a.reason.length > 0)).toBe(true)
+    expect(tasks.some(a => a.mid === 'm1' && a.kind === 'SOURCE_COMMIT_SKIPPED' && a.reason.length > 0)).toBe(true)
   })
 
   it('a failing committer does NOT close the batch and does not move the cursor', async () => {

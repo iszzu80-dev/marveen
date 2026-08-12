@@ -36,12 +36,26 @@ function detect(lines: string[]): string[] {
   const failedIn = (o: unknown): { failed?: boolean; error?: string } | null =>
     (o && typeof o === 'object' && (o as { failed?: unknown }).failed === true)
       ? (o as { failed?: boolean; error?: string }) : null
+  const failureList = (o: unknown): Array<{ caseId?: string; error?: string }> | null => {
+    if (!o || typeof o !== 'object') return null
+    const f = (o as { failures?: unknown }).failures
+    return Array.isArray(f) && f.length > 0 ? f as Array<{ caseId?: string; error?: string }> : null
+  }
+  const describe_ = (list: Array<{ caseId?: string; error?: string }>): string => {
+    const first = list[0]
+    const rest = list.length > 1 ? ` (+${list.length - 1} more)` : ''
+    return `${list.length} failed: ${first?.caseId ?? '?'}: ${first?.error ?? 'no error text'}${rest}`
+  }
   if (parsed) {
     const self = failedIn(parsed)
     if (self) problems.push(`step: ${self.error ?? 'reported failed:true'}`)
+    const selfFailures = failureList(parsed)
+    if (selfFailures) problems.push(`step: ${describe_(selfFailures)}`)
     for (const [k, v] of Object.entries(parsed)) {
       const nested = failedIn(v)
       if (nested) problems.push(`step/${k}: ${nested.error ?? 'reported failed:true'}`)
+      const nestedFailures = failureList(v)
+      if (nestedFailures) problems.push(`step/${k}: ${describe_(nestedFailures)}`)
     }
   }
   return problems
@@ -91,9 +105,44 @@ describe('cycle report failure detection', () => {
     ])).toEqual([])
   })
 
-  it('STANDING CHECK: the script itself still inspects nested payloads', () => {
+  it('HEADLINE 2: a non-empty failures array is a problem (live 2026-08-11)', () => {
+    // The exact line this runner printed while calling itself clean: the channel
+    // step could not deliver an owner question, said so in `failures`, exited 0
+    // — and `problems` was empty. A question that never reached Istvan was filed
+    // under "cycle fine".
+    const problems = detect([
+      'CosChannel: {"channel":"telegram:cos","pending":1,"sent":0,'
+        + '"failures":[{"caseId":"case-private-19f4c2ec1256e723","error":"telegram sendMessage failed: fetch failed"}]}',
+    ])
+    expect(problems).toHaveLength(1)
+    expect(problems[0]).toMatch(/1 failed: case-private-19f4c2ec1256e723: telegram sendMessage failed/)
+  })
+
+  it('catches per-item failures nested under a subsystem too', () => {
+    // The reader and goal enrichment report theirs one level down, for the same
+    // reason the `failed` flag had to be checked at both depths.
+    const problems = detect([
+      'Reader: {"reader":{"read":2,"failures":[{"caseId":"personal/c1","error":"model timeout"},'
+        + '{"caseId":"personal/c2","error":"model timeout"}]}}',
+    ])
+    expect(problems).toHaveLength(1)
+    expect(problems[0]).toMatch(/step\/reader: 2 failed: personal\/c1: model timeout \(\+1 more\)/)
+  })
+
+  it('an EMPTY failures array is not a problem', () => {
+    // The counter-case, and the reason the check tests length rather than
+    // presence: every one of these steps reports `failures: []` on a good run.
+    expect(detect([
+      'GoalEnrichment: {"enriched":2,"remaining":11,"failures":[]}',
+      'Reader: {"reader":{"read":3,"failures":[]}}',
+      'CosChannel: {"pending":0,"sent":0,"failures":[]}',
+    ])).toEqual([])
+  })
+
+  it('STANDING CHECK: the script itself still inspects nested payloads and failure lists', () => {
     const src = readFileSync(resolve(process.cwd(), 'scripts/cos-cycle.ts'), 'utf8')
     expect(src).toMatch(/Object\.entries\(p\)/)
     expect(src).toMatch(/failedIn/)
+    expect(src).toMatch(/failureList/)
   })
 })

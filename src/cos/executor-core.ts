@@ -50,7 +50,10 @@ export interface ReadbackResult { found: boolean; available?: boolean; externalR
 
 export interface OutboundAdapter {
   readonly actionType: string
-  send(action: OutboundAction): Promise<{ externalRef: string }>
+  /** `threadRef` is the provider conversation the action landed in, when the
+   *  adapter knows it. Persisted to the ledger so a reply arriving later can be
+   *  matched to the case that sent the letter. */
+  send(action: OutboundAction): Promise<{ externalRef: string; threadRef?: string }>
   /** F-12: `knownRef` is the provider id recorded when the send returned. An
    *  adapter whose marker search is unavailable can use it as the fallback
    *  evidence; one that has no such fallback ignores it. */
@@ -238,7 +241,7 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
     db: Database.Database, ledgerId: string, status: OutboundStatus,
     fields: Partial<Record<'external_ref' | 'last_error' | 'sending_at' | 'applied_at' | 'verified_at' | 'attempt'
       | 'run_id' | 'campaign_version' | 'approval_version' | 'rendered_variables_hash'
-      | 'provider_message_id' | 'rfc_message_id', unknown>>,
+      | 'provider_message_id' | 'rfc_message_id' | 'thread_ref', unknown>>,
     now: number,
   ): void {
     const cols = ['status = @status', 'updated_at = @now']
@@ -424,9 +427,11 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
       return loadOrThrow(db, ledgerId)
     }
     let externalRef: string
+    let threadRef: string | undefined
     try {
       const r = await adapter.send(loadOrThrow(db, ledgerId))
       externalRef = r.externalRef
+      threadRef = r.threadRef
     } catch (err) {
       const hints = err as Partial<SendErrorHints>
       const msg = String((err as Error)?.message ?? err)
@@ -450,6 +455,7 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
     // the AC-21 query answerable without guessing which column is real.
     setStatus(db, ledgerId, 'APPLIED_UNVERIFIED', {
       external_ref: externalRef, applied_at: now, provider_message_id: externalRef,
+      ...(threadRef ? { thread_ref: threadRef } : {}),
     }, now)
     return verifyAction(db, adapter, ledgerId, now)
   }
