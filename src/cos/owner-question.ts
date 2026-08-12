@@ -23,6 +23,7 @@ import type Database from 'better-sqlite3'
 import { createAgentMessage, appendDailyLog } from '../db.js'
 import { foldName, type ReaderEvidencePacket } from './reader.js'
 import type { EvidencePlan } from './evidence-planner.js'
+import { collectDecisionPackage, formatDeadline, type DecisionPackage } from './decision-package.js'
 
 export interface OwnerQuestion {
   caseId: string
@@ -50,7 +51,17 @@ function ownerSteps(plan: EvidencePlan): string[] {
  * a notification channel becomes noise and then becomes muted.
  */
 export function buildOwnerQuestion(
-  input: { caseId: string; domain: string; title: string; packet: ReaderEvidencePacket; plan: EvidencePlan },
+  input: {
+    caseId: string; domain: string; title: string
+    packet: ReaderEvidencePacket; plan: EvidencePlan
+    /** §20 — the four elements the question used to be missing. Optional so the
+     *  composer stays pure and every existing caller keeps working: without it
+     *  the question is exactly what it was, with it the question is a Decision
+     *  Package. Gathered by collectDecisionPackage, which does the DB reads. */
+    pkg?: DecisionPackage
+    /** Only used to say how far away the deadline is. */
+    now?: number
+  },
 ): OwnerQuestion | null {
   const steps = ownerSteps(input.plan)
   const ballIsHis = input.packet.ballHolder === 'ISTVAN'
@@ -72,6 +83,24 @@ export function buildOwnerQuestion(
   if (context.length > 0) {
     lines.push('Amit tudunk:')
     lines.push(...context)
+    lines.push('')
+  }
+
+  // §20.2 — WHAT THE SYSTEM ALREADY DID. Placed before the ask, because it is
+  // the context that changes the answer: "I already emailed them twice" and "I
+  // have done nothing yet" call for different replies to the same question, and
+  // until now the question said neither.
+  const pkg = input.pkg
+  if (pkg && pkg.handled.length > 0) {
+    lines.push('Amit eddig elintéztem:')
+    lines.push(...pkg.handled.slice(0, 5).map(h => `• ${h}`))
+    lines.push('')
+  }
+
+  // §20.3 — the CAUSE. "Ami Tőled kell" names the symptom; this names why the
+  // machine could not get past it on its own.
+  if (pkg?.stoppedBecause) {
+    lines.push(`Miért állt meg: ${pkg.stoppedBecause}`)
     lines.push('')
   }
 
@@ -97,18 +126,49 @@ export function buildOwnerQuestion(
   }
   lines.push(...asks)
 
+  // §20.5 and §20.4 — the suggestion, and what may be answered to it.
+  //
+  // In this order and not the reverse: options before a recommendation is a
+  // menu, and a menu is what the owner already has. The recommendation is the
+  // system doing the thinking it was built to do; the options exist so he can
+  // refuse it in one word.
+  if (pkg?.recommendation) {
+    lines.push('')
+    lines.push(`Javaslatom: ${pkg.recommendation}`)
+    if (pkg.options.length > 0) {
+      lines.push('Válaszolhatsz:')
+      lines.push(...pkg.options.map(o => `• ${o}`))
+    }
+  }
+
   if (input.packet.uncertainty.length > 0) {
     lines.push('')
     lines.push(`Bizonytalanság: ${input.packet.uncertainty.slice(0, 2).join('; ')}`)
   }
+
+  // §20.7 — the date. Last, and on its own line, because it is the one element
+  // that is read at a glance and decides whether the rest is read now or later.
+  if (pkg?.deadline) {
+    lines.push('')
+    lines.push(formatDeadline(pkg.deadline, input.now ?? Math.floor(Date.now() / 1000)))
+  }
+
   lines.push('')
   lines.push(`(ügy: ${input.caseId} · magabiztosság: ${input.packet.confidence})`)
 
   const text = lines.join('\n')
   // The hash covers WHAT IS ASKED, not the whole packet: a new fact that does
   // not change the ask must not re-ask.
+  //
+  // §20 ADDS EXACTLY ONE FIELD TO IT: the recommendation. "Javaslatom: X" and
+  // "Javaslatom: Y" are different questions -- one word of his answer means
+  // something different in each -- so a re-plan that changes the proposal has
+  // to reach him. The other three elements deliberately stay OUT: a new line
+  // under "amit eddig elintéztem", or a deadline drawing closer, is new CONTEXT
+  // for the same ask, and re-asking on context is the loop review #6 spent a
+  // day closing.
   const hash = createHash('sha256')
-    .update([input.caseId, ...asks].join(''))
+    .update([input.caseId, ...asks, input.pkg?.recommendation ?? ''].join(''))
     .digest('hex')
     .slice(0, 32)
   return { caseId: input.caseId, domain: input.domain, text, hash }
@@ -332,8 +392,13 @@ export function askPendingOwnerQuestions(
     }
 
     const title = caseTitle(db, row.domain, row.case_id) ?? row.case_id
+    // §20 — the Decision Package. THE CALLER IS THE POINT: buildOwnerQuestion
+    // has been able to take a `pkg` since it was written, and a package nobody
+    // collects is the defect this review has spent a week naming. Gathered here,
+    // once per question, from state that already exists.
+    const pkg = collectDecisionPackage(db, row.domain === 'zst' ? 'zst' : 'personal', row.case_id)
     const question = buildOwnerQuestion({
-      caseId: row.case_id, domain: row.domain, title, packet, plan,
+      caseId: row.case_id, domain: row.domain, title, packet, plan, pkg, now,
     })
     if (!question) { result.nothingToAsk++; continue }
     if (isHandled(db, row.case_id, row.domain, question.hash)) {
