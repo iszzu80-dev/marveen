@@ -95,6 +95,18 @@ describe('COS dispatch gate', () => {
     expect(evaluateDispatch(db, REQ).allowed).toBe(false)
   })
 
+  // ASSERTED BY CONTENT, NOT BY COUNT (2026-08-12). This used to require
+  // exactly three reasons, and §21 made it five: when the campaign approval
+  // refuses, the gate now also reports why the standing delegation would not
+  // have covered the send either. That is the point of the layer — "no
+  // approval" and "and no delegation applies" are different facts, and a caller
+  // that sees only the first goes looking for an approval when the real answer
+  // is that a human has to read this letter.
+  //
+  // A hardcoded count tests the arithmetic of the reason list rather than the
+  // property the test is named for. Naming the layers means a NEW layer that
+  // forgets to report itself still fails this, while one that reports itself
+  // correctly does not.
   it('reports ALL failing layers at once (fail-closed, no short-circuit)', () => {
     const db = seedGreen()
     setMode(db, 'gmail', 'READ_ONLY', 1100) // connector veto
@@ -103,6 +115,40 @@ describe('COS dispatch gate', () => {
       renderedPayloadHash: 'nope', // campaign veto
     })
     expect(d.allowed).toBe(false)
-    expect(d.reasons.length).toBe(3)   // connector + sensitivity + campaign; the rung permits
+    const joined = d.reasons.join(' | ')
+    expect(joined).toMatch(/connector "gmail" is not write-usable/)
+    expect(joined).toMatch(/profile "routine_lowcost" is not allowed/)
+    expect(joined).toMatch(/campaign not authorized/)
+    // The rung permits here, so it must NOT appear — a test that only checks
+    // for presence would pass on a gate that vetoed everything.
+    expect(joined).not.toMatch(/autonómia-fokozat/)
+  })
+
+  // §21 — the send that the approval path refuses and the delegation covers.
+  //
+  // This is the only test in this file where `allowed` goes TRUE without an
+  // approval, and it is worth stating plainly what it means: Marveen replies in
+  // Istvan's name, in an existing thread, without asking him first. Everything
+  // else in the gate still had to pass.
+  it('a standing delegation can substitute for the approval — and only for it', () => {
+    const db = seedGreen()
+    const delegable = {
+      ...REQ,
+      renderedPayloadHash: 'nope',            // no approval matches this payload
+      content: 'Megkaptam a tervezetet.',
+      subject: 'Visszajelzés', body: 'Megkaptam a tervezetet.',
+      outboundKind: 'REPLY' as const,
+    }
+    const ok = evaluateDispatch(db, delegable)
+    expect(ok.allowed).toBe(true)
+    expect(ok.delegationEnvelopeId).toBe('pri-email-v1')
+    expect(ok.delegatedIntent).toBe('factual_reply')
+    // …and it is NOT recorded as an approval, because none happened.
+    expect(ok.approvalId).toBeUndefined()
+
+    // The same letter with the connector down still cannot go: a delegation is
+    // permission to skip the QUESTION, never a safety layer.
+    setMode(db, 'gmail', 'READ_ONLY', 1100)
+    expect(evaluateDispatch(db, delegable).allowed).toBe(false)
   })
 })
