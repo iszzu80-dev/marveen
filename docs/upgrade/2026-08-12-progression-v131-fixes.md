@@ -6,6 +6,69 @@
 
 ---
 
+## 🔴 0/a. A §21 Delegation Envelope — amit MUSZÁJ elolvasnod frissítés előtt
+
+**Ez az egyetlen változás a csomagban, ami után Marveen a nevedben küld levelet
+anélkül, hogy megkérdezne.** Minden más csak mér, ír vagy megjelenít.
+
+A hét válaszod alapján ez lépett életbe:
+
+| | Személyes (PRI) | Céges (ZST) |
+|---|---|---|
+| szándékok | factual_reply, clarification, **quote_request**, routine_followup, scheduling | factual_reply, clarification, routine_followup |
+| új szálat indíthat | igen — de **nem** árajánlatkéréssel | **nem, semmivel** |
+| címzett | **bárki** ⚠️ | **csak** `relacio@t-online.hu` |
+| pénzügyi keret | 0 Ft | 0 Ft |
+| napi keret | 10 levél | 5 levél |
+
+### ⚠️ Amit külön nézz meg: a személyes oldalon nincs címzett-lista
+
+Az 5. kérdésre a könyvelőt adtad meg, és a kérdés a **céges** listáról szólt. A
+személyes envelope ezért **bármely címzettnek** engedi a fenti szándékokat.
+Ez a csomag legnagyobb hatósugarú sora.
+
+Ha ez nem így volt szánva, egy sor:
+
+```ts
+// src/cos/delegation-envelope.ts — PERSONAL_EMAIL_ENVELOPE
+recipientAllowlist: ['ugyved@…', 'relacio@t-online.hu'],   // null helyett
+```
+
+### Ami NEM változott
+
+Az envelope **kizárólag a jóváhagyást** váltja ki. A connector-ellenőrzés, az
+érzékenységi szabály és a §22 autonómia-fokozat változatlanul ÉS-elve fut, és az
+envelope csak utánuk kerül sorra. Ha a fokozat nem enged küldést, a delegálás
+nem segít rajta — ez teszttel rögzítve.
+
+### Kikapcsolás, ha baj van
+
+```ts
+revokeEnvelope(db, 'pri-email-v1', 'miért', now)   // azonnal, deploy nélkül
+restoreEnvelope(db, 'pri-email-v1', 'istvan', now) // vissza, csak kézzel
+```
+
+A „rossz küldés" ágat magától is észreveszi: ha egy delegálás alatt küldött
+levél `FAILED_TERMINAL` / `OUTCOME_UNKNOWN` / `RECOVERY_REQUIRED` állapotban
+végzi, a következő delegált küldés **elutasításra kerül**, amíg vissza nem
+kapcsolod. Ez nem időzítőn jár le — egy magától visszatérő delegálás nem volt
+igazán visszavonva.
+
+### Az első hét ellenőrzése
+
+```sql
+SELECT a.delegation_envelope_id, a.intent, COUNT(*)
+  FROM action_authorizations a
+ WHERE a.delegation_envelope_id IS NOT NULL
+ GROUP BY 1, 2;
+```
+
+Ez a lista **pontosan az**, amit Marveen megkérdezés nélkül küldött. Ha üres, a
+delegálás egyszer sem talált el semmit — az sem hiba, az osztályozó szándékosan
+csak biztos találatra mond igent.
+
+---
+
 ## ⚠️ 0. Amit az éles frissítésnél meg kell csinálni
 
 **Séma-migráció NINCS.** Egyetlen oszlop sem került be, egyetlen `CHECK` sem
@@ -142,7 +205,7 @@ enum-nevét mutatta szürkén. Régi hiba; addig volt láthatatlan, amíg a
 | § | Miért nem |
 |---|---|
 | **13.1** — az arbitráció kimenete hasson a döntésre | Előbb látni kell, mennyire jók a javaslatok. A §4.2 mérőszámok most készültek el; **ezek adják a bizonyítékot**, és addig ez a lépés megalapozatlan lenne |
-| **21** — Delegation Envelope | Az oszlop megvan, az írási út megvan, **hívó nincs**. A §21 fogalma (intent-lista, pénzügyi plafon, `existing_thread_only`) nem létezik, és kitalálni nem az én dolgom — ez tulajdonosi döntés arról, mit delegál |
+| **21** — Delegation Envelope | **Elkészült** — a hét tulajdonosi döntés megérkezett 2026-08-12-én, lásd a 0/a szakaszt. Ami továbbra sem készült el: a céges **vendor**-lista (Istvan a könyvelőt nevezte meg, szállítót nem), és az `approval_source` mező a §23 tizenkettőből |
 | **4.2 küszöbértékek** | A spec megnevezi a mérőszámokat, a számokat nem. A `QUALITY_THRESHOLDS` az én becslésem, **semmit nem blokkol**, és a kódban ki van írva, hogy ítélet |
 | **§8 további 9 eseménytípus** | `ACTION_PROPOSED` / `ACTION_VERIFIED` az executoré, `INFORMATION_RESOLVED` a resolveré. Ha itt írnám meg őket, **más komponens szájába adnék szavakat** |
 
