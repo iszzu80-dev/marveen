@@ -467,7 +467,13 @@ export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
       const raw = await readBody(ctx.req)
       const body = JSON.parse(raw.toString() || '{}')
       const now = Math.floor(Date.now() / 1000)
-      const result = recordInvoice(getDb(), body, { now, salt: 'invoice-salt' })
+      let fxRates: import('../../costops/fx.js').FxRateTable = {}
+      try {
+        // Card 23912ca4: same single provider-neutral fx source as email-ingest.
+        const { loadFxRates } = await import('../../costops/fx-config.js')
+        fxRates = loadFxRates().rates
+      } catch { /* fx unset -> foreign-currency invoices correctly refused (400), never booked raw or at a fabricated 0 */ }
+      const result = recordInvoice(getDb(), body, { now, salt: 'invoice-salt', fxRates })
       json(res, result, result.ok ? 200 : (result.status || 500))
     } catch (err) {
       logger.error({ err }, 'CostOps invoice record failed')
@@ -481,7 +487,13 @@ export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
       const raw = await readBody(ctx.req)
       const body = JSON.parse(raw.toString() || '{}')
       const now = Math.floor(Date.now() / 1000)
-      const result = applyInvoiceAdjustment(getDb(), body, { now })
+      let fxRates: import('../../costops/fx.js').FxRateTable = {}
+      try {
+        // Card 23912ca4: same single provider-neutral fx source as email-ingest.
+        const { loadFxRates } = await import('../../costops/fx-config.js')
+        fxRates = loadFxRates().rates
+      } catch { /* fx unset -> foreign-currency invoices correctly refused (400), never booked raw or at a fabricated 0 */ }
+      const result = applyInvoiceAdjustment(getDb(), body, { now, fxRates })
       json(res, result, result.ok ? 200 : (result.status || 500))
     } catch (err) {
       logger.error({ err }, 'CostOps invoice adjustment failed')

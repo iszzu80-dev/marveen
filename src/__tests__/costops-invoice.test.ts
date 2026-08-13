@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
-import { monthWindow } from '../costops/ledger.js'
+import { monthWindow, getCostSummary } from '../costops/ledger.js'
 import { initPeriodCloseSchema } from '../costops/period-close.js'
+import { buildReconciliation } from '../costops/reconciliation.js'
+import type { CostOpsConfig } from '../costops/config.js'
 import {
   computeNetAmount,
   invoiceDedupKey,
@@ -341,5 +343,254 @@ describe('initInvoiceSchema', () => {
         VALUES ('render-hosting','render',0,1,'HUF',100,0,0,0,0,0,100,'recorded','dk1',@now,@now)
       `).run({ now })
     }).toThrow()
+  })
+})
+
+// 2026-08-12 review, COS-CORE-C2: the invoice door used to write the
+// foreign-currency net RAW into the HUF ledger (11.15 USD -> "11.15 forint",
+// a ~360x undercount), while email-ingest/manual-entry already converted or
+// refused at the door. Now this door converts with full GAP-09 provenance and
+// refuses (400) a currency it cannot convert.
+describe('recordInvoice -- foreign-currency invoice (COS-CORE-C2)', () => {
+  beforeEach(() => setup())
+
+  it('converts a USD net to HUF at the door, with full fx provenance on the ledger line', () => {
+    const db = getDb()
+    const win = monthWindow(NOW)
+    insertSource(db, 'openai-api', 'openai')
+    const r = recordInvoice(db, {
+      source_id: 'openai-api', provider: 'openai', invoice_ref: 'USD-001',
+      billing_period_start: win.start, billing_period_end: win.end, currency: 'USD', gross_amount: 11.15,
+    }, { now: NOW, salt: SALT, fxRates: { USD: 360 } })
+    expect(r.ok).toBe(true)
+    const line = db.prepare(`SELECT billed_cost, currency, original_amount, original_currency, fx_rate, fx_date, fx_source, conversion_method FROM cost_line_items WHERE id = ?`).get(r.ledgerLineId) as {
+      billed_cost: number; currency: string; original_amount: number; original_currency: string
+      fx_rate: number; fx_date: number; fx_source: string; conversion_method: string
+    }
+    expect(line.billed_cost).toBe(4014) // 11.15 * 360, never the raw 11.15
+    expect(line.currency).toBe('HUF')
+    expect(line.original_amount).toBe(11.15)
+    expect(line.original_currency).toBe('USD')
+    expect(line.fx_rate).toBe(360)
+    expect(line.fx_source).toBe('manual') // operator-configured store/costops-fx.json rate (card 23912ca4)
+    expect(line.conversion_method).toBe('invoice_date_rate')
+    // the invoice ENTITY stays the document of record, in its own currency
+    const inv = db.prepare(`SELECT currency, net_amount FROM costops_invoices WHERE id = ?`).get(r.invoiceId) as { currency: string; net_amount: number }
+    expect(inv.currency).toBe('USD')
+    expect(inv.net_amount).toBe(11.15)
+  })
+
+  it('an already-HUF invoice carries no fabricated conversion provenance', () => {
+    const db = getDb()
+    const win = monthWindow(NOW)
+    insertSource(db, 'render-hosting', 'render')
+    const r = recordInvoice(db, {
+      source_id: 'render-hosting', provider: 'render', invoice_ref: 'HUF-001',
+      billing_period_start: win.start, billing_period_end: win.end, currency: 'HUF', gross_amount: 12000,
+    }, { now: NOW, salt: SALT, fxRates: { USD: 360 } })
+    const line = db.prepare(`SELECT billed_cost, original_amount, fx_rate, fx_source FROM cost_line_items WHERE id = ?`).get(r.ledgerLineId) as { billed_cost: number; original_amount: number | null; fx_rate: number | null; fx_source: string | null }
+    expect(line.billed_cost).toBe(12000)
+    expect(line.original_amount).toBeNull()
+    expect(line.fx_rate).toBeNull()
+    expect(line.fx_source).toBeNull()
+  })
+
+  it('refuses an unconvertible currency with 400 and books NOTHING (no rate is never rate 0)', () => {
+    const db = getDb()
+    const win = monthWindow(NOW)
+    insertSource(db, 'openai-api', 'openai')
+    const r = recordInvoice(db, {
+      source_id: 'openai-api', provider: 'openai', invoice_ref: 'GBP-001',
+      billing_period_start: win.start, billing_period_end: win.end, currency: 'GBP', gross_amount: 25,
+    }, { now: NOW, salt: SALT, fxRates: { USD: 360 } })
+    expect(r.ok).toBe(false)
+    expect(r.status).toBe(400)
+    expect(r.error).toContain('unconvertible')
+    expect((db.prepare(`SELECT COUNT(*) as n FROM costops_invoices`).get() as { n: number }).n).toBe(0)
+    expect((db.prepare(`SELECT COUNT(*) as n FROM cost_line_items`).get() as { n: number }).n).toBe(0)
+    // same refusal when no rate table is passed at all
+    const r2 = recordInvoice(db, {
+      source_id: 'openai-api', provider: 'openai', invoice_ref: 'USD-002',
+      billing_period_start: win.start, billing_period_end: win.end, currency: 'USD', gross_amount: 10,
+    }, { now: NOW, salt: SALT })
+    expect(r2.status).toBe(400)
+  })
+
+  it('converts the corrected amount too when a USD invoice corrects an existing line', () => {
+    const db = getDb()
+    const win = monthWindow(NOW)
+    insertSource(db, 'openai-api', 'openai')
+    db.prepare(`
+      INSERT INTO cost_line_items (source_id, charge_period_start, charge_period_end, charge_category, billed_cost, currency, confidence, data_freshness, dedup_key, created_at, actual_source)
+      VALUES ('openai-api', @start, @end, 'usage', 3000, 'HUF', 'manual', @now, 'estimate-usd', @now, 'manual_entry')
+    `).run({ start: win.start, end: win.end, now: NOW })
+    const r = recordInvoice(db, {
+      source_id: 'openai-api', provider: 'openai', invoice_ref: 'USD-003',
+      billing_period_start: win.start, billing_period_end: win.end, currency: 'USD', gross_amount: 10,
+    }, { now: NOW + 100, salt: SALT, fxRates: { USD: 360 } })
+    expect(r.ok).toBe(true)
+    const corrected = db.prepare(`SELECT billed_cost, original_amount, original_currency, fx_rate, conversion_method FROM cost_line_items WHERE id = ?`).get(r.ledgerLineId) as { billed_cost: number; original_amount: number; original_currency: string; fx_rate: number; conversion_method: string }
+    expect(corrected.billed_cost).toBe(3600) // 10 USD * 360, never 10 "forint"
+    expect(corrected.original_amount).toBe(10)
+    expect(corrected.original_currency).toBe('USD')
+    expect(corrected.fx_rate).toBe(360)
+    expect(corrected.conversion_method).toBe('invoice_date_rate')
+  })
+
+  it('applyInvoiceAdjustment cascades the recomputed net converted to HUF, rated as of the correction event', () => {
+    const db = getDb()
+    const win = monthWindow(NOW)
+    insertSource(db, 'openai-api', 'openai')
+    const rec = recordInvoice(db, {
+      source_id: 'openai-api', provider: 'openai', invoice_ref: 'USD-004',
+      billing_period_start: win.start, billing_period_end: win.end, currency: 'USD', gross_amount: 10,
+    }, { now: NOW, salt: SALT, fxRates: { USD: 360 } })
+    const adj = applyInvoiceAdjustment(db, { invoiceId: rec.invoiceId!, creditAmount: 2, reason: 'provider credit (USD)' }, { now: NOW + 100, fxRates: { USD: 360 } })
+    expect(adj.ok).toBe(true)
+    const invoiceRow = db.prepare(`SELECT net_amount, ledger_line_id FROM costops_invoices WHERE id = ?`).get(rec.invoiceId) as { net_amount: number; ledger_line_id: number }
+    expect(invoiceRow.net_amount).toBe(8) // invoice currency (USD)
+    const corrected = db.prepare(`SELECT billed_cost, original_amount, conversion_method FROM cost_line_items WHERE id = ?`).get(invoiceRow.ledger_line_id) as { billed_cost: number; original_amount: number; conversion_method: string }
+    expect(corrected.billed_cost).toBe(2880) // 8 USD * 360
+    expect(corrected.original_amount).toBe(8)
+    expect(corrected.conversion_method).toBe('correction_date_rate') // GAP-09: late correction, rated at the correction event
+  })
+
+  it('applyInvoiceAdjustment refuses (400, nothing written) when the invoice currency has no rate anymore', () => {
+    const db = getDb()
+    const win = monthWindow(NOW)
+    insertSource(db, 'openai-api', 'openai')
+    const rec = recordInvoice(db, {
+      source_id: 'openai-api', provider: 'openai', invoice_ref: 'USD-005',
+      billing_period_start: win.start, billing_period_end: win.end, currency: 'USD', gross_amount: 10,
+    }, { now: NOW, salt: SALT, fxRates: { USD: 360 } })
+    const adj = applyInvoiceAdjustment(db, { invoiceId: rec.invoiceId!, creditAmount: 2, reason: 'credit' }, { now: NOW + 100 })
+    expect(adj.ok).toBe(false)
+    expect(adj.status).toBe(400)
+    const invoiceRow = db.prepare(`SELECT net_amount, credit_amount FROM costops_invoices WHERE id = ?`).get(rec.invoiceId) as { net_amount: number; credit_amount: number }
+    expect(invoiceRow.net_amount).toBe(10) // untouched
+    expect(invoiceRow.credit_amount).toBe(0)
+  })
+})
+
+// 2026-08-12 review, COS-CORE-H2: better-sqlite3 only rolls back on a THROW;
+// the old `return null` failure path COMMITTED the costops_invoices INSERT
+// with ledger_line_id NULL, and the active-dedup index turned every retry
+// into a permanent 'duplicate invoice' 409.
+describe('embedded correction failure rolls the whole write back (COS-CORE-H2)', () => {
+  beforeEach(() => setup())
+
+  /** Fabricate the drifted state createCorrection legitimately 409s on: a row
+   * already claims to correct `lineId`. Parked in the NEXT month so
+   * recordInvoice's own active-line lookup never picks it as the target. */
+  function insertPhantomCorrection(db: ReturnType<typeof getDb>, lineId: number): void {
+    const next = monthWindow(NOW + 32 * 86400)
+    db.prepare(`
+      INSERT INTO cost_line_items (source_id, charge_period_start, charge_period_end, charge_category, billed_cost, currency, confidence, data_freshness, dedup_key, created_at, corrects_line_id)
+      VALUES ('render-hosting', @start, @end, 'usage', 1, 'HUF', 'manual', @now, 'phantom-correction', @now, @lineId)
+    `).run({ start: next.start, end: next.end, now: NOW, lineId })
+  }
+
+  it('a refused embedded correction leaves NO invoice row committed, and the same invoice can be retried', () => {
+    const db = getDb()
+    const win = monthWindow(NOW)
+    insertSource(db, 'render-hosting', 'render')
+    const estInfo = db.prepare(`
+      INSERT INTO cost_line_items (source_id, charge_period_start, charge_period_end, charge_category, billed_cost, currency, confidence, data_freshness, dedup_key, created_at)
+      VALUES ('render-hosting', @start, @end, 'usage', 10000, 'HUF', 'manual', @now, 'estimate-1', @now)
+    `).run({ start: win.start, end: win.end, now: NOW })
+    insertPhantomCorrection(db, estInfo.lastInsertRowid as number)
+
+    const input = {
+      source_id: 'render-hosting', provider: 'render', invoice_ref: 'INV-ROLLBACK',
+      billing_period_start: win.start, billing_period_end: win.end, currency: 'HUF', gross_amount: 11500,
+    }
+    const r = recordInvoice(db, input, { now: NOW + 100, salt: SALT })
+    expect(r.ok).toBe(false)
+    expect(r.status).toBe(409) // the correction's own status, not a blanket 500
+    // NOTHING partial committed: no invoice row, target line still active
+    expect((db.prepare(`SELECT COUNT(*) as n FROM costops_invoices`).get() as { n: number }).n).toBe(0)
+    expect((db.prepare(`SELECT voided_at FROM cost_line_items WHERE dedup_key = 'estimate-1'`).get() as { voided_at: number | null }).voided_at).toBeNull()
+
+    // resolve the drift -> the SAME invoice retries cleanly (no phantom 'duplicate invoice')
+    db.prepare(`UPDATE cost_line_items SET corrects_line_id = NULL WHERE dedup_key = 'phantom-correction'`).run()
+    const retry = recordInvoice(db, input, { now: NOW + 200, salt: SALT })
+    expect(retry.ok).toBe(true)
+    expect((db.prepare(`SELECT COUNT(*) as n FROM costops_invoices`).get() as { n: number }).n).toBe(1)
+  })
+
+  it('a refused cascade rolls applyInvoiceAdjustment back: net_amount never diverges from the ledger', () => {
+    const db = getDb()
+    const win = monthWindow(NOW)
+    insertSource(db, 'render-hosting', 'render')
+    const rec = recordInvoice(db, {
+      source_id: 'render-hosting', provider: 'render', invoice_ref: 'INV-ADJ-ROLLBACK',
+      billing_period_start: win.start, billing_period_end: win.end, currency: 'HUF', gross_amount: 12000,
+    }, { now: NOW, salt: SALT })
+    insertPhantomCorrection(db, rec.ledgerLineId!)
+
+    const adj = applyInvoiceAdjustment(db, { invoiceId: rec.invoiceId!, creditAmount: 2000, reason: 'goodwill credit' }, { now: NOW + 100 })
+    expect(adj.ok).toBe(false)
+    expect(adj.status).toBe(409)
+    const invoiceRow = db.prepare(`SELECT net_amount, credit_amount, ledger_line_id FROM costops_invoices WHERE id = ?`).get(rec.invoiceId) as { net_amount: number; credit_amount: number; ledger_line_id: number }
+    expect(invoiceRow.net_amount).toBe(12000) // the UPDATE rolled back with the failed correction
+    expect(invoiceRow.credit_amount).toBe(0)
+    expect(invoiceRow.ledger_line_id).toBe(rec.ledgerLineId)
+    expect((db.prepare(`SELECT voided_at FROM cost_line_items WHERE id = ?`).get(rec.ledgerLineId) as { voided_at: number | null }).voided_at).toBeNull()
+  })
+})
+
+// 2026-08-12 review, COS-CORE-H3: the correction used to copy the CORRECTED
+// line's confidence/actual_source, so an invoice-driven correction of a
+// manual estimate stayed `manual` -- it never outranked sibling manual lines
+// (feeding C1's double count) and was invisible to both reconcile surfaces.
+describe('invoice-driven correction provenance (COS-CORE-H3)', () => {
+  beforeEach(() => setup())
+
+  function insertManualEstimate(db: ReturnType<typeof getDb>, amount: number): number {
+    const win = monthWindow(NOW)
+    const info = db.prepare(`
+      INSERT INTO cost_line_items (source_id, charge_period_start, charge_period_end, charge_category, billed_cost, currency, confidence, data_freshness, dedup_key, created_at, actual_source)
+      VALUES ('render-hosting', @start, @end, 'usage', @amount, 'HUF', 'manual', @now, 'estimate-1', @now, 'manual_entry')
+    `).run({ start: win.start, end: win.end, now: NOW, amount })
+    return info.lastInsertRowid as number
+  }
+
+  it('the corrected line carries actual_invoice/email_invoice, not the manual it replaced', () => {
+    const db = getDb()
+    const win = monthWindow(NOW)
+    insertSource(db, 'render-hosting', 'render')
+    insertManualEstimate(db, 10000)
+    const r = recordInvoice(db, {
+      source_id: 'render-hosting', provider: 'render', invoice_ref: 'INV-CONF',
+      billing_period_start: win.start, billing_period_end: win.end, currency: 'HUF', gross_amount: 11500,
+    }, { now: NOW + 100, salt: SALT })
+    expect(r.ok).toBe(true)
+    const corrected = db.prepare(`SELECT confidence, actual_source FROM cost_line_items WHERE id = ?`).get(r.ledgerLineId) as { confidence: string; actual_source: string }
+    expect(corrected.confidence).toBe('actual_invoice')
+    expect(corrected.actual_source).toBe('email_invoice')
+  })
+
+  it('the invoiced amount now wins both reconcile surfaces (summary ACT_CONF + reconciliation invoice_amount)', () => {
+    const db = getDb()
+    const win = monthWindow(NOW)
+    insertSource(db, 'render-hosting', 'render')
+    insertManualEstimate(db, 10000)
+    recordInvoice(db, {
+      source_id: 'render-hosting', provider: 'render', invoice_ref: 'INV-RECON',
+      billing_period_start: win.start, billing_period_end: win.end, currency: 'HUF', gross_amount: 11500,
+    }, { now: NOW + 100, salt: SALT })
+
+    const cfgHuf: CostOpsConfig = { version: 1, currency: 'HUF', fixed_costs: [], budgets: [] }
+    const summary = getCostSummary(db, cfgHuf, NOW + 200)
+    const rec = summary.reconcile.find(x => x.source_id === 'render-hosting')
+    expect(rec).toBeDefined() // an actAmt > 0 row exists at all now
+    expect(rec!.actual).toBe(11500)
+    expect(rec!.resolved_confidence).toBe('actual_invoice')
+    expect(summary.all_sources.find(x => x.source_id === 'render-hosting')?.actual_source).toBe('email_invoice')
+
+    const rows = buildReconciliation(db, NOW + 200, win.key)
+    const row = rows.find(x => x.source_id === 'render-hosting')!
+    expect(row.invoice_amount).toBe(11500)
+    expect(row.operationally_selected_amount).toBe(11500)
   })
 })

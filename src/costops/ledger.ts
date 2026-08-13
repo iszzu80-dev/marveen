@@ -290,11 +290,29 @@ export function confidenceBucket(c: CostConfidence): CostBucket {
 
 // ---- write path: reflect config fixed costs into the ledger (idempotent) -----
 
+// LIKE-escape for the corrected-fixed-line probe below: '%'/'_' are LIKE
+// wildcards and a source_id is operator-supplied config text, so both (and
+// the escape char itself) must match literally, never as patterns.
+function escapeLike(s: string): string {
+  return s.replace(/[\\%_]/g, ch => `\\${ch}`)
+}
+
 /**
  * Upsert the config's fixed/manual monthly costs as cost_line_items for the
  * target month, and upsert their cost_sources. Idempotent via a stable
  * dedup_key (`fixed|<source_id>|<YYYY-MM>`) so re-running never duplicates.
  * Returns the number of line items written/updated.
+ *
+ * Two writes this function must NOT make (both found by the 2026-08-12
+ * review, COS-CORE-H1/C1 -- this sync runs as a side effect of every
+ * GET /api/costs/summary read, so "merely looking at the dashboard" was
+ * performing them):
+ * - a CLOSED month is an immutable snapshot (GAP-13): a config edit after
+ *   close must not rewrite the closed month's rows on the next view. The
+ *   whole sync no-ops for a closed month; 'provisional'/'reopened' keep
+ *   open-month write rules, same as every other guarded door.
+ * - a source+month whose fixed line was superseded by a CORRECTION must not
+ *   be re-inserted (see the per-entry probe in the loop below).
  */
 export function syncFixedCostsToLedger(
   db: Database.Database,
@@ -303,6 +321,26 @@ export function syncFixedCostsToLedger(
   monthKey?: string,
 ): number {
   const win = monthWindow(now, monthKey)
+  // GAP-13 write-guard. The status probe is inlined rather than importing
+  // period-close.ts's checkPeriodWritable: period-close.ts imports
+  // getCostSummary/monthWindow from this file, and this module deliberately
+  // stays at the bottom of that import stack (same file-local-duplication
+  // convention fx.ts documents for round2).
+  const periodRow = db.prepare(`SELECT status FROM period_status WHERE month = ?`).get(win.key) as { status: string } | undefined
+  if (periodRow?.status === 'closed') return 0
+  // COS-CORE-C1: when correction.ts voids a row it renames the dedup_key by
+  // appending '|corrected|<ts>' (the plain column-level UNIQUE on dedup_key
+  // has to free the slot). Freeing the slot is exactly what let this upsert
+  // re-insert the config amount on the NEXT summary read and double-book the
+  // month next to the corrected figure. The renamed key doubles as the
+  // durable record that a correction chain now owns this source+month, so
+  // its presence -- at the root; deeper links keep their own 'correction|…'
+  // keys -- is the skip signal, however long the chain has since grown.
+  const correctedProbe = db.prepare(`
+    SELECT 1 FROM cost_line_items
+    WHERE voided_at IS NOT NULL AND dedup_key LIKE @pattern ESCAPE '\\'
+    LIMIT 1
+  `)
   const upsertSource = db.prepare(`
     INSERT INTO cost_sources (id, name, provider, source_type, currency, active, created_at, updated_at)
     VALUES (@id, @name, @provider, @source_type, @currency, 1, @now, @now)
@@ -332,12 +370,18 @@ export function syncFixedCostsToLedger(
         id: e.source_id, name: e.name, provider: e.provider,
         source_type: e.source_type, currency: e.currency ?? config.currency, now,
       })
+      const dedupKey = `fixed|${e.source_id}|${win.key}`
+      // COS-CORE-C1 (see the prepared probe above): the correction chain's
+      // newest link -- e.g. an invoiced actual -- is this source+month's
+      // number now; the config figure stays out until the month rolls over
+      // to a fresh dedup slot. Per source+month, never a whole-sync skip.
+      if (correctedProbe.get({ pattern: `${escapeLike(dedupKey)}|corrected|%` })) continue
       upsertLine.run({
         source_id: e.source_id, start: win.start, end: win.end,
         charge_category: e.charge_category ?? 'subscription', service_name: e.name,
         billed_cost: e.amount, currency: e.currency ?? config.currency,
         confidence: e.confidence ?? 'manual', now,
-        dedup_key: `fixed|${e.source_id}|${win.key}`,
+        dedup_key: dedupKey,
       })
       count++
     }

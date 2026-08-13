@@ -9,6 +9,8 @@ import {
 } from '../costops/ledger.js'
 import { validateConfig } from '../costops/config.js'
 import type { CostOpsConfig } from '../costops/config.js'
+import { createCorrection } from '../costops/correction.js'
+import { recordInvoice } from '../costops/invoice.js'
 
 // 2026-07-15T12:00:00Z -> mid-July, deterministic "now" for all summary tests.
 const NOW = Math.floor(Date.UTC(2026, 6, 15, 12, 0, 0) / 1000)
@@ -221,5 +223,123 @@ describe('costops ledger + summary', () => {
     expect(s.token_usage.note).toContain('not priced')
     // token usage must NOT contribute to money
     expect(s.current_spend).toBe(0)
+  })
+})
+
+// 2026-08-12 review, COS-CORE-C1: the invoice->correction->sync interplay.
+// syncFixedCostsToLedger runs as a side effect of every GET /api/costs/summary
+// read, and correction.ts frees the voided row's dedup_key slot -- so before
+// the fix, the very next dashboard READ re-inserted the config amount next to
+// the corrected figure and the month stayed double-booked forever.
+describe('syncFixedCostsToLedger vs corrections (COS-CORE-C1)', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('a re-sync never resurrects a fixed line a correction superseded (spend stable across repeated summary reads)', () => {
+    const db = getDb()
+    const c = cfg()
+    syncFixedCostsToLedger(db, c, NOW)
+    const fixedLine = db.prepare(`SELECT id FROM cost_line_items WHERE dedup_key = ?`).get(`fixed|anthropic-max|2026-07`) as { id: number }
+    // the invoice arrives: 22000 was the estimate, 23500 is the real charge
+    const corr = createCorrection(db, { originalLineId: fixedLine.id, newAmount: 23500, reason: 'invoice arrived' }, { now: NOW + 100 })
+    expect(corr.ok).toBe(true)
+
+    // next dashboard read: sync + summary. The freed dedup slot must NOT be refilled.
+    syncFixedCostsToLedger(db, c, NOW + 200)
+    const s1 = getCostSummary(db, c, NOW + 200)
+    expect(s1.current_spend).toBe(31500) // 23500 corrected + 8000 openai -- NOT 45500
+
+    // and the read after that (the original repro's failure point)
+    syncFixedCostsToLedger(db, c, NOW + 300)
+    const s2 = getCostSummary(db, c, NOW + 300)
+    expect(s2.current_spend).toBe(31500)
+    const active = db.prepare(`SELECT COUNT(*) as n FROM cost_line_items WHERE source_id = 'anthropic-max' AND voided_at IS NULL`).get() as { n: number }
+    expect(active.n).toBe(1) // only the correction; the config line stayed out
+  })
+
+  it('full review repro: fixed cost -> recorded invoice corrects it -> two more summary reads keep the invoice amount', () => {
+    const db = getDb()
+    const c = cfg()
+    syncFixedCostsToLedger(db, c, NOW)
+    const r = recordInvoice(db, {
+      source_id: 'anthropic-max', provider: 'anthropic', invoice_ref: 'INV-2026-07',
+      billing_period_start: monthWindow(NOW).start, billing_period_end: monthWindow(NOW).end,
+      currency: 'HUF', gross_amount: 23500,
+    }, { now: NOW + 100, salt: 'test-salt' })
+    expect(r.ok).toBe(true)
+
+    for (const at of [NOW + 200, NOW + 300]) {
+      syncFixedCostsToLedger(db, c, at)
+      const s = getCostSummary(db, c, at)
+      expect(s.current_spend).toBe(31500) // invoice 23500 + openai 8000
+      expect(s.all_sources.find(x => x.source_id === 'anthropic-max')?.spend).toBe(23500)
+    }
+  })
+
+  it('the skip is per source+month: sibling sources still sync, and the next month gets a fresh fixed line', () => {
+    const db = getDb()
+    const c = cfg()
+    syncFixedCostsToLedger(db, c, NOW)
+    const fixedLine = db.prepare(`SELECT id FROM cost_line_items WHERE dedup_key = ?`).get(`fixed|anthropic-max|2026-07`) as { id: number }
+    createCorrection(db, { originalLineId: fixedLine.id, newAmount: 23500, reason: 'invoice arrived' }, { now: NOW + 100 })
+
+    // July re-sync: openai upserts (count 1), anthropic-max is skipped
+    expect(syncFixedCostsToLedger(db, c, NOW + 200)).toBe(1)
+
+    // August is a fresh dedup slot -- the config figure applies again
+    const augNow = NOW + 32 * 86400
+    expect(syncFixedCostsToLedger(db, c, augNow)).toBe(2)
+    const augLine = db.prepare(`SELECT billed_cost FROM cost_line_items WHERE dedup_key = ?`).get(`fixed|anthropic-max|2026-08`) as { billed_cost: number }
+    expect(augLine.billed_cost).toBe(22000)
+  })
+
+  it('config amount changes still flow to an UNcorrected fixed line', () => {
+    const db = getDb()
+    syncFixedCostsToLedger(db, cfg(), NOW)
+    const fixedLine = db.prepare(`SELECT id FROM cost_line_items WHERE dedup_key = ?`).get(`fixed|anthropic-max|2026-07`) as { id: number }
+    createCorrection(db, { originalLineId: fixedLine.id, newAmount: 23500, reason: 'invoice arrived' }, { now: NOW + 100 })
+    const c2 = cfg({ fixed_costs: [
+      { source_id: 'anthropic-max', name: 'Claude Max', provider: 'anthropic', source_type: 'subscription', amount: 25000, period: 'monthly', confidence: 'manual', currency: 'HUF' },
+      { source_id: 'openai', name: 'ChatGPT', provider: 'openai', source_type: 'subscription', amount: 9000, period: 'monthly', confidence: 'manual', currency: 'HUF' },
+    ] })
+    syncFixedCostsToLedger(db, c2, NOW + 200)
+    // corrected source keeps the corrected amount; uncorrected sibling takes the new config amount
+    expect((db.prepare(`SELECT billed_cost FROM cost_line_items WHERE source_id='anthropic-max' AND voided_at IS NULL`).get() as { billed_cost: number }).billed_cost).toBe(23500)
+    expect((db.prepare(`SELECT billed_cost FROM cost_line_items WHERE dedup_key = 'fixed|openai|2026-07'`).get() as { billed_cost: number }).billed_cost).toBe(9000)
+  })
+})
+
+// 2026-08-12 review, COS-CORE-H1 (GAP-13 freeze bypass): the summary route's
+// read-time sync wrote into closed months -- a config edit after close
+// rewrote the closed month's rows on the next mere VIEW of it.
+describe('syncFixedCostsToLedger into a closed month (COS-CORE-H1)', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('no-ops for a closed month: config change + summary read leave the closed month untouched', () => {
+    const db = getDb()
+    const c = cfg()
+    syncFixedCostsToLedger(db, c, NOW)
+    db.prepare(`INSERT INTO period_status (month, status, updated_at) VALUES ('2026-07', 'closed', ?)`).run(NOW + 100)
+
+    const c2 = cfg({ fixed_costs: [
+      { source_id: 'anthropic-max', name: 'Claude Max', provider: 'anthropic', source_type: 'subscription', amount: 30000, period: 'monthly', confidence: 'manual', currency: 'HUF' },
+    ] })
+    expect(syncFixedCostsToLedger(db, c2, NOW + 200)).toBe(0)
+    const row = db.prepare(`SELECT billed_cost, data_freshness FROM cost_line_items WHERE dedup_key = 'fixed|anthropic-max|2026-07'`).get() as { billed_cost: number; data_freshness: number }
+    expect(row.billed_cost).toBe(22000) // frozen at the close-time amount
+    expect(row.data_freshness).toBe(NOW) // not even touched
+    // the read path itself still works and reports the frozen numbers
+    expect(getCostSummary(db, c2, NOW + 200).current_spend).toBe(30000) // 22000 + 8000, unchanged
+  })
+
+  it('provisional and reopened months keep open-month write rules', () => {
+    const db = getDb()
+    const c = cfg()
+    syncFixedCostsToLedger(db, c, NOW)
+    db.prepare(`INSERT INTO period_status (month, status, updated_at) VALUES ('2026-07', 'closed', ?)`).run(NOW + 100)
+    expect(syncFixedCostsToLedger(db, c, NOW + 200)).toBe(0)
+    db.prepare(`UPDATE period_status SET status = 'reopened', updated_at = ? WHERE month = '2026-07'`).run(NOW + 300)
+    expect(syncFixedCostsToLedger(db, c, NOW + 400)).toBe(2)
+    db.prepare(`UPDATE period_status SET status = 'provisional', updated_at = ? WHERE month = '2026-07'`).run(NOW + 500)
+    expect(syncFixedCostsToLedger(db, c, NOW + 600)).toBe(2)
   })
 })

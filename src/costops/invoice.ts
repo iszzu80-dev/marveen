@@ -27,7 +27,8 @@
 import type Database from 'better-sqlite3'
 import { monthWindow, hashRef } from './ledger.js'
 import { checkPeriodWritable } from './period-close.js'
-import { createCorrection } from './correction.js'
+import { createCorrection, type CorrectionFxProvenance } from './correction.js'
+import { convertToHufWithProvenance, convertCorrectionToHuf, resolveFxRate, type FxRateTable, type FxConversion } from './fx.js'
 
 // ---- status + amounts -------------------------------------------------------------------
 
@@ -87,6 +88,44 @@ export function inferExpectedInvoiceBy(periodEndsAsc: number[], graceDays = 15):
   return last + typicalGap + graceDays * 86400
 }
 
+// ---- transaction failure marker --------------------------------------------------------------
+
+/**
+ * COS-CORE-H2: better-sqlite3 rolls a db.transaction() back ONLY on a throw
+ * -- a plain `return` (including the old `return null` failure path) COMMITS
+ * everything that ran before it. A legitimately refused embedded correction
+ * was therefore leaving the costops_invoices INSERT behind with
+ * ledger_line_id NULL, and the active-dedup_key index turned every retry
+ * into a permanent 'duplicate invoice' 409. Failure paths inside a
+ * transaction now throw this marker; the caller catches it OUTSIDE the
+ * transaction and maps it back to the module's {ok,error,status} result
+ * shape, so nothing partial is ever committed.
+ */
+class EmbeddedCorrectionError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message)
+    this.name = 'EmbeddedCorrectionError'
+  }
+}
+
+/**
+ * The correction row's fx provenance for an invoice-driven write: the
+ * conversion that produced the HUF amount when one happened, EXPLICIT nulls
+ * when the invoice was already HUF -- never the corrected line's own (stale,
+ * unrelated) conversion carried forward. See CorrectionFxProvenance's
+ * contract in correction.ts.
+ */
+function invoiceCorrectionFx(conversion: FxConversion | null): CorrectionFxProvenance {
+  return {
+    original_amount: conversion?.original_amount ?? null,
+    original_currency: conversion?.original_currency ?? null,
+    fx_rate: conversion?.fx_rate ?? null,
+    fx_date: conversion?.fx_date ?? null,
+    fx_source: conversion?.fx_source ?? null,
+    conversion_method: conversion?.conversion_method ?? null,
+  }
+}
+
 // ---- recording an invoice ------------------------------------------------------------------
 
 export interface RecordInvoiceInput {
@@ -131,7 +170,7 @@ export interface RecordInvoiceResult {
  *   createCorrection cannot rescue (it requires an existing row). The
  *   period must be explicitly reopened first (period-close.ts's audited path).
  */
-export function recordInvoice(db: Database.Database, input: RecordInvoiceInput, opts: { now: number; salt: string }): RecordInvoiceResult {
+export function recordInvoice(db: Database.Database, input: RecordInvoiceInput, opts: { now: number; salt: string; fxRates?: FxRateTable }): RecordInvoiceResult {
   if (!input.source_id) return { ok: false, error: 'source_id is required', status: 400 }
   if (!input.provider) return { ok: false, error: 'provider is required', status: 400 }
   if (!input.currency) return { ok: false, error: 'currency is required', status: 400 }
@@ -149,6 +188,28 @@ export function recordInvoice(db: Database.Database, input: RecordInvoiceInput, 
     late_charge_amount: input.late_charge_amount ?? 0,
   }
   const net = computeNetAmount(amounts)
+
+  // COS-CORE-C2: the ledger is a HUF ledger -- every aggregate sums
+  // billed_cost currency-blind, so a foreign-currency net written raw
+  // becomes "11.15 forint" in the headline (a ~360x undercount for USD).
+  // The email-ingest and manual-entry doors already convert-or-refuse at the
+  // door; this door now does the same, via fx.ts's provenance-carrying
+  // conversion. The costops_invoices row itself keeps the invoice's OWN
+  // currency and amounts (that's the document of record); only the ledger
+  // line is normalized. An invoice fixes the transaction, so the rate is
+  // tied to the invoice event ('invoice_date_rate', same as email-ingest);
+  // the rate itself is the operator-configured store/costops-fx.json value,
+  // hence fx_source 'manual' (card 23912ca4). An unresolvable currency is
+  // refused (400) BEFORE anything is written -- never booked raw, never
+  // fabricated at rate 0.
+  const cur = input.currency.toUpperCase()
+  const conversion = cur === 'HUF' ? null : convertToHufWithProvenance(net, cur, opts.fxRates ?? {}, {
+    fxSource: 'manual', invoiceDate: opts.now, serviceDate: input.billing_period_start, now: opts.now,
+  })
+  if (cur !== 'HUF' && conversion == null) {
+    return { ok: false, error: `unconvertible currency '${input.currency}' -- no HUF rate configured for it (store/costops-fx.json); refusing to book a foreign-currency amount raw into the HUF ledger`, status: 400 }
+  }
+  const netHuf = conversion ? conversion.huf_amount : net
 
   const refHash = input.invoice_ref ? hashRef(opts.salt, input.invoice_ref) : null
   const periodKey = monthWindow(input.billing_period_start).key
@@ -168,8 +229,7 @@ export function recordInvoice(db: Database.Database, input: RecordInvoiceInput, 
     return { ok: false, error: `${writable.reason} -- and no existing ledger line exists to correct`, status: 409 }
   }
 
-  let caughtError: string | null = null
-  const tx = db.transaction(() => {
+  const tx = db.transaction((): { invoiceId: number; ledgerLineId: number | null } => {
     const info = db.prepare(`
       INSERT INTO costops_invoices
         (source_id, provider, invoice_ref_hash, billing_period_start, billing_period_end, service_period_start, service_period_end,
@@ -191,16 +251,40 @@ export function recordInvoice(db: Database.Database, input: RecordInvoiceInput, 
     let ledgerLineId: number | null = null
     if (activeLine) {
       const reasonPrefix = writable.writable ? 'invoice recorded' : 'late invoice recorded (period closed)'
-      const corr = createCorrection(db, { originalLineId: activeLine.id, newAmount: net, reason: `${reasonPrefix}: ${dedupKey}` }, { now: opts.now })
-      if (!corr.ok) { caughtError = corr.error ?? 'correction failed'; return null }
+      // COS-CORE-H3: the replacement figure comes from a real invoice, so it
+      // must carry the invoice channel's confidence/actual_source (same pair
+      // the first-time-INSERT branch below writes), not whatever channel the
+      // corrected line happened to be -- copying `manual` from a corrected
+      // estimate kept the invoiced amount below sibling manual lines and out
+      // of the reconcile views entirely.
+      const corr = createCorrection(db, {
+        originalLineId: activeLine.id, newAmount: netHuf, reason: `${reasonPrefix}: ${dedupKey}`,
+        confidence: 'actual_invoice', actualSource: 'email_invoice',
+        fx: invoiceCorrectionFx(conversion),
+      }, { now: opts.now })
+      // COS-CORE-H2: throw, never return -- see EmbeddedCorrectionError.
+      if (!corr.ok) throw new EmbeddedCorrectionError(corr.error ?? 'correction failed', corr.status ?? 500)
       ledgerLineId = corr.newLineId ?? null
     } else {
       const lineDedup = `invoice|${input.source_id}|${periodKey}|${opts.now}`
       const lineInfo = db.prepare(`
         INSERT INTO cost_line_items
-          (source_id, charge_period_start, charge_period_end, charge_category, billed_cost, currency, confidence, data_freshness, dedup_key, created_at, actual_source)
-        VALUES (@source_id, @start, @end, 'usage', @net, @currency, 'actual_invoice', @now, @dedup_key, @now, 'email_invoice')
-      `).run({ source_id: input.source_id, start: input.billing_period_start, end: input.billing_period_end, net, currency: input.currency, dedup_key: lineDedup, now: opts.now })
+          (source_id, charge_period_start, charge_period_end, charge_category, billed_cost, currency, confidence, data_freshness, dedup_key, created_at, actual_source,
+           original_amount, original_currency, fx_rate, fx_date, fx_source, conversion_method)
+        VALUES (@source_id, @start, @end, 'usage', @net, 'HUF', 'actual_invoice', @now, @dedup_key, @now, 'email_invoice',
+                @original_amount, @original_currency, @fx_rate, @fx_date, @fx_source, @conversion_method)
+      `).run({
+        source_id: input.source_id, start: input.billing_period_start, end: input.billing_period_end,
+        net: netHuf, dedup_key: lineDedup, now: opts.now,
+        // Currency-retention (v0.7/GAP-09, same shape as email-ingest): only
+        // a REAL conversion has an "original" distinct from billed_cost.
+        original_amount: conversion?.original_amount ?? null,
+        original_currency: conversion?.original_currency ?? null,
+        fx_rate: conversion?.fx_rate ?? null,
+        fx_date: conversion?.fx_date ?? null,
+        fx_source: conversion?.fx_source ?? null,
+        conversion_method: conversion?.conversion_method ?? null,
+      })
       ledgerLineId = lineInfo.lastInsertRowid as number
     }
 
@@ -208,8 +292,16 @@ export function recordInvoice(db: Database.Database, input: RecordInvoiceInput, 
     return { invoiceId, ledgerLineId }
   })
 
-  const result = tx()
-  if (caughtError || !result) return { ok: false, error: caughtError ?? 'record invoice failed', status: 500 }
+  let result: { invoiceId: number; ledgerLineId: number | null }
+  try {
+    result = tx()
+  } catch (err) {
+    // COS-CORE-H2: the throw rolled the whole write back (invoice INSERT
+    // included), so the same invoice can be retried once the blocker is
+    // resolved -- no phantom 'duplicate invoice' row survives the failure.
+    if (err instanceof EmbeddedCorrectionError) return { ok: false, error: err.message, status: err.status }
+    throw err
+  }
   return { ok: true, invoiceId: result.invoiceId, ledgerLineId: result.ledgerLineId }
 }
 
@@ -225,6 +317,7 @@ export interface ApplyInvoiceAdjustmentInput {
 
 interface InvoiceRow extends InvoiceAmounts {
   id: number
+  currency: string
   status: InvoiceStatus
   ledger_line_id: number | null
 }
@@ -238,9 +331,9 @@ interface InvoiceRow extends InvoiceAmounts {
  * The ORIGINAL charge is never touched; only a new corrected line appears,
  * per GAP-14's "eredeti charge megmarad."
  */
-export function applyInvoiceAdjustment(db: Database.Database, input: ApplyInvoiceAdjustmentInput, opts: { now: number }): RecordInvoiceResult {
+export function applyInvoiceAdjustment(db: Database.Database, input: ApplyInvoiceAdjustmentInput, opts: { now: number; fxRates?: FxRateTable }): RecordInvoiceResult {
   if (!input.reason || !input.reason.trim()) return { ok: false, error: 'reason is required for an invoice adjustment (auditability)', status: 400 }
-  const row = db.prepare(`SELECT id, gross_amount, tax_amount, discount_amount, credit_amount, refund_amount, late_charge_amount, status, ledger_line_id FROM costops_invoices WHERE id = ?`).get(input.invoiceId) as InvoiceRow | undefined
+  const row = db.prepare(`SELECT id, currency, gross_amount, tax_amount, discount_amount, credit_amount, refund_amount, late_charge_amount, status, ledger_line_id FROM costops_invoices WHERE id = ?`).get(input.invoiceId) as InvoiceRow | undefined
   if (!row) return { ok: false, error: `no invoice with id ${input.invoiceId}`, status: 404 }
   if (row.status === 'voided') return { ok: false, error: `invoice ${input.invoiceId} is voided -- cannot adjust it`, status: 409 }
 
@@ -252,7 +345,25 @@ export function applyInvoiceAdjustment(db: Database.Database, input: ApplyInvoic
   }
   const net = computeNetAmount(amounts)
 
-  let caughtError: string | null = null
+  // COS-CORE-C2, same door-side conversion as recordInvoice, but this is a
+  // LATE-CORRECTION event: GAP-09 rates it as of the correction itself
+  // ('correction_date_rate' via fx.ts's convertCorrectionToHuf), never as a
+  // silent recompute of the original invoice's conversion. Refused (400)
+  // before anything is written when the invoice's currency has no rate.
+  const cur = row.currency.toUpperCase()
+  let conversion: FxConversion | null = null
+  if (cur !== 'HUF') {
+    const rate = resolveFxRate(cur, opts.fxRates ?? {})
+    if (rate == null) {
+      return { ok: false, error: `unconvertible currency '${row.currency}' -- no HUF rate configured for it (store/costops-fx.json); refusing to book a foreign-currency amount raw into the HUF ledger`, status: 400 }
+    }
+    conversion = convertCorrectionToHuf({
+      originalCurrency: cur, correctionAmountOriginalCurrency: net,
+      correctionDate: opts.now, correctionRate: rate, correctionSource: 'manual', now: opts.now,
+    })
+  }
+  const netHuf = conversion ? conversion.huf_amount : net
+
   const tx = db.transaction(() => {
     db.prepare(`
       UPDATE costops_invoices SET credit_amount=@credit, refund_amount=@refund, late_charge_amount=@late, net_amount=@net
@@ -261,14 +372,27 @@ export function applyInvoiceAdjustment(db: Database.Database, input: ApplyInvoic
 
     let ledgerLineId = row.ledger_line_id
     if (row.ledger_line_id != null) {
-      const corr = createCorrection(db, { originalLineId: row.ledger_line_id, newAmount: net, reason: `invoice adjustment: ${input.reason}` }, { now: opts.now })
-      if (!corr.ok) { caughtError = corr.error ?? 'correction failed'; return }
+      // COS-CORE-H3: same invoice-channel provenance as recordInvoice's
+      // correction branch -- the cascaded amount is still the invoice's.
+      const corr = createCorrection(db, {
+        originalLineId: row.ledger_line_id, newAmount: netHuf, reason: `invoice adjustment: ${input.reason}`,
+        confidence: 'actual_invoice', actualSource: 'email_invoice',
+        fx: invoiceCorrectionFx(conversion),
+      }, { now: opts.now })
+      // COS-CORE-H2: throw so the net_amount UPDATE above rolls back with it
+      // -- a refused cascade must not leave the invoice claiming a net the
+      // ledger never received.
+      if (!corr.ok) throw new EmbeddedCorrectionError(corr.error ?? 'correction failed', corr.status ?? 500)
       ledgerLineId = corr.newLineId ?? row.ledger_line_id
       db.prepare(`UPDATE costops_invoices SET ledger_line_id = ? WHERE id = ?`).run(ledgerLineId, input.invoiceId)
     }
   })
-  tx()
-  if (caughtError) return { ok: false, error: caughtError, status: 500 }
+  try {
+    tx()
+  } catch (err) {
+    if (err instanceof EmbeddedCorrectionError) return { ok: false, error: err.message, status: err.status }
+    throw err
+  }
   return { ok: true, invoiceId: input.invoiceId }
 }
 
