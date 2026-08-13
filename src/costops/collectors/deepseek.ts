@@ -59,14 +59,28 @@ export function forecastDeepSeekExhaustion(snapshotsAsc: BalanceSnapshot[], now:
 interface DeepSeekBalanceInfo { currency?: string; total_balance?: string | number }
 interface DeepSeekBalanceResp { is_available?: boolean; balance_infos?: DeepSeekBalanceInfo[] }
 
-/** Extract the USD total balance from the /user/balance response (0 if absent). */
-export function parseDeepSeekBalanceUsd(raw: unknown): number {
-  const r = (raw && typeof raw === 'object') ? raw as DeepSeekBalanceResp : {}
+/**
+ * Extract the USD total balance from the /user/balance response.
+ *
+ * COS-OPS-H2: an absent/unparseable balance_infos (or is_available:false) used
+ * to parse as 0 -- a REAL-looking snapshot. deriveMtdSpend then booked the
+ * drop-to-zero as genuine spend for the rest of the month (and the next good
+ * reading was ignored as a "top-up"), permanently poisoning MTD spend and the
+ * exhaustion forecast off a single malformed-but-200 response. Now returns
+ * null for anything that isn't a recognizable, available balance -- "the
+ * balance is unknown", never a fabricated $0 -- and the caller records an
+ * error run WITHOUT writing a snapshot.
+ */
+export function parseDeepSeekBalanceUsd(raw: unknown): number | null {
+  if (!raw || typeof raw !== 'object') return null
+  const r = raw as DeepSeekBalanceResp
+  // Explicit provider-side "not available" -- the numbers alongside it are not a live balance.
+  if (r.is_available === false) return null
   const infos = Array.isArray(r.balance_infos) ? r.balance_infos : []
   const usd = infos.find(i => (i.currency || '').toUpperCase() === 'USD') || infos[0]
-  if (!usd) return 0
+  if (!usd) return null
   const v = typeof usd.total_balance === 'number' ? usd.total_balance : parseFloat(String(usd.total_balance ?? ''))
-  return isFinite(v) ? v : 0
+  return isFinite(v) ? v : null
 }
 
 export const DEEPSEEK_VAULT_SECRET_ID = 'DEEPSEEK_API_KEY'
@@ -103,7 +117,7 @@ export async function syncDeepSeekBalance(
   const httpGetJson = deps.httpGetJson || (async (url: string, headers: Record<string, string>) => {
     const r = await fetch(url, { method: 'GET', headers }); if (!r.ok) throw new Error(`deepseek api ${r.status}`); return r.json()
   })
-  let balanceUsd: number
+  let balanceUsd: number | null
   try {
     const raw = await httpGetJson(DEEPSEEK_BALANCE_URL, { authorization: `Bearer ${apiKey}` })
     balanceUsd = parseDeepSeekBalanceUsd(raw)
@@ -111,6 +125,15 @@ export async function syncDeepSeekBalance(
     const s = sanitizeError(err)
     recordRun(db, 'error', 0, w, now, s.message)
     return { ok: false, provider: 'deepseek', status: 'error', imported_count: 0, error: s.code, period: w.key }
+  }
+  // COS-OPS-H2: a 200 whose body isn't a recognizable, available balance is an
+  // ERROR run, not a $0 snapshot -- writing a fabricated 0 here would book the
+  // whole remaining balance as MTD spend (deriveMtdSpend counts the drop) and
+  // ignore the next good reading as a "top-up". No snapshot, no line, no
+  // entitlement touch; last good data stays.
+  if (balanceUsd == null) {
+    recordRun(db, 'error', 0, w, now, 'unrecognizable /user/balance response (or is_available=false) -- balance unknown, no snapshot recorded')
+    return { ok: false, provider: 'deepseek', status: 'error', imported_count: 0, error: 'unrecognizable balance response', period: w.key }
   }
   // record the snapshot, then derive MTD spend from this-month snapshots (asc)
   db.prepare(`INSERT INTO provider_balance_snapshots (provider, currency, balance, captured_at) VALUES ('deepseek','USD',?,?)`).run(balanceUsd, now)

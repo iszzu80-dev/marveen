@@ -32,6 +32,21 @@ describe('mapGitHubUsage (pure, offline)', () => {
     expect(mapGitHubUsage(null, { periodStart: START, periodEnd: END, fxUsdHuf: 360, idSalt: 's', now: START })).toHaveLength(0)
     expect(mapGitHubUsage({ message: 'Not Found' }, { periodStart: START, periodEnd: END, fxUsdHuf: 360, idSalt: 's', now: START })).toHaveLength(0)
   })
+
+  // Card 23912ca4 / COS-OPS-H4: the fx=0 guard originally landed on the OpenAI
+  // mapper only -- this one kept storing usd*0=0 as an HUF provider_api line,
+  // which outranked the real manual estimate in the reconcile.
+  it('a zero fxUsdHuf produces NO line -- real USD spend is not fabricated into 0 HUF', () => {
+    expect(mapGitHubUsage(report([2, 3]), { periodStart: START, periodEnd: END, fxUsdHuf: 0, idSalt: 's', now: START })).toHaveLength(0)
+  })
+
+  it('a negative fxUsdHuf is treated the same as zero -- no fabricated line', () => {
+    expect(mapGitHubUsage(report([2, 3]), { periodStart: START, periodEnd: END, fxUsdHuf: -1, idSalt: 's', now: START })).toHaveLength(0)
+  })
+
+  it('with no rate even the explicit empty-report 0 line is withheld -- an unconvertible zero is still unknown-in-HUF', () => {
+    expect(mapGitHubUsage({ usageItems: [] }, { periodStart: START, periodEnd: END, fxUsdHuf: 0, idSalt: 's', now: START })).toHaveLength(0)
+  })
 })
 
 describe('githubCollector + syncGitHubCollector (offline stub)', () => {
@@ -61,6 +76,27 @@ describe('githubCollector + syncGitHubCollector (offline stub)', () => {
   it('errors (no import) when the vault token is missing', async () => {
     const db = getDb()
     const r = await syncGitHubCollector(db, Math.floor(Date.now() / 1000), { apiKey: null, fxUsdHuf: 360, httpGetJson: async () => report([1]) })
+    expect(r.ok).toBe(false)
+    expect((db.prepare("SELECT COUNT(*) c FROM cost_line_items WHERE source_id='github'").get() as { c: number }).c).toBe(0)
+  })
+
+  // Card 23912ca4 / COS-OPS-H4: an unconfigured USD rate must be an explicit,
+  // actionable BLOCKER (status/error field), not a silent 0-import that looks
+  // identical to "there was no GitHub spend this month".
+  it('an unset (0) USD rate is a loud blocker -- no import, an actionable error', async () => {
+    const db = getDb()
+    const now = Math.floor(Date.UTC(2026, 6, 10) / 1000)
+    const r = await syncGitHubCollector(db, now, { apiKey: 'ghp-stub', fxUsdHuf: 0, httpGetJson: async () => report([2, 3]) })
+    expect(r.ok).toBe(false)
+    expect(r.status).toBe('error')
+    expect(r.error).toMatch(/rate is not configured/i)
+    expect((db.prepare("SELECT COUNT(*) c FROM cost_line_items WHERE source_id='github'").get() as { c: number }).c).toBe(0)
+  })
+
+  it('a negative USD rate is also a blocker, not a silent import', async () => {
+    const db = getDb()
+    const now = Math.floor(Date.UTC(2026, 6, 10) / 1000)
+    const r = await syncGitHubCollector(db, now, { apiKey: 'ghp-stub', fxUsdHuf: -5, httpGetJson: async () => report([2]) })
     expect(r.ok).toBe(false)
     expect((db.prepare("SELECT COUNT(*) c FROM cost_line_items WHERE source_id='github'").get() as { c: number }).c).toBe(0)
   })

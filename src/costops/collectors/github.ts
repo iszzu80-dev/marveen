@@ -55,6 +55,15 @@ export function mapGitHubUsage(
     const amt = typeof raw2 === 'number' ? raw2 : parseFloat(String(raw2 ?? ''))
     if (isFinite(amt)) usdTotal += amt
   }
+  // Card 23912ca4 / COS-OPS-H4: a zero/unconfigured fxUsdHuf must never
+  // fabricate a 0 HUF line -- with real USD usage that would read as "GitHub
+  // cost this month: nothing" at provider_api confidence, outranking the real
+  // manual estimate in the reconcile. Even the explicit API-observed-zero line
+  // is withheld: with no rate configured we cannot vouch for ANY HUF figure,
+  // and the sync wrapper below fails fast with the actionable message before
+  // this point anyway. Guarded here too so a future direct caller of this
+  // pure mapper cannot bypass the check.
+  if (!(opts.fxUsdHuf > 0)) return []
   const monthKey = new Date(opts.periodStart * 1000).toISOString().slice(0, 7)
   const amountHuf = Math.round(usdTotal * opts.fxUsdHuf * 100) / 100
   return [{
@@ -137,13 +146,24 @@ export async function syncGitHubCollector(
       fxUsdHuf = loadRenderPricing().pricing.fx_usd_huf || 0
     } catch { fxUsdHuf = 0 }
   }
+  // Card 23912ca4 / COS-OPS-H4: fail fast with an explicit blocker instead of
+  // silently storing a fabricated 0 HUF line (the mapper also guards this on
+  // its own, but the point of failing HERE is the actionable error message).
+  // Same two-level guard as the OpenAI collector, where the fix originally
+  // landed alone.
+  if (!(fxUsdHuf > 0)) {
+    return {
+      ok: false, provider: 'github', status: 'error', imported_count: 0,
+      error: 'USD->HUF rate is not configured (fx_usd_huf in store/costops-render-pricing.json) -- costs were NOT converted or stored; set the rate and re-run',
+    }
+  }
   const httpGetJson = deps.httpGetJson || (async (url: string, headers: Record<string, string>) => {
     const r = await fetch(url, { method: 'GET', headers })
     if (!r.ok) throw new Error(`github api ${r.status}`)
     return r.json()
   })
   const w = monthWindow(now)
-  const opts = { periodStart: w.start, periodEnd: w.end, secret: apiKey, fxUsdHuf: fxUsdHuf || 0, idSalt: 'github-salt', httpGetJson, now }
+  const opts = { periodStart: w.start, periodEnd: w.end, secret: apiKey, fxUsdHuf, idSalt: 'github-salt', httpGetJson, now }
   const res = await runCollector({ db, collector: githubCollector, opts, now })
   return {
     ok: res.status === 'ok', provider: 'github', status: res.status,

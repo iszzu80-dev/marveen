@@ -390,7 +390,12 @@ export interface RecommendationReconcileResult {
  *
  * - Candidate with no existing row, OR matching a row that's already
  *   'expired' -> brand new recommendation, status 'open' (an expired one
- *   resurfacing gets a fresh record, not a silent un-expire).
+ *   resurfacing gets a fresh record, not a silent un-expire). NOTE for
+ *   persistence layers: dedup_key is UNIQUE (initOptimizationSchema below),
+ *   so "fresh record" for an expired key must be realized as a full-field
+ *   reset of the existing row (see captureRecommendations' ON CONFLICT
+ *   upsert), never a second physical row -- a plain INSERT here is the
+ *   COS-OPS-C1 pipeline-killer.
  * - Candidate matching an 'open' existing row -> touch: refresh cost/saving/
  *   risk/confidence/evidence numbers (the underlying data may have moved)
  *   without touching status.

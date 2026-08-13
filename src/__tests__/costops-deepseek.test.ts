@@ -60,7 +60,21 @@ describe('parseDeepSeekBalanceUsd', () => {
   it('reads the USD total_balance from the /user/balance shape', () => {
     expect(parseDeepSeekBalanceUsd({ is_available: true, balance_infos: [{ currency: 'USD', total_balance: '4.55' }] })).toBe(4.55)
     expect(parseDeepSeekBalanceUsd({ balance_infos: [{ currency: 'CNY', total_balance: '30' }] })).toBe(30) // falls back to first
-    expect(parseDeepSeekBalanceUsd(null)).toBe(0)
+  })
+
+  // COS-OPS-H2: a malformed-but-200 body used to parse as 0 -- a real-looking
+  // snapshot whose drop-to-zero deriveMtdSpend booked as spend, permanently.
+  // Unknown is null, never a fabricated $0.
+  it('returns null (not 0) for an unrecognizable shape', () => {
+    expect(parseDeepSeekBalanceUsd(null)).toBeNull()
+    expect(parseDeepSeekBalanceUsd('oops')).toBeNull()
+    expect(parseDeepSeekBalanceUsd({ error: 'internal' })).toBeNull()
+    expect(parseDeepSeekBalanceUsd({ balance_infos: [] })).toBeNull()
+    expect(parseDeepSeekBalanceUsd({ balance_infos: [{ currency: 'USD', total_balance: 'NaN-ish' }] })).toBeNull()
+  })
+
+  it('returns null when the provider says the balance is not available', () => {
+    expect(parseDeepSeekBalanceUsd({ is_available: false, balance_infos: [{ currency: 'USD', total_balance: '4.55' }] })).toBeNull()
   })
 })
 
@@ -183,6 +197,42 @@ describe('syncDeepSeekBalance (offline stub)', () => {
     expect(line.original_amount).toBeCloseTo(1.8, 4)
     expect(line.original_currency).toBe('USD')
     expect(line.fx_rate).toBe(360)
+  })
+
+  // COS-OPS-H2: a malformed-but-200 balance response must be an ERROR run with
+  // NO snapshot -- a fabricated $0 snapshot would book the whole remaining
+  // balance as MTD spend (deriveMtdSpend counts drops) and the next good
+  // reading would be ignored as a "top-up", poisoning the month permanently.
+  describe.each([
+    ['malformed 200 body', { error: 'internal' }],
+    ['is_available:false', { is_available: false, balance_infos: [{ currency: 'USD', total_balance: '4.55' }] }],
+    ['empty balance_infos', { is_available: true, balance_infos: [] }],
+  ])('COS-OPS-H2: %s', (_label, badBody) => {
+    it('writes no snapshot, records an error run, and leaves MTD spend unchanged', async () => {
+      const db = getDb()
+      const t0 = Math.floor(Date.UTC(2026, 6, 5) / 1000)
+      const bal = (v: string) => async () => ({ is_available: true, balance_infos: [{ currency: 'USD', total_balance: v }] })
+      // Two good syncs establish a real MTD spend of 1.80 USD.
+      await syncDeepSeekBalance(db, t0, { apiKey: 'k', fxUsdHuf: 360, httpGetJson: bal('5.00') })
+      await syncDeepSeekBalance(db, t0 + 86400, { apiKey: 'k', fxUsdHuf: 360, httpGetJson: bal('3.20') })
+
+      const r = await syncDeepSeekBalance(db, t0 + 2 * 86400, { apiKey: 'k', fxUsdHuf: 360, httpGetJson: async () => badBody })
+      expect(r.ok).toBe(false)
+      expect(r.status).toBe('error')
+
+      // No third snapshot landed -- the two good ones stand alone.
+      const snaps = db.prepare("SELECT COUNT(*) c FROM provider_balance_snapshots WHERE provider='deepseek'").get() as { c: number }
+      expect(snaps.c).toBe(2)
+      // The run is recorded as an error, not an ok with a fabricated 0.
+      const run = db.prepare("SELECT status FROM import_runs WHERE provider='deepseek' ORDER BY id DESC LIMIT 1").get() as { status: string }
+      expect(run.status).toBe('error')
+      // MTD spend is unchanged: still the real 1.80 USD drop, not 5.00 (drop-to-zero).
+      const line = db.prepare("SELECT billed_cost FROM cost_line_items WHERE source_id='deepseek-api'").get() as { billed_cost: number }
+      expect(line.billed_cost).toBeCloseTo(1.8 * 360, 2)
+      // The entitlement still reflects the last GOOD balance reading.
+      const ent = db.prepare("SELECT remaining FROM entitlements WHERE dedup_key='deepseek|prepaid_balance'").get() as { remaining: number }
+      expect(ent.remaining).toBe(3.2)
+    })
   })
 
   it('does not fabricate an original currency when no fx rate is configured (fxUsdHuf 0)', async () => {

@@ -24,6 +24,13 @@ interface OpenAiCostResult { amount?: OpenAiAmount; line_item?: string | null; p
 interface OpenAiCostBucket { start_time?: number; end_time?: number; results?: OpenAiCostResult[] }
 interface OpenAiCostsPage { object?: string; data?: OpenAiCostBucket[]; has_more?: boolean; next_page?: string | null }
 
+// COS-OPS-H5: limit=31 fits a month of daily buckets, but the API still owns
+// the page size -- if it ever pages, the cursor must be followed or the month
+// silently under-counts. A cursor that never terminates within this bound
+// means a broken/looping API, and the run must FAIL (throw -> runCollector
+// records status='error', imports nothing) rather than book a partial total.
+const MAX_COSTS_PAGES = 40
+
 /**
  * PURE mapper: OpenAI /organization/costs page -> a single aggregated
  * provider_api line for the openai-api source for the requested period. Daily
@@ -80,15 +87,38 @@ export function mapOpenAiCosts(
 export const openaiCollector: ProviderCollector = {
   provider: 'openai',
   collectorName: 'openai-costs',
+  // COS-OPS-H5: the page cursor (has_more/next_page) is followed until the
+  // report terminates -- previously only the first page was ever read, so a
+  // paged month imported a silent under-count as the provider_api actual. An
+  // unterminated or cursor-less continuation throws, failing the whole run
+  // instead of importing a partial total.
   async collectRaw(opts: CollectOpts): Promise<{ raw: unknown; lines: NormalizedCostLine[] }> {
     // OpenAI Costs API takes unix start_time; daily buckets; limit covers a month.
-    const url = `${OPENAI_COSTS_URL}?start_time=${opts.periodStart}&end_time=${opts.periodEnd}&bucket_width=1d&limit=31`
+    const baseUrl = `${OPENAI_COSTS_URL}?start_time=${opts.periodStart}&end_time=${opts.periodEnd}&bucket_width=1d&limit=31`
     // secret used ONLY as the auth header; never logged.
     const headers = {
       'authorization': `Bearer ${opts.secret}`,
       'content-type': 'application/json',
     }
-    const raw = await opts.httpGetJson(url, headers)
+    const buckets: OpenAiCostBucket[] = []
+    let cursor: string | null = null
+    for (let pageNo = 1; ; pageNo++) {
+      if (pageNo > MAX_COSTS_PAGES) {
+        throw new Error(`openai costs pagination exceeded ${MAX_COSTS_PAGES} pages -- aborting rather than importing a partial month`)
+      }
+      const url = cursor ? `${baseUrl}&page=${encodeURIComponent(cursor)}` : baseUrl
+      const rawPage = await opts.httpGetJson(url, headers)
+      const page = (rawPage && typeof rawPage === 'object') ? rawPage as OpenAiCostsPage : {}
+      if (Array.isArray(page.data)) buckets.push(...page.data)
+      if (!page.has_more) break
+      if (!page.next_page) {
+        throw new Error('openai costs has_more=true without a next_page cursor -- aborting rather than importing a partial month')
+      }
+      cursor = page.next_page
+    }
+    // All pages merged into one page-shaped raw (same keys as a single page,
+    // so the dry-run shape description stays representative).
+    const raw: OpenAiCostsPage = { object: 'page', data: buckets, has_more: false, next_page: null }
     const lines = mapOpenAiCosts(raw, {
       periodStart: opts.periodStart, periodEnd: opts.periodEnd,
       fxUsdHuf: opts.fxUsdHuf, idSalt: opts.idSalt, now: opts.now,

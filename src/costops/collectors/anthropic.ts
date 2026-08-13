@@ -38,7 +38,15 @@ interface AnthropicCostBucket {
 interface AnthropicCostReport {
   data?: AnthropicCostBucket[]
   has_more?: boolean
+  next_page?: string | null
 }
+
+// COS-OPS-H5: the cost_report API pages in daily buckets, so a month with many
+// days spans several pages. A well-behaved report fits in a handful; a cursor
+// that never terminates within this bound means a broken/looping API, and the
+// run must FAIL (throw -> runCollector records status='error', imports nothing)
+// rather than silently book the pages fetched so far as the month's actual.
+const MAX_COST_REPORT_PAGES = 40
 
 /**
  * PURE mapper: Anthropic cost_report -> a single aggregated provider_api line
@@ -64,6 +72,14 @@ export function mapAnthropicCostReport(
     }
   }
   if (!any) return []
+  // Card 23912ca4 / COS-OPS-H4: a zero/unconfigured fxUsdHuf must never
+  // fabricate a 0 HUF line -- that would read as "Anthropic cost this month:
+  // nothing" with provider_api confidence, outranking the real manual estimate
+  // in the reconcile. The real cost is unknown-in-HUF, not zero. No line at
+  // all until a real rate exists (idempotent dedup_key means a later re-run
+  // with a real rate fills this in). Guarded here too, not only in the sync
+  // wrapper, so a future direct caller of this pure mapper cannot bypass it.
+  if (!(opts.fxUsdHuf > 0)) return []
   const monthKey = new Date(opts.periodStart * 1000).toISOString().slice(0, 7)
   const amountHuf = Math.round(usdTotal * opts.fxUsdHuf * 100) / 100
   return [{
@@ -89,17 +105,43 @@ export const anthropicCollector: ProviderCollector = {
   // READ the cost report and return BOTH the raw response and the normalized
   // lines. The raw is used ONLY to describe its shape in a dry-run (never
   // persisted, never logged). The secret is used only as the auth header.
+  //
+  // COS-OPS-H5: the report pages in daily buckets (has_more/next_page), so a
+  // month with many days only had its FIRST page imported as the authoritative
+  // provider_api actual -- a silent monthly under-count that then won the
+  // reconcile against the correct manual estimate. The cursor is now followed
+  // (next_page passed back as the `page` query param) until has_more is false;
+  // an unterminated or cursor-less continuation throws, failing the whole run
+  // instead of importing a partial total.
   async collectRaw(opts: CollectOpts): Promise<{ raw: unknown; lines: NormalizedCostLine[] }> {
     const startIso = new Date(opts.periodStart * 1000).toISOString()
     const endIso = new Date(opts.periodEnd * 1000).toISOString()
-    const url = `${ANTHROPIC_COST_URL}?starting_at=${encodeURIComponent(startIso)}&ending_at=${encodeURIComponent(endIso)}`
+    const baseUrl = `${ANTHROPIC_COST_URL}?starting_at=${encodeURIComponent(startIso)}&ending_at=${encodeURIComponent(endIso)}`
     // secret used ONLY as the auth header; never logged.
     const headers = {
       'x-api-key': opts.secret,
       'anthropic-version': ANTHROPIC_VERSION,
       'content-type': 'application/json',
     }
-    const raw = await opts.httpGetJson(url, headers)
+    const buckets: AnthropicCostBucket[] = []
+    let cursor: string | null = null
+    for (let pageNo = 1; ; pageNo++) {
+      if (pageNo > MAX_COST_REPORT_PAGES) {
+        throw new Error(`anthropic cost_report pagination exceeded ${MAX_COST_REPORT_PAGES} pages -- aborting rather than importing a partial month`)
+      }
+      const url = cursor ? `${baseUrl}&page=${encodeURIComponent(cursor)}` : baseUrl
+      const rawPage = await opts.httpGetJson(url, headers)
+      const page = (rawPage && typeof rawPage === 'object') ? rawPage as AnthropicCostReport : {}
+      if (Array.isArray(page.data)) buckets.push(...page.data)
+      if (!page.has_more) break
+      if (!page.next_page) {
+        throw new Error('anthropic cost_report has_more=true without a next_page cursor -- aborting rather than importing a partial month')
+      }
+      cursor = page.next_page
+    }
+    // All pages merged into one report-shaped raw (same keys as a single page,
+    // so the dry-run shape description stays representative).
+    const raw: AnthropicCostReport = { data: buckets, has_more: false }
     const lines = mapAnthropicCostReport(raw, {
       periodStart: opts.periodStart, periodEnd: opts.periodEnd,
       fxUsdHuf: opts.fxUsdHuf, idSalt: opts.idSalt, now: opts.now,
@@ -159,13 +201,25 @@ export async function syncAnthropicCostReport(
       fxUsdHuf = loadRenderPricing().pricing.fx_usd_huf || 0
     } catch { fxUsdHuf = 0 }
   }
+  // Card 23912ca4 / COS-OPS-H4: fail fast with an explicit blocker instead of
+  // silently storing a fabricated 0 HUF line (the mapper also guards this on
+  // its own, but the point of failing HERE is the actionable error message).
+  // This guard originally landed on the OpenAI collector only; anthropic and
+  // github kept fabricating 0-HUF provider_api lines that outranked the real
+  // manual estimates.
+  if (!(fxUsdHuf > 0)) {
+    return {
+      ok: false, provider: 'anthropic', status: 'error', imported_count: 0,
+      error: 'USD->HUF rate is not configured (fx_usd_huf in store/costops-render-pricing.json) -- costs were NOT converted or stored; set the rate and re-run',
+    }
+  }
   const httpGetJson = deps.httpGetJson || (async (url: string, headers: Record<string, string>) => {
     const r = await fetch(url, { method: 'GET', headers })
     if (!r.ok) throw new Error(`anthropic admin api ${r.status}`)
     return r.json()
   })
   const w = monthWindow(now)
-  const opts = { periodStart: w.start, periodEnd: w.end, secret: apiKey, fxUsdHuf: fxUsdHuf || 0, idSalt: 'anthropic-salt', httpGetJson, now }
+  const opts = { periodStart: w.start, periodEnd: w.end, secret: apiKey, fxUsdHuf, idSalt: 'anthropic-salt', httpGetJson, now }
   const res = await runCollector({ db, collector: anthropicCollector, opts, now })
   return {
     ok: res.status === 'ok', provider: 'anthropic', status: res.status,
