@@ -2,9 +2,11 @@
 ## Proactive Core
 ### Brownfield proactive detection, qualification and internal preparation — zero new external execution surface
 
+**Spec verzió:** v1.4.2 — lásd a **§32. Amendment log**-ot  
 **Státusz:** proposed implementation baseline — review-integrated revision  
 **Dátum:** 2026-08-13  
 **Előző baseline:** `marveen-autonomous-case-progression-spec-v1.3.1.md`  
+**Felváltott revízió:** `marveen-autonomous-case-progression-spec-v1.4.1-superseded.md`  
 **Leválasztott következő release:** `marveen-autonomous-case-progression-spec-v1.5-external-research-browser-autonomy.md`  
 **System of record:** meglévő Personal + ZST COS Case Store, intake, events, progression state, approval/action réteg  
 **Implementációs stratégia:** brownfield `reuse → audit → harden → wire`; új subsystem csak bizonyított hiány esetén  
@@ -101,9 +103,15 @@ Ezek v1.5 scope.
 
 A v1.4 nem tekinthető sikeresnek pusztán attól, hogy a mechanizmus-metrikái zöldek. A release-nek **előre rögzített, cáfolható inkrementális értékhipotézist** kell teljesítenie shadow módban.
 
-### 1.4.1 Historical volume calibration before pre-registration
+### 1.4.1 Volume calibration before pre-registration
 
-A live shadow küszöb és mérési ablak **nem választható meg vakon**. A §26 szerinti replay corpus + reactive baseline lépés részeként először kötelező lefuttatni legalább az előző 90 nap reprezentatív korpuszát, és megmérni:
+> **v1.4.2 módosítás.** Ez a szakasz korábban „legalább az előző **90 nap** reprezentatív
+> korpuszát" követelte meg. A 90 nap **proxy volt egy volumen-feltételre**, és amikor a proxyt
+> megmértük, kiderült, hogy a tároló nem elég mély hozzá — és soha nem is lesz visszamenőleg.
+> A követelmény helyére a **volumen-feltétel maga** került. A teljes indoklás a §27-ben.
+
+A live shadow küszöb és mérési ablak **nem választható meg vakon**. A §26 szerinti replay corpus +
+reactive baseline lépés részeként kötelező egy kalibrációs mérés, amely megméri:
 
 ```text
 historical_eligible_case_count
@@ -114,30 +122,90 @@ historical_material_findings_count
 historical_deadline/stall/anomaly/opportunity mix
 ```
 
+#### A korpusz-feltétel — volumen, nem naptár
+
+A kalibrációs korpusz akkor elegendő, ha **egyszerre** teljesül:
+
+```text
+eligible_observation_count            >= minimum_eligible_observations
+independent_adjudication_packet_count >= blinding_validation_min_packets
+```
+
+A napok száma **nem** feltétel. Egy 90 napos ablak, amiben harminc ügy van, nem méri meg azt,
+amit egy 20 napos, amiben kétszáz — és fordítva. Ahol eddig „90 nap" szerepelt, ott a fenti két
+egyenlőtlenség áll.
+
+**A korpusz lehet visszamenőleges vagy előre néző.** Ha a tároló mélysége nem elég, a kalibráció
+egy `CALIBRATION` karú futással **előre méri** a volument. Két kódban kikényszerített szabály védi:
+
+1. kalibrációs kimenet **nem kerülhet adjudikációba**;
+2. kalibrációval megérintett korpusz **nem hordozhat kontroll-kart** — a kísérlet korpusza egy
+   későbbi, konstrukció szerint diszjunkt időablak.
+
+**Ha a volumen nem érkezik meg**, a becsületes kimenet `NO_EVIDENCE_DUE_TO_LOW_VOLUME`. Az nem PASS,
+és nem is elrejtett kudarc: megállapítás a korpuszról. Ablakot **utólag**, a szám megismerése után
+tágítani tilos — az ugyanaz a lépés, amit a `V4-F14` a találat-küszöbnél tilt.
+
+#### Az „elfogadható megfigyelés" definíciója
+
+`eligible_observation_count` **nem** származhat a detektor kimenetéből. A nevező **kizárólag egy
+független címkézési menetből** származhat, ami időben **megelőzi** a proaktív futást.
+
+> **Elfogadható megfigyelés:** időponthoz kötött állapot a Case-rétegben, amiről egy hozzáértő
+> kabinetfőnök szólt volna a tulajdonosnak, és amihez a bizonyíték **már a tárolóban volt** a
+> szólás pillanata előtt.
+
+Öt feltétel, mind kötelező:
+
+1. **vak eldönthetőség** — kizárólag a `T` időpontbeli pillanatképből, olyasvalaki által, aki nem
+   látta a detektor kimenetét; ha csak a jelzés ismeretében ítélhető meg, az **visszaigazolás, nem
+   megfigyelés**;
+2. **bizonyíték-elsőbbség** — a bizonyítéknak szigorúan `T` **előtt** kell a tárolóban lennie;
+3. **tulajdonosi relevancia** — a próba az, hogy a tulajdonosnak kellett-e tudnia, nem az, hogy a
+   rendszer ki tudta-e számolni; gépileg nem ellenőrizhető, ezért **érdemi indoklás** kötelező;
+4. **a hiány rekord, nem üresség** — címkézett nulla ≠ át nem nézett ablak; átnézés nélkül a
+   számláló **null**;
+5. **a címkéző mondhassa, hogy nem tudja** — `UNCERTAIN` alak, **külön számolva**, egyik oldalba sem
+   olvasztva; küszöb csak **előre regisztrálva** kapuz.
+
 A replay után, **de a live shadow indulása előtt**, egy immutable eval configurationben pre-registerelendő:
 
 ```yaml
 value_gate_registration:
-  corpus_window_days: 90
+  # A design-fél: MOST befagyasztható, mert nem függ a mért volumentől.
   shadow_window_days: <30|60|90>
-  minimum_eligible_observations: <integer>
-  required_incremental_material_catches: <integer>
-  max_false_positive_interruption_candidates_per_7d: <integer>
   primary_adjudicator: <named human>
   backup_adjudicator: <named human>
   adjudication_cadence: <e.g. twice weekly>
   timeliness_rubric_version: <immutable version>
-  reactive_baseline_run_id: <independently persisted control run>
   blinding_effectiveness_test: <pre-registered test/version>
   blinding_null_origin_guess_rate: 0.50
   blinding_detectable_origin_guess_rate: 0.70
   origin_guess_alpha: 0.05
   blinding_target_power: 0.80
   blinding_validation_min_packets: <power-derived integer; default design = 40>
+  max_uncertain_rate: <float | null>     # null = jelentve, de nem kapuz
+
+  # A küszöb-fél: CSAK a kalibrációs mérés után tölthető ki, és utána immutable.
+  minimum_eligible_observations: <integer>
+  required_incremental_material_catches: <integer>
+  max_false_positive_interruption_candidates_per_7d: <integer>
+
+  # A befagyasztási pont: KAPU, nem dátum.
+  reactive_baseline_run_id: <independently persisted control run>
+  detector_config_fingerprint: <a detektor- ÉS intake-források tartalom-hashe>
+  calibration_commit: <commit sha>
   frozen_at:
 ```
 
-**Default candidate**, ha a historical volume ezt támogatja:
+**A `frozen_at` önmagában nem elég.** Egy ígéret, hogy a befagyasztás után nem landol proaktív modul,
+pontosan az a fajta állítás, ami csendben megszegődik. A `detector_config_fingerprint` a **forrást**
+hasheli, nem egy verzió-stringet, és a hatóköre a detektor mellett az **intake-modulokat is
+tartalmazza**: ami organikus érkezésnek látszik, részben a saját beviteli csatornánk kimenete, tehát
+a jogosultsági ráta egy intake-konfigurációra feltételezett. Egy csak-detektor hash engedné, hogy a
+**nevező elmozduljon**, miközben a kísérlet befagyasztottnak mondja magát.
+
+**Default candidate**, ha a mért volumen ezt támogatja:
 
 ```text
 shadow_window = 30 days
@@ -154,7 +222,16 @@ blinding_required_window = a pre-registered blinding power-design által igénye
 frozen_shadow_window = max(value_gate_required_window, blinding_required_window)
 ```
 
-Ha a 90 napos replay azt mutatja, hogy 30 nap alatt bármelyik mintaigény várhatóan nem teljesül, az ablakot **a shadow előtt** 60 vagy 90 napra kell kalibrálni. A value-gate küszöböt és a blinding minimum mintát együtt kell befagyasztani. Live shadow közben egyik gate success-preserving módosítása sem megengedett.
+Ha a kalibráció azt mutatja, hogy 30 nap alatt bármelyik mintaigény várhatóan nem teljesül, az ablakot **a shadow előtt** 60 vagy 90 napra kell kalibrálni. A value-gate küszöböt és a blinding minimum mintát együtt kell befagyasztani. Live shadow közben egyik gate success-preserving módosítása sem megengedett.
+
+**Egy módszertani figyelmeztetés a volumen-méréshez.** A backfill (migrációval betöltött, nem
+érkezett ügy) aránya **nem mérhető** per-ügy késleltetéssel (ügy létrehozása mínusz első bizonyíték):
+egy migráció az ügyet és az eseményét egyszerre írja, tehát a késleltetés nulla, és a betöltött ügy
+organikusnak látszik. Az első élő mérésen ez a módszer 24 ügyet mutatott backfillnek, míg a napi
+eloszlás 45-öt. **Ezt a mérőt így nem szabad automatizálni** — alulbecsülne, és a nevezőt fújná fel.
+
+Ugyanígy: egy naiv napi ráta **felső korlát, nem becslés**, ha a beérkező ügyek egy részét a saját
+intake-heartbeatünk hozza létre. A mérendő rendszer és a mérés forrása ilyenkor nem független.
 
 A default blinding power-design:
 
@@ -1457,7 +1534,12 @@ Kötelező negatív tesztek:
 - `adjudication_sla_breach_count`;
 - `value_hypothesis_result`.
 
-Primary acceptance: a §1.4-ben **90 napos replay után, live shadow előtt befagyasztott** value-gate konfiguráció szerint. A `5 catches / 30 nap` csak default candidate, ha a historical eligible volume ezt mérhetővé teszi. `NO_EVIDENCE_DUE_TO_LOW_VOLUME` és `EVALUATION_WINDOW_DEGRADED` nem PASS.
+Primary acceptance: a §1.4-ben **a volumen-kalibráció után, live shadow előtt befagyasztott** value-gate konfiguráció szerint. A `5 catches / 30 nap` csak default candidate, ha a mért eligible volume ezt mérhetővé teszi. `NO_EVIDENCE_DUE_TO_LOW_VOLUME` és `EVALUATION_WINDOW_DEGRADED` nem PASS.
+
+`eligible_observation_count` a §1.4.1 szerinti **független címkézési menetből** származik. Ha a
+korpuszt senki nem nézte át, a metrika **null**, és a kimenet `EVALUATION_WINDOW_DEGRADED` — nem 0,
+és nem PASS. `uncertain_count` és `uncertain_rate` mindig jelentendő; küszöböt csak akkor kapuz, ha
+`max_uncertain_rate` **előre** regisztrálva lett.
 
 Blinding validity metrics:
 
@@ -1568,7 +1650,7 @@ Kötelező auditpontok:
 24. approval deadline-escape feasibility and queue ordering by `latest_present_by` / `internal_safe_deadline`;
 25. value-gate blind adjudication capability, reviewer assignment, cadence and backlog telemetry;
 26. reactive baseline independent replay/persistence capability;
-27. 90-day eligible-volume calibration and shadow-window feasibility;
+27. eligible-volume calibration (volume condition per §1.4.1, not a calendar window) and shadow-window feasibility;
 28. proactive draft factual-claim derivation path;
 29. adjudication packet canonicalization parity between proactive and reactive outputs;
 30. origin-guess telemetry + statistical blinding-effectiveness measurement feasibility;
@@ -1600,9 +1682,9 @@ A teljes v1.4 implementation sorrend:
 ```text
 1. live repo + DB + runtime capability audit
 2. maturity matrix + exact brownfield delta plan
-3. 90-day replay corpus + independent reactive baseline run
-4. eligible-volume calibration + timeliness rubric + blind-adjudication capability audit
-5. freeze §1.4 value-gate registration (window, thresholds, adjudicators, cadence, control run ID)
+3. volume-qualified replay corpus (§1.4.1: volumen-feltétel, nem naptár) + independent reactive baseline run; ha a tároló mélysége nem elég, `CALIBRATION` karú előre-mérés
+4. független eligible-observation címkézési menet (a nevező forrása) + timeliness rubric + blind-adjudication capability audit
+5. freeze §1.4 value-gate registration: a design-fél azonnal, a küszöb-fél a mérés után; `detector_config_fingerprint` + `calibration_commit` kötelező
 6. `ProactiveSignal` schema
 7. `ProactiveInitiative` schema
 8. Reader evidence extension
@@ -1791,3 +1873,62 @@ A v1.4 sikere akkor bizonyított, ha Marveen:
 ## Provenance note
 
 Ez a specifikáció a korábbi `marveen-autonomous-case-progression-spec-v1.4` általános proaktív modelljéből csak a brownfield Proactive Core-t tartja meg. A browser/research/disclosure részt külön v1.5 release-be választja le. A dokumentumban felsorolt 2026-08-13-i codebase findingok a felülvizsgálat során jelentett megállapítások; implementáció előtt live repo/DB/runtime audittal ellenőrizendők.
+
+---
+
+# 32. Amendment log
+
+A spec saját szabálya szerint (`§22`) PASS-feltételt gyengíteni verzió-bump nélkül tilos. Ez a napló
+a fordítottját is rögzíti: azokat a módosításokat, amelyek egy feltételt **szigorítottak vagy
+pontosítottak**, mert a laza megfogalmazás egy mérést tett volna érvénytelenné.
+
+## v1.4.2 — 2026-08-13 — a 90 napos korpusz-proxy leváltása
+
+**Érintett szakaszok:** §1.4.1 (átírva), §24.2, §26/3, §26/4, §26/5.
+
+**Mi változott.** A „legalább az előző 90 nap reprezentatív korpusza" helyére a **volumen-feltétel
+maga** került (`eligible_observation_count` és `independent_adjudication_packet_count` küszöbök), a
+naptári ablak megszűnt feltétel lenni.
+
+**Miért.** A 90 nap egy volumen-feltétel proxyja volt, és amikor a proxyt megmértük, a tároló
+mélysége az élő rendszerben ez volt:
+
+```text
+personal_cases          73 rekord /  8 nap
+personal_case_events   356 rekord / 52 nap
+zst_cases               42 rekord /  6 nap
+zst_case_events        157 rekord /  6 nap
+evidence packets       177 rekord /  2 nap
+kanban                1629 rekord / 56 nap
+```
+
+A 90 napos korpusz **nem létezik, és visszamenőleg nem is állítható elő**. Egy feltétel, aminek
+sosem lehet megfelelni, két rossz kimenet közül választat: vagy a release áll meg örökre, vagy a
+feltételt csendben lazítjuk, amikor kényelmetlenné válik. A specifikációnak azt kell kimondania,
+amit valójában akar — **elég megfigyelést a két mintaigény méretezéséhez** —, és azt kell
+megengednie, hogy ez **előre nézve** is megszerezhető legyen.
+
+**Ami ettől nem lett engedékenyebb.** A módosítás nem gyengíti a kaput, három ponton szigorít:
+
+1. `eligible_observation_count` **nem jöhet a detektor kimenetéből**. A korábbi implementáció így
+   számolt, tehát az érték-metrika nevezője maga a mért rendszer kimenete volt: egy detektor, ami
+   kevesebbet vesz észre, ugyanolyan jól teljesített volna azzal, hogy **kisebb világot** szab
+   magának. A nevező mostantól kizárólag egy **független, időben megelőző címkézési menetből**
+   származhat. Ezt állandó ellenőrzés őrzi, nem csak ez a mondat.
+2. **Az át nem nézett korpusz `null`, nem `0`.** „Semmi nem volt jogosult" és „senki nem nézte meg"
+   ugyanazt a számot adja és ellentétes következtetést hordoz; az utóbbi kimenete
+   `EVALUATION_WINDOW_DEGRADED`.
+3. **A befagyasztás kapu, nem dátum.** `detector_config_fingerprint` (forrás-tartalom hash, az
+   intake-modulokat is beleértve) + `calibration_commit` kötelező mező.
+
+**Ami nyitva marad, és nem az implementáció dolga.** A `minimum_eligible_observations` és a
+`required_incremental_material_catches` **csak a kalibrációs mérés után** tölthető ki, az
+adjudikátorok megnevezése pedig tulajdonosi döntés. Amíg ezek üresek, a kapu kimenete
+`NO_EVIDENCE_DUE_TO_LOW_VOLUME` — nem PASS.
+
+**Elvetett alternatíva.** Felmerült a korpusz domain szerinti szétvágása (personal = kalibráció,
+ZST = kísérlet). Elvetve: a personalon mért küszöb ZST-re alkalmazva **rossz populációból** méretezné
+az ablakot, és a fal ezt **elfedte** volna — minden szabályosnak látszott volna. A választott
+megoldás időbeli: a kalibráció előre néz, a kísérlet korpusza egy későbbi ablak, tehát a kettő
+**konstrukció szerint diszjunkt**, és nem kell fal, mert soha nem érintkeznek. Mindkét domain
+mindkét futásban benne van, **domainenként jelentve**.

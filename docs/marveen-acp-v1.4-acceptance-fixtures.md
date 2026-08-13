@@ -244,7 +244,7 @@ Neither outcome is a value-gate PASS.
 
 ## V4-F14 — Low-volume value-gate calibration
 
-**Given:** the 90-day replay shows that the initially proposed 30-day window cannot realistically reach the required eligible observation volume.
+**Given:** the volume calibration (spec v1.4.2, §1.4.1 — a volume condition, not a calendar window) shows that the initially proposed 30-day window cannot realistically reach the required eligible observation volume.
 
 **PASS:**
 - before live shadow, both value-gate and blinding-sample requirements are estimated from replay;
