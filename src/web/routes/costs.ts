@@ -356,6 +356,11 @@ export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
   // Phase 3 (GAP-11): every configured budget's LIVE status (current_spend/
   // forecast/variance/status against its scope), not just the raw config
   // entries -- same shape as what period-close's immutable snapshot bundles.
+  // COS-CORE-M3: each status now carries spend_basis ('all_sources_headline'
+  // for every resolved scope, global included -- so the per-provider budgets
+  // sum to the global one and all of them reconcile with the headline spend
+  // figure shown beside them). It rides along in this whole-object
+  // serialization; there is no per-field allowlist to extend.
   if (path === '/api/costs/budgets' && method === 'GET') {
     try {
       const monthKey = url.searchParams.get('month') || undefined
@@ -467,7 +472,13 @@ export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
       const raw = await readBody(ctx.req)
       const body = JSON.parse(raw.toString() || '{}')
       const now = Math.floor(Date.now() / 1000)
-      const result = recordInvoice(getDb(), body, { now, salt: 'invoice-salt' })
+      let fxRates: import('../../costops/fx.js').FxRateTable = {}
+      try {
+        // Card 23912ca4: same single provider-neutral fx source as email-ingest.
+        const { loadFxRates } = await import('../../costops/fx-config.js')
+        fxRates = loadFxRates().rates
+      } catch { /* fx unset -> foreign-currency invoices correctly refused (400), never booked raw or at a fabricated 0 */ }
+      const result = recordInvoice(getDb(), body, { now, salt: 'invoice-salt', fxRates })
       json(res, result, result.ok ? 200 : (result.status || 500))
     } catch (err) {
       logger.error({ err }, 'CostOps invoice record failed')
@@ -481,7 +492,13 @@ export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
       const raw = await readBody(ctx.req)
       const body = JSON.parse(raw.toString() || '{}')
       const now = Math.floor(Date.now() / 1000)
-      const result = applyInvoiceAdjustment(getDb(), body, { now })
+      let fxRates: import('../../costops/fx.js').FxRateTable = {}
+      try {
+        // Card 23912ca4: same single provider-neutral fx source as email-ingest.
+        const { loadFxRates } = await import('../../costops/fx-config.js')
+        fxRates = loadFxRates().rates
+      } catch { /* fx unset -> foreign-currency invoices correctly refused (400), never booked raw or at a fabricated 0 */ }
+      const result = applyInvoiceAdjustment(getDb(), body, { now, fxRates })
       json(res, result, result.ok ? 200 : (result.status || 500))
     } catch (err) {
       logger.error({ err }, 'CostOps invoice adjustment failed')

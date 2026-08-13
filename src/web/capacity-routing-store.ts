@@ -20,7 +20,7 @@
 // provider from every routing decision, not merely from the write path.
 
 import { join } from 'node:path'
-import { readFileSync, existsSync, writeFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { PROJECT_ROOT } from '../config.js'
 import { atomicWriteFileSync } from './atomic-write.js'
 import type { FallbackCandidate } from '../capacity-routing.js'
@@ -80,6 +80,29 @@ export function clearRuntimeOverlay(agent: string, path: string = OVERLAY_PATH):
   if (!(agent in file)) return
   delete file[agent]
   atomicWriteFileSync(path, JSON.stringify(file, null, 2))
+}
+
+export interface ClearedOverlay {
+  agent: string
+  entry: RuntimeOverlayEntry
+}
+
+/**
+ * Clear EVERY agent's overlay entry in one write (OPT-C1, review 2026-08-12).
+ *
+ * This is the emergency-stop counterpart of clearRuntimeOverlay: turning
+ * routing off must not leave agents pinned on their fallback models, because
+ * with the runner's sweep gated off nothing would ever climb them back. The
+ * cleared entries are RETURNED so the caller can record a routing event per
+ * agent, the same bookkeeping the runner does when it clears one overlay.
+ * A no-op (nothing to clear) performs no write at all.
+ */
+export function clearAllRuntimeOverlays(path: string = OVERLAY_PATH): ClearedOverlay[] {
+  const file = readOverlayFile(path)
+  const cleared = Object.entries(file).map(([agent, entry]) => ({ agent, entry }))
+  if (cleared.length === 0) return cleared
+  atomicWriteFileSync(path, JSON.stringify({}, null, 2))
+  return cleared
 }
 
 export function listRuntimeOverlays(path: string = OVERLAY_PATH): OverlayFile {
@@ -202,7 +225,15 @@ export function isEnabledForRouting(provider: string, authProfile: string, confi
  *
  * Returns the overlay's model ONLY when:
  *   (a) an overlay entry exists for this agent, AND
- *   (b) that entry's (provider, authProfile) is STILL enabled_for_routing per
+ *   (b) routing is administratively ON (`config.enabled`) -- OPT-C1 (review
+ *       2026-08-12): with routing off the sweep never runs again, so a
+ *       surviving overlay applied at spawn would pin the agent on its
+ *       fallback FOREVER. An administrative stop must make the very next
+ *       respawn launch the configured primary, even if clearing the overlay
+ *       file itself failed. Note this gates overlay APPLICATION only -- the
+ *       kill switch still deliberately preserves candidate trust flags
+ *       (see setCapacityRoutingEnabled), AND
+ *   (c) that entry's (provider, authProfile) is STILL enabled_for_routing per
  *       the current config -- re-checked now, not trusted from write time, so
  *       revoking trust takes effect on the very next resolution even before
  *       any sweep clears the stale entry.
@@ -217,27 +248,14 @@ export function resolveRuntimeModel(
   const overlay = readRuntimeOverlay(agent, paths.overlayPath ?? OVERLAY_PATH)
   if (!overlay) return configuredModel
   const config = readCapacityRoutingConfig(paths.configPath ?? CONFIG_PATH)
+  if (!config.enabled) return configuredModel
   if (!isEnabledForRouting(overlay.provider, overlay.authProfile, config)) return configuredModel
   return overlay.model
 }
 
-// ---------------------------------------------------------------------------
-// config-examples scaffold (mirrors the other CostOps *.example.json files)
-// ---------------------------------------------------------------------------
-
-export function ensureCapacityRoutingConfigExample(exampleDir: string): void {
-  const examplePath = join(exampleDir, 'capacity-routing-config.example.json')
-  if (existsSync(examplePath)) return
-  const example = {
-    _doc: 'Lean Optimization Phase 3 capacity-routing config (gitignored real copy: store/capacity-routing-config.json). '
-      + 'enabled=false is safe-by-default. Each candidate needs enabledForRouting:true to ever be used -- an external/'
-      + 'non-trusted provider stays false until a separate owner GO. At most 2 candidates (hard ceiling).',
-    enabled: false,
-    candidates: [
-      { provider: 'anthropic', authProfile: 'plan:secondary', model: 'claude-sonnet-5', enabledForRouting: true, subscriptionIncluded: true },
-    ],
-    limitedThreshold: 0.9,
-    ttlMs: 1_800_000,
-  }
-  writeFileSync(examplePath, JSON.stringify(example, null, 2) + '\n')
-}
+// The config-examples scaffold (ensureCapacityRoutingConfigExample) that used
+// to sit here was dead code with zero callers, and its example content never
+// reached the repo (OPT-M8, review 2026-08-12) -- the example is now COMMITTED
+// as config-examples/capacity-routing-config.example.json, matching how every
+// other CostOps *.example.json is shipped, and a test keeps the committed file
+// normalizing cleanly through normalizeCapacityRoutingConfig above.

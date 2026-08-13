@@ -18,7 +18,7 @@
 // listAlerts() (the same read path GET /api/costs/alerts uses).
 
 import type Database from 'better-sqlite3'
-import { monthWindow, CONF_PRIORITY, getCostSummary, type CostSummary } from './ledger.js'
+import { monthWindow, CONF_PRIORITY, getCostSummary, resolveSourceTotal, type CostSummary } from './ledger.js'
 import type { CostOpsConfig } from './config.js'
 import { buildSourceInventory, type SourceInventoryEntry, type CredentialChecker, type Freshness } from './inventory.js'
 import { buildReconciliation, type SourceReconciliation } from './reconciliation.js'
@@ -188,36 +188,41 @@ export function providerSummaryToCsv(rows: CostSummary['operational']['provider_
 export interface CategorySummaryRow { source_type: string; spend: number }
 export interface CategorySummaryExport { meta: ExportMeta; categories: CategorySummaryRow[] }
 
-interface CategoryLineRow { source_type: string; billed_cost: number; confidence: string; source_id: string }
+interface CategoryLineRow { source_type: string; billed_cost: number; confidence: string; data_freshness: number; source_id: string }
 
 /**
- * Groups the SAME confidence-resolved per-source line ledger.ts's own
- * headline resolution uses (best line per source by CONF_PRIORITY, excluding
- * pending/plan-estimate lines) by `cost_sources.source_type` -- a cost
- * CATEGORY in this codebase's vocabulary (subscription/hosting/domain/saas/
- * usage/manual), distinct from `charge_category` (usage/subscription/
+ * Groups the SAME confidence-resolved per-source figure ledger.ts's own
+ * headline resolution uses (resolveSourceTotal by CONF_PRIORITY -- winning
+ * class per source, SUMMED across its distinct charges, excluding
+ * pending/plan-estimate lines; COS-CORE-M1: a local pick-one reduce here
+ * drifted from the dec9ae64 summing fix) by `cost_sources.source_type` -- a
+ * cost CATEGORY in this codebase's vocabulary (subscription/hosting/domain/
+ * saas/usage/manual), distinct from `charge_category` (usage/subscription/
  * purchase/tax/credit/adjustment).
  */
-function resolveCategorySummary(db: Database.Database, win: ReturnType<typeof monthWindow>): CategorySummaryRow[] {
+function resolveCategorySummary(db: Database.Database, win: ReturnType<typeof monthWindow>, now: number): CategorySummaryRow[] {
   const rows = db.prepare(`
-    SELECT cs.source_type as source_type, cli.billed_cost as billed_cost, cli.confidence as confidence, cli.source_id as source_id
+    SELECT cs.source_type as source_type, cli.billed_cost as billed_cost, cli.confidence as confidence,
+           cli.data_freshness as data_freshness, cli.source_id as source_id
     FROM cost_line_items cli JOIN cost_sources cs ON cs.id = cli.source_id
     WHERE cli.charge_period_start < @end AND cli.charge_period_end > @start AND cli.voided_at IS NULL
       AND cli.confidence NOT IN ('pending_permission', 'provider_plan_estimate')
   `).all({ start: win.start, end: win.end }) as CategoryLineRow[]
-  const bySource = new Map<string, CategoryLineRow>()
+  const bySource = new Map<string, CategoryLineRow[]>()
   for (const r of rows) {
-    const cur = bySource.get(r.source_id)
-    if (!cur || (CONF_PRIORITY[r.confidence] || 0) > (CONF_PRIORITY[cur.confidence] || 0)) bySource.set(r.source_id, r)
+    const arr = bySource.get(r.source_id); if (arr) arr.push(r); else bySource.set(r.source_id, [r])
   }
   const byCategory = new Map<string, number>()
-  for (const r of bySource.values()) byCategory.set(r.source_type, round2((byCategory.get(r.source_type) || 0) + r.billed_cost))
+  for (const ls of bySource.values()) {
+    const resolved = resolveSourceTotal(ls, now, c => CONF_PRIORITY[c] || 0)
+    byCategory.set(resolved.source_type, round2((byCategory.get(resolved.source_type) || 0) + resolved.billed_cost))
+  }
   return [...byCategory.entries()].map(([source_type, spend]) => ({ source_type, spend })).sort((a, b) => b.spend - a.spend)
 }
 
 export function exportCategorySummary(db: Database.Database, now: number, opts: { month?: string } = {}): CategorySummaryExport {
   const win = monthWindow(now, opts.month)
-  return { meta: buildMeta('category_summary', now, opts), categories: resolveCategorySummary(db, win) }
+  return { meta: buildMeta('category_summary', now, opts), categories: resolveCategorySummary(db, win, now) }
 }
 
 export function categorySummaryToCsv(rows: CategorySummaryRow[]): string {

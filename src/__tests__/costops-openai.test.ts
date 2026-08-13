@@ -163,4 +163,45 @@ describe('openaiCollector + syncOpenAiCollector (offline stub, no live call)', (
     expect(r.ok).toBe(true)
     expect((db.prepare("SELECT billed_cost FROM cost_line_items WHERE source_id='openai-api'").get() as { billed_cost: number }).billed_cost).toBe(4.0 * 360)
   })
+
+  // COS-OPS-H5: the Costs API declares has_more/next_page -- before the cursor
+  // was followed, a paged response imported only its first page as the
+  // authoritative provider_api actual (a silent monthly under-count).
+  it('COS-OPS-H5: follows the has_more/next_page cursor and sums ALL pages into the month line', async () => {
+    const db = getDb()
+    const now = Math.floor(Date.UTC(2026, 6, 10) / 1000)
+    const page1 = { ...fixturePage([1.5, 2.0]), has_more: true, next_page: 'cursor-page-2' }
+    const page2 = { ...fixturePage([0.5]), has_more: false, next_page: null }
+    const urls: string[] = []
+    const r = await syncOpenAiCollector(db, now, {
+      apiKey: 'sk-admin-stub', fxUsdHuf: 360,
+      httpGetJson: async (url) => {
+        urls.push(url)
+        return url.includes('page=cursor-page-2') ? page2 : page1
+      },
+    })
+    expect(r.ok).toBe(true)
+    expect(urls).toHaveLength(2)
+    expect(urls[1]).toContain('page=cursor-page-2')
+    const line = db.prepare("SELECT billed_cost FROM cost_line_items WHERE source_id='openai-api'").get() as { billed_cost: number }
+    // (1.5 + 2.0 + 0.5) USD * 360 -- both pages, not just the first.
+    expect(line.billed_cost).toBe(Math.round(4.0 * 360 * 100) / 100)
+  })
+
+  it('COS-OPS-H5: runaway pagination FAILS the run (error, nothing imported) instead of silently booking a partial month', async () => {
+    const db = getDb()
+    const now = Math.floor(Date.UTC(2026, 6, 10) / 1000)
+    let calls = 0
+    const r = await syncOpenAiCollector(db, now, {
+      apiKey: 'sk-admin-stub', fxUsdHuf: 360,
+      httpGetJson: async () => {
+        calls++
+        return { ...fixturePage([1.0]), has_more: true, next_page: `cursor-${calls}` }
+      },
+    })
+    expect(r.ok).toBe(false)
+    expect(r.status).toBe('error')
+    expect(calls).toBeLessThanOrEqual(41) // bounded, not an infinite loop
+    expect((db.prepare("SELECT COUNT(*) c FROM cost_line_items WHERE source_id='openai-api'").get() as { c: number }).c).toBe(0)
+  })
 })

@@ -227,4 +227,55 @@ describe('captureRecommendations persistence round-trip', () => {
     const expiredRow = listRecommendations(db, { status: 'expired' }).find(r => r.type === 'duplicate_hosting_saas')
     expect(expiredRow).toBeDefined()
   })
+
+  // COS-OPS-C1: an expired recommendation being re-detected used to be routed
+  // into a plain INSERT against the UNIQUE dedup_key -- so the FIRST capture
+  // after the ~90-day expiry threw SQLITE_CONSTRAINT_UNIQUE and (inserts
+  // running first, no transaction) killed every other recommendation's
+  // touch/resolve/expire in the same run, on every subsequent daily capture.
+  it('COS-OPS-C1: detect -> expire -> re-detect on a third capture succeeds, the row is open again, and the OTHER recommendation is still processed in the same capture', () => {
+    const db = getDb()
+    const win = monthWindow(NOW)
+    // Recommendation A: the render hosting duplicate (will expire and resurface).
+    insertSource(db, 'render-hosting-1', 'render', 'hosting')
+    insertSource(db, 'render-hosting-2', 'render', 'hosting')
+    insertLine(db, { source: 'render-hosting-1', start: win.start, end: win.end, amount: 12000, confidence: 'manual', dedupKey: 'd1' })
+    insertLine(db, { source: 'render-hosting-2', start: win.start, end: win.end, amount: 8000, confidence: 'manual', dedupKey: 'd2' })
+
+    // Capture 1: A is inserted open with a short expiry.
+    captureRecommendations(db, NOW, { expirySeconds: 100 })
+
+    // Recommendation B: a netlify saas duplicate, appearing before capture 2 --
+    // its later expiry keeps it open through capture 3.
+    insertSource(db, 'netlify-saas-1', 'netlify', 'saas')
+    insertSource(db, 'netlify-saas-2', 'netlify', 'saas')
+    insertLine(db, { source: 'netlify-saas-1', start: win.start, end: win.end, amount: 6000, confidence: 'manual', dedupKey: 'n1' })
+    insertLine(db, { source: 'netlify-saas-2', start: win.start, end: win.end, amount: 4000, confidence: 'manual', dedupKey: 'n2' })
+
+    // Capture 2: A is still detected but past its expiry -> expired; B inserted open.
+    const second = captureRecommendations(db, NOW + 200, { expirySeconds: 100 })
+    expect(second.expired).toBe(1)
+    expect(second.inserted).toBe(1)
+
+    // Capture 3: A is re-detected while its row sits 'expired'. Pre-fix this
+    // threw SQLITE_CONSTRAINT_UNIQUE and B's touch never ran.
+    const third = captureRecommendations(db, NOW + 250, { expirySeconds: 100 })
+    expect(third.inserted).toBe(1) // A resurfacing, as the reconciler's "fresh record"
+    expect(third.touched).toBe(1)  // B's lifecycle still processed in the same capture
+
+    // A is a single physical row again, open, with fully reset lifecycle fields.
+    const a = db.prepare(`SELECT status, first_seen, last_seen, expires_at, status_changed_at, status_changed_by, COUNT(*) OVER () AS n FROM costops_recommendations WHERE dedup_key = 'duplicate_hosting_saas|render|hosting'`).get() as { status: string; first_seen: number; last_seen: number; expires_at: number; status_changed_at: number | null; status_changed_by: string | null; n: number }
+    expect(a.n).toBe(1)
+    expect(a.status).toBe('open')
+    expect(a.first_seen).toBe(NOW + 250)
+    expect(a.last_seen).toBe(NOW + 250)
+    expect(a.expires_at).toBe(NOW + 250 + 100)
+    expect(a.status_changed_at).toBeNull()
+    expect(a.status_changed_by).toBeNull()
+
+    // B is untouched by A's resurfacing -- still open, last_seen refreshed.
+    const b = db.prepare(`SELECT status, last_seen FROM costops_recommendations WHERE dedup_key = 'duplicate_hosting_saas|netlify|saas'`).get() as { status: string; last_seen: number }
+    expect(b.status).toBe('open')
+    expect(b.last_seen).toBe(NOW + 250)
+  })
 })

@@ -24,9 +24,7 @@ import { enrichCaseGoal } from './progression-pipeline.js'
 import type { LlmClient } from './progression-interpreter.js'
 import { readDocumentBytes } from './cos-documents.js'
 import { roundRobinByDomain } from './reader-cycle.js'
-import { effectiveSensitivity, escalateSensitivity, classifyPersonalSensitivity } from './sensitivity.js'
-import { coerceZstSensitivity } from './zst-sensitivity.js'
-import { isProviderAllowedForSensitivity, providersAllowedFor } from './provider-data-policy.js'
+import { egressTierFor, isProviderAllowedForSensitivity, providersAllowedFor } from './provider-data-policy.js'
 import type { CaseSensitivity } from './schema.js'
 
 export interface GoalEnrichmentResult {
@@ -133,26 +131,17 @@ export interface EnrichRoutes { general?: EnrichRoute | null; contracted?: Enric
  *  would have silently stopped all corporate enrichment; a pre-existing test
  *  ("covers the corporate namespace too") caught it.
  *
- *  The corporate mapping is NOT invented here. zst-sensitivity.ts already states
- *  the owner-sanctioned policy per tier, and its shape maps cleanly onto the
- *  personal scale: ZST_INTERNAL is the everyday tier and is the only one that
- *  admits the cheap `analysis_efficient` profile, exactly as PERSONAL does; every
- *  class above it is restricted to the strong profiles, as SENSITIVE_PERSONAL is.
- *  PUBLIC is PUBLIC in both. Anything unrecognised lands on the strict side
- *  through coerceZstSensitivity's own fail-closed default. */
-function tierFor(domain: 'personal' | 'zst', declared: unknown, content: string): CaseSensitivity {
-  if (domain !== 'zst') return effectiveSensitivity(declared, content)
-  const z = coerceZstSensitivity(declared)
-  const mapped: CaseSensitivity = z === 'PUBLIC' ? 'PUBLIC' : z === 'ZST_INTERNAL' ? 'PERSONAL' : 'SENSITIVE_PERSONAL'
-  // The corporate branch used to stop at the mapping and ignore the content
-  // entirely, so ZST_INTERNAL — the everyday tier almost every corporate case
-  // carries — landed on PERSONAL and was DeepSeek-eligible however the text
-  // actually read. A supplier's IBAN in the description was routed to a
-  // THIRD_PARTY provider on the strength of a tier the sender did not choose.
-  // The personal branch has always escalated on content; the declared tier is a
-  // claim in both namespaces.
-  return escalateSensitivity(mapped, classifyPersonalSensitivity(content).tier)
-}
+ *  THIS USED TO BE A PRIVATE COPY, AND THE COPY WAS THE PROBLEM (review
+ *  2026-08-12, T-1). The Reader sweep — the module this file copied `routeFor`
+ *  from — never got the same treatment, so it kept reading corporate cases with
+ *  the personal coercer. One question, two paths, one answer. The mapping now
+ *  lives in provider-data-policy.ts and both sweeps call it, with a standing
+ *  check that fails if they ever diverge again.
+ *
+ *  The shared version is also stricter than this one was: it runs the CORPORATE
+ *  content classifier as well, so an IBAN in a ZST_INTERNAL thread lifts the
+ *  tier instead of riding on the declaration alone. */
+const tierFor = egressTierFor
 
 /** §10: pick the cheapest provider CLEARED for this content, or null.
  *  Byte-for-byte the Reader's rule (reader-cycle routeFor): try the general

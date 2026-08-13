@@ -35,6 +35,20 @@ export function initBudgetAuditSchema(db: Database.Database): void {
 
 const DEFAULT_OWNER = process.env.COSTOPS_DEFAULT_OWNER || 'operator'
 
+/**
+ * COS-CORE-M3: which set of numbers a budget's current_spend/forecast was
+ * measured against. Named in the payload so no reader has to reverse-engineer
+ * it from the scope -- the whole finding was that two bases were in use and
+ * nothing said so.
+ *
+ *   all_sources_headline -- summary.all_sources, the same CONF_PRIORITY
+ *     resolution behind the dashboard's headline per-source table. Every
+ *     RESOLVED scope uses this, global included, so the parts sum to the whole.
+ *   not_resolved -- 'product'/'agent': no cost attribution exists, so there is
+ *     no basis and spend/forecast are a structural 0, not a measurement.
+ */
+export type BudgetSpendBasis = 'all_sources_headline' | 'not_resolved'
+
 export interface BudgetStatus {
   id: string
   name: string
@@ -51,6 +65,7 @@ export interface BudgetStatus {
   used_pct: number
   forecast_pct: number
   status: 'ok' | 'warning' | 'hard'
+  spend_basis: BudgetSpendBasis
   owner: string
   notes: string | null
 }
@@ -58,37 +73,63 @@ export interface BudgetStatus {
 function round2(n: number): number { return Math.round(n * 100) / 100 }
 function round4(n: number): number { return Math.round(n * 10000) / 10000 }
 
-function spendForScope(budget: BudgetEntry, summary: CostSummary): { spend: number; forecast: number } {
+type ScopeSources = CostSummary['all_sources']
+
+// A pending_permission source carries spend/forecast null (cost unreadable, never
+// a fabricated 0). It contributes nothing to any total here -- the same as it
+// contributes nothing to the headline figure the budget is read next to.
+function sumSources(sources: ScopeSources): { spend: number; forecast: number } {
+  return {
+    spend: sources.reduce((sum, s) => sum + (s.spend ?? 0), 0),
+    forecast: sources.reduce((sum, s) => sum + (s.forecast_month_end ?? 0), 0),
+  }
+}
+
+/**
+ * COS-CORE-M3 (owner decision, 2026-08-13): ONE canonical basis for every
+ * resolved scope -- summary.all_sources, the headline resolution.
+ *
+ * 'global' used to measure against summary.operational_spend while every other
+ * scope summed all_sources. Those two differ by design, not by accident:
+ * operational applies OPERATIONAL_TIER, drops a provider's manual/estimate
+ * sources once that provider has provider-derived data, and counts
+ * provider_plan_estimate lines that all_sources deliberately withholds as
+ * advisory. So the per-provider budgets never summed to the global one, and one
+ * month's spend could read `warning` on a provider budget and `ok` on global.
+ *
+ * The budget warning is displayed next to the headline spend figure on the same
+ * screen, so it must reconcile with THAT number, and "the parts sum to the
+ * whole" has to be literally true. Hence: global = the sum over the same
+ * all_sources rows the provider/category/source scopes slice.
+ *
+ * Note what this inherits, deliberately, so the invariant is exact rather than
+ * approximately true: all_sources is built from the active-or-decommissioned
+ * cost_sources rows, so decommissioned sources count in every scope (including
+ * global) and soft-disabled ones (active=0) count in none. Whatever the
+ * headline table shows is what every budget measures.
+ */
+function spendForScope(budget: BudgetEntry, summary: CostSummary): { spend: number; forecast: number; basis: BudgetSpendBasis } {
   const scope = budget.scope ?? 'global'
   if (scope === 'global') {
-    return { spend: summary.operational_spend, forecast: summary.operational_forecast_month_end }
+    return { ...sumSources(summary.all_sources), basis: 'all_sources_headline' }
   }
   if (scope === 'provider') {
-    const sources = summary.all_sources.filter(s => s.provider === budget.scope_ref)
-    return {
-      spend: sources.reduce((sum, s) => sum + (s.spend ?? 0), 0),
-      forecast: sources.reduce((sum, s) => sum + (s.forecast_month_end ?? 0), 0),
-    }
+    return { ...sumSources(summary.all_sources.filter(s => s.provider === budget.scope_ref)), basis: 'all_sources_headline' }
   }
   if (scope === 'category') {
-    const sources = summary.all_sources.filter(s => s.source_type === budget.scope_ref)
-    return {
-      spend: sources.reduce((sum, s) => sum + (s.spend ?? 0), 0),
-      forecast: sources.reduce((sum, s) => sum + (s.forecast_month_end ?? 0), 0),
-    }
+    return { ...sumSources(summary.all_sources.filter(s => s.source_type === budget.scope_ref)), basis: 'all_sources_headline' }
   }
   if (scope === 'source') {
-    const row = summary.all_sources.find(s => s.source_id === budget.scope_ref)
-    return { spend: row?.spend ?? 0, forecast: row?.forecast_month_end ?? 0 }
+    return { ...sumSources(summary.all_sources.filter(s => s.source_id === budget.scope_ref)), basis: 'all_sources_headline' }
   }
   // 'product' | 'agent': explicitly out of GAP-11 scope -- never resolved to
   // a real number here (no agent/task/product cost attribution exists).
-  return { spend: 0, forecast: 0 }
+  return { spend: 0, forecast: 0, basis: 'not_resolved' }
 }
 
 /** Resolve one budget entry's live status against an already-computed CostSummary. Pure, no I/O. */
 export function resolveBudgetStatus(budget: BudgetEntry, summary: CostSummary): BudgetStatus {
-  const { spend, forecast } = spendForScope(budget, summary)
+  const { spend, forecast, basis } = spendForScope(budget, summary)
   const warning_threshold = budget.warning_threshold ?? 0.8
   const hard_threshold = budget.hard_threshold ?? 1.0
   const used_pct = budget.amount > 0 ? spend / budget.amount : 0
@@ -102,6 +143,7 @@ export function resolveBudgetStatus(budget: BudgetEntry, summary: CostSummary): 
     warning_threshold, hard_threshold,
     current_spend: round2(spend), forecast: round2(forecast), variance: round2(forecast - budget.amount),
     used_pct: round4(used_pct), forecast_pct: round4(forecast_pct), status,
+    spend_basis: basis,
     owner: budget.owner ?? DEFAULT_OWNER, notes: budget.notes ?? null,
   }
 }

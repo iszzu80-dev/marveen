@@ -49,6 +49,19 @@ describe('anthropic mapper (pure, offline)', () => {
     expect(mapAnthropicCostReport({ data: [] }, { periodStart: w.start, periodEnd: w.end, fxUsdHuf: FX, idSalt: 's', now: NOW })).toHaveLength(0)
   })
 
+  // Card 23912ca4 / COS-OPS-H4: the fx=0 guard originally landed on the OpenAI
+  // mapper only -- this one kept storing usd*0=0 as an HUF provider_api line,
+  // which outranked the real manual estimate in the reconcile.
+  it('a zero fxUsdHuf produces NO line -- real USD spend is not fabricated into 0 HUF', () => {
+    const w = monthWindow(NOW)
+    expect(mapAnthropicCostReport(FIXTURE, { periodStart: w.start, periodEnd: w.end, fxUsdHuf: 0, idSalt: 'salt', now: NOW })).toHaveLength(0)
+  })
+
+  it('a negative fxUsdHuf is treated the same as zero -- no fabricated line', () => {
+    const w = monthWindow(NOW)
+    expect(mapAnthropicCostReport(FIXTURE, { periodStart: w.start, periodEnd: w.end, fxUsdHuf: -1, idSalt: 'salt', now: NOW })).toHaveLength(0)
+  })
+
   // Card 320c477a: data_freshness_at must be the INGEST instant (opts.now),
   // never the bucket's ending_at -- the anthropic-cost-report mapper carried
   // the exact same defect as the openai one (both fell back to a period-end

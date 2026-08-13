@@ -8,7 +8,7 @@
 // boot seam (startCostOpsBackgroundTasks) for the daily capture cadence.
 
 import type Database from 'better-sqlite3'
-import { monthWindow, CONF_PRIORITY, type MonthWindow } from './ledger.js'
+import { monthWindow, CONF_PRIORITY, resolveSourceTotal, type MonthWindow } from './ledger.js'
 import { resolveSourceForecast, forecastSnapshotDedupKey, type ForecastResult, type ForecastContext } from './forecast.js'
 import type { BalanceSnapshot } from './collectors/deepseek.js'
 
@@ -22,11 +22,12 @@ interface LineRow {
   billed_cost: number
   charge_category: string
   confidence: string
+  data_freshness: number
 }
 
-function resolveBestLinePerSource(db: Database.Database, win: MonthWindow): Map<string, LineRow> {
+function resolveBestLinePerSource(db: Database.Database, win: MonthWindow, now: number): Map<string, LineRow> {
   const lines = db.prepare(`
-    SELECT source_id, billed_cost, charge_category, confidence
+    SELECT source_id, billed_cost, charge_category, confidence, data_freshness
     FROM cost_line_items
     WHERE charge_period_start < @end AND charge_period_end > @start
       AND voided_at IS NULL AND confidence NOT IN ('pending_permission', 'provider_plan_estimate')
@@ -37,7 +38,11 @@ function resolveBestLinePerSource(db: Database.Database, win: MonthWindow): Map<
   }
   const resolved = new Map<string, LineRow>()
   for (const [sid, ls] of bySource) {
-    resolved.set(sid, ls.reduce((a, b) => (CONF_PRIORITY[b.confidence] || 0) > (CONF_PRIORITY[a.confidence] || 0) ? b : a))
+    // COS-CORE-M1: ledger.ts's shared resolution+summing seam -- a month with
+    // two same-confidence invoices forecasts from their SUM as its MTD basis,
+    // the same figure getCostSummary's headline shows, not from whichever one
+    // a local pick-one reduce happened to keep.
+    resolved.set(sid, resolveSourceTotal(ls, now, c => CONF_PRIORITY[c] || 0))
   }
   return resolved
 }
@@ -84,7 +89,7 @@ function insertSnapshot(db: Database.Database, opts: { sourceId: string | null; 
 export function captureForecastSnapshots(db: Database.Database, now: number): StoredForecast[] {
   const win = monthWindow(now)
   const sources = db.prepare(`SELECT id, provider FROM cost_sources WHERE active = 1 AND lifecycle_state != 'decommissioned'`).all() as SourceRow[]
-  const bestLine = resolveBestLinePerSource(db, win)
+  const bestLine = resolveBestLinePerSource(db, win, now)
   const results: StoredForecast[] = []
   let total = 0
 

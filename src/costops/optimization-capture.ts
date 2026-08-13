@@ -227,27 +227,44 @@ export interface RecommendationCaptureSummary {
  * whose condition disappeared, and expire unaddressed ones past their
  * expires_at. Requires `initOptimizationSchema` to have already run (Mason's
  * seam call) -- not invoked here.
+ *
+ * COS-OPS-C1: reconcileRecommendations routes a candidate matching an
+ * 'expired' row into toInsert ("gets a fresh record") -- but dedup_key is
+ * UNIQUE, so a plain INSERT here threw SQLITE_CONSTRAINT_UNIQUE on the first
+ * re-detection after the ~90-day expiry, and (inserts running first, no
+ * transaction) killed every OTHER recommendation's touch/resolve/expire in
+ * the same capture, every day, forever. Fixed two ways, mirroring
+ * applyAlertReconciliation (alerts-store.ts): the insert is now an
+ * ON CONFLICT(dedup_key) full-field reset (status back to 'open', fresh
+ * first_seen/last_seen/expires_at/created_at, human decision fields cleared
+ * -- the documented "fresh record, not a silent un-expire", realized on the
+ * one physical row the UNIQUE key allows), and all four write phases run in
+ * one db.transaction() so a failure in any phase leaves no partial capture.
  */
 export function captureRecommendations(db: Database.Database, now: number, opts: { expirySeconds?: number } = {}): RecommendationCaptureSummary {
   const existing = loadExistingRecommendations(db)
   const candidates = gatherRecommendationCandidates(db, now)
   const result = reconcileRecommendations(existing, candidates, now, opts.expirySeconds)
 
+  // Plain insert for a never-seen dedup_key; for a key whose row is 'expired'
+  // (the only status reconcileRecommendations routes back into toInsert), a
+  // full reset of every lifecycle + evidence field -- equivalent to the fresh
+  // record the reconciler asked for.
   const insertStmt = db.prepare(`
     INSERT INTO costops_recommendations
       (type, evidence_json, dedup_key, current_monthly_cost, estimated_monthly_saving, estimated_annual_saving, switching_cost, risk, confidence, human_decision_required, rollback_note, status, status_changed_at, status_changed_by, expires_at, first_seen, last_seen, created_at)
     VALUES (@type, @evidence_json, @dedup_key, @current_monthly_cost, @estimated_monthly_saving, @estimated_annual_saving, @switching_cost, @risk, @confidence, @human_decision_required, @rollback_note, 'open', NULL, NULL, @expires_at, @first_seen, @last_seen, @now)
+    ON CONFLICT(dedup_key) DO UPDATE SET
+      type=excluded.type, evidence_json=excluded.evidence_json,
+      current_monthly_cost=excluded.current_monthly_cost,
+      estimated_monthly_saving=excluded.estimated_monthly_saving,
+      estimated_annual_saving=excluded.estimated_annual_saving,
+      switching_cost=excluded.switching_cost, risk=excluded.risk, confidence=excluded.confidence,
+      human_decision_required=excluded.human_decision_required, rollback_note=excluded.rollback_note,
+      status='open', status_changed_at=NULL, status_changed_by=NULL,
+      expires_at=excluded.expires_at, first_seen=excluded.first_seen, last_seen=excluded.last_seen,
+      created_at=excluded.created_at
   `)
-  for (const r of result.toInsert) {
-    insertStmt.run({
-      type: r.type, evidence_json: serializeEvidence(r.evidence), dedup_key: r.dedup_key,
-      current_monthly_cost: r.current_monthly_cost, estimated_monthly_saving: r.estimated_monthly_saving,
-      estimated_annual_saving: r.estimated_annual_saving, switching_cost: r.switching_cost,
-      risk: r.risk, confidence: r.confidence, human_decision_required: r.human_decision_required,
-      rollback_note: r.rollback_note, expires_at: r.expires_at, first_seen: r.first_seen, last_seen: r.last_seen, now,
-    })
-  }
-
   const touchStmt = db.prepare(`
     UPDATE costops_recommendations SET
       last_seen=@last_seen, evidence_json=@evidence_json, current_monthly_cost=@current_monthly_cost,
@@ -255,20 +272,31 @@ export function captureRecommendations(db: Database.Database, now: number, opts:
       switching_cost=@switching_cost, risk=@risk, confidence=@confidence
     WHERE dedup_key=@dedup_key
   `)
-  for (const t of result.toTouch) {
-    touchStmt.run({
-      dedup_key: t.dedup_key, last_seen: t.patch.last_seen, evidence_json: serializeEvidence(t.patch.evidence),
-      current_monthly_cost: t.patch.current_monthly_cost, estimated_monthly_saving: t.patch.estimated_monthly_saving,
-      estimated_annual_saving: t.patch.estimated_annual_saving, switching_cost: t.patch.switching_cost,
-      risk: t.patch.risk, confidence: t.patch.confidence,
-    })
-  }
-
   const resolveStmt = db.prepare(`UPDATE costops_recommendations SET status='resolved' WHERE dedup_key=?`)
-  for (const r of result.toResolve) resolveStmt.run(r.dedup_key)
-
   const expireStmt = db.prepare(`UPDATE costops_recommendations SET status='expired' WHERE dedup_key=?`)
-  for (const e of result.toExpire) expireStmt.run(e.dedup_key)
+
+  const tx = db.transaction(() => {
+    for (const r of result.toInsert) {
+      insertStmt.run({
+        type: r.type, evidence_json: serializeEvidence(r.evidence), dedup_key: r.dedup_key,
+        current_monthly_cost: r.current_monthly_cost, estimated_monthly_saving: r.estimated_monthly_saving,
+        estimated_annual_saving: r.estimated_annual_saving, switching_cost: r.switching_cost,
+        risk: r.risk, confidence: r.confidence, human_decision_required: r.human_decision_required,
+        rollback_note: r.rollback_note, expires_at: r.expires_at, first_seen: r.first_seen, last_seen: r.last_seen, now,
+      })
+    }
+    for (const t of result.toTouch) {
+      touchStmt.run({
+        dedup_key: t.dedup_key, last_seen: t.patch.last_seen, evidence_json: serializeEvidence(t.patch.evidence),
+        current_monthly_cost: t.patch.current_monthly_cost, estimated_monthly_saving: t.patch.estimated_monthly_saving,
+        estimated_annual_saving: t.patch.estimated_annual_saving, switching_cost: t.patch.switching_cost,
+        risk: t.patch.risk, confidence: t.patch.confidence,
+      })
+    }
+    for (const r of result.toResolve) resolveStmt.run(r.dedup_key)
+    for (const e of result.toExpire) expireStmt.run(e.dedup_key)
+  })
+  tx()
 
   return { candidates: candidates.length, inserted: result.toInsert.length, touched: result.toTouch.length, resolved: result.toResolve.length, expired: result.toExpire.length }
 }

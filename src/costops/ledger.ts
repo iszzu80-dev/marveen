@@ -10,6 +10,7 @@ import type Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
 import type { CostOpsConfig, CostConfidence } from './config.js'
 import { getTokenCostEstimate, type PricingConfig, type TokenCostEstimate } from './pricing.js'
+import { isFailureStatus, SQL_FAILURE_STATUS_LIST, SQL_HEALTH_STATUS_LIST } from './collectors/types.js'
 
 // ---- month math (UTC, deterministic given `now`) ---------------------------
 
@@ -194,13 +195,33 @@ export function resolveSourceWinners<T extends { confidence: string; data_freshn
 /** Sum a resolved-winners group into one line, carrying the shared confidence
  *  and the group's own metadata (from the first winner), with billed_cost
  *  summed across every distinct charge and data_freshness the freshest seen. */
-function sumWinners<T extends { billed_cost: number; data_freshness: number }>(winners: T[]): T {
+export function sumWinners<T extends { billed_cost: number; data_freshness: number }>(winners: T[]): T {
   if (winners.length === 1) return winners[0]
   return {
     ...winners[0],
     billed_cost: winners.reduce((s, l) => s + l.billed_cost, 0),
     data_freshness: winners.reduce((m, l) => Math.max(m, l.data_freshness), winners[0].data_freshness),
   }
+}
+
+/**
+ * COS-CORE-M1 (extends card dec9ae64): the ONE resolution-then-summing seam
+ * for "what is this source's number this month". The dec9ae64 fix landed in
+ * this file's two resolvers, but THREE sibling copies elsewhere
+ * (reconciliation.ts, forecast-capture.ts, export.ts) still hand-rolled a
+ * pick-one reduce -- so a month with two actual_invoice receipts summed here
+ * and picked-one everywhere else, and the surfaces disagreed again, one seam
+ * further out. Every caller resolving a source's per-month lines must go
+ * through this function (or resolveSourceWinners+sumWinners directly), never
+ * a local reduce. `lines` must be non-empty -- an empty month is the
+ * caller's no_data/null case, never a fabricated 0 from here.
+ */
+export function resolveSourceTotal<T extends { confidence: string; billed_cost: number; data_freshness: number; source_type?: string }>(
+  lines: T[],
+  now: number,
+  tierOf: (confidence: string) => number,
+): T {
+  return sumWinners(resolveSourceWinners(lines, now, tierOf))
 }
 
 /**
@@ -290,11 +311,29 @@ export function confidenceBucket(c: CostConfidence): CostBucket {
 
 // ---- write path: reflect config fixed costs into the ledger (idempotent) -----
 
+// LIKE-escape for the corrected-fixed-line probe below: '%'/'_' are LIKE
+// wildcards and a source_id is operator-supplied config text, so both (and
+// the escape char itself) must match literally, never as patterns.
+function escapeLike(s: string): string {
+  return s.replace(/[\\%_]/g, ch => `\\${ch}`)
+}
+
 /**
  * Upsert the config's fixed/manual monthly costs as cost_line_items for the
  * target month, and upsert their cost_sources. Idempotent via a stable
  * dedup_key (`fixed|<source_id>|<YYYY-MM>`) so re-running never duplicates.
  * Returns the number of line items written/updated.
+ *
+ * Two writes this function must NOT make (both found by the 2026-08-12
+ * review, COS-CORE-H1/C1 -- this sync runs as a side effect of every
+ * GET /api/costs/summary read, so "merely looking at the dashboard" was
+ * performing them):
+ * - a CLOSED month is an immutable snapshot (GAP-13): a config edit after
+ *   close must not rewrite the closed month's rows on the next view. The
+ *   whole sync no-ops for a closed month; 'provisional'/'reopened' keep
+ *   open-month write rules, same as every other guarded door.
+ * - a source+month whose fixed line was superseded by a CORRECTION must not
+ *   be re-inserted (see the per-entry probe in the loop below).
  */
 export function syncFixedCostsToLedger(
   db: Database.Database,
@@ -303,6 +342,26 @@ export function syncFixedCostsToLedger(
   monthKey?: string,
 ): number {
   const win = monthWindow(now, monthKey)
+  // GAP-13 write-guard. The status probe is inlined rather than importing
+  // period-close.ts's checkPeriodWritable: period-close.ts imports
+  // getCostSummary/monthWindow from this file, and this module deliberately
+  // stays at the bottom of that import stack (same file-local-duplication
+  // convention fx.ts documents for round2).
+  const periodRow = db.prepare(`SELECT status FROM period_status WHERE month = ?`).get(win.key) as { status: string } | undefined
+  if (periodRow?.status === 'closed') return 0
+  // COS-CORE-C1: when correction.ts voids a row it renames the dedup_key by
+  // appending '|corrected|<ts>' (the plain column-level UNIQUE on dedup_key
+  // has to free the slot). Freeing the slot is exactly what let this upsert
+  // re-insert the config amount on the NEXT summary read and double-book the
+  // month next to the corrected figure. The renamed key doubles as the
+  // durable record that a correction chain now owns this source+month, so
+  // its presence -- at the root; deeper links keep their own 'correction|…'
+  // keys -- is the skip signal, however long the chain has since grown.
+  const correctedProbe = db.prepare(`
+    SELECT 1 FROM cost_line_items
+    WHERE voided_at IS NOT NULL AND dedup_key LIKE @pattern ESCAPE '\\'
+    LIMIT 1
+  `)
   const upsertSource = db.prepare(`
     INSERT INTO cost_sources (id, name, provider, source_type, currency, active, created_at, updated_at)
     VALUES (@id, @name, @provider, @source_type, @currency, 1, @now, @now)
@@ -332,12 +391,18 @@ export function syncFixedCostsToLedger(
         id: e.source_id, name: e.name, provider: e.provider,
         source_type: e.source_type, currency: e.currency ?? config.currency, now,
       })
+      const dedupKey = `fixed|${e.source_id}|${win.key}`
+      // COS-CORE-C1 (see the prepared probe above): the correction chain's
+      // newest link -- e.g. an invoiced actual -- is this source+month's
+      // number now; the config figure stays out until the month rolls over
+      // to a fresh dedup slot. Per source+month, never a whole-sync skip.
+      if (correctedProbe.get({ pattern: `${escapeLike(dedupKey)}|corrected|%` })) continue
       upsertLine.run({
         source_id: e.source_id, start: win.start, end: win.end,
         charge_category: e.charge_category ?? 'subscription', service_name: e.name,
         billed_cost: e.amount, currency: e.currency ?? config.currency,
         confidence: e.confidence ?? 'manual', now,
-        dedup_key: `fixed|${e.source_id}|${win.key}`,
+        dedup_key: dedupKey,
       })
       count++
     }
@@ -418,7 +483,8 @@ export interface CostSummary {
   estimated_total_with_token_cost: number
   // v0.3: per-source estimate-vs-actual (only sources that have a provider_api line).
   reconcile: Array<{ source_id: string; estimate: number; actual: number; variance: number; resolved_confidence: string }>
-  // v0.3/v0.5: last collector run per provider + sync state (ok/stale/failed).
+  // v0.3/v0.5: last collector run per provider + sync state (ok/stale/failed/no_data --
+  // 'no_data' = the provider has only ever produced benign runs, see collectors/types.ts).
   provider_sync: Array<{ provider: string; collector_name: string; status: string; imported_count: number; data_freshness_at: number | null; last_sync: number; last_success: number | null; last_failed: number | null; data_age_secs: number | null; current_period: string; previous_period_coverage: boolean; stale: boolean; error_code: string | null }>
   // v0.3/v0.5 Render plan-based estimate (ADVISORY -- NOT in current_spend). null until a Render import.
   render_plan: {
@@ -718,29 +784,65 @@ export function getCostSummary(
   // v0.3/v0.5 provider sync status: the latest run per provider + last ok/failed +
   // derived status (ok / stale / failed / no_data) + data age + period coverage.
   const STALE_SECS = 3 * 24 * 3600
+  // Latest run per provider REGARDLESS of status: provider visibility + "when
+  // did the sync loop last tick" (last_sync).
   const latestRows = db.prepare(`
     SELECT provider, collector_name, status, imported_count, data_freshness_at, started_at, error_code
     FROM import_runs r
     WHERE started_at = (SELECT MAX(started_at) FROM import_runs WHERE provider = r.provider)
     GROUP BY provider
   `).all() as Array<{ provider: string; collector_name: string; status: string; imported_count: number; data_freshness_at: number | null; started_at: number; error_code: string | null }>
+  // COS-OPS-H3 / COS-CORE-M2: sync HEALTH is derived from the latest
+  // HEALTH-BEARING run (ok or a real failure) -- benign rows
+  // (skipped/locked/dry_run, see collectors/types.ts) carry no evidence
+  // either way, so an ok -> skipped sequence stays ok and an error -> skipped
+  // sequence stays failed. Keyed per (provider, collector_name) because one
+  // provider can run two collectors on different cadences (anthropic: hourly
+  // usage snapshot + daily cost report); a per-provider "latest row" would
+  // alternate between them and flap the status. A provider is 'failed' when
+  // ANY of its collectors' latest health-bearing run is a failure -- stable
+  // until that same collector produces a newer ok.
+  const healthRows = db.prepare(`
+    SELECT provider, collector_name, status, imported_count, data_freshness_at, started_at, error_code
+    FROM import_runs r
+    WHERE status IN (${SQL_HEALTH_STATUS_LIST})
+      AND started_at = (SELECT MAX(started_at) FROM import_runs
+                        WHERE provider = r.provider AND collector_name = r.collector_name
+                          AND status IN (${SQL_HEALTH_STATUS_LIST}))
+    GROUP BY provider, collector_name
+  `).all() as Array<{ provider: string; collector_name: string; status: string; imported_count: number; data_freshness_at: number | null; started_at: number; error_code: string | null }>
+  const healthByProvider = new Map<string, typeof healthRows>()
+  for (const h of healthRows) {
+    const list = healthByProvider.get(h.provider)
+    if (list) list.push(h); else healthByProvider.set(h.provider, [h])
+  }
   const lastOkStmt = db.prepare(`SELECT MAX(started_at) t FROM import_runs WHERE provider = ? AND status = 'ok'`)
-  const lastFailStmt = db.prepare(`SELECT MAX(started_at) t FROM import_runs WHERE provider = ? AND status IN ('error','failed','partial','rate_limited')`)
+  const lastFailStmt = db.prepare(`SELECT MAX(started_at) t FROM import_runs WHERE provider = ? AND status IN (${SQL_FAILURE_STATUS_LIST})`)
   const prevProviders = new Set(prevRows.map(l => providerBySource.get(l.source_id) || 'other'))
   const provider_sync = latestRows.map(r => {
     const lastOk = (lastOkStmt.get(r.provider) as { t: number | null }).t || null
     const lastFailed = (lastFailStmt.get(r.provider) as { t: number | null }).t || null
-    // "stale" means we have not SYNCED recently (not about the billing-period age).
-    const syncAge = now - r.started_at
-    const stale = syncAge > STALE_SECS
-    const status = r.status !== 'ok' ? 'failed' : (stale ? 'stale' : 'ok')
+    const health = (healthByProvider.get(r.provider) ?? []).slice().sort((a, b) => b.started_at - a.started_at)
+    const failing = health.find(h => isFailureStatus(h.status)) ?? null
+    const latestHealth = health[0] ?? null
+    // Representative row for the detail fields: the (most recent) failing
+    // collector when failed, else the latest health-bearing row; a provider
+    // with ONLY benign history falls back to its latest (benign) run and
+    // reports 'no_data' -- it has produced no sync-health evidence at all.
+    const rep = failing ?? latestHealth ?? r
+    // "stale" means no health-bearing SYNC recently (not the billing-period
+    // age) -- a benign skipped/locked/dry_run tick does not refresh it,
+    // because nothing landed.
+    const syncAge = now - (latestHealth?.started_at ?? r.started_at)
+    const stale = latestHealth != null && syncAge > STALE_SECS
+    const status = failing ? 'failed' : latestHealth ? (stale ? 'stale' : 'ok') : 'no_data'
     return {
-      provider: r.provider, collector_name: r.collector_name, status,
-      imported_count: r.imported_count, data_freshness_at: r.data_freshness_at,
+      provider: r.provider, collector_name: rep.collector_name, status,
+      imported_count: rep.imported_count, data_freshness_at: rep.data_freshness_at,
       last_sync: r.started_at, last_success: lastOk, last_failed: lastFailed,
       data_age_secs: syncAge,
       current_period: win.key, previous_period_coverage: prevProviders.has(r.provider),
-      stale, error_code: r.error_code,
+      stale, error_code: rep.error_code,
     }
   })
 

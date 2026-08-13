@@ -1,7 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import {
+  MAX_AUTO_FALLBACKS_PER_PACKAGE,
+  MAX_FALLBACK_CANDIDATES,
+  canAutoFallback,
+} from '../capacity-routing.js'
 import {
   DEFAULT_OPTIMIZATION_CONFIG,
   PRESET_MODULES,
@@ -31,12 +36,7 @@ describe('optimization-config', () => {
     masterEnabled: true,
     preset: 'active',
     modules: { ...PRESET_MODULES.active },
-    routing: {
-      automaticFallback: true,
-      trustedProvidersOnly: true,
-      maxFallbacksPerProfile: 2,
-      maxAutomaticFallbacksPerDispatch: 1,
-    },
+    routing: { automaticFallback: true },
     ui: {
       defaultWindow: '30d',
       showAllocationCost: true,
@@ -173,6 +173,105 @@ describe('optimization-config', () => {
       expect(result.config.modules.runtimeRouting).toBe(false)
       expect(result.config.modules.recommendations).toBe(false)
       expect(result.config.preset).toBe('custom')
+    })
+  })
+
+  // OPT-H2 remainder (review 2026-08-12, closed 2026-08-13). Three routing
+  // knobs were deleted because nothing read them: `trustedProvidersOnly`,
+  // `maxFallbacksPerProfile`, `maxAutomaticFallbacksPerDispatch`. The risk of a
+  // deletion like this is twofold -- an existing on-disk config could stop
+  // loading, and a later change could quietly reintroduce the fields as
+  // decoration. Both are pinned here.
+  describe('OPT-H2: the routing block has exactly one knob', () => {
+    it('HEADLINE: the deleted knob names appear in no CODE under src/ or web/', () => {
+      // Asserted on the source because the defect class is an ABSENCE of
+      // readers -- a re-added field would pass every behavioural test in this
+      // file while advertising a control that controls nothing.
+      //
+      // Comments are stripped first, on purpose: the names SHOULD still be
+      // written down in the narrative comments that record why they were
+      // deleted (optimization-config.ts, optimization-config-audit.ts). Losing
+      // that explanation is how a deleted knob gets helpfully re-added.
+      const stripComments = (text: string): string => text
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/(^|[^:])\/\/.*$/gm, '$1')
+      const dead = ['trustedProvidersOnly', 'maxFallbacksPerProfile', 'maxAutomaticFallbacksPerDispatch']
+      const offenders: string[] = []
+      const walk = (start: string): void => {
+        for (const entry of readdirSync(start, { withFileTypes: true })) {
+          const full = join(start, entry.name)
+          if (entry.isDirectory()) {
+            if (entry.name === 'node_modules' || entry.name === '__tests__') continue
+            walk(full)
+            continue
+          }
+          if (!/\.(ts|js)$/.test(entry.name)) continue
+          const code = stripComments(readFileSync(full, 'utf-8'))
+          for (const name of dead) if (code.includes(name)) offenders.push(`${full}: ${name}`)
+        }
+      }
+      for (const root of ['src', 'web']) walk(join(process.cwd(), root))
+      expect(offenders).toEqual([])
+    })
+
+    it('the committed example config advertises only the wired knob', () => {
+      // The example is what an operator copies. Advertising a dead field there
+      // is how a knob that controls nothing gets believed in the first place.
+      const example = JSON.parse(
+        readFileSync(join(process.cwd(), 'config-examples/optimization-config.example.json'), 'utf-8'),
+      ) as { routing: Record<string, unknown> }
+      expect(Object.keys(example.routing)).toEqual(['automaticFallback'])
+    })
+
+    it('an existing on-disk config still carrying the deleted knobs loads unchanged', () => {
+      // No migration ships with the deletion, so the normalizer has to be the
+      // migration: it whitelists field by field, and the extras simply vanish.
+      const legacy = {
+        ...activeConfig(),
+        routing: {
+          automaticFallback: true,
+          trustedProvidersOnly: true,
+          maxFallbacksPerProfile: 2,
+          maxAutomaticFallbacksPerDispatch: 1,
+        },
+      }
+      writeFileSync(configPath, JSON.stringify(legacy, null, 2) + '\n')
+
+      const result = readOptimizationConfig(configPath)
+      expect(result.valid).toBe(true)
+      expect(result.config.routing).toEqual({ automaticFallback: true })
+      expect(result.config.masterEnabled).toBe(true)
+      expect(result.config.preset).toBe('active')
+    })
+
+    it('a write cannot smuggle the deleted knobs back onto disk', () => {
+      // `next.routing` arrives from a PATCH body. Passing it through verbatim
+      // would let an untrusted caller repopulate the file with fields the code
+      // ignores -- indistinguishable, on the next read of the file by a human,
+      // from live settings.
+      writeCurrent(activeConfig())
+      const result = writeOptimizationConfig({
+        ...activeConfig(),
+        routing: {
+          automaticFallback: false,
+          trustedProvidersOnly: false,
+          maxFallbacksPerProfile: 99,
+        } as unknown as OptimizationConfig['routing'],
+      }, { path: configPath })
+
+      expect(result.ok).toBe(true)
+      expect(result.config.routing).toEqual({ automaticFallback: false })
+      const onDisk = JSON.parse(readFileSync(configPath, 'utf-8')) as OptimizationConfig
+      expect(onDisk.routing).toEqual({ automaticFallback: false })
+    })
+
+    it('the fallback ceilings stay code constants, not config', () => {
+      // The reason `maxAutomaticFallbacksPerDispatch` was deleted rather than
+      // wired: a config-settable version would let a dashboard edit RAISE a
+      // safety ceiling. capacity-routing.ts owns them and says so.
+      expect(MAX_AUTO_FALLBACKS_PER_PACKAGE).toBe(1)
+      expect(MAX_FALLBACK_CANDIDATES).toBe(2)
+      expect(canAutoFallback(MAX_AUTO_FALLBACKS_PER_PACKAGE)).toBe(false)
     })
   })
 

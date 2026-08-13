@@ -70,6 +70,12 @@ Ezek későbbi, különálló fejlesztési scope-ok.
 
 A CostOps később exportálhat szabványos költség- és budget-jeleket más moduloknak, de most nem építünk ilyen integrációt, és nem kapcsoljuk össze a routinggal.
 
+> **Frissítés (2026-08-13, review R-14).** A fenti bekezdés a CostOps saját scope-járól szól, és arra **továbbra is igaz**: a `src/costops/` egyetlen modulja sem importál a routingból, és nem hoz routing-döntést.
+>
+> Ami azóta megépült, az a **Lean Optimization** — egy külön modul (`src/optimization/`), ami a másik irányból olvassa a CostOpsot: tizenkét import `optimization → costops` irányban, visszafelé nulla. A capacity-aware routing, az automatikus fallback és a modellválasztás tehát létezik, de nem a CostOpsban, hanem fölötte.
+>
+> A rétegzés így helyes, a mondat viszont önmagában félrevezette azt, aki csak ezt a dokumentumot olvasta: „nem kapcsoljuk össze a routinggal" a CostOps kódjára vonatkozik, nem a deploymentre. A fenti out-of-scope lista ennek megfelelően olvasandó: ezek nem a Marveen tiltott képességei, hanem a CostOps modulhatárán kívüli képességek.
+
 ---
 
 ## 3. Költségfogalmak kötelező szétválasztása

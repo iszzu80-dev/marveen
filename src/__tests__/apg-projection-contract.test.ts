@@ -23,17 +23,54 @@ const base = {
   recommendationEvidenceCompleteness: null,
 }
 
+/**
+ * Where the kernel's source lives, for the cross-repo contract check.
+ *
+ * REVIEW 2026-08-13, R-10. This used to be one hardcoded path under `homedir()`
+ * with a bare `if (!existsSync(kernel)) return` in front of it — so on every
+ * machine and every CI run where the kernel is NOT checked out at exactly
+ * `~/marveen-local/apg-kernel`, the headline assertion did not run and the test
+ * reported green. The one guard on the F-8 fix was itself green-by-absence,
+ * which is the fourth entry in this file's own list of "ways a projection lied
+ * quietly".
+ *
+ * Two changes. The path is configurable (`APG_KERNEL_SRC_PATH`) and a couple of
+ * conventional sibling checkouts are tried, so it finds the kernel far more
+ * often than before; and when it genuinely cannot, the test SKIPS VISIBLY
+ * instead of passing silently.
+ */
+function kernelCheckpointsPath(): string | null {
+  const candidates = [
+    process.env.APG_KERNEL_SRC_PATH,
+    join(homedir(), 'marveen-local', 'apg-kernel', 'src', 'checkpoints.py'),
+    join(process.cwd(), '..', 'marveen-apg-kernel', 'src', 'checkpoints.py'),
+    join(homedir(), 'marveen-apg-kernel', 'src', 'checkpoints.py'),
+  ].filter((p): p is string => Boolean(p))
+  return candidates.find(p => existsSync(p)) ?? null
+}
+
 describe('F-8: the kernel result vocabulary is one contract, not two', () => {
-  it('HEADLINE: the UI list matches the kernel RESULT_VALUES', () => {
+  const kernel = kernelCheckpointsPath()
+  const withKernel = kernel ? it : it.skip
+
+  withKernel('HEADLINE: the UI list matches the kernel RESULT_VALUES', () => {
     // Two repos, one contract. The kernel renamed NOT_APPLICABLE to EXCLUDED
     // and added ERROR; the UI still matched the old name, so both new values
     // fell through to "executing".
-    const kernel = join(homedir(), 'marveen-local', 'apg-kernel', 'src', 'checkpoints.py')
-    if (!existsSync(kernel)) return // kernel not checked out here — nothing to compare against
-    const line = readFileSync(kernel, 'utf8').split('\n').find(l => l.includes('RESULT_VALUES'))
+    const line = readFileSync(kernel!, 'utf8').split('\n').find(l => l.includes('RESULT_VALUES'))
     expect(line).toBeTruthy()
     const kernelValues = [...line!.matchAll(/"([A-Z_]+)"/g)].map(m => m[1]).sort()
     expect([...APG_CHECKPOINT_RESULTS].sort()).toEqual(kernelValues)
+  })
+
+  it('the UI vocabulary is pinned even when the kernel is not checked out', () => {
+    // The half that must hold WITHOUT the sibling repo, so a machine that cannot
+    // run the comparison above is not left with no check at all. If somebody
+    // edits APG_CHECKPOINT_RESULTS, this fails and sends them to the kernel to
+    // confirm the rename really happened there too.
+    expect([...APG_CHECKPOINT_RESULTS].sort()).toEqual(
+      ['ERROR', 'EXCLUDED', 'FAIL', 'PASS', 'UNKNOWN'],
+    )
   })
 
   it('EXCLUDED is not "executing" — a gate that never ran is not work in progress', () => {

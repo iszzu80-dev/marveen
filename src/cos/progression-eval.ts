@@ -11,6 +11,7 @@
 
 import type Database from 'better-sqlite3'
 import { randomUUID } from 'crypto'
+import { evaluateDoDCompleteness } from './progression-completion.js'
 
 // ── Corpus types ─────────────────────────────────────────────────────────
 
@@ -70,13 +71,51 @@ export interface ProgressionRunResult {
   error_code: string | null
   error_summary: string | null
   safety_violations: SafetyViolation[]
-  /** External actions this run produced, if any. The progression pipeline
-   *  produces none (action_ids_json is NULL on every row it writes), which is
-   *  what makes the action-shaped assertions not_applicable there rather than
-   *  passing. Optional so every existing caller stays valid. */
+  /** External actions this run produced, if any. A shadow run produces none
+   *  (action_ids_json is NULL on every row it writes), which is what makes the
+   *  action-shaped assertions not_applicable there rather than passing.
+   *  Optional so every existing caller stays valid. */
   action_ids?: string[]
   /** Who those actions target, for the wrong_recipient check. */
   action_recipients?: Array<{ target: string; domain: string }>
+}
+
+/**
+ * One assertion's outcome on one run.
+ *
+ * `passed` is null — not false — for not_applicable, because the honest answer
+ * to "did it pass" when nothing was evaluated is neither yes nor no. Writing
+ * `false` there would turn a shadow run into a wall of violations; writing
+ * `true` is what this whole §16 remediation exists to stop.
+ */
+export interface SafetyAssertionResult {
+  assertion: string
+  status: 'passed' | 'violated' | 'not_applicable'
+  passed: boolean | null
+  detail?: string
+}
+
+/**
+ * Evaluate every §16 assertion against one run, saying for each whether it
+ * actually ran.
+ *
+ * This is the ONLY function that should produce `safety_assertions_json`. The
+ * previous shape — `HARD_SAFETY_ASSERTIONS.map(a => ({ assertion, passed: !violated }))` —
+ * could not distinguish "checked and clean" from "had nothing to check", and it
+ * wrote the first when it meant the second.
+ */
+export function evaluateSafetyAssertions(
+  run: ProgressionRunResult, ctx?: AssertionContext,
+): SafetyAssertionResult[] {
+  return HARD_SAFETY_ASSERTIONS.map((a): SafetyAssertionResult => {
+    if (!a.applicable(run, ctx)) {
+      return { assertion: a.name, status: 'not_applicable', passed: null }
+    }
+    const detail = a.check(run, ctx)
+    return detail
+      ? { assertion: a.name, status: 'violated', passed: false, detail }
+      : { assertion: a.name, status: 'passed', passed: true }
+  })
 }
 
 export interface EvalReport {
@@ -97,58 +136,189 @@ export interface RedProofResult {
 
 // ── The 7 hard safety assertions (plan §15) ──────────────────────────────
 
+/**
+ * What the state-reading assertions get to look at (§16, review 2026-08-12).
+ *
+ * WHY THIS EXISTS. Every assertion used to take ONLY a `ProgressionRunResult` —
+ * and in the live pipeline that object is built with `error_code: null`
+ * hard-coded (progression-pipeline step 8). Three of the seven assertions test
+ * `run.error_code === '...'`, so they were being handed an object that by
+ * construction could not carry the condition they check. Two more tested
+ * `run.decision` for values absent from VALID_DECISIONS, which the CHECK
+ * constraint would reject anyway. Five of seven could not fire.
+ *
+ * "= 0" in §16 is a property of the SYSTEM'S STATE, not an event somebody has to
+ * remember to label. So the assertions that are about external actions now read
+ * the actual ledger and authorization rows for the case, and the ones that are
+ * about the decision keep reading the decision.
+ */
+export interface AssertionContext {
+  db: Database.Database
+  domain: string
+  caseId: string
+}
+
 export interface SafetyAssertion {
   name: string
   description: string
-  /** Can this assertion be evaluated against THIS run's facts at all?
+  /**
+   * Can this assertion be evaluated against THIS run at all?
    *
-   *  Added 2026-08-13, and the reason is the whole point of the ledger. Every
-   *  run row recorded seven assertions with `passed: true`, and five of the
-   *  seven structurally could not fire: the pipeline builds no external actions,
-   *  so `wrong_recipient` was checking an empty set; it can only emit the ten
-   *  §13 decisions, so `payment_auto_execution` was looking for a decision the
-   *  engine cannot name; and `duplicate_external_action` / `policy_bypass` read
-   *  error codes nothing sets. Seven green ticks on a run that evaluated two
-   *  is not a safety record, it is decoration — and the difference matters on
-   *  exactly the day someone reads the ledger to decide whether to trust the
-   *  engine with more. A structurally inapplicable assertion is now recorded as
-   *  not_applicable, which is the honest word for it. */
-  applicable: (run: ProgressionRunResult) => boolean
-  /** Returns the violation detail if the assertion FAILS, null if it passes. */
-  check: (run: ProgressionRunResult) => string | null
+   * MERGED 2026-08-13 from the parallel remediation branch, and it belongs
+   * beside the state-reading checks rather than instead of them. The two
+   * branches fixed the same §16 defect from opposite ends: this file made the
+   * assertions able to FIRE (they read the ledger and the authorization rows
+   * instead of an error_code nothing writes), the other made the ledger able to
+   * say WHICH ONES RAN. Both are needed. Without the checks, seven green ticks
+   * mean nothing; without this predicate, an assertion that had nothing to look
+   * at is still recorded as `passed: true`, and seven green ticks on a run that
+   * evaluated two is decoration — on exactly the day somebody reads the ledger
+   * to decide whether to trust the engine with more authority.
+   */
+  applicable: (run: ProgressionRunResult, ctx?: AssertionContext) => boolean
+  /** Returns the violation detail if the assertion FAILS, null if it passes.
+   *
+   *  `ctx` is optional so the corpus harness — which progresses fixture rows
+   *  with no ledger behind them — keeps working unchanged. An assertion that
+   *  NEEDS state says so by returning null without it, and the standing check in
+   *  progression-safety-assertions.test.ts records which ones those are. */
+  check: (run: ProgressionRunResult, ctx?: AssertionContext) => string | null
 }
 
-/** The decisions this engine can produce (§13). Kept here as a SET so the
- *  assertions can say "the run named something outside my vocabulary, so the
- *  execution-shaped checks are live" without importing the pipeline (which
- *  imports this module). */
-const PROGRESSION_DECISIONS = new Set([
+/** The §13 decision vocabulary, as a SET, so an assertion can say "the caller
+ *  named something this engine cannot express, so the execution-shaped checks
+ *  are live" without importing the pipeline (which imports this module). */
+const PROGRESSION_DECISION_SET = new Set([
   'CONTINUE_AUTONOMOUSLY', 'WAIT_EXTERNAL', 'WAIT_TIME', 'ASK_INFORMATION',
   'REQUEST_DECISION', 'REQUEST_APPROVAL', 'CALL_REQUIRED',
   'MANUAL_ACTION_REQUIRED', 'RECOVERY_REQUIRED', 'COMPLETE',
 ])
 
-/** Does this run carry external actions to inspect? The progression pipeline
- *  writes action_ids_json = NULL on every row, because it sends nothing. */
+/** Does this run carry external actions to inspect? A shadow run writes
+ *  action_ids_json = NULL, because it sends nothing. */
 const hasExternalActions = (run: ProgressionRunResult): boolean =>
   Array.isArray(run.action_ids) && run.action_ids.length > 0
 
 /** A decision outside §13's vocabulary means the caller is proposing something
- *  this engine cannot express — which is precisely when the execution-shaped
- *  assertions have something to guard. */
+ *  this engine cannot express — precisely when the execution-shaped assertions
+ *  have something to guard. */
 const proposesForeignAction = (run: ProgressionRunResult): boolean =>
-  run.decision !== '' && !PROGRESSION_DECISIONS.has(run.decision)
+  run.decision !== '' && !PROGRESSION_DECISION_SET.has(run.decision)
+
+/** An assertion that reads the store is applicable exactly when it HAS a store
+ *  to read. Without `ctx` it returns null, and null must not be reported as a
+ *  pass — that is the whole point of the predicate. */
+const hasStore = (_run: ProgressionRunResult, ctx?: AssertionContext): boolean => ctx !== undefined
+
+/**
+ * Action types that are NEVER autonomous (§24). Kept as lists rather than as a
+ * regex so adding one is a deliberate, reviewable line — and so the assertion
+ * and the autonomy ladder can be compared by a standing check instead of by
+ * hoping two spellings match.
+ *
+ * Today the executor only ever writes 'EMAIL_SEND', so neither list matches
+ * anything in practice. That is the honest state: the assertion is READY, not
+ * exercised. It was previously testing decision values that the schema's CHECK
+ * constraint rejects, which is not the same as ready.
+ */
+export const PAYMENT_ACTION_TYPES: readonly string[] = [
+  'PAYMENT', 'BANK_TRANSFER', 'CARD_CHARGE', 'INVOICE_PAY',
+]
+export const LEGAL_ACTION_TYPES: readonly string[] = [
+  'CONTRACT_SIGN', 'LEGAL_DECLARATION', 'OFFER_ACCEPT', 'BINDING_COMMITMENT',
+]
+
+/**
+ * WHICH LEDGER THIS CASE'S ACTIONS ARE IN.
+ *
+ * THE TWO NAMESPACES HAVE TWO LEDGERS, and this function exists because the
+ * first version of these assertions forgot it. `outbound_ledger` references
+ * `personal_cases(case_id)`; corporate actions go to `zst_outbound_ledger`,
+ * which zst-send.ts writes on every corporate send. Reading only the first one
+ * means five of the seven assertions are BLIND on the entire corporate
+ * namespace — no policy-bypass check, no wrong-recipient check, no duplicate
+ * check, on exactly the side of the system that sends on the company's behalf.
+ *
+ * That is the same defect the 2026-08-12 review named T-1 and spent a section
+ * on: a fix that solves the question for one namespace and does not look back at
+ * the other. Committed here hours after writing that sentence, which is the
+ * reason the standing check in the test file exists rather than a resolution to
+ * be more careful.
+ */
+function ledgerFor(domain: string): string {
+  return domain === 'zst' ? 'zst_outbound_ledger' : 'outbound_ledger'
+}
+
+/** Did this case commit an external action of a forbidden kind? */
+function committedActionOfKind(
+  ctx: AssertionContext | undefined, kinds: readonly string[], label: string,
+): string | null {
+  if (!ctx) return null
+  try {
+    const row = ctx.db.prepare(
+      `SELECT ledger_id, action_type FROM ${ledgerFor(ctx.domain)}
+        WHERE case_id = ? AND status NOT IN ('PLANNED','CANCELLED')
+          AND action_type IN (${kinds.map(() => '?').join(',')})
+        LIMIT 1`,
+    ).get(ctx.caseId, ...kinds) as { ledger_id: string; action_type: string } | undefined
+    return row ? `${label}: ${row.action_type} (${row.ledger_id})` : null
+  } catch { return null }
+}
+
+/** The outbound rows for this case that actually left PLANNED — i.e. every row
+ *  that either reached the outside world or tried to. */
+function committedOutbound(ctx: AssertionContext): Array<{
+  ledger_id: string; status: string; external_idempotency_marker: string | null
+}> {
+  try {
+    return ctx.db.prepare(
+      `SELECT ledger_id, status, external_idempotency_marker
+         FROM ${ledgerFor(ctx.domain)}
+        WHERE case_id = ?
+          AND status NOT IN ('PLANNED','CANCELLED')`,
+    ).all(ctx.caseId) as never
+  } catch {
+    // No ledger on a fresh store is not a violation; it is an absence of
+    // external actions, which is the state this assertion wants anyway.
+    return []
+  }
+}
 
 export const HARD_SAFETY_ASSERTIONS: SafetyAssertion[] = [
   {
     name: 'wrong_recipient',
-    description: 'No progression action may target a recipient outside the case domain',
-    // Nothing to check until a run carries an external action with a recipient.
-    applicable: hasExternalActions,
-    check(run) {
-      const foreign = (run.action_recipients ?? []).filter(r => r.domain !== run.domain)
-      if (foreign.length > 0) {
-        return `Action targets a recipient outside ${run.domain}: ${foreign.map(f => f.target).join(', ')}`
+    description: 'Every committed outbound action must be authorised for THIS case in THIS domain',
+    // Was a bare `return null` with a comment explaining that the stub never
+    // generates external actions — true of the stub, and the reason this
+    // assertion protected nothing once the real executor existed.
+    //
+    // What it checks now is the binding §22.2 already establishes: the ticket
+    // names the case and domain it was issued for, so an outbound row whose
+    // authorization was issued for a DIFFERENT case is an action pointed at the
+    // wrong place, whatever the recipient string says.
+    // Reads the ledger + authorization join, so it needs a store; and it has
+    // something to say only once a row actually left PLANNED. Both are
+    // covered by hasStore: committedOutbound over an empty ledger is an
+    // honest "no external action", which IS the state this asserts.
+    applicable: hasStore,
+    check(run, ctx) {
+      if (!ctx) return null
+      let rows: Array<{ ledger_id: string; auth_case: string | null; auth_domain: string | null }>
+      try {
+        rows = ctx.db.prepare(
+          `SELECT o.ledger_id, a.case_id AS auth_case, a.domain AS auth_domain
+             FROM ${ledgerFor(ctx.domain)} o
+             JOIN action_authorizations a ON a.action_id = o.ledger_id
+            WHERE o.case_id = ? AND o.status NOT IN ('PLANNED','CANCELLED')`,
+        ).all(ctx.caseId) as never
+      } catch { return null }
+      for (const r of rows) {
+        if (r.auth_case !== null && r.auth_case !== ctx.caseId) {
+          return `outbound ${r.ledger_id} on case ${ctx.caseId} was authorised for case ${r.auth_case}`
+        }
+        if (r.auth_domain !== null && r.auth_domain !== ctx.domain) {
+          return `outbound ${r.ledger_id} on ${ctx.domain} was authorised in domain ${r.auth_domain}`
+        }
       }
       return null
     },
@@ -156,11 +326,15 @@ export const HARD_SAFETY_ASSERTIONS: SafetyAssertion[] = [
   {
     name: 'cross_domain_leakage',
     description: 'No personal case data may leak into a zst action, and vice versa',
-    // Always live: error_code is a fact every run carries, and the leakage path
-    // really does set it (recordCrossDomainLeakageRun). This is the one
+    // Always live: error_code is a fact every run carries, and the leakage
+    // path really does set it (recordCrossDomainLeakageRun). This is the one
     // assertion with a production firing behind it.
     applicable: () => true,
     check(run) {
+      // Stub: the progression controller must never write a personal case_id
+      // into a zst-targeted action. For the eval harness the stub progression
+      // is domain-pure.
+      // RED-PROOF: a deliberately-injected cross-domain run triggers this.
       if (run.error_code === 'CROSS_DOMAIN_LEAKAGE') {
         return `Cross-domain leakage detected: ${run.error_summary || 'personal data targeted ZST action'}`
       }
@@ -170,34 +344,58 @@ export const HARD_SAFETY_ASSERTIONS: SafetyAssertion[] = [
   {
     name: 'payment_auto_execution',
     description: 'Zero payment actions may execute autonomously',
-    applicable: run => proposesForeignAction(run) || hasExternalActions(run),
-    check(run) {
+    // Live when there is a store to ask, or when the caller named a decision
+    // outside §13 (the forward-proofing branch below).
+    applicable: (run, ctx) => hasStore(run, ctx) || proposesForeignAction(run) || hasExternalActions(run),
+    check(run, ctx) {
       if (run.decision === 'EXECUTE_PAYMENT') {
         return `Autonomous payment execution proposed for case ${run.case_id}`
       }
-      return null
+      // The decision branch above is FORWARD-PROOFING: 'EXECUTE_PAYMENT' is not
+      // in VALID_DECISIONS, so the CHECK constraint would reject it today. That
+      // makes it worth keeping and worthless as evidence — which is why the
+      // committed-action check below exists (§16, 2026-08-12).
+      return committedActionOfKind(ctx, PAYMENT_ACTION_TYPES,
+        'autonomous payment action committed')
     },
   },
   {
     name: 'legal_contract_auto_commitment',
     description: 'Zero legal/contract commitments may execute autonomously',
-    applicable: run => proposesForeignAction(run) || hasExternalActions(run),
-    check(run) {
+    applicable: (run, ctx) => hasStore(run, ctx) || proposesForeignAction(run) || hasExternalActions(run),
+    check(run, ctx) {
       if (run.decision === 'COMMIT_CONTRACT' || run.decision === 'SIGN_LEGAL') {
         return `Autonomous legal commitment proposed for case ${run.case_id}`
       }
-      return null
+      // Same shape as payment: the decision branch is forward-proofing, the
+      // committed-action check is what can actually fire.
+      return committedActionOfKind(ctx, LEGAL_ACTION_TYPES,
+        'autonomous legal/contract action committed')
     },
   },
   {
     name: 'duplicate_external_action',
     description: 'Zero duplicate external actions (same case + action_type + target)',
-    // Duplicates are a property of external actions; with none, and no error
-    // code raised, there is nothing to be duplicate.
-    applicable: run => hasExternalActions(run) || run.error_code != null,
-    check(run) {
-      if (run.error_code === 'DUPLICATE_ACTION') {
-        return `Duplicate external action detected: ${run.error_summary || ''}`
+    // Was `run.error_code === 'DUPLICATE_ACTION'` — an error code with ZERO
+    // producers in the codebase, handed an object whose error_code is
+    // hard-coded null. It could not fire.
+    //
+    // The real invariant: the ledger's UNIQUE(internal_idempotency_key) stops
+    // the INTERNAL duplicate, and the EXTERNAL marker is what proves the same
+    // message actually went out twice (§7.1 / D.1). Two committed rows carrying
+    // one marker is that, and nothing else produces it.
+    applicable: hasStore,
+    check(run, ctx) {
+      if (!ctx) return null
+      const seen = new Map<string, string>()
+      for (const row of committedOutbound(ctx)) {
+        const marker = row.external_idempotency_marker
+        if (!marker) continue
+        const first = seen.get(marker)
+        if (first) {
+          return `outbound ${first} and ${row.ledger_id} share external marker ${marker}`
+        }
+        seen.set(marker, row.ledger_id)
       }
       return null
     },
@@ -205,59 +403,119 @@ export const HARD_SAFETY_ASSERTIONS: SafetyAssertion[] = [
   {
     name: 'premature_completion',
     description: 'No case may complete without all DoD criteria met',
-    // A run that does not claim completion cannot complete prematurely.
-    applicable: run => run.decision === 'COMPLETE',
-    check(run) {
-      if (run.error_code === 'PREMATURE_COMPLETION') {
+    // Two live branches: the injected RED-PROOF markers on the run itself, and
+    // the real case state. Either is enough to have something to say.
+    applicable: (run, ctx) => hasStore(run, ctx) || run.decision === 'COMPLETE',
+    check(run, ctx) {
+      if (run.decision === 'COMPLETE' && run.error_code === 'PREMATURE_COMPLETION') {
         return `Premature completion: ${run.error_summary || 'DoD not met'}`
       }
       // RED-PROOF: a run that claims completion without DoD
-      if (run.reason === 'RED-PROOF: no DoD criteria satisfied') {
+      if (run.decision === 'COMPLETE' && run.reason === 'RED-PROOF: no DoD criteria satisfied') {
         return `Premature completion: case ${run.case_id} completed with zero DoD criteria met`
       }
+      // AND THE REAL STATE (§16, 2026-08-12). The two branches above need
+      // somebody to have written an error_code or an exact reason string, on an
+      // object whose error_code is hard-coded null — so ask the case instead.
+      //
+      // NARROWED, AND THE NARROWING IS THE WHOLE POINT. My first version asked
+      // only "is this case COMPLETED while the guard refuses it?", and that is
+      // the wrong question twice over:
+      //
+      //   - It fires on states the engine did not cause. An OWNER closure is
+      //     always allowed (canCompleteCase returns early for 'OWNER'), a case
+      //     closed before progression was enabled never met a gate, and a test
+      //     fixture can seed COMPLETED directly. None of those are the engine
+      //     completing something prematurely; two checkpoint-E.4 tests are
+      //     exactly this shape and went red.
+      //   - Worse, it is CIRCULAR on the one case it seemed to catch. A safety
+      //     violation sets runStatus = FAILED, and the §25 downgrade further
+      //     down is gated on runStatus === 'COMPLETED'. So the assertion firing
+      //     SUPPRESSED the very correction that would have fixed the decision —
+      //     the engine kept its COMPLETE instead of stepping back to
+      //     CONTINUE_AUTONOMOUSLY. A guard that disables a guard is worse than
+      //     no guard.
+      //
+      // What is left is the invariant with no other owner: the case is closed,
+      // the PROGRESSION ENGINE closed it, and the evidence behind that closure
+      // does not hold up.
+      //
+      // AND IT ASKS THE DoD DIRECTLY, NOT canCompleteCase. That was the second
+      // trap here. The engine's own completion path sets progression_enabled = 0
+      // on the case it just closed, and canCompleteCase returns allowed for a
+      // progression-disabled case ("legacy close path"). So an assertion built
+      // on the gate would answer "fine" for every case the engine ever closed —
+      // dead by construction, in precisely the way this review has been naming
+      // all week: a check that is built, tested, and can never fire in traffic.
+      //
+      // evaluateDoDCompleteness reads dod_verification_json and nothing else, so
+      // it keeps answering after the case is disabled. The two things it has to
+      // say are the two the 2026-08-09 incident turned on: the criteria were
+      // proven with evidence, and they were THIS case's criteria rather than the
+      // per-status template every case in that status shares.
+      if (!ctx) return null
+      try {
+        const table = ctx.domain === 'zst' ? 'zst_cases' : 'personal_cases'
+        const events = ctx.domain === 'zst' ? 'zst_case_events' : 'personal_case_events'
+        const row = ctx.db.prepare(
+          `SELECT status FROM ${table} WHERE case_id = ?`,
+        ).get(ctx.caseId) as { status: string } | undefined
+        if (row?.status !== 'COMPLETED') return null
+
+        const closedByEngine = ctx.db.prepare(
+          `SELECT 1 FROM ${events}
+            WHERE case_id = ? AND event_type = 'STATUS_CHANGED'
+              AND new_status = 'COMPLETED' AND actor = 'progression-engine'
+            LIMIT 1`,
+        ).get(ctx.caseId) as unknown
+        if (!closedByEngine) return null
+
+        const dod = evaluateDoDCompleteness(ctx.db, ctx.domain as 'personal' | 'zst', ctx.caseId)
+        if (!dod.allMet) {
+          return `case ${ctx.caseId} was completed BY THE ENGINE with ${dod.metCriteria}/`
+            + `${dod.totalCriteria} definition-of-done criteria proven`
+        }
+        if (dod.verification && dod.verification.provenance !== 'CASE_SPECIFIC') {
+          return `case ${ctx.caseId} was completed BY THE ENGINE against a `
+            + `${dod.verification.provenance} definition-of-done, not this case's own contract`
+        }
+      } catch { /* verification or table unavailable — absence is not a violation */ }
       return null
     },
   },
   {
     name: 'policy_bypass',
     description: 'No progression decision may bypass the deterministic policy gate',
-    // The only signal this reads is an error code. With none set there is
-    // nothing to evaluate — and saying "passed" would claim the policy gate was
-    // checked when it was not consulted at all.
-    applicable: run => run.error_code != null,
-    check(run) {
-      if (run.error_code === 'POLICY_BYPASS') {
-        return `Policy bypass detected: ${run.error_summary || 'action not in delegation envelope'}`
+    // Was `run.error_code === 'POLICY_BYPASS'` — again an error code nothing
+    // writes, on an object whose error_code is always null.
+    //
+    // The real invariant is the one §22.1 and §22.2 spent a whole review round
+    // establishing: NO external write without a ticket the deterministic gate
+    // issued and the executor consumed. A ledger row that left PLANNED with no
+    // consumed authorization IS the bypass — and unlike an error code, nobody
+    // has to remember to label it.
+    applicable: hasStore,
+    check(run, ctx) {
+      if (!ctx) return null
+      let rows: Array<{ ledger_id: string; status: string; consumed_at: number | null; auth: string | null }>
+      try {
+        rows = ctx.db.prepare(
+          `SELECT o.ledger_id, o.status, a.consumed_at, a.authorization_id AS auth
+             FROM ${ledgerFor(ctx.domain)} o
+             LEFT JOIN action_authorizations a ON a.action_id = o.ledger_id
+            WHERE o.case_id = ? AND o.status NOT IN ('PLANNED','CANCELLED')`,
+        ).all(ctx.caseId) as never
+      } catch { return null }
+      for (const r of rows) {
+        if (!r.auth) return `outbound ${r.ledger_id} (${r.status}) has no action authorization`
+        if (r.consumed_at === null) {
+          return `outbound ${r.ledger_id} (${r.status}) carries an authorization that was never consumed`
+        }
       }
       return null
     },
   },
 ]
-
-/** One assertion's verdict as it is written into safety_assertions_json. */
-export interface SafetyAssertionResult {
-  assertion: string
-  status: 'passed' | 'violated' | 'not_applicable'
-  /** Kept for readers written before `status` existed: true/false as before,
-   *  and null for not_applicable — because the honest answer to "did it pass"
-   *  for an assertion that was never evaluated is neither yes nor no. */
-  passed: boolean | null
-  detail?: string
-}
-
-/** Evaluate all seven against one run's real facts. Every assertion appears in
- *  the output — the ledger says what was checked AND what could not be. */
-export function evaluateSafetyAssertions(run: ProgressionRunResult): SafetyAssertionResult[] {
-  return HARD_SAFETY_ASSERTIONS.map((a): SafetyAssertionResult => {
-    if (!a.applicable(run)) {
-      return { assertion: a.name, status: 'not_applicable', passed: null }
-    }
-    const detail = a.check(run)
-    return detail
-      ? { assertion: a.name, status: 'violated', passed: false, detail }
-      : { assertion: a.name, status: 'passed', passed: true }
-  })
-}
 
 // ── Stub progression engine ──────────────────────────────────────────────
 
@@ -322,8 +580,11 @@ export function progressCaseStub(
     safety_violations: [],
   }
 
-  // 4. Evaluate hard safety assertions
-  const assertionResults = evaluateSafetyAssertions(result)
+  // 4. Evaluate hard safety assertions.
+  // The corpus rows have no ledger behind them, but passing the context is free
+  // and means a fixture that DOES seed outbound rows is measured by the same
+  // assertions the live pipeline uses -- one implementation, not two.
+  const assertionResults = evaluateSafetyAssertions(result, { db, domain: c.domain, caseId: c.case_id })
   for (const r of assertionResults) {
     if (r.status === 'violated') {
       result.safety_violations.push({
@@ -335,7 +596,12 @@ export function progressCaseStub(
     }
   }
 
-  // 5. Record the progression run
+  // 5. Record the progression run.
+  // The recorded shape is `evaluateSafetyAssertions`'s own output, not a
+  // re-derivation from `safety_violations`. Re-deriving is how the old row said
+  // `passed: true` for an assertion that never ran: "not in the violations
+  // list" and "checked and clean" are different facts, and only one of them is
+  // evidence.
   const safetyJson = JSON.stringify(assertionResults)
 
   db.prepare(

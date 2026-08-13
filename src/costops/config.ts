@@ -12,31 +12,81 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { PROJECT_ROOT } from '../config.js'
 import { logger } from '../logger.js'
+import { atomicWriteFileSync } from '../web/atomic-write.js'
 
 export const COSTOPS_CONFIG_PATH = join(PROJECT_ROOT, 'store', 'costops-config.json')
 export const COSTOPS_EXAMPLE_PATH = join(PROJECT_ROOT, 'store', 'costops-config.json.example')
 
-export type CostConfidence =
-  | 'actual_invoice'
-  | 'provider_api'
-  | 'billing_export'
-  | 'provider_plan_estimate'  // v0.3: derived from provider plan inventory (Render), NOT an invoice; advisory
-  | 'local_usage'
-  | 'estimate'
-  | 'manual'
+/**
+ * Where the config actually lives for this process (C-5).
+ *
+ * WHY THIS EXISTS. `loadCostopsConfig` read the ONE real on-disk path, and so
+ * did `saveCostopsConfig`. The route tests therefore created and deleted budgets
+ * in the operator's REAL config file, and said so in a comment: "leaving an id
+ * behind would leak into unrelated test runs". That is a test suite whose
+ * correctness depends on its own cleanup code never being skipped — and under
+ * vitest's parallelism, two files touching one JSON document is a race, which is
+ * how three of these tests came up red once and green on a re-run with no code
+ * change in between.
+ *
+ * An env override is the smallest thing that fixes it: production reads exactly
+ * the path it always did, and a test can point at a throwaway file and exercise
+ * the REAL read/write code rather than a mock of it.
+ */
+export function costopsConfigPath(): string {
+  return process.env.COSTOPS_CONFIG_PATH ?? COSTOPS_CONFIG_PATH
+}
+
+/** The example lives beside whatever config path is in force, so a test that
+ *  redirects the config does not scatter `.example` files into `store/`. */
+export function costopsExamplePath(): string {
+  const configured = process.env.COSTOPS_CONFIG_PATH
+  return configured ? `${configured}.example` : COSTOPS_EXAMPLE_PATH
+}
+
+// COS-CORE-M5: the runtime value list the CostConfidence type is derived
+// from, so ingest doors can VALIDATE a caller-supplied confidence string
+// against the union instead of trusting it -- an unrecognized string (e.g.
+// the typo 'actual-invoice') lands at priority 0 in every resolver and
+// silently demotes a real invoice below manual entries.
+export const COST_CONFIDENCE_VALUES = [
+  'actual_invoice',
+  'provider_api',
+  'billing_export',
+  'provider_plan_estimate',  // v0.3: derived from provider plan inventory (Render), NOT an invoice; advisory
+  'local_usage',
+  'estimate',
+  'manual',
   // v0.7: a real, tracked provider whose cost cannot be read (missing IAM/API
   // permission, e.g. AWS Cost Explorer). Advisory like provider_plan_estimate --
   // NEVER shown as 0, NEVER folded into current_spend/operational. Surfaces only
   // via a dedicated billing_access_needed warning (see warnings.ts).
-  | 'pending_permission'
+  'pending_permission',
+] as const
 
-export type ChargeCategory =
-  | 'usage'
-  | 'subscription'
-  | 'purchase'
-  | 'tax'
-  | 'credit'
-  | 'adjustment'
+export type CostConfidence = (typeof COST_CONFIDENCE_VALUES)[number]
+
+export function isCostConfidence(v: unknown): v is CostConfidence {
+  return typeof v === 'string' && (COST_CONFIDENCE_VALUES as readonly string[]).includes(v)
+}
+
+// Same runtime-list-derives-the-type pattern as COST_CONFIDENCE_VALUES above
+// (COS-CORE-M4): the invoice door accepts a caller-supplied charge_category
+// and must validate it against the union, not trust it.
+export const CHARGE_CATEGORY_VALUES = [
+  'usage',
+  'subscription',
+  'purchase',
+  'tax',
+  'credit',
+  'adjustment',
+] as const
+
+export type ChargeCategory = (typeof CHARGE_CATEGORY_VALUES)[number]
+
+export function isChargeCategory(v: unknown): v is ChargeCategory {
+  return typeof v === 'string' && (CHARGE_CATEGORY_VALUES as readonly string[]).includes(v)
+}
 
 export interface FixedCostEntry {
   source_id: string
@@ -128,15 +178,21 @@ export interface ConfigLoadResult {
  * On a missing config, writes the placeholder example alongside for guidance.
  */
 export function loadCostopsConfig(): ConfigLoadResult {
-  if (!existsSync(COSTOPS_CONFIG_PATH)) {
+  const path = costopsConfigPath()
+  if (!existsSync(path)) {
     ensureExampleConfig()
     return { config: { ...EMPTY_CONFIG }, exists: false, errors: [] }
   }
   let raw: unknown
   try {
-    raw = JSON.parse(readFileSync(COSTOPS_CONFIG_PATH, 'utf-8'))
+    raw = JSON.parse(readFileSync(path, 'utf-8'))
   } catch (err) {
-    logger.warn({ err }, 'costops-config.json is not valid JSON')
+    // NOT an empty config with no errors (C-6). A file that exists and cannot be
+    // parsed is a DIFFERENT fact from a file that is not there, and the
+    // `exists: true` + error pair is what keeps the caller able to tell them
+    // apart — the summary endpoint shows the error instead of quietly reporting
+    // zero fixed costs over a config somebody broke with a trailing comma.
+    logger.warn({ err, path }, 'costops-config.json is not valid JSON')
     return { config: { ...EMPTY_CONFIG }, exists: true, errors: ['config is not valid JSON'] }
   }
   return validateConfig(raw)
@@ -144,8 +200,9 @@ export function loadCostopsConfig(): ConfigLoadResult {
 
 export function ensureExampleConfig(): void {
   try {
-    if (!existsSync(COSTOPS_EXAMPLE_PATH)) {
-      writeFileSync(COSTOPS_EXAMPLE_PATH, JSON.stringify(EXAMPLE_CONFIG, null, 2) + '\n', 'utf-8')
+    const examplePath = costopsExamplePath()
+    if (!existsSync(examplePath)) {
+      writeFileSync(examplePath, JSON.stringify(EXAMPLE_CONFIG, null, 2) + '\n', 'utf-8')
     }
   } catch (err) {
     logger.warn({ err }, 'Failed to write costops-config example')
@@ -160,7 +217,17 @@ export function ensureExampleConfig(): void {
  * round-trips the full object, so this stays consistent with it.
  */
 export function saveCostopsConfig(config: CostOpsConfig): void {
-  writeFileSync(COSTOPS_CONFIG_PATH, JSON.stringify(config, null, 2) + '\n', 'utf-8')
+  // COS-CORE-M7: atomic (tmp + rename via atomicWriteFileSync, the same
+  // helper capacity-routing-store et al. use) -- this file is the SINGLE
+  // copy of every fixed-cost/budget definition, and a crash mid-writeFileSync
+  // truncates it, after which the loader silently degrades to EMPTY_CONFIG.
+  //
+  // MERGE 2026-08-13: the atomic write goes to costopsConfigPath(), not to the
+  // constant. C-5 made the path env-overridable precisely so the route tests
+  // stop writing the operator's real config; writing the constant here would
+  // have reopened that hole on the one path that MUTATES the file, which is the
+  // half that matters.
+  atomicWriteFileSync(costopsConfigPath(), JSON.stringify(config, null, 2) + '\n')
 }
 
 /**

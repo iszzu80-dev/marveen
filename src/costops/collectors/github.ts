@@ -55,6 +55,15 @@ export function mapGitHubUsage(
     const amt = typeof raw2 === 'number' ? raw2 : parseFloat(String(raw2 ?? ''))
     if (isFinite(amt)) usdTotal += amt
   }
+  // Card 23912ca4 / COS-OPS-H4: a zero/unconfigured fxUsdHuf must never
+  // fabricate a 0 HUF line -- with real USD usage that would read as "GitHub
+  // cost this month: nothing" at provider_api confidence, outranking the real
+  // manual estimate in the reconcile. Even the explicit API-observed-zero line
+  // is withheld: with no rate configured we cannot vouch for ANY HUF figure,
+  // and the sync wrapper below fails fast with the actionable message before
+  // this point anyway. Guarded here too so a future direct caller of this
+  // pure mapper cannot bypass the check.
+  if (!(opts.fxUsdHuf > 0)) return []
   const monthKey = new Date(opts.periodStart * 1000).toISOString().slice(0, 7)
   const amountHuf = Math.round(usdTotal * opts.fxUsdHuf * 100) / 100
   return [{
@@ -74,16 +83,32 @@ export function mapGitHubUsage(
   }]
 }
 
-/** The account whose billing is read. Set via COSTOPS_GITHUB_BILLING_USER env var. */
-export const GITHUB_BILLING_USER = process.env.COSTOPS_GITHUB_BILLING_USER || ''
+/** Env var naming the account whose billing is read. */
+export const GITHUB_BILLING_USER_ENV = 'COSTOPS_GITHUB_BILLING_USER'
 
-export function makeGitHubCollector(user: string = GITHUB_BILLING_USER): ProviderCollector {
+/**
+ * COS-OPS-M7: read the billing user AT SYNC TIME, never at module import. The
+ * old import-time `process.env... || ''` constant froze whatever the env held
+ * when the module first loaded; unset, it silently built
+ * `GET /users//settings/...` -- a garbage URL whose generic 404 said nothing
+ * about the actual problem (a missing env var).
+ */
+export function getGitHubBillingUser(): string | null {
+  const u = (process.env[GITHUB_BILLING_USER_ENV] || '').trim()
+  return u || null
+}
+
+export function makeGitHubCollector(user?: string): ProviderCollector {
   return {
     provider: 'github',
     collectorName: 'github-billing-usage',
     async collectRaw(opts: CollectOpts): Promise<{ raw: unknown; lines: NormalizedCostLine[] }> {
+      // Resolved per call (not at construction/import): a garbage /users//...
+      // URL must be impossible even for a direct collector caller.
+      const billingUser = user ?? getGitHubBillingUser()
+      if (!billingUser) throw new Error(`${GITHUB_BILLING_USER_ENV} is not set -- cannot build the billing usage URL`)
       const d = new Date(opts.periodStart * 1000)
-      const url = `${GITHUB_API}/users/${user}/settings/billing/usage?year=${d.getUTCFullYear()}&month=${d.getUTCMonth() + 1}`
+      const url = `${GITHUB_API}/users/${billingUser}/settings/billing/usage?year=${d.getUTCFullYear()}&month=${d.getUTCMonth() + 1}`
       // secret used ONLY as the auth header; never logged.
       const headers = {
         'authorization': `Bearer ${opts.secret}`,
@@ -116,10 +141,20 @@ export const GITHUB_VAULT_SECRET_ID = 'github_plan'
 export async function syncGitHubCollector(
   db: import('better-sqlite3').Database,
   now: number,
-  deps: { httpGetJson?: import('./types.js').HttpGetJson; apiKey?: string | null; fxUsdHuf?: number } = {},
+  deps: { httpGetJson?: import('./types.js').HttpGetJson; apiKey?: string | null; fxUsdHuf?: number; billingUser?: string | null } = {},
 ): Promise<{ ok: boolean; provider: string; status: string; imported_count: number; error?: string; period?: string }> {
   const { runCollector } = await import('./runner.js')
   const { monthWindow } = await import('../ledger.js')
+  // COS-OPS-M7: validate the billing account BEFORE any network/URL work --
+  // an unset env var must be a precise, actionable blocker (same fail-fast
+  // style as the fx guard below), never a generic 404 off a /users// URL.
+  const billingUser = deps.billingUser !== undefined ? deps.billingUser : getGitHubBillingUser()
+  if (!billingUser) {
+    return {
+      ok: false, provider: 'github', status: 'error', imported_count: 0,
+      error: `GitHub billing account is not configured (${GITHUB_BILLING_USER_ENV} env var is unset/empty) -- nothing was fetched or stored; set it to the GitHub username whose billing should be read and re-run`,
+    }
+  }
   let apiKey = deps.apiKey
   if (apiKey === undefined) {
     try {
@@ -132,10 +167,27 @@ export async function syncGitHubCollector(
   }
   let fxUsdHuf = deps.fxUsdHuf
   if (fxUsdHuf === undefined) {
+    // COS-OPS-M6: read the rate from the provider-neutral fx config, not from
+    // the Render plan-pricing file. GitHub's USD spend has nothing to do with
+    // Render's plan prices; while it was read from there, deleting the dead
+    // Render config would have silently converted this collector's real USD
+    // spend to 0 HUF. fx-config.ts seeds itself once from the legacy
+    // fx_usd_huf, so an already-configured rate carries over untouched.
     try {
-      const { loadRenderPricing } = await import('./render.js')
-      fxUsdHuf = loadRenderPricing().pricing.fx_usd_huf || 0
+      const { loadFxRates } = await import('../fx-config.js')
+      fxUsdHuf = loadFxRates().rates.USD ?? 0
     } catch { fxUsdHuf = 0 }
+  }
+  // Card 23912ca4 / COS-OPS-H4: fail fast with an explicit blocker instead of
+  // silently storing a fabricated 0 HUF line (the mapper also guards this on
+  // its own, but the point of failing HERE is the actionable error message).
+  // Same two-level guard as the OpenAI collector, where the fix originally
+  // landed alone.
+  if (!(fxUsdHuf > 0)) {
+    return {
+      ok: false, provider: 'github', status: 'error', imported_count: 0,
+      error: 'USD->HUF rate is not configured (store/costops-fx.json) -- costs were NOT converted or stored; set the rate and re-run',
+    }
   }
   const httpGetJson = deps.httpGetJson || (async (url: string, headers: Record<string, string>) => {
     const r = await fetch(url, { method: 'GET', headers })
@@ -143,8 +195,8 @@ export async function syncGitHubCollector(
     return r.json()
   })
   const w = monthWindow(now)
-  const opts = { periodStart: w.start, periodEnd: w.end, secret: apiKey, fxUsdHuf: fxUsdHuf || 0, idSalt: 'github-salt', httpGetJson, now }
-  const res = await runCollector({ db, collector: githubCollector, opts, now })
+  const opts = { periodStart: w.start, periodEnd: w.end, secret: apiKey, fxUsdHuf, idSalt: 'github-salt', httpGetJson, now }
+  const res = await runCollector({ db, collector: makeGitHubCollector(billingUser), opts, now })
   return {
     ok: res.status === 'ok', provider: 'github', status: res.status,
     imported_count: res.importedCount, error: res.errorMessageSanitized || undefined, period: w.key,

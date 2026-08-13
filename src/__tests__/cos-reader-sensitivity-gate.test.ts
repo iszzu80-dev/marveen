@@ -133,12 +133,12 @@ describe('§10 provider routing before the Reader', () => {
       { sensitivity: 'PERSONAL', content: 'semmi erdekes' },
       { sensitivity: 'PERSONAL', content: 'a kartya: 4111 1111 1111 1111' },
     ]
-    expect(contextSensitivity(items)).toBe('HIGHLY_SENSITIVE')
-    expect(contextSensitivity([{ sensitivity: 'PERSONAL', content: 'semmi' }])).toBe('PERSONAL')
+    expect(contextSensitivity('personal', items)).toBe('HIGHLY_SENSITIVE')
+    expect(contextSensitivity('personal', [{ sensitivity: 'PERSONAL', content: 'semmi' }])).toBe('PERSONAL')
   })
 
   it('an empty context is PUBLIC, not maximally sensitive', () => {
-    expect(contextSensitivity([])).toBe('PUBLIC')
+    expect(contextSensitivity('personal', [])).toBe('PUBLIC')
   })
 
   it('a document with no tier of its own inherits the CASE tier', () => {

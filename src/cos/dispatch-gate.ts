@@ -20,6 +20,7 @@ import { authorizeSend } from './campaigns.js'
 import { permits } from './autonomy-ladder.js'
 import { routeModelForSensitivity, type RoutingStrategy } from './model-routing.js'
 import { mintGatePermit } from './gate-permit.js'
+import { evaluateEnvelope, type EnvelopeDecision, type Intent } from './delegation-envelope.js'
 import type { CaseSensitivity } from './schema.js'
 
 export interface DispatchRequest {
@@ -56,6 +57,17 @@ export interface DispatchRequest {
   campaignId: string
   templateHash: string
   renderedPayloadHash: string
+  /** §21: which namespace's envelope applies. Defaults to 'personal' because
+   *  this gate IS the personal path — the corporate gate is evaluateZstSendGate,
+   *  which passes 'zst' explicitly. */
+  envelopeDomain?: 'personal' | 'zst'
+  /** §21: the intent classifier reads the letter, and it reads subject and body
+   *  as separate fields because `content` is already their concatenation and a
+   *  classifier that cannot tell them apart cannot tell a subject line naming a
+   *  price from a body committing to one. Absent falls back to `content`, which
+   *  is fail-closed: fewer positive matches, never more. */
+  subject?: string
+  body?: string
 }
 
 export interface DispatchDecision {
@@ -78,6 +90,14 @@ export interface DispatchDecision {
    *  same transaction as the SENDING write instead of only before it. */
   limits?: { maxTotal: number | null; maxPerKind: number | null; kind: string | null }
   approvalId?: string
+  /** §21: set when this send is allowed by a STANDING DELEGATION rather than by
+   *  a human approval. Absent means a human approved it — the two are never both
+   *  present, because the envelope is only consulted when the approval refused. */
+  delegationEnvelopeId?: string
+  /** Which intent the deterministic classifier recognised. Recorded because "it
+   *  went without asking" is only auditable if the reason it qualified is
+   *  written down next to it. */
+  delegatedIntent?: Intent
 }
 
 /** Evaluate the full send gate. Fail-closed: every layer must pass. */
@@ -118,7 +138,44 @@ export function evaluateDispatch(db: Database.Database, req: DispatchRequest): D
     channel: req.channel ?? 'EMAIL',
     ...(req.usedVariables ? { usedVariables: req.usedVariables } : {}),
   }, req.now)
-  if (!auth.authorized) reasons.push(`campaign not authorized: ${auth.reason}`)
+
+  // §21 / §22 — STANDING DELEGATION *OR* HUMAN APPROVAL.
+  //
+  // The spec's chokepoint has always read "standing delegation OR human
+  // approval", and only the right-hand branch existed: `delegation_envelope_id`
+  // travelled through the whole system and was NULL on every row, because no
+  // caller ever set it. This is the left-hand branch.
+  //
+  // WHAT IT SUBSTITUTES FOR, AND WHAT IT DOES NOT. Only the campaign approval.
+  // The connector check, the sensitivity/profile rule and the §22 rung are
+  // evaluated above and are ANDed regardless — a standing delegation is
+  // permission to skip the QUESTION, never permission to skip a safety layer.
+  // That is why this sits at the bottom of the function and not at the top.
+  //
+  // ASKED ONLY WHEN THE APPROVAL PATH REFUSED. A send that already has a valid
+  // approval must not consume envelope quota or be recorded as delegated: it was
+  // authorised the ordinary way, and saying otherwise would overstate how much
+  // the system does unsupervised.
+  let delegation: EnvelopeDecision | null = null
+  if (!auth.authorized) {
+    delegation = evaluateEnvelope(db, {
+      domain: req.envelopeDomain ?? 'personal',
+      actionType: 'EMAIL_SEND',
+      recipient: req.recipient,
+      subject: req.subject ?? '',
+      body: req.body ?? req.content,
+      outboundKind: req.outboundKind ?? null,
+      now: req.now ?? Math.floor(Date.now() / 1000),
+    })
+    if (!delegation.delegated) {
+      // BOTH refusals are reported, not just the approval's. "No approval" and
+      // "the delegation would not have covered it either" are different facts,
+      // and a caller that sees only the first will go looking for an approval
+      // when the real answer is that this letter needs a human to read it.
+      reasons.push(`campaign not authorized: ${auth.reason}`)
+      for (const r of delegation.reasons) reasons.push(`delegálás: ${r}`)
+    }
+  }
 
   const routed = routeModelForSensitivity(tier, { strategy: req.routingStrategy ?? 'capability' })
   // §22.2 (review #3 Ú-4): stamp the decision as gate-produced. issueAuthorization
@@ -128,5 +185,13 @@ export function evaluateDispatch(db: Database.Database, req: DispatchRequest): D
     allowed: reasons.length === 0, reasons, sensitivityTier: tier, recommendedProfile: routed.profile,
     campaignVersion: auth.campaignVersion, approvalVersion: auth.approvalVersion,
     limits: auth.limits, approvalId: auth.approvalId,
+    // Carried out of the gate so the caller can bind it into the authorization
+    // ticket. `delegation_envelope_id` counts towards policyEvaluationHash, so
+    // once this is set the ticket is bound to the delegation that justified it —
+    // and a send authorised by an envelope can no longer be replayed as if a
+    // human had approved it.
+    ...(delegation?.delegated
+      ? { delegationEnvelopeId: delegation.envelopeId, delegatedIntent: delegation.intent }
+      : {}),
   })
 }

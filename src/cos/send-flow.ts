@@ -282,6 +282,9 @@ export async function dispatchApprovedSend(
     content: `${input.email.subject}\n${input.email.body}`,
     targetProfile: input.targetProfile,
     campaignId: input.campaignId, templateHash: input.templateHash, renderedPayloadHash: input.renderedPayloadHash,
+    // §21: the classifier needs the letter, and needs subject and body apart —
+    // `content` above is already their concatenation.
+    envelopeDomain: 'personal', subject: input.email.subject, body: input.email.body,
     // The address on the envelope we are about to put in the post, not a stored
     // intention: the allowlist must be checked against what actually goes out.
     recipient: input.email.to,
@@ -344,11 +347,22 @@ export async function dispatchApprovedSend(
     goalVersion: null,
     actionId: input.ledgerId,
     actionType: 'EMAIL_SEND',
-    intent: 'SEND_APPROVED_EMAIL',
+    // §21: the intent the gate's deterministic classifier recognised, when this
+    // send is going out on a standing delegation. Falls back to the old constant
+    // when a human approved it — there the intent is not what justified the
+    // send, the approval is.
+    intent: decision.delegatedIntent ?? 'SEND_APPROVED_EMAIL',
     targetReference: input.campaignId,
     recipient: input.email.to,
     payloadHash: input.renderedPayloadHash,
     approvalId: decision.approvalId ?? null,
+    // THE COLUMN FINALLY GETS A VALUE. `delegation_envelope_id` has existed and
+    // counted towards policyEvaluationHash since §22.2 was built, and was NULL
+    // on every row ever written because no caller set it — the audit for the
+    // 2026-08-12 review found the pipeline complete and the concept absent.
+    // Binding it here means a ticket issued under a delegation cannot be
+    // consumed as though a human had approved it: the hash would differ.
+    delegationEnvelopeId: decision.delegationEnvelopeId ?? null,
   }
   const ticket = issueAuthorization(db, authContext, now, {}, decision)
 

@@ -83,6 +83,19 @@ nothing was computed.
 `lastEnabledConfiguration` (captured the instant `masterEnabled` transitions true→false; restored
 on request when turning back on).
 
+**Deviation from the owner spec's suggested schema (§9), OPT-H2 remainder, 2026-08-13.** The
+`routing` block holds one field, `automaticFallback`, not the four the spec sketches. The other
+three were built, shipped unread, and have now been deleted: `trustedProvidersOnly` (trust is
+enforced per-candidate by `enabledForRouting` in the capacity-routing config, which is the
+granularity an operator can actually act on), `maxFallbacksPerProfile` (no enforcement point exists
+and none was designed), and `maxAutomaticFallbacksPerDispatch` (the limit is the hard code constant
+`MAX_AUTO_FALLBACKS_PER_PACKAGE = 1` in `capacity-routing.ts`, alongside
+`MAX_FALLBACK_CANDIDATES = 2`, both documented there as "ceilings, not defaults to grow later" —
+exposing it as config would let a dashboard edit *raise* a safety ceiling). The ceilings stay code
+constants by design; the normalizer whitelists the routing block field by field, so a
+pre-existing `store/optimization-config.json` still carrying the three keys loads unchanged and
+simply sheds them on its next write. No migration.
+
 **Presets** (`PRESET_MODULES` in `optimization-config.ts`):
 
 | Preset | measurement | contextEfficiency | capacityMonitoring | runtimeRouting | recommendations | marketWatch | benchmarkRecommendations |

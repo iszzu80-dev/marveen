@@ -68,11 +68,29 @@ interface StoredDecision {
   status: OptimizationDecisionStatus
 }
 
+// Terminal-for-this-verdict statuses that a CHANGED verdict may reopen. The
+// human-workflow statuses (viewed/accepted/deferred/canary_needed) stay out:
+// they are mid-review, and overwriting them would discard an operator's state.
 const REOPENABLE_STATUSES = new Set<OptimizationDecisionStatus>([
   'executed',
   'rejected',
   'expired',
 ])
+
+/**
+ * OPT-M5 (review 2026-08-12): 'insufficient_evidence' is a parking state, not
+ * a human decision -- a package lands there only because the recommender could
+ * not produce an actionable verdict yet. It was missing from the reopen path,
+ * so once the evidence DID arrive (verdict became actionable) the upsert
+ * refreshed the verdict text but left the status buried forever. It reopens
+ * on a different condition than REOPENABLE_STATUSES: not "the verdict
+ * changed" but "the incoming verdict is actionable" -- staying insufficient
+ * on a still-INSUFFICIENT_EVIDENCE refresh, reopening the moment there is
+ * something a human could actually act on.
+ */
+function isActionableVerdict(verdict: string): boolean {
+  return verdict !== 'INSUFFICIENT_EVIDENCE'
+}
 
 export function upsertDecisionsFromRecommendations(
   db: Database.Database,
@@ -118,8 +136,10 @@ export function upsertDecisionsFromRecommendations(
       }
 
       const shouldReopen =
-        REOPENABLE_STATUSES.has(existing.status)
-        && existing.verdict !== recommendation.verdict
+        (REOPENABLE_STATUSES.has(existing.status)
+          && existing.verdict !== recommendation.verdict)
+        || (existing.status === 'insufficient_evidence'
+          && isActionableVerdict(recommendation.verdict))
 
       if (shouldReopen) {
         db.prepare(`
@@ -168,10 +188,51 @@ export function upsertDecisionsFromRecommendations(
   return run()
 }
 
+/**
+ * OPT-M5 (review 2026-08-12): a deferred decision stored a deferred_until that
+ * nothing ever read, so "defer until <date>" silently meant "defer forever".
+ * Promotion happens AT READ TIME, here, deliberately: this is the least
+ * invasive seam that closes the gap -- every consumer of decision status
+ * (the /recommendations and /audit routes) reads through this function, so a
+ * past-due deferred becomes visible exactly when anyone looks, without adding
+ * a background sweeper that would need its own schedule, failure handling and
+ * operational surface for a purely presentational state change. The cost is
+ * that the flip is not clock-exact (it lands on the next read, not at
+ * deferred_until sharp), which is acceptable for a human review queue.
+ *
+ * A deferred decision with deferred_until NULL is an INDEFINITE defer and is
+ * never promoted -- that has always been its meaning.
+ */
+function promotePastDueDeferred(db: Database.Database, now: number): void {
+  const due = db.prepare(`
+    SELECT package_id, status FROM optimization_decisions
+    WHERE status = 'deferred' AND deferred_until IS NOT NULL AND deferred_until <= ?
+  `).all(now) as Array<{ package_id: string; status: OptimizationDecisionStatus }>
+  if (due.length === 0) return
+  const run = db.transaction(() => {
+    for (const row of due) {
+      db.prepare(`
+        UPDATE optimization_decisions
+        SET status = 'new', status_changed_at = ?, status_changed_by = 'system',
+            deferred_until = NULL, updated_at = ?
+        WHERE package_id = ?
+      `).run(now, now, row.package_id)
+      db.prepare(`
+        INSERT INTO optimization_decision_events (
+          package_id, from_status, to_status, actor, at, note
+        ) VALUES (?, 'deferred', 'new', 'system', ?, 'deferred_until elapsed, resurfaced for review')
+      `).run(row.package_id, now)
+    }
+  })
+  run()
+}
+
 export function listOptimizationDecisions(
   db: Database.Database,
   opts: { status?: OptimizationDecisionStatus } = {},
+  now: number = Math.floor(Date.now() / 1000),
 ): OptimizationDecisionRecord[] {
+  promotePastDueDeferred(db, now)
   if (opts.status) {
     return db.prepare(`
       SELECT *

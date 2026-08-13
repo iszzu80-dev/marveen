@@ -107,4 +107,85 @@ describe('P2-C: syncAnthropicCostReport', () => {
     const n = db.prepare("SELECT COUNT(*) c FROM cost_line_items WHERE source_id='anthropic-api'").get() as { c: number }
     expect(n.c).toBe(0)
   })
+
+  // Card 23912ca4 / COS-OPS-H4: the fx=0 guard existed only on the OpenAI sync;
+  // this one silently stored usd*0=0 HUF as a provider_api line that outranked
+  // the real manual estimate.
+  it('6. an unset (0) USD rate is a loud blocker -- no import, an actionable error', async () => {
+    const db = getDb()
+    const res = await syncAnthropicCostReport(db, NOW, {
+      apiKey: 'fixture-key', fxUsdHuf: 0, httpGetJson: async () => FIXTURE,
+    })
+    expect(res.ok).toBe(false)
+    expect(res.status).toBe('error')
+    expect(res.error).toMatch(/rate is not configured/i)
+    const n = db.prepare("SELECT COUNT(*) c FROM cost_line_items WHERE source_id='anthropic-api'").get() as { c: number }
+    expect(n.c).toBe(0)
+  })
+
+  // COS-OPS-H5: cost_report pages in daily buckets -- before the cursor was
+  // followed, a paged month imported only its first page as the authoritative
+  // provider_api actual (a silent under-count that won the reconcile).
+  it('7. follows the has_more/next_page cursor and sums ALL pages into the month line', async () => {
+    const db = getDb()
+    const page1 = {
+      data: [{ starting_at: '2026-07-01T00:00:00Z', ending_at: '2026-07-02T00:00:00Z', results: [{ amount: 12.5, currency: 'USD', cost_type: 'tokens' }] }],
+      has_more: true,
+      next_page: 'cursor-page-2',
+    }
+    const page2 = {
+      data: [{ starting_at: '2026-07-02T00:00:00Z', ending_at: '2026-07-03T00:00:00Z', results: [{ amount: 7.5, currency: 'USD', cost_type: 'tokens' }] }],
+      has_more: false,
+      next_page: null,
+    }
+    const urls: string[] = []
+    const res = await syncAnthropicCostReport(db, NOW, {
+      apiKey: 'fixture-key', fxUsdHuf: 400,
+      httpGetJson: async (url) => {
+        urls.push(url)
+        return url.includes('page=cursor-page-2') ? page2 : page1
+      },
+    })
+    expect(res.ok).toBe(true)
+    expect(urls).toHaveLength(2)
+    expect(urls[1]).toContain('page=cursor-page-2')
+    const line = db.prepare("SELECT billed_cost FROM cost_line_items WHERE source_id='anthropic-api'").get() as { billed_cost: number }
+    // (12.5 + 7.5) USD * 400 = 8000 HUF -- both pages, not just the first.
+    expect(line.billed_cost).toBe(8000)
+  })
+
+  it('8. runaway pagination FAILS the run (error, nothing imported) instead of silently booking a partial month', async () => {
+    const db = getDb()
+    let calls = 0
+    const res = await syncAnthropicCostReport(db, NOW, {
+      apiKey: 'fixture-key', fxUsdHuf: 400,
+      httpGetJson: async () => {
+        calls++
+        return {
+          data: [{ starting_at: '2026-07-01T00:00:00Z', ending_at: '2026-07-02T00:00:00Z', results: [{ amount: 1, currency: 'USD' }] }],
+          has_more: true, next_page: `cursor-${calls}`,
+        }
+      },
+    })
+    expect(res.ok).toBe(false)
+    expect(res.status).toBe('error')
+    expect(calls).toBeLessThanOrEqual(41) // bounded, not an infinite loop
+    const n = db.prepare("SELECT COUNT(*) c FROM cost_line_items WHERE source_id='anthropic-api'").get() as { c: number }
+    expect(n.c).toBe(0) // no partial total was imported
+  })
+
+  it('9. has_more without a next_page cursor also fails the run rather than importing a partial month', async () => {
+    const db = getDb()
+    const res = await syncAnthropicCostReport(db, NOW, {
+      apiKey: 'fixture-key', fxUsdHuf: 400,
+      httpGetJson: async () => ({
+        data: [{ starting_at: '2026-07-01T00:00:00Z', ending_at: '2026-07-02T00:00:00Z', results: [{ amount: 1, currency: 'USD' }] }],
+        has_more: true, next_page: null,
+      }),
+    })
+    expect(res.ok).toBe(false)
+    expect(res.status).toBe('error')
+    const n = db.prepare("SELECT COUNT(*) c FROM cost_line_items WHERE source_id='anthropic-api'").get() as { c: number }
+    expect(n.c).toBe(0)
+  })
 })

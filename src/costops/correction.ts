@@ -18,10 +18,48 @@
 
 import type Database from 'better-sqlite3'
 
+/**
+ * FX provenance for the REPLACEMENT amount (GAP-09's original_amount/
+ * original_currency/fx_rate/fx_date/fx_source/conversion_method set). When a
+ * caller supplies this it is taken WHOLESALE, all six fields: the original
+ * line's provenance describes the original line's number, not the new one, so
+ * a converted foreign-currency invoice must carry its own conversion and an
+ * already-HUF invoice must carry explicit nulls -- inheriting a stale
+ * conversion from the corrected line would label the new HUF figure with a
+ * rate that was never applied to it. Plain `string` (not fx.ts's FxSource/
+ * ConversionMethod unions) on purpose: these map to nullable TEXT columns and
+ * this module stays free of an fx.ts import.
+ */
+export interface CorrectionFxProvenance {
+  original_amount: number | null
+  original_currency: string | null
+  fx_rate: number | null
+  fx_date: number | null
+  fx_source: string | null
+  conversion_method: string | null
+}
+
 export interface CreateCorrectionInput {
   originalLineId: number
   newAmount: number
   reason: string
+  // By default a correction inherits the original row's confidence and
+  // actual_source -- right when the correction is the same MEASUREMENT
+  // CHANNEL producing a better number (an operator re-keying a manual
+  // figure is still a manual figure). Wrong when the replacement comes from
+  // a genuinely more authoritative channel: an invoice-driven correction of
+  // a manual estimate that copies `manual` never outranks sibling manual
+  // lines (CONF_PRIORITY), stays invisible to the summary reconcile's
+  // ACT_CONF filter and to reconciliation.ts's invoice_amount -- so
+  // recordInvoice/applyInvoiceAdjustment pass 'actual_invoice'/
+  // 'email_invoice' here. Leave unset whenever the correction really is the
+  // same kind of line as the original.
+  confidence?: string
+  actualSource?: string
+  // See CorrectionFxProvenance above. Unset = carry the original's
+  // provenance forward unchanged (a re-keyed amount is still the same
+  // conversion event).
+  fx?: CorrectionFxProvenance
 }
 
 export interface CorrectionResult {
@@ -50,6 +88,8 @@ interface OriginalRow {
   original_currency: string | null
   fx_rate: number | null
   fx_date: number | null
+  fx_source: string | null
+  conversion_method: string | null
   voided_at: number | null
 }
 
@@ -91,20 +131,29 @@ export function createCorrection(
         (source_id, charge_period_start, charge_period_end, charge_category, service_name,
          usage_type, consumed_quantity, consumed_unit, billed_cost, effective_cost, currency,
          confidence, data_freshness, source_ref, dedup_key, created_at, actual_source,
-         original_amount, original_currency, fx_rate, fx_date, corrects_line_id)
+         original_amount, original_currency, fx_rate, fx_date, fx_source, conversion_method,
+         corrects_line_id)
       VALUES
         (@source_id, @start, @end, @charge_category, @service_name,
          @usage_type, @consumed_quantity, @consumed_unit, @billed_cost, NULL, @currency,
          @confidence, @now, @source_ref, @dedup_key, @now, @actual_source,
-         @original_amount, @original_currency, @fx_rate, @fx_date, @corrects_line_id)
+         @original_amount, @original_currency, @fx_rate, @fx_date, @fx_source, @conversion_method,
+         @corrects_line_id)
     `).run({
       source_id: original.source_id, start: original.charge_period_start, end: original.charge_period_end,
       charge_category: original.charge_category, service_name: original.service_name,
       usage_type: original.usage_type, consumed_quantity: original.consumed_quantity, consumed_unit: original.consumed_unit,
-      billed_cost: input.newAmount, currency: original.currency, confidence: original.confidence,
-      now: opts.now, source_ref: original.source_ref, dedup_key: newDedupKey, actual_source: original.actual_source,
-      original_amount: original.original_amount, original_currency: original.original_currency,
-      fx_rate: original.fx_rate, fx_date: original.fx_date, corrects_line_id: input.originalLineId,
+      billed_cost: input.newAmount, currency: original.currency,
+      confidence: input.confidence ?? original.confidence,
+      now: opts.now, source_ref: original.source_ref, dedup_key: newDedupKey,
+      actual_source: input.actualSource ?? original.actual_source,
+      original_amount: input.fx ? input.fx.original_amount : original.original_amount,
+      original_currency: input.fx ? input.fx.original_currency : original.original_currency,
+      fx_rate: input.fx ? input.fx.fx_rate : original.fx_rate,
+      fx_date: input.fx ? input.fx.fx_date : original.fx_date,
+      fx_source: input.fx ? input.fx.fx_source : original.fx_source,
+      conversion_method: input.fx ? input.fx.conversion_method : original.conversion_method,
+      corrects_line_id: input.originalLineId,
     })
     return info.lastInsertRowid as number
   })

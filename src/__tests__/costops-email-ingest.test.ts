@@ -63,7 +63,9 @@ describe('ingestEmailCosts', () => {
     const pro = db.prepare("SELECT billed_cost, confidence, charge_category FROM cost_line_items WHERE source_id='anthropic-pro'").get() as any
     expect(pro.billed_cost).toBe(8990)
     expect(pro.confidence).toBe('actual_invoice')
-    expect(pro.charge_category).toBe('invoice')
+    // COS-CORE-M4: 'invoice' was never a ChargeCategory union member --
+    // derived from the entry's source_type instead (default 'subscription').
+    expect(pro.charge_category).toBe('subscription')
     const oa = db.prepare("SELECT billed_cost FROM cost_line_items WHERE source_id='openai-api'").get() as any
     expect(oa.billed_cost).toBe(3.5 * 360)
 
@@ -126,6 +128,34 @@ describe('ingestEmailCosts', () => {
     ], { fxUsdHuf: 360, now: NOW })
     expect(r.ingested).toBe(1)
     expect((db.prepare("SELECT billed_cost FROM cost_line_items WHERE source_id='openai-api'").get() as any).billed_cost).toBe(3.5 * 360)
+  })
+
+  // COS-CORE-M5: an arbitrary confidence string used to be stored verbatim.
+  // The exact failure mode: the typo 'actual-invoice' (dash) lands at
+  // priority 0 in every resolver, silently demoting a real invoice below a
+  // sibling manual line. Now it is a per-entry ERROR, same reporting as bad
+  // month/currency -- never silently rewritten to a confidence the sender
+  // did not claim, never stored as-is.
+  it("rejects a confidence string outside the CostConfidence union (the 'actual-invoice' typo), ingests the rest", () => {
+    const db = getDb()
+    const r = ingestEmailCosts(db, [
+      { source_id: 'typo', name: 'Typo', provider: 'x', amount: 100, currency: 'HUF', month: '2026-06', message_ref: 'm-typo', confidence: 'actual-invoice' },
+      { source_id: 'ok', name: 'Ok', provider: 'x', amount: 200, currency: 'HUF', month: '2026-06', message_ref: 'm-ok', confidence: 'actual_invoice' },
+    ], { fxUsdHuf: 360, now: NOW })
+    expect(r.ingested).toBe(1)
+    expect(r.errors.length).toBe(1)
+    expect(r.errors[0].source_id).toBe('typo')
+    expect(r.errors[0].reason).toContain("invalid confidence 'actual-invoice'")
+    expect((db.prepare("SELECT COUNT(*) c FROM cost_line_items WHERE source_id='typo'").get() as any).c).toBe(0)
+  })
+
+  it('an omitted confidence still defaults to actual_invoice (unchanged default)', () => {
+    const db = getDb()
+    const r = ingestEmailCosts(db, [
+      { source_id: 's', name: 'S', provider: 'x', amount: 100, currency: 'HUF', month: '2026-06', message_ref: 'm-default' },
+    ], { fxUsdHuf: 360, now: NOW })
+    expect(r.ingested).toBe(1)
+    expect((db.prepare("SELECT confidence FROM cost_line_items WHERE source_id='s'").get() as any).confidence).toBe('actual_invoice')
   })
 
   it('stores no raw message ref -- only a hash in source_ref/dedup_key', () => {

@@ -3,9 +3,23 @@
 // Composes the scheduler queries, the executor, and the radar runner into ONE
 // idempotent-per-item cycle the runtime calls each period:
 //   1. reconcile outbound_ledger — drive executeAction on every row needing
-//      automated work (PLANNED/FAILED_RETRYABLE→send, SENDING/OUTCOME_UNKNOWN→
-//      recover, APPLIED_UNVERIFIED→re-attempt readback). RECOVERY_REQUIRED is
-//      surfaced for a human, not auto-driven.
+//      automated RECOVERY work (SENDING/OUTCOME_UNKNOWN→recover,
+//      APPLIED_UNVERIFIED→re-attempt readback). RECOVERY_REQUIRED is surfaced
+//      for a human, not auto-driven.
+//
+//      NOT PLANNED, AND NOT FAILED_RETRYABLE. This comment used to name both,
+//      and it was describing the tick as it was BEFORE F-7/N-3 (review
+//      2026-08-13, R-12): `reconcileOutbound` excludes them, deliberately,
+//      because either one starting here would be a FIRST delivery decided by a
+//      loop that evaluates no gate. That check lives in dispatchApprovedSend /
+//      dispatchZstSend. Leaving the old sentence in place is the failure mode
+//      this codebase has been chasing all week — a comment asserting a wiring
+//      that the code below it removed.
+//
+//      CONSEQUENCE, STATED SO IT IS NOT REDISCOVERED AS A BUG: the F-15 retry
+//      ceiling and its backoff are therefore only reachable through a new
+//      dispatch call (the owner re-sending from Mission Control), not through
+//      this loop. That is the intended safety posture, not an oversight.
 //   2. run due radar checks through the rental adapter, collecting HITs.
 //   3. surface how many cases are due to wake / have due follow-ups (the caller
 //      / LLM decides what to do with those).

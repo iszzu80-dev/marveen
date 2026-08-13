@@ -10,6 +10,7 @@
 import type Database from 'better-sqlite3'
 import type { CostOpsConfig } from './config.js'
 import { deriveSourceLifecycle, deriveProvenance, type SourceLifecycle, type SourceProvenance } from './lifecycle.js'
+import { isFailureStatus, SQL_HEALTH_STATUS_LIST, type ImportStatus } from './collectors/types.js'
 import { getSecret } from '../web/vault.js'
 import { buildCollectorPlan } from './collectors/scheduled-sync.js'
 
@@ -90,6 +91,7 @@ interface SourceRow {
 
 interface RunRow {
   provider: string
+  collector_name: string
   status: string
   started_at: number
   error_code: string | null
@@ -142,15 +144,31 @@ export function buildSourceInventory(
 
   const sources = db.prepare(`SELECT id, name, provider, source_type FROM cost_sources WHERE active = 1 AND lifecycle_state != 'decommissioned' ORDER BY name`).all() as SourceRow[]
 
-  // Latest run + last successful run + last failed run, per provider.
-  const latestRows = db.prepare(`
-    SELECT provider, status, started_at, error_code
+  // Latest HEALTH-BEARING run ('ok' or a real failure -- benign
+  // skipped/locked/dry_run rows carry no evidence, see collectors/types.ts)
+  // per (provider, collector_name). COS-CORE-M2: deriving lifecycle from the
+  // raw latest row made a benign hourly 'skipped' tick flip a source to
+  // 'blocked'; per-collector keying also stops a two-cadence provider
+  // (anthropic) from flapping between its collectors' interleaved rows --
+  // ok -> skipped stays ok, error -> skipped stays blocked.
+  const healthRows = db.prepare(`
+    SELECT provider, collector_name, status, started_at, error_code
     FROM import_runs r
-    WHERE started_at = (SELECT MAX(started_at) FROM import_runs WHERE provider = r.provider)
-    GROUP BY provider
+    WHERE status IN (${SQL_HEALTH_STATUS_LIST})
+      AND started_at = (SELECT MAX(started_at) FROM import_runs
+                        WHERE provider = r.provider AND collector_name = r.collector_name
+                          AND status IN (${SQL_HEALTH_STATUS_LIST}))
+    GROUP BY provider, collector_name
   `).all() as RunRow[]
-  const latestByProvider = new Map(latestRows.map(r => [r.provider, r]))
+  const healthByProvider = new Map<string, RunRow[]>()
+  for (const h of healthRows) {
+    const list = healthByProvider.get(h.provider)
+    if (list) list.push(h); else healthByProvider.set(h.provider, [h])
+  }
   const lastOkStmt = db.prepare(`SELECT MAX(started_at) t FROM import_runs WHERE provider = ? AND status = 'ok'`)
+  // Any-status attempt recency (benign ticks included) -- last_attempted_sync
+  // keeps meaning "when did a collector last RUN", unlike the health rows above.
+  const lastAttemptStmt = db.prepare(`SELECT MAX(started_at) t FROM import_runs WHERE provider = ?`)
 
   // Per-source activity/provenance aggregate, across ALL time (not just the
   // current month -- lifecycle is "has this source EVER worked", not "did it
@@ -187,9 +205,15 @@ export function buildSourceInventory(
     const credentialRequired = registry != null
     const credentialPresent = credentialRequired ? checkCredential(registry.checkKind, registry.id) : false
 
-    const latestRun = latestByProvider.get(s.provider) ?? null
+    // Provider health: the most recent failing collector wins (a sibling
+    // collector's later ok must not mask it); else the latest health-bearing
+    // run; a benign-only (or empty) history is null -- no health evidence,
+    // which deriveSourceLifecycle treats as "no attempt recorded".
+    const health = (healthByProvider.get(s.provider) ?? []).slice().sort((a, b) => b.started_at - a.started_at)
+    const failing = health.find(h => isFailureStatus(h.status)) ?? null
+    const latestRun = failing ?? health[0] ?? null
     const lastOk = latestRun ? ((lastOkStmt.get(s.provider) as { t: number | null }).t ?? null) : null
-    const lastRunStatus = latestRun ? (latestRun.status === 'ok' ? 'ok' as const : (latestRun.status as any)) : null
+    const lastRunStatus = latestRun ? (latestRun.status as ImportStatus) : null
 
     const agg = aggBySource.get(s.id)
     const hasEverHadActivity = (agg?.ever_had_real_activity ?? 0) === 1
@@ -242,7 +266,7 @@ export function buildSourceInventory(
       manual_fallback: !credentialRequired,
       blocker,
       last_successful_sync: lastOk,
-      last_attempted_sync: latestRun?.started_at ?? null,
+      last_attempted_sync: (lastAttemptStmt.get(s.provider) as { t: number | null }).t ?? null,
     }
   })
 }

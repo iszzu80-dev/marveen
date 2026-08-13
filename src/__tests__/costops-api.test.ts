@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { initDatabase, getDb } from '../db.js'
 import { tryHandleCostOps } from '../web/routes/costs.js'
 import { monthWindow } from '../costops/ledger.js'
@@ -32,6 +35,30 @@ function fakeCtxWithBody(path: string, method: string, body: unknown): { ctx: Ro
   }) as any
   return { ctx, out }
 }
+
+// C-5 (review 2026-08-11): these tests used to create and delete budgets in the
+// OPERATOR'S REAL store/costops-config.json, and the comment below the budget
+// suite said so out loud -- "leaving an id behind would leak into unrelated test
+// runs". That is a suite whose correctness depends on its own cleanup never
+// being skipped, and under vitest's parallelism two files writing one JSON
+// document is a race: three of these came up red once and green on a re-run with
+// no code change in between.
+//
+// The config path is now redirectable, so this points at a throwaway file and
+// still exercises the REAL load/save code rather than a mock of it.
+let configDir: string
+const savedConfigPath = process.env.COSTOPS_CONFIG_PATH
+
+beforeAll(() => {
+  configDir = mkdtempSync(join(tmpdir(), 'costops-api-'))
+  process.env.COSTOPS_CONFIG_PATH = join(configDir, 'costops-config.json')
+})
+
+afterAll(() => {
+  if (savedConfigPath === undefined) delete process.env.COSTOPS_CONFIG_PATH
+  else process.env.COSTOPS_CONFIG_PATH = savedConfigPath
+  rmSync(configDir, { recursive: true, force: true })
+})
 
 describe('costops API (route smoke)', () => {
   beforeEach(() => { initDatabase(':memory:') })
@@ -261,10 +288,12 @@ describe('costops API (route smoke)', () => {
     expect(out.status).toBe(404)
   })
 
-  // Phase 3 (GAP-11): budget CRUD + history routes. Each test cleans up its
-  // own budget id at the end -- loadCostopsConfig() reads the real on-disk
-  // store/costops-config.json (same convention as every other CostOps config
-  // route), so leaving an id behind would leak into unrelated test runs.
+  // Phase 3 (GAP-11): budget CRUD + history routes.
+  //
+  // These write through the REAL config load/save path -- which is the point of
+  // the test -- but into a throwaway file (see COSTOPS_CONFIG_PATH above, C-5),
+  // so a skipped cleanup can no longer leak into another test file or into the
+  // operator's own config.
   describe('budget CRUD + history routes (GAP-11)', () => {
     const BID = 'route-test-budget'
 

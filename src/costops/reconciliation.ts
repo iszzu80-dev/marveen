@@ -8,12 +8,15 @@
 // proves internal consistency, not cross-source-of-truth agreement).
 //
 // Read-only, additive: does not change getCostSummary's contract or write
-// anything. Reuses the same CONF_PRIORITY resolution as ledger.ts so
-// "operationally selected" here always matches what the dashboard actually
-// shows for that source.
+// anything. Reuses ledger.ts's resolveSourceTotal (the same CONF_PRIORITY
+// resolution AND multi-line summing getCostSummary itself runs, plus the
+// same advisory/pending exclusion) so "operationally selected" here always
+// matches what the dashboard actually shows for that source -- COS-CORE-M1:
+// a local pick-one reduce here drifted from the dec9ae64 summing fix and
+// made this header's claim false for a two-invoice month.
 
 import type Database from 'better-sqlite3'
-import { monthWindow, CONF_PRIORITY } from './ledger.js'
+import { monthWindow, CONF_PRIORITY, ADVISORY_CONF, PENDING_CONF, resolveSourceTotal } from './ledger.js'
 
 export type ReconciliationStatus =
   | 'matched'
@@ -45,7 +48,7 @@ export interface SourceReconciliation {
 const VARIANCE_TOLERANCE_FRACTION = 0.02
 
 interface SourceRow { id: string; name: string; provider: string }
-interface LineRow { source_id: string; billed_cost: number; confidence: string; actual_source: string | null }
+interface LineRow { source_id: string; billed_cost: number; confidence: string; data_freshness: number; actual_source: string | null }
 
 function round2(n: number): number { return Math.round(n * 100) / 100 }
 
@@ -62,7 +65,7 @@ export function buildReconciliation(db: Database.Database, now: number, month?: 
   const win = monthWindow(now, month)
   const sources = db.prepare(`SELECT id, name, provider FROM cost_sources WHERE active = 1 AND lifecycle_state != 'decommissioned'`).all() as SourceRow[]
   const lines = db.prepare(`
-    SELECT source_id, billed_cost, confidence, actual_source
+    SELECT source_id, billed_cost, confidence, data_freshness, actual_source
     FROM cost_line_items
     WHERE charge_period_start < @end AND charge_period_end > @start AND voided_at IS NULL
   `).all({ start: win.start, end: win.end }) as LineRow[]
@@ -91,8 +94,16 @@ export function buildReconciliation(db: Database.Database, now: number, month?: 
     const observed_provider_amount = providerLines.length > 0 ? round2(providerLines.reduce((sum, l) => sum + l.billed_cost, 0)) : null
     const invoice_amount = invoiceLines.length > 0 ? round2(invoiceLines.reduce((sum, l) => sum + l.billed_cost, 0)) : null
 
-    const resolved = ls.reduce((a, b) => (CONF_PRIORITY[b.confidence] || 0) > (CONF_PRIORITY[a.confidence] || 0) ? b : a)
-    const operationally_selected_amount = round2(resolved.billed_cost)
+    // COS-CORE-M1: the SAME resolution+summing seam getCostSummary's headline
+    // uses (resolveSourceTotal over the non-advisory/non-pending lines), so a
+    // month with two same-confidence invoices reports their SUM here too --
+    // never a picked-one that disagrees with the dashboard. A source whose
+    // lines are ALL advisory/pending has no operationally-selected figure at
+    // all (null, never a plan-estimate number the dashboard would exclude).
+    const headlineLs = ls.filter(l => !ADVISORY_CONF.has(l.confidence) && !PENDING_CONF.has(l.confidence))
+    const operationally_selected_amount = headlineLs.length > 0
+      ? round2(resolveSourceTotal(headlineLs, now, c => CONF_PRIORITY[c] || 0).billed_cost)
+      : null
 
     const forecastRow = latestForecast.get(s.id, win.key) as { forecast_amount: number } | undefined
     const expected_amount = forecastRow ? round2(forecastRow.forecast_amount) : null

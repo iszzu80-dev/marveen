@@ -15,9 +15,19 @@ import type Database from 'better-sqlite3'
 import { looksLikeAQuestionBack } from './cos-telegram.js'
 import { recordOwnerAnswer, matchAnswerTarget, holdOwnerMessage } from './owner-question.js'
 
-/** Istvan's own Telegram user id. The bot is reachable by anyone who finds it,
- *  and an owner-answer is an authorisation-bearing act — it closes questions and
- *  writes OWNER_DECISION events onto cases. */
+/** Istvan's own Telegram user id, as a LAST-RESORT default only.
+ *
+ *  MERGE 2026-08-13 (review T-4). The authorisation boundary on this path is
+ *  "whose replies count", and it belongs in the deployment config, not in a
+ *  constant inside a module: an owner-answer closes questions and writes
+ *  OWNER_DECISION events onto cases, and a literal buried here is the line
+ *  nobody finds on the next install. `handleOwnerUpdate` therefore takes the id
+ *  from its caller, which reads `owner_id` from the bot config and REFUSES to
+ *  poll at all when it is absent — refusing everything is the only safe reading
+ *  of "nobody said who may decide".
+ *
+ *  Kept exported because the existing tests name it, and because a documented
+ *  default is more honest than the same string appearing in three fixtures. */
 export const OWNER_ID = '8942301795'
 
 /** What one poll produced. Every branch below either RECORDS the owner's words
@@ -53,8 +63,9 @@ export interface OwnerUpdate {
  */
 export function handleOwnerUpdate(
   db: Database.Database, channel: string, u: OwnerUpdate, result: PollResult,
+  ownerId: string = OWNER_ID,
 ): void {
-  if (u.fromId !== OWNER_ID) { result.rejected++; return }
+  if (u.fromId !== ownerId) { result.rejected++; return }
 
   // A question back is not an answer — and counting it is not keeping it.
   //

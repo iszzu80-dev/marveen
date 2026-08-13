@@ -14,7 +14,10 @@
 //
 // SENDER CHECK: only the owner's own user id is accepted. The bot is reachable
 // by anyone who finds it, and an owner-answer is an authorisation-bearing act --
-// it closes questions and writes OWNER_DECISION events onto cases.
+// it closes questions and writes OWNER_DECISION events onto cases. The id comes
+// from the bot config (`owner_id`), not from a literal in this file: it is
+// deployment-local identity, and a constant buried in a poller is the line
+// nobody finds on the next install.
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
@@ -24,6 +27,7 @@ import { loadCosBotConfig, pollCosUpdates } from '../src/cos/cos-telegram.js'
 import { handleOwnerUpdate, type PollResult } from '../src/cos/owner-inbox.js'
 
 const OFFSET_PATH = 'store/.cos-telegram-offset'
+
 function readOffset(): number {
   try { return Number(readFileSync(OFFSET_PATH, 'utf8').trim()) || 0 } catch { return 0 }
 }
@@ -40,6 +44,31 @@ async function main(): Promise<void> {
     console.log('CosInbox:', JSON.stringify({ read: 0, failed: true, error: 'CoS bot not configured' })); return
   }
 
+  // WHOSE replies count, from config (review 2026-08-12, T-4). No owner id means
+  // no owner answers: refusing everything is the only safe reading of "nobody
+  // said who may decide", and it is reported rather than looking like silence.
+  if (!cfg.ownerId) {
+    console.log('CosInbox:', JSON.stringify({
+      read: 0, failed: true,
+      error: 'no owner_id in the CoS bot config — owner answers cannot be authorised',
+    }))
+    return
+  }
+
+  // WHOSE replies count, from config (review 2026-08-12, T-4). No owner id means
+  // no owner answers: refusing everything is the only safe reading of "nobody
+  // said who may decide", and it is reported rather than looking like silence.
+  // Kept through the 2026-08-13 merge that moved the per-message branches into
+  // owner-inbox.ts — the extraction made every branch testable, and this guard
+  // is the one that decides whether those branches run for the right person.
+  if (!cfg.ownerId) {
+    console.log('CosInbox:', JSON.stringify({
+      read: 0, failed: true,
+      error: 'no owner_id in the CoS bot config — owner answers cannot be authorised',
+    }))
+    return
+  }
+
   const updates = await pollCosUpdates(cfg, readOffset())
   // `ambiguous`: the owner wrote a plain message while SEVERAL questions were
   // open, so which case he meant cannot be known. Counted separately from
@@ -50,7 +79,7 @@ async function main(): Promise<void> {
 
   for (const u of updates) {
     highest = Math.max(highest, u.updateId)
-    handleOwnerUpdate(db, cfg.channelId!, u, result)
+    handleOwnerUpdate(db, cfg.channelId!, u, result, cfg.ownerId)
   }
 
   // Confirm only AFTER the answers are written. Telegram drops an update once a

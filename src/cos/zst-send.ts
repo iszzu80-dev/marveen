@@ -23,6 +23,7 @@ import { zstApprovals, type ApprovalEnvelope } from './approval-core.js'
 import { permits } from './autonomy-ladder.js'
 import { issueAuthorization, type AuthorizationContext } from './action-authorization.js'
 import { mintGatePermit } from './gate-permit.js'
+import { evaluateEnvelope, type EnvelopeDecision, type Intent } from './delegation-envelope.js'
 import { acquireZstClaim, releaseZstClaim } from './zst-case-store.js'
 import { type EmailDraft, renderedPayloadHash, templateHashFor } from './email-payload.js'
 
@@ -249,6 +250,9 @@ export interface DispatchZstSendInput {
   now?: number
   /** F-2 / AC-21. */
   runId?: string
+  /** §21: INITIAL opens a thread, REPLY/FOLLOW_UP continue one. The corporate
+   *  envelope opens none, so an absent value is read as INITIAL — fail-closed. */
+  outboundKind?: 'INITIAL' | 'FOLLOW_UP' | 'REPLY' | null
 }
 export interface ZstDispatchDecision {
   allowed: boolean
@@ -256,6 +260,9 @@ export interface ZstDispatchDecision {
   sensitivityTier: string
   campaignVersion?: number
   approvalVersion?: number
+  /** §21: set when a STANDING DELEGATION allowed this, not a human approval. */
+  delegationEnvelopeId?: string
+  delegatedIntent?: Intent
   approvalId?: string
   /** N-2: handed to the executor so the ceiling is counted inside the same
    *  transaction that writes SENDING. */
@@ -306,7 +313,33 @@ export function evaluateZstSendGate(db: Database.Database, req: DispatchZstSendI
     renderedPayloadHash: req.renderedPayloadHash, recipient: req.email.to,
     outboundKind: zstOutboundKindOf(db, req.ledgerId), now: req.now,
   })
-  if (!auth.authorized) reasons.push(`not authorized: ${auth.reason}`)
+
+  // §21 — the corporate standing delegation. Istvan, 2026-08-12: "A COS a cég
+  // nevében is küldhet majd levelet."
+  //
+  // BOTH GATES, AND THAT IS THE POINT OF DOING IT HERE. The two send paths are
+  // separate modules with separate tables, which is exactly how the corporate
+  // half has repeatedly been the one left behind — the autonomy rung above says
+  // so in its own comment, and the 2026-08-12 review's T-1 said it again. An
+  // envelope wired only into the personal gate would have been the same defect a
+  // third time.
+  //
+  // The corporate envelope is narrower than the personal one, and the narrowness
+  // is Istvan's answer rather than my caution: he named one address for the
+  // allowlist (the accountant), and named no vendors.
+  let delegation: EnvelopeDecision | null = null
+  if (!auth.authorized) {
+    delegation = evaluateEnvelope(db, {
+      domain: 'zst', actionType: 'EMAIL_SEND', recipient: req.email.to,
+      subject: req.email.subject, body: req.email.body,
+      outboundKind: req.outboundKind ?? null,
+      now: req.now ?? Math.floor(Date.now() / 1000),
+    })
+    if (!delegation.delegated) {
+      reasons.push(`not authorized: ${auth.reason}`)
+      for (const r of delegation.reasons) reasons.push(`delegálás: ${r}`)
+    }
+  }
 
   // §22.2 (review #3 U-4): same stamp as the personal gate. The two gates are
   // separate modules on purpose (different tables, different limits), so both
@@ -315,6 +348,9 @@ export function evaluateZstSendGate(db: Database.Database, req: DispatchZstSendI
     allowed: reasons.length === 0, reasons, sensitivityTier: tier,
     campaignVersion: auth.campaignVersion, approvalVersion: auth.approvalVersion,
     approvalId: auth.approvalId, limits: auth.limits,
+    ...(delegation?.delegated
+      ? { delegationEnvelopeId: delegation.envelopeId, delegatedIntent: delegation.intent }
+      : {}),
   })
 }
 
@@ -384,14 +420,22 @@ export async function dispatchZstSend(
     goalVersion: null,
     actionId: input.ledgerId,
     actionType: 'EMAIL_SEND',
-    intent: 'SEND_APPROVED_EMAIL',
+    intent: decision.delegatedIntent ?? 'SEND_APPROVED_EMAIL',
     targetReference: input.campaignId,
     recipient: input.email.to,
     payloadHash: input.renderedPayloadHash,
     // The approval this send is running under, recorded on the ticket. It used
     // to be a hardcoded null, so the corporate half of the AC-21 trail could not
-    // answer "which YES authorised this letter".
+    // answer "which YES authorised this letter" -- AND, more sharply, so
+    // consumeAuthorization's approval-revocation re-check (§22.2's TOCTOU list,
+    // sixth field) never ran on the corporate path at all: that block is gated
+    // on the ticket carrying an approval_id. A corporate approval withdrawn
+    // between issue and execution could still send inside the ticket's lifetime.
     approvalId: decision.approvalId ?? null,
+    // §21: binds the ticket to the delegation that justified it. The field
+    // counts towards policyEvaluationHash, so a delegated send cannot be
+    // consumed as though a human had approved it.
+    delegationEnvelopeId: decision.delegationEnvelopeId ?? null,
   }
   const ticket = issueAuthorization(db, authContext, now, {}, decision)
   try {

@@ -70,10 +70,32 @@ describe('costops period trend', () => {
       VALUES ('aws', @start, @end, 'usage', 0, 'HUF', 'pending_permission', @now, @now)
     `).run({ start: win.start, end: win.end, now: NOW })
     const trend = getPeriodTrend(db, cfg(), NOW, 1)
-    // A month with ONLY a pending_permission row still has a row, so it's not no_data,
-    // but that row must contribute 0 to operational_spend and not appear in provider_breakdown.
-    expect(trend.current.no_data).toBe(false)
+    // COS-CORE-M6: a month whose ONLY rows are pending_permission has no
+    // readable operational figure at all -- no_data:true, never
+    // "no_data:false with operational_spend 0" (exactly the fabricated zero
+    // the module header rules out). The pending row must still never appear
+    // as spend or in provider_breakdown.
+    expect(trend.current.no_data).toBe(true)
     expect(trend.current.operational_spend).toBe(0)
     expect(trend.current.provider_breakdown.find(p => p.provider === 'aws')).toBeUndefined()
+  })
+
+  it('a pending-only month plus a real month keeps month_over_month_delta honest (null, not delta-from-0)', () => {
+    const db = getDb()
+    // Previous month (June): a real fixed cost. Current month (July): only a
+    // pending_permission row -> current is no_data, so the delta must be null,
+    // never 22000 -> 0 read as "spend dropped to zero".
+    syncFixedCostsToLedger(db, cfg(), NOW, '2026-06')
+    const win = monthWindow(NOW)
+    db.prepare(`INSERT INTO cost_sources (id, name, provider, source_type, currency, active, created_at, updated_at) VALUES ('aws','AWS','aws','usage','HUF',1,@now,@now) ON CONFLICT(id) DO NOTHING`).run({ now: NOW })
+    db.prepare(`
+      INSERT INTO cost_line_items (source_id, charge_period_start, charge_period_end, charge_category, billed_cost, currency, confidence, data_freshness, created_at)
+      VALUES ('aws', @start, @end, 'usage', 0, 'HUF', 'pending_permission', @now, @now)
+    `).run({ start: win.start, end: win.end, now: NOW })
+    const trend = getPeriodTrend(db, cfg(), NOW, 2)
+    expect(trend.previous.no_data).toBe(false)
+    expect(trend.previous.operational_spend).toBe(22000)
+    expect(trend.current.no_data).toBe(true)
+    expect(trend.month_over_month_delta).toBeNull()
   })
 })

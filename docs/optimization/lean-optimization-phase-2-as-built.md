@@ -79,6 +79,42 @@ Deliberately deferred to this acceptance step so the fleet was not churned mid-p
   deepseek / **api_payg**). Billing mode comes from `store/billing-map.json` (verified live pairs),
   never inferred from a provider name.
 
+## P2-B origin boundary — deliberate, not a gap
+
+Recorded 2026-08-13 because the lean-optimization review (OPT-M6, `costops-lean-optimization-full-review-2026-08-12.md`)
+filed this as "P2-B wired at 1 of 4 dispatch origins". It is not a shortfall; it is where the design
+runs out of signal, and the next reader should not re-file it.
+
+**Where P2-B is wired.** The admission gate (`evaluateDispatchAdmissionSafe`), the saturation-event
+record and the packet metadata (`recordPacketMetadataSafe`) all hang off exactly one origin:
+`fireKanbanDispatch()` in `src/web/routes/kanban.ts` (`:120` gate, `:175` metadata). The other three
+origins named in the P2-B packet — `message-router.ts` (`:704`), `schedule-runner.ts` (`:681`),
+`agent-worker.ts` (`:686`) — mint a stamped dispatch row via `createDispatchSafe` and nothing more.
+
+**Why the other three are not gated.** The packet is explicit that `taskSize` comes from explicit
+dispatch metadata or a deterministic workflow policy (kanban label / card type) and is
+**never LLM-estimated** (`phase2-p2b-context-packet.md:55-58`); an unmarked task is treated as the
+agent's default, never guessed `large`. A chat message, a scheduled task and a worker job carry no
+size signal of any kind — no label, no card type, no explicit metadata — so `resolveTaskSize()`
+would fall straight through to the agent default (`normal` as shipped) on every single call. Wiring
+the gate there would be behaviour-neutral by construction: it would burn a live-saturation read per
+dispatch to compute a refusal that can never fire, and it would write packet metadata whose
+`taskSize` is an assumption rather than an observation — which is the confident-zero failure mode
+this phase spent its whole test budget avoiding. Kanban is wired because kanban is the only origin
+that HAS the signal.
+
+(The one way a refusal could occur at those origins today is an operator setting
+`agents.<name>.agentDefaultTaskSize` to `large` in `store/session-efficiency.json` — which is a
+blanket "hold all this agent's work while it is saturated" switch, not a per-task size signal, and
+not what the gate is for.)
+
+**What would have to exist before wiring them.** An explicit size signal at the origin itself, not
+an inference about it: a `taskSize` field on the scheduled-task definition, on the worker job
+record, or on the agent-message envelope, populated by whoever creates the work. Once such a field
+exists, wiring is mechanical — pass it as `explicitTaskSize` to `evaluateDispatchAdmissionSafe` and
+carry it into `buildContextPacket`, exactly as the kanban path passes `admission.taskSize`. Until
+then, adding the call sites buys nothing and costs honesty.
+
 ## Honest gaps — measured, not hidden
 
 1. **The kanban origin was production-dead; now proven live. The `accepted` writer is still

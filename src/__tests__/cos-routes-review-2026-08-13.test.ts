@@ -101,11 +101,26 @@ describe('A8: an approval question is answerable from Mission Control', () => {
     expect(out.status).not.toBe(404)
     expect(out.body.ok).toBe(true)
 
+    // MERGE 2026-08-13: asserted by EXISTENCE, not by "is the newest row".
+    //
+    // This used to read the last event and expect OWNER_DECISION. That held
+    // while the engine wrote nothing into the case's own history — and §8
+    // (progression-events.ts, merged from the parallel branch) is precisely the
+    // change that makes it write: the route runs a progression cycle after the
+    // owner acts, and that cycle now appends PLAN_REVISED and friends. So the
+    // newest row is the ENGINE's note, which is the new feature working, not
+    // this one failing.
+    //
+    // What this test is actually about is that the owner's YES was recorded at
+    // all (before the fix the route 404'd and nothing was written). Ordering is
+    // somebody else's invariant.
     const ev = getDb().prepare(
-      `SELECT event_type, payload FROM personal_case_events WHERE case_id = ? ORDER BY event_id DESC LIMIT 1`
-    ).get(CASE_ID) as { event_type: string; payload: string }
-    expect(ev.event_type).toBe('OWNER_DECISION')
-    expect(JSON.parse(ev.payload).choice).toBe('YES')
+      `SELECT event_type, payload FROM personal_case_events
+        WHERE case_id = ? AND event_type = 'OWNER_DECISION'
+        ORDER BY event_id DESC LIMIT 1`
+    ).get(CASE_ID) as { event_type: string; payload: string } | undefined
+    expect(ev?.event_type).toBe('OWNER_DECISION')
+    expect(JSON.parse(ev!.payload).choice).toBe('YES')
   })
 })
 

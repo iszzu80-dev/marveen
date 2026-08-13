@@ -1,0 +1,15 @@
+{
+  "_doc": "Lean Optimization Phase 3 capacity-routing config (gitignored real copy: store/capacity-routing-config.json). enabled=false is safe-by-default. Each candidate needs enabledForRouting:true to ever be used -- an external/non-trusted provider stays false until a separate owner GO. At most 2 candidates (hard ceiling). limitedThreshold is the usage fraction at/above which a key reads 'limited' instead of 'degraded'; ttlMs is the climb-back backoff used when no provider-stated reset time is observable.",
+  "enabled": false,
+  "candidates": [
+    {
+      "provider": "anthropic",
+      "authProfile": "plan:secondary",
+      "model": "claude-sonnet-5",
+      "enabledForRouting": true,
+      "subscriptionIncluded": true
+    }
+  ],
+  "limitedThreshold": 0.9,
+  "ttlMs": 1800000
+}

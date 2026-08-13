@@ -21,10 +21,7 @@ const BASE = {
     runtimeRouting: true, recommendations: true, marketWatch: true,
     benchmarkRecommendations: true,
   },
-  routing: {
-    automaticFallback: true, trustedProvidersOnly: true,
-    maxFallbacksPerProfile: 1, maxAutomaticFallbacksPerDispatch: 1,
-  },
+  routing: { automaticFallback: true },
   ui: { defaultWindow: '30d' as const, showAllocationCost: true },
 }
 
@@ -68,11 +65,15 @@ describe('O-7: the emergency stop reports what happened', () => {
 
   it('writeOptimizationConfig reports ok:false when the write cannot land', () => {
     // The condition the handler now checks has to be reachable, or the branch
-    // above is decoration. An unwritable directory is the read-only-store case.
-    writeOptimizationConfig(BASE, { path: cfg })
-    chmodSync(dir, 0o500)
-    const result = writeOptimizationConfig({ ...BASE, masterEnabled: false }, { path: cfg })
-    chmodSync(dir, 0o755)
+    // above is decoration. A config path inside a directory that does not
+    // exist is the write-cannot-land case. (This used to chmod the dir to
+    // 0o500, which silently proves nothing when the suite runs as root --
+    // root writes through mode bits, and the test went red for the wrong
+    // reason. A nonexistent parent fails for EVERY uid.)
+    const result = writeOptimizationConfig(
+      { ...BASE, masterEnabled: false },
+      { path: join(dir, 'no-such-dir', 'optimization-config.json') },
+    )
     expect(result.ok).toBe(false)
     expect(result.error).toBeTruthy()
   })

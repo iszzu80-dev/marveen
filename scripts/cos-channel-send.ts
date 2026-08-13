@@ -10,6 +10,9 @@
 import { initDatabase, getDb } from '../src/db.js'
 import { loadCosBotConfig, loadChannelConfigs, sendCosMessage } from '../src/cos/cos-telegram.js'
 import { pendingOutbox, markOutboxSent, markOutboxFailed } from '../src/cos/channel-outbox.js'
+import {
+  heldOwnerMessages, buildHeldFollowUp, markHeldResolved, outstandingOwnerQuestions,
+} from '../src/cos/owner-question.js'
 
 async function main(): Promise<void> {
   initDatabase()
@@ -50,6 +53,33 @@ async function main(): Promise<void> {
       failures.push({ caseId: r.case_id, error: String((e as Error)?.message ?? e).slice(0, 160) })
     }
   }
+  // HELD MESSAGES GET AN ANSWER (review 2026-08-12, T-3).
+  //
+  // `holdOwnerMessage` kept the owner's words when they could not be attributed
+  // — and nothing read the table, nothing set `resolved_at`, and he was never
+  // told. From his side that is indistinguishable from the message being
+  // dropped: he replies, nothing happens, silence. A held message with no reply
+  // is the same silence with a better audit trail.
+  //
+  // The follow-up hands him the one action that resolves it: reply-to on the
+  // question he means. `matchAnswerTarget` treats that as exact, so the next
+  // round needs no guessing at all.
+  //
+  // SENT FIRST, MARKED AFTER. A delivery failure must leave the row open for the
+  // next sweep, which is the whole reason the row exists.
+  let heldAnswered = 0
+  const open = outstandingOwnerQuestions(db, 5)
+  for (const h of heldOwnerMessages(db, 5)) {
+    if (h.channel !== cfg.channelId) continue
+    try {
+      await sendCosMessage(cfg, buildHeldFollowUp(h, open))
+      markHeldResolved(db, h.heldId, 'visszakerdeztunk a csatornan')
+      heldAnswered++
+    } catch (e) {
+      failures.push({ caseId: `held:${h.heldId}`, error: String((e as Error)?.message ?? e).slice(0, 160) })
+    }
+  }
+
   // THE OUTBOX, DRAINED PER CHANNEL. Producers with no state of their own to
   // hang a message on (the radar first) queue here instead of sending, so a
   // synchronous tick never waits on the network and a transient failure retries
@@ -87,6 +117,9 @@ async function main(): Promise<void> {
 
   console.log('CosChannel:', JSON.stringify({
     channel: cfg.channelId, pending: rows.length, sent, failures,
+    // Reported even at zero, same rule as the outbox: "nothing was held" and
+    // "held messages are piling up unanswered" must not look the same.
+    heldAnswered, heldOpen: heldOwnerMessages(db, 50).length,
     // Reported even when zero: "the outbox was empty" and "the outbox was never
     // drained" must not look the same in the cycle report. `outboxByChannel`
     // makes the split visible — one number for two bots would hide a channel
