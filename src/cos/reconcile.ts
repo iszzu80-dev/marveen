@@ -20,6 +20,7 @@
 
 import type Database from 'better-sqlite3'
 import { evaluateOutputFloors, breachedFloors } from './output-floor.js'
+import { numericCursorSql } from './email-ingest.js'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -370,13 +371,23 @@ const radarCheckFailing: Check = (db, now) => {
 const cursorBatchMismatch: Check = (db) => {
   // §19 KRITIKUS: the cursor moved past a batch that never terminalised. This is
   // the one that says the system believes it processed mail it did not.
+  //
+  // Both columns are TEXT and Gmail historyIds are decimal integers, so this
+  // used to order them as strings — '9999999' >= '10000000' is true as text and
+  // false as a number. On a CRITICAL check that cuts both ways: it invented
+  // data-loss alarms whenever the cursor had fewer digits than the batch, and
+  // it stayed silent on the real thing whenever it had more. Compare as numbers,
+  // and only when both sides actually are positions — a triage batch's
+  // 'triage-1755000000' carries none, and SQLite's CAST would read it as 0.
   let n = 0
   try {
     n = (db.prepare(
       `SELECT COUNT(*) AS n FROM email_source_checkpoints cp
        JOIN email_processing_batches b ON b.gmail_account_id = cp.gmail_account_id
-       WHERE b.status IN ('OPEN','PROCESSING') AND b.cursor_after IS NOT NULL
-         AND cp.history_cursor IS NOT NULL AND cp.history_cursor >= b.cursor_after`
+       WHERE b.status IN ('OPEN','PROCESSING')
+         AND ${numericCursorSql('b.cursor_after')}
+         AND ${numericCursorSql('cp.history_cursor')}
+         AND CAST(cp.history_cursor AS INTEGER) >= CAST(b.cursor_after AS INTEGER)`
     ).get() as { n: number }).n
   } catch { return null }
   if (!n) return null
