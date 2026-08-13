@@ -46,6 +46,16 @@ export interface CapacityInputs {
    * This is ground truth and overrides a period-old usage fraction.
    */
   activeBlockingSignal: boolean
+  /**
+   * Seconds until the PROVIDER-STATED reset of the window this reading belongs
+   * to, measured against the same "now" that ageSeconds was computed against
+   * (OPT-M1, review 2026-08-12). Zero or negative means the stated reset has
+   * already passed -- the window the reading describes no longer exists.
+   * Null/absent when the provider stated no reset time (a snapshot's resets_at
+   * column is NULL unless the provider gave a real timestamp -- see
+   * costops/capacity-snapshots.ts; never fabricated from a label).
+   */
+  secondsUntilProviderReset?: number | null
 }
 
 const DEFAULT_LIMITED_THRESHOLD = 0.9
@@ -62,6 +72,26 @@ const DEFAULT_LIMITED_THRESHOLD = 0.9
  *   2. `available` is reachable ONLY when the data is fresh. Stale data can
  *      degrade a would-be-available read down to 'degraded', but staleness
  *      never manufactures 'available' out of an absent or old figure.
+ *
+ * OPT-M1 (review 2026-08-12) added the mirror-image rule for the CONSTRAINED
+ * side, which the original only applied to the available side: a limited/
+ * blocked reading that is past the staleness horizon, or past its own
+ * provider-stated reset time, degrades to 'unknown' (refresh required) rather
+ * than pinning the key constrained forever. The asymmetry the fix removes: a
+ * stale LOW reading was demoted (available -> degraded), but a stale 100%
+ * reading stayed 'blocked' indefinitely -- with nothing refreshing snapshots
+ * for a key nobody routes to, a single over-limit observation was permanent.
+ * The demotion goes to 'unknown', NOT to 'degraded': 'degraded' is routable,
+ * and an expired over-limit reading is no evidence of health -- the honest
+ * answer is "not known until re-observed", the same contract as the balance
+ * path below. A LOW stale reading still degrades to 'degraded' (routable):
+ * usage within a plan window is slow-moving and only ever grows toward the
+ * limit, so an old low figure still bounds the truth from below; an old
+ * OVER-limit figure bounds nothing once its window may have reset.
+ *
+ * `limitedThreshold` comes from deployment-local config
+ * (capacity-routing-config.json's limitedThreshold, threaded through by the
+ * runner -- OPT-M2); the default is the committed 0.9.
  */
 export function deriveCapacityState(
   inputs: CapacityInputs,
@@ -71,9 +101,10 @@ export function deriveCapacityState(
   if (inputs.usageConfidence === 'unknown' || inputs.usageFraction === null) return 'unknown'
 
   const stale = inputs.ageSeconds === null || inputs.ageSeconds > inputs.staleAfterSeconds
+  const resetElapsed = inputs.secondsUntilProviderReset != null && inputs.secondsUntilProviderReset <= 0
 
-  if (inputs.usageFraction >= 1) return 'blocked'
-  if (inputs.usageFraction >= limitedThreshold) return 'limited'
+  if (inputs.usageFraction >= 1) return (stale || resetElapsed) ? 'unknown' : 'blocked'
+  if (inputs.usageFraction >= limitedThreshold) return (stale || resetElapsed) ? 'unknown' : 'limited'
   return stale ? 'degraded' : 'available'
 }
 

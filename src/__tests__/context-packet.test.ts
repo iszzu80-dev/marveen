@@ -21,6 +21,7 @@ import {
   truncateExcerpt,
   CONTEXT_PACKET_VERSION,
   MAX_EXCERPT_CHARS,
+  MAX_NOTE_CHARS,
   MAX_SECTION_CHARS,
   TARGET_FRESH_TOKENS,
   type ContextPacketInput,
@@ -151,6 +152,46 @@ describe('P2-B context packet: a full document inlined instead of referenced FAI
     }))
     expect(v.ok).toBe(false)
     expect(v.errors.map(e => e.code)).toContain('artifact_inlined')
+  })
+
+  it('OPT-M7: FAILS when the document is pasted into a reference NOTE (the former unbounded side door)', () => {
+    const v = validateContextPacket(minimal({
+      references: [{ path: 'docs/audit.md', ref: 'abc1234', contentHash: hashContent(FULL_DOCUMENT), note: FULL_DOCUMENT }],
+    }))
+    expect(v.ok).toBe(false)
+    expect(v.errors.map(e => e.code)).toContain('reference_note_too_long')
+  })
+
+  it('OPT-M7: a note at the cap passes; one char over fails', () => {
+    const ref = (note: string) => minimal({
+      references: [{ path: 'docs/a.md', ref: 'abc1234', contentHash: hashContent('x'), note }],
+    })
+    expect(validateContextPacket(ref('n'.repeat(MAX_NOTE_CHARS))).ok).toBe(true)
+    const over = validateContextPacket(ref('n'.repeat(MAX_NOTE_CHARS + 1)))
+    expect(over.ok).toBe(false)
+    expect(over.errors.map(e => e.code)).toContain('reference_note_too_long')
+  })
+
+  it('OPT-M7: the note COUNTS toward the whole-artifact fraction -- splitting a document across excerpt + note does not evade the check', () => {
+    // 1000-byte artifact; excerpt (300) and note (250) each innocent alone,
+    // 550 combined >= 50% of the artifact -> the document is inlined in halves.
+    const artifact = 'y'.repeat(1000)
+    const v = validateContextPacket(minimal({
+      references: [{
+        path: 'docs/small.md', ref: 'abc1234', contentHash: hashContent(artifact),
+        bytes: 1000, excerpt: 'y'.repeat(300), note: 'y'.repeat(250),
+      }],
+    }))
+    expect(v.ok).toBe(false)
+    expect(v.errors.map(e => e.code)).toContain('artifact_inlined')
+    // The same excerpt with a short real note stays fine.
+    const ok = validateContextPacket(minimal({
+      references: [{
+        path: 'docs/small.md', ref: 'abc1234', contentHash: hashContent(artifact),
+        bytes: 1000, excerpt: 'y'.repeat(300), note: 'see the config block',
+      }],
+    }))
+    expect(ok.ok).toBe(true)
   })
 
   it('does NOT punish quoting a genuinely tiny artifact in full', () => {

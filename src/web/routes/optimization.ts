@@ -21,6 +21,10 @@ import {
   upsertDecisionsFromRecommendations,
   type OptimizationDecisionStatus,
 } from '../../optimization/optimization-decisions.js'
+import {
+  initOptimizationConfigAuditSchema,
+  recordOptimizationConfigAudit,
+} from '../../optimization/optimization-config-audit.js'
 import { loadPackageInventoryConfig } from '../../costops/package-inventory.js'
 import { loadFxRates } from '../../costops/fx-config.js'
 import { buildPortfolioReport } from '../../costops/portfolio-recommendation.js'
@@ -67,8 +71,10 @@ export async function tryHandleOptimization(ctx: RouteContext): Promise<boolean>
   // touches optimization_decisions/optimization_decision_events, not only the
   // /recommendations GET. A caller reaching /audit or /recommendations/decision
   // before ever calling /recommendations would otherwise hit "no such table".
+  // The config-audit table (OPT-M3) rides the same seam for the same reason.
   if (path.startsWith('/api/optimization/')) {
     initOptimizationDecisionsSchema(getDb())
+    initOptimizationConfigAuditSchema(getDb())
   }
 
   if (path === '/api/optimization/summary' && method === 'GET') {
@@ -269,6 +275,11 @@ export async function tryHandleOptimization(ctx: RouteContext): Promise<boolean>
       return true
     }
 
+    // OPT-M3 (review 2026-08-12): every config write leaves an audit row, per
+    // the dashboard spec's "every config change is audited" acceptance. The
+    // pre-write config is read HERE (not reconstructed from version-1 later)
+    // so the recorded from-state is what was actually replaced.
+    const before = readOptimizationConfig().config
     const result = writeOptimizationConfig(
       {
         masterEnabled: body.masterEnabled,
@@ -287,6 +298,12 @@ export async function tryHandleOptimization(ctx: RouteContext): Promise<boolean>
       json(res, { error: result.error, config: result.config }, 409)
       return true
     }
+    recordOptimizationConfigAudit(getDb(), {
+      at: Math.floor(Date.now() / 1000),
+      surface: 'settings',
+      from: before,
+      to: result.config,
+    })
     json(res, { config: result.config })
     return true
   }
@@ -326,6 +343,15 @@ export async function tryHandleOptimization(ctx: RouteContext): Promise<boolean>
       json(res, { ok: false, error: result.error ?? 'write failed', config: result.config }, 500)
       return true
     }
+    // OPT-M3: the kill switch is a config write like any other and gets its
+    // audit row -- recorded AFTER the ok check so a failed stop is not logged
+    // as a change that happened.
+    recordOptimizationConfigAudit(getDb(), {
+      at: Math.floor(Date.now() / 1000),
+      surface: 'emergency',
+      from: current,
+      to: result.config,
+    })
     // Ó-2 (review #2, 2026-08-11): the stop has TWO halves — this config and the
     // capacity-routing flag — and they can land separately. Reporting a single
     // verdict for both is how an operator walks away from a half-stopped system.

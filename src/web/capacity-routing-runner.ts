@@ -201,38 +201,80 @@ function capacityStateForDeepSeekBalance(
   )
 }
 
+export interface CapacityInfo {
+  state: CapacityState
+  /**
+   * Provider-stated reset time (epoch sec) behind the reading, when the
+   * underlying snapshot carried one (OPT-M1: the codex collector persists
+   * resets_at and usageFigure now surfaces it). Null for the balance path,
+   * for keys with no snapshot, and for providers that state no reset --
+   * never fabricated from a TTL or a reset label.
+   */
+  providerStatedResetAtSec: number | null
+}
+
+/**
+ * Capacity state PLUS the provider-stated reset time for one (provider,
+ * authProfile) key. `limitedThreshold` is the deployment-local
+ * capacity-routing-config value (OPT-M2 -- before this parameter the stored
+ * knob never reached deriveCapacityState and the state layer always used the
+ * committed 0.9); omitted = the pure layer's own default, so existing callers
+ * that carry no config (optimization-routing.ts) are byte-identical.
+ */
+export function capacityInfoFor(
+  db: Database.Database,
+  provider: string,
+  authProfile: string,
+  now: number,
+  activeBlockingSignal: boolean,
+  limitedThreshold?: number,
+): CapacityInfo {
+  // DeepSeek: prepaid balance, not a subscription window -- see
+  // capacityStateForDeepSeekBalance's header comment. Checked before the
+  // subscriptions-config path below so a stray deepseek subscriptions.json
+  // entry (there should never be one) cannot silently take over. A balance
+  // has no provider-stated reset (money does not reset on a schedule).
+  if (provider === 'deepseek') {
+    return { state: capacityStateForDeepSeekBalance(db, now, activeBlockingSignal), providerStatedResetAtSec: null }
+  }
+  const { config } = loadSubscriptionsConfig()
+  const lifecycle = deriveLifecycle(config, now)
+  const sub = findSubscriptionFor(lifecycle, provider, authProfile)
+  if (!sub) {
+    return {
+      state: deriveCapacityState({
+        usageFraction: null, usageConfidence: 'unknown', ageSeconds: null,
+        staleAfterSeconds: CAPACITY_STALE_AFTER_SECONDS, activeBlockingSignal,
+      }, limitedThreshold),
+      providerStatedResetAtSec: null,
+    }
+  }
+  const usage = usageFigure(db, sub, now)
+  const fresh = freshnessOf(usage.freshness.as_of, now)
+  const resetAtSec = usage.resets_at ?? null
+  const state = deriveCapacityState({
+    usageFraction: usage.value,
+    usageConfidence: usage.confidence,
+    ageSeconds: fresh.age_seconds,
+    staleAfterSeconds: CAPACITY_STALE_AFTER_SECONDS,
+    activeBlockingSignal,
+    // OPT-M1: an over-limit reading whose provider-stated reset has already
+    // passed must degrade to 'unknown' in the pure layer, not pin 'blocked'.
+    secondsUntilProviderReset: resetAtSec === null ? null : resetAtSec - now,
+  }, limitedThreshold)
+  return { state, providerStatedResetAtSec: resetAtSec }
+}
+
+/** State-only convenience over capacityInfoFor, for callers that need no reset time. */
 export function capacityStateFor(
   db: Database.Database,
   provider: string,
   authProfile: string,
   now: number,
   activeBlockingSignal: boolean,
+  limitedThreshold?: number,
 ): CapacityState {
-  // DeepSeek: prepaid balance, not a subscription window -- see
-  // capacityStateForDeepSeekBalance's header comment. Checked before the
-  // subscriptions-config path below so a stray deepseek subscriptions.json
-  // entry (there should never be one) cannot silently take over.
-  if (provider === 'deepseek') {
-    return capacityStateForDeepSeekBalance(db, now, activeBlockingSignal)
-  }
-  const { config } = loadSubscriptionsConfig()
-  const lifecycle = deriveLifecycle(config, now)
-  const sub = findSubscriptionFor(lifecycle, provider, authProfile)
-  if (!sub) {
-    return deriveCapacityState({
-      usageFraction: null, usageConfidence: 'unknown', ageSeconds: null,
-      staleAfterSeconds: CAPACITY_STALE_AFTER_SECONDS, activeBlockingSignal,
-    })
-  }
-  const usage = usageFigure(db, sub, now)
-  const fresh = freshnessOf(usage.freshness.as_of, now)
-  return deriveCapacityState({
-    usageFraction: usage.value,
-    usageConfidence: usage.confidence,
-    ageSeconds: fresh.age_seconds,
-    staleAfterSeconds: CAPACITY_STALE_AFTER_SECONDS,
-    activeBlockingSignal,
-  }, undefined) // uses the module default limitedThreshold; see checkAgent for the config-driven override path
+  return capacityInfoFor(db, provider, authProfile, now, activeBlockingSignal, limitedThreshold).state
 }
 
 export interface AgentRoutingDecisionInput {
@@ -251,6 +293,16 @@ export interface AgentRoutingDecisionInput {
    * system_state (optimization-summary.ts) has claimed all along.
    */
   automaticFallback: boolean
+  /**
+   * The PRIMARY key's provider-stated capacity reset time (ms epoch), when one
+   * is observable -- OPT-M1 (review 2026-08-12): this used to be hardcoded
+   * null inside decideAgentRouting under a comment claiming no provider-stated
+   * reset is observable, which is false for codex (its collector persists a
+   * real resets_at and capacityInfoFor surfaces it). Null when the primary's
+   * snapshot carries none; shouldClimbBackToPrimary then falls back to the
+   * TTL guess exactly as before.
+   */
+  providerStatedResetAtMs: number | null
   nowMs: number
   ttlMs: number
 }
@@ -282,7 +334,9 @@ export function decideAgentRouting(input: AgentRoutingDecisionInput): AgentRouti
     }
     const climb = shouldClimbBackToPrimary({
       overlaySetAtMs: overlay.setAtMs, nowMs, ttlMs,
-      providerStatedResetAtMs: null, // no provider-stated reset is observable today; TTL guess only
+      // Real when the primary's snapshot states one (codex), null otherwise --
+      // shouldClimbBackToPrimary prefers the stated reset over the TTL guess.
+      providerStatedResetAtMs: input.providerStatedResetAtMs,
       primaryCapacityState: primaryState,
     })
     return climb
@@ -312,6 +366,7 @@ async function checkAgent(
   candidates: FallbackCandidate[],
   ttlMs: number,
   automaticFallback: boolean,
+  limitedThreshold: number,
 ): Promise<void> {
   if (agentRunState(name) !== 'running') return
 
@@ -329,7 +384,11 @@ async function checkAgent(
   const configuredKey = capacityKeyId({ provider: configuredProvider, authProfile: configuredAuthProfile })
 
   const limitBannerShowing = detectsUsageLimit(pane)
-  const primaryState = capacityStateFor(db, configuredProvider, configuredAuthProfile, nowSec, limitBannerShowing)
+  // OPT-M2: the deployment-local limitedThreshold finally reaches the state
+  // derivation (it used to be stored/normalized and then ignored). OPT-M1: the
+  // primary's provider-stated reset time rides along for climb-back.
+  const primaryInfo = capacityInfoFor(db, configuredProvider, configuredAuthProfile, nowSec, limitBannerShowing, limitedThreshold)
+  const primaryState = primaryInfo.state
   const errorClass = limitBannerShowing ? classifyError({ kind: 'usage_limit_banner' }) : null
 
   const overlay = readRuntimeOverlay(name)
@@ -337,13 +396,17 @@ async function checkAgent(
 
   const candidateStates = new Map<string, CapacityState>()
   for (const c of candidates) {
-    const s = capacityStateFor(db, c.provider, c.authProfile, nowSec, false)
+    const s = capacityStateFor(db, c.provider, c.authProfile, nowSec, false, limitedThreshold)
     candidateStates.set(capacityKeyId(c), s)
   }
 
   const decision = decideAgentRouting({
     overlay, packageOpen, primaryState, candidates, candidateStates,
-    errorClass, automaticFallback, nowMs, ttlMs,
+    errorClass, automaticFallback,
+    providerStatedResetAtMs: primaryInfo.providerStatedResetAtSec === null
+      ? null
+      : primaryInfo.providerStatedResetAtSec * 1000,
+    nowMs, ttlMs,
   })
 
   if (decision.kind === 'none') {
@@ -411,7 +474,7 @@ export function startCapacityRoutingRunner(): NodeJS.Timeout {
     const automaticFallback = readOptimizationConfig().config.routing.automaticFallback
     const now = Date.now()
     for (const name of listAgentNames()) {
-      try { await checkAgent(name, now, cfg.candidates, cfg.ttlMs, automaticFallback) }
+      try { await checkAgent(name, now, cfg.candidates, cfg.ttlMs, automaticFallback, cfg.limitedThreshold) }
       catch (err) { logger.debug({ err, agent: name }, 'capacity-routing: agent check error') }
     }
   }

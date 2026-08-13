@@ -125,6 +125,7 @@ describe('OPT-H1: both routing directions, through the real isPackageOpen -> dec
     overlay: RuntimeOverlayEntry | null
     primaryState: CapacityState
     automaticFallback?: boolean
+    providerStatedResetAtMs?: number | null
   }) {
     const { open: packageOpen } = isPackageOpen(getDb(), AGENT, NOW_SEC, CAP_SEC)
     return decideAgentRouting({
@@ -135,6 +136,7 @@ describe('OPT-H1: both routing directions, through the real isPackageOpen -> dec
       candidateStates: candidateStatesAvailable(),
       errorClass: null,
       automaticFallback: opts.automaticFallback ?? true,
+      providerStatedResetAtMs: opts.providerStatedResetAtMs ?? null,
       nowMs: NOW_MS,
       ttlMs: TTL_MS,
     })
@@ -176,6 +178,48 @@ describe('OPT-H1: both routing directions, through the real isPackageOpen -> dec
   })
 })
 
+describe('OPT-M1: the provider-stated reset time reaches climb-back (no longer hardcoded null)', () => {
+  function decide(opts: {
+    overlay: RuntimeOverlayEntry | null
+    primaryState: CapacityState
+    providerStatedResetAtMs: number | null
+  }) {
+    const { open: packageOpen } = isPackageOpen(getDb(), AGENT, NOW_SEC, CAP_SEC)
+    return decideAgentRouting({
+      overlay: opts.overlay,
+      packageOpen,
+      primaryState: opts.primaryState,
+      candidates: [CANDIDATE],
+      candidateStates: candidateStatesAvailable(),
+      errorClass: null,
+      automaticFallback: true,
+      providerStatedResetAtMs: opts.providerStatedResetAtMs,
+      nowMs: NOW_MS,
+      ttlMs: TTL_MS,
+    })
+  }
+
+  it('a stated reset in the FUTURE holds the overlay even though the TTL has long elapsed', () => {
+    // OVERLAY's setAtMs puts the TTL comfortably in the past -- before OPT-M1
+    // the hardcoded null made this climb back on TTL alone.
+    const d = decide({ overlay: OVERLAY, primaryState: 'available', providerStatedResetAtMs: NOW_MS + 60_000 })
+    expect(d).toEqual({ kind: 'none', reasonCode: 'ttl_not_elapsed_or_primary_still_constrained' })
+  })
+
+  it('a stated reset that has PASSED climbs back (provider-stated beats the TTL guess)', () => {
+    // TTL not yet elapsed, but the provider says the window reset a minute ago.
+    const young = { ...OVERLAY, setAtMs: NOW_MS - 60_000 }
+    const d = decide({ overlay: young, primaryState: 'available', providerStatedResetAtMs: NOW_MS - 60_000 })
+    expect(d).toEqual({ kind: 'clear', reasonCode: 'primary_recovered_climb_back' })
+  })
+
+  it('null stated reset falls back to the TTL guess, byte-identical to the pre-fix behaviour', () => {
+    expect(decide({ overlay: OVERLAY, primaryState: 'available', providerStatedResetAtMs: null }).kind).toBe('clear')
+    const young = { ...OVERLAY, setAtMs: NOW_MS - 60_000 }
+    expect(decide({ overlay: young, primaryState: 'available', providerStatedResetAtMs: null }).kind).toBe('none')
+  })
+})
+
 describe('OPT-H2: routing.automaticFallback gates SET, never climb-back/clear', () => {
   function decide(opts: {
     overlay: RuntimeOverlayEntry | null
@@ -191,6 +235,7 @@ describe('OPT-H2: routing.automaticFallback gates SET, never climb-back/clear', 
       candidateStates: candidateStatesAvailable(),
       errorClass: null,
       automaticFallback: opts.automaticFallback,
+      providerStatedResetAtMs: null,
       nowMs: NOW_MS,
       ttlMs: TTL_MS,
     })
@@ -246,5 +291,17 @@ describe('STANDING CHECKS: the wiring stays wired (source-level, same pattern as
 
   it('isPackageOpen defaults its bound to the dispatch-attribution window cap (never unbounded)', () => {
     expect(runnerSrc()).toMatch(/loadDispatchAttributionConfig\(\)\.maxWindowSeconds/)
+  })
+
+  it('OPT-M2: the sweep threads cfg.limitedThreshold into the per-agent check (the knob is not decorative)', () => {
+    expect(runnerSrc()).toMatch(/cfg\.limitedThreshold/)
+  })
+
+  it('OPT-M1: decideAgentRouting no longer hardcodes providerStatedResetAtMs to null', () => {
+    // The pre-fix line was `providerStatedResetAtMs: null, // no provider-stated
+    // reset is observable today` -- false for codex. The value must flow from
+    // the input (fed by capacityInfoFor's snapshot read), never a literal null.
+    expect(runnerSrc()).toMatch(/providerStatedResetAtMs:\s*input\.providerStatedResetAtMs/)
+    expect(runnerSrc()).toMatch(/providerStatedResetAtSec/)
   })
 })

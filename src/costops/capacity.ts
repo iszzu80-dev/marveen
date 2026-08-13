@@ -55,6 +55,17 @@ export interface CapacityFigure {
   blocker: string | null
   /** Unit of `value` -- never assumed by the renderer. */
   unit: string | null
+  /**
+   * Provider-stated reset time (epoch sec) of the window the figure belongs
+   * to, when the underlying snapshot carried one (OPT-M1, review 2026-08-12:
+   * the codex collector persists resets_at, and before this field the column
+   * was write-only -- no reader ever surfaced it, so the routing layer could
+   * not distinguish "over limit right now" from "over limit in a window that
+   * has since reset"). Optional: only figures backed by a capacity snapshot
+   * carry it; counters and derived figures leave it absent. Never fabricated
+   * from a reset LABEL -- absent unless the provider gave a real timestamp.
+   */
+  resets_at?: number | null
 }
 
 const CONFIDENCE_RANK: Record<UsageConfidence, number> = { measured: 3, manual: 2, inferred: 1, unknown: 0 }
@@ -172,6 +183,10 @@ export function assertNoRecommendationLanguage(payload: unknown): void {
  * Confidence comes from the SNAPSHOT ROW, not from this function's opinion: codex's
  * provider metadata read is 'measured', a Claude usage-screen reading is 'manual'.
  * No snapshot => unknown with the reason, never 0.
+ *
+ * The snapshot's provider-stated resets_at travels with the figure (OPT-M1) so
+ * a routing-side reader can tell an over-limit reading whose window has since
+ * reset apart from a live one -- see the CapacityFigure.resets_at doc above.
  */
 export function usageFigure(db: Database.Database, sub: SubscriptionLifecycle, now: number): CapacityFigure {
   const snap = latestRateLimitSnapshot(db, sub.provider, sub.authProfile)
@@ -191,6 +206,9 @@ export function usageFigure(db: Database.Database, sub: SubscriptionLifecycle, n
       source: snap.snapshot_source ?? 'unmarked_snapshot',
       blocker: 'the stored snapshot carries no confidence marker, so its number cannot be presented as a usage figure',
       unit: 'fraction',
+      // The reset time is provenance-free metadata about the window, not the
+      // figure itself, so it is surfaced even when the number is withheld.
+      resets_at: snap.resets_at ?? null,
     }
   }
   return {
@@ -200,6 +218,7 @@ export function usageFigure(db: Database.Database, sub: SubscriptionLifecycle, n
     source: snap.snapshot_source ?? 'unknown_source',
     blocker: null,
     unit: 'fraction',
+    resets_at: snap.resets_at ?? null,
   }
 }
 

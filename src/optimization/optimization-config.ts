@@ -1,10 +1,11 @@
-import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { PROJECT_ROOT } from '../config.js'
 import { atomicWriteFileSync } from '../web/atomic-write.js'
 import { setCapacityRoutingEnabled, clearAllRuntimeOverlays } from '../web/capacity-routing-store.js'
 import { getDb } from '../db.js'
+import { initOptimizationConfigAuditSchema, recordOptimizationConfigAudit } from './optimization-config-audit.js'
 import { insertRoutingEvent } from '../costops/dispatch.js'
 import { resolveAuthProfile } from '../costops/dispatch-identity.js'
 import { deriveProvider } from '../costops/pricing.js'
@@ -357,8 +358,10 @@ export function writeOptimizationConfig(
      *  Default: the real setter, and only when the live path is in use — a
      *  caller writing to its own file must not touch the machine's routing flag.
      *  Without this seam the failure branch was untestable, and an untested
-     *  failure branch on an emergency stop is the branch that matters. */
-    propagate?: (enabled: boolean) => void
+     *  failure branch on an emergency stop is the branch that matters.
+     *  May return whether the flag actually changed (setCapacityRoutingEnabled
+     *  does); a true return earns a 'propagation' audit row (OPT-M3). */
+    propagate?: (enabled: boolean) => boolean | void
     /** The overlay-wipe half of the OFF direction (OPT-C1), injectable for the
      *  same reason as `propagate` and defaulting the same way: the real
      *  implementation only when the live path is in use. */
@@ -428,8 +431,29 @@ export function writeOptimizationConfig(
     const shouldRun = config.masterEnabled && config.modules.runtimeRouting === true
     if (propagate && !shouldRun) {
       try {
-        propagate(false)
+        const flagChanged = propagate(false)
         routingFlagPropagated = true
+        // OPT-M3 (review 2026-08-12): the propagation is a config change of
+        // ANOTHER file (the capacity-routing runner flag), so when it actually
+        // flipped something it gets its own audit row -- the dashboard spec's
+        // "every config change is audited" covers this write too, and the
+        // route-level rows only describe the optimization-config file itself.
+        // Best-effort by design: the audit is bookkeeping about a safety
+        // action that already happened, so a recording failure must never
+        // convert a successful stop into a reported one.
+        if (flagChanged === true) {
+          try {
+            const db = getDb()
+            initOptimizationConfigAuditSchema(db)
+            recordOptimizationConfigAudit(db, {
+              at: Math.floor(Date.now() / 1000),
+              surface: 'propagation',
+              from: current,
+              to: config,
+              deltaSummary: 'capacity-routing-config.enabled true->false (runtime routing off propagated)',
+            })
+          } catch { /* audit is best-effort; the propagation itself succeeded */ }
+        }
       } catch (error) {
         routingFlagPropagated = false
         warnings.push('az optimalizacio-config KIIRODOTT, de a capacity-routing kapcsolo NEM lett kikapcsolva: '
@@ -467,35 +491,8 @@ export function writeOptimizationConfig(
   }
 }
 
-export function ensureOptimizationConfigExample(exampleDir: string): void {
-  const examplePath = join(exampleDir, 'optimization-config.example.json')
-  if (existsSync(examplePath)) return
-  const example = {
-    _doc: 'Illustrative Lean Optimization configuration only. The real deployment-local file lives gitignored at '
-      + 'store/optimization-config.json.',
-    version: 1,
-    masterEnabled: true,
-    preset: 'active',
-    modules: {
-      measurement: true,
-      contextEfficiency: true,
-      capacityMonitoring: true,
-      runtimeRouting: true,
-      recommendations: true,
-      marketWatch: true,
-      benchmarkRecommendations: true,
-    },
-    routing: {
-      automaticFallback: true,
-      trustedProvidersOnly: true,
-      maxFallbacksPerProfile: 2,
-      maxAutomaticFallbacksPerDispatch: 1,
-    },
-    ui: {
-      defaultWindow: '30d',
-      showAllocationCost: true,
-    },
-    lastEnabledConfiguration: null,
-  }
-  writeFileSync(examplePath, JSON.stringify(example, null, 2) + '\n')
-}
+// The runtime scaffold ensureOptimizationConfigExample() that used to sit here
+// was dead code with zero callers (OPT-M8, review 2026-08-12): the example it
+// would have written already exists as the committed
+// config-examples/optimization-config.example.json, so the function only
+// duplicated that content in a place nothing executed.

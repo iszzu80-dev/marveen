@@ -41,6 +41,17 @@ export const MAX_EXCERPT_CHARS = 1200
  *  pasted document, which is precisely what the packet format exists to stop. */
 export const MAX_SECTION_CHARS = 2000
 
+/** Longest an ArtifactRef.note may be (OPT-M7, review 2026-08-12: the note was
+ *  the one unbounded, fully-rendered string in the format -- a whole document
+ *  could ride it validly, defeating every cap above). A DEDICATED limit rather
+ *  than MAX_SECTION_CHARS because the section cap is disproportionate here:
+ *  2000 chars per reference would let a note out-carry the excerpt cap (1200)
+ *  it sits next to, inverting the discipline -- the note explains WHY an
+ *  artifact is referenced and what to look for, a sentence or two, while the
+ *  excerpt is the field that carries quoted content. 500 keeps the note
+ *  clearly subordinate to the excerpt. */
+export const MAX_NOTE_CHARS = 500
+
 /** An excerpt may not be (nearly) the whole artifact. */
 export const MAX_EXCERPT_FRACTION_OF_ARTIFACT = 0.5
 
@@ -83,7 +94,8 @@ export interface ArtifactRef {
   bytes?: number | null
   /** Short, relevant excerpt (<= MAX_EXCERPT_CHARS). Optional. */
   excerpt?: string | null
-  /** Why this artifact is referenced / what to look for in it. */
+  /** Why this artifact is referenced / what to look for in it. A sentence or
+   *  two (<= MAX_NOTE_CHARS) -- content belongs in `excerpt`, never here. */
   note?: string | null
 }
 
@@ -306,6 +318,12 @@ export type PacketIssueCode =
   | 'reference_path_missing'
   | 'reference_ref_missing'
   | 'reference_hash_invalid'
+  // OPT-M7. Prefixed 'reference_' ON PURPOSE: session-checkpoint.ts's
+  // delegated validator forwards packet errors whose code starts with
+  // 'reference_' (plus two named codes), so this spelling makes checkpoints
+  // inherit the note cap through the existing filter with no second
+  // implementation and no drift.
+  | 'reference_note_too_long'
   | 'excerpt_too_long'
   | 'artifact_inlined'
   | 'section_inlined'
@@ -357,8 +375,9 @@ export function findSecretShapes(text: string): string[] {
  * ERRORS (packet is not valid):
  *  - a required section is missing (goal / doneWhen / dataSensitivity)
  *  - a reference is not a real reference (no path, no pinned ref, no sha256)
- *  - an excerpt is longer than MAX_EXCERPT_CHARS, or is (nearly) the whole
- *    artifact -- i.e. the document was re-inlined under an excerpt label
+ *  - an excerpt is longer than MAX_EXCERPT_CHARS, a note is longer than
+ *    MAX_NOTE_CHARS, or excerpt + note together are (nearly) the whole
+ *    artifact -- i.e. the document was re-inlined under an excerpt/note label
  *  - a free-text section body is longer than MAX_SECTION_CHARS -- i.e. a
  *    document was pasted into the packet instead of referenced
  *  - the packet carries something shaped like a credential
@@ -390,11 +409,23 @@ export function validateContextPacket(p: ContextPacket): PacketValidation {
       err('excerpt_too_long', `references[${i}].excerpt`,
         `Excerpt is ${ex.length} chars (limit ${MAX_EXCERPT_CHARS}) -- reference the path, do not re-inline the document`)
     }
+    // OPT-M7 (review 2026-08-12): the note is rendered in full, so an
+    // unbounded note was a valid side door around every cap above -- a whole
+    // document could be pasted into it and the packet still validated.
+    const note = r.note ?? ''
+    if (note.length > MAX_NOTE_CHARS) {
+      err('reference_note_too_long', `references[${i}].note`,
+        `Note is ${note.length} chars (limit ${MAX_NOTE_CHARS}) -- a note says why the artifact is referenced; quoted content belongs in the excerpt, large material behind the path`)
+    }
     // The reference-not-inline rule: an "excerpt" that is most of a large
-    // artifact is the full document wearing an excerpt label.
-    if (r.bytes != null && r.bytes >= MIN_ARTIFACT_BYTES_FOR_INLINE_CHECK && ex.length >= r.bytes * MAX_EXCERPT_FRACTION_OF_ARTIFACT) {
+    // artifact is the full document wearing an excerpt label. The note counts
+    // toward the same fraction (OPT-M7): both strings are rendered verbatim
+    // under this reference, so splitting a document across excerpt + note must
+    // not evade the check either field would trip alone.
+    if (r.bytes != null && r.bytes >= MIN_ARTIFACT_BYTES_FOR_INLINE_CHECK
+      && (ex.length + note.length) >= r.bytes * MAX_EXCERPT_FRACTION_OF_ARTIFACT) {
       err('artifact_inlined', `references[${i}].excerpt`,
-        `Excerpt is ${ex.length} of ${r.bytes} artifact bytes -- that is the document inlined, not an excerpt`)
+        `Excerpt + note are ${ex.length + note.length} of ${r.bytes} artifact bytes -- that is the document inlined, not an excerpt`)
     }
   })
 

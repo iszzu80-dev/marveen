@@ -103,6 +103,20 @@ describe('capacity-routing-store', () => {
       const cfg = readCapacityRoutingConfig(join(dir, 'nope.json'))
       expect(cfg.enabled).toBe(false)
     })
+
+    it('OPT-M8: the COMMITTED example normalizes cleanly and safe-by-default (nothing dropped, enabled:false)', () => {
+      // The example used to exist only inside a never-called scaffold function
+      // (ensureCapacityRoutingConfigExample); now it is a real committed file,
+      // and this test keeps it in sync with the normalizer's schema: every
+      // candidate survives normalization (a dropped candidate would mean the
+      // example documents a shape the code refuses) and the safe defaults hold.
+      const raw = JSON.parse(readFileSync(join(import.meta.dirname, '../../config-examples/capacity-routing-config.example.json'), 'utf-8'))
+      const cfg = normalizeCapacityRoutingConfig(raw)
+      expect(cfg.enabled).toBe(false)
+      expect(cfg.candidates).toHaveLength((raw.candidates as unknown[]).length)
+      expect(cfg.limitedThreshold).toBe(raw.limitedThreshold)
+      expect(cfg.ttlMs).toBe(raw.ttlMs)
+    })
   })
 
   describe('isEnabledForRouting', () => {

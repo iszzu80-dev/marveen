@@ -10,7 +10,7 @@ import {
   REQUIRED_HANDOFF_SECTIONS,
   type SessionCheckpoint,
 } from '../session-checkpoint.js'
-import { artifactRefFromContent, hashContent, MAX_EXCERPT_CHARS, TARGET_FRESH_TOKENS } from '../context-packet.js'
+import { artifactRefFromContent, hashContent, MAX_EXCERPT_CHARS, MAX_NOTE_CHARS, TARGET_FRESH_TOKENS } from '../context-packet.js'
 import { handoffPrompt, resumePrompt } from '../web/context-guard-runner.js'
 
 const REPO_ROOT = join(import.meta.dirname, '..', '..')
@@ -150,6 +150,18 @@ describe('P2-B checkpoint: stays reference-based', () => {
     expect(v.ok).toBe(false)
     expect(v.errors.map(e => e.code)).toContain('reference_invalid')
     expect(v.referenceValidation.errors.map(e => e.code)).toContain('excerpt_too_long')
+  })
+
+  it('OPT-M7: REJECTS an over-long reference NOTE, inherited through the SAME delegated packet rule', () => {
+    // The packet-side code is 'reference_note_too_long' -- the reference_
+    // prefix is what makes the checkpoint's delegation filter forward it, so
+    // the note cap needs no second implementation here.
+    const v = validateCheckpoint(cp({
+      references: [{ path: 'docs/a.md', ref: 'abc1234', contentHash: hashContent('x'), note: 'n'.repeat(MAX_NOTE_CHARS + 1) }],
+    }))
+    expect(v.ok).toBe(false)
+    expect(v.errors.map(e => e.code)).toContain('reference_invalid')
+    expect(v.referenceValidation.errors.map(e => e.code)).toContain('reference_note_too_long')
   })
 
   it('REJECTS a checkpoint carrying something shaped like a credential', () => {

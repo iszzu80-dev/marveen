@@ -20,7 +20,7 @@
 // provider from every routing decision, not merely from the write path.
 
 import { join } from 'node:path'
-import { readFileSync, existsSync, writeFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { PROJECT_ROOT } from '../config.js'
 import { atomicWriteFileSync } from './atomic-write.js'
 import type { FallbackCandidate } from '../capacity-routing.js'
@@ -253,23 +253,9 @@ export function resolveRuntimeModel(
   return overlay.model
 }
 
-// ---------------------------------------------------------------------------
-// config-examples scaffold (mirrors the other CostOps *.example.json files)
-// ---------------------------------------------------------------------------
-
-export function ensureCapacityRoutingConfigExample(exampleDir: string): void {
-  const examplePath = join(exampleDir, 'capacity-routing-config.example.json')
-  if (existsSync(examplePath)) return
-  const example = {
-    _doc: 'Lean Optimization Phase 3 capacity-routing config (gitignored real copy: store/capacity-routing-config.json). '
-      + 'enabled=false is safe-by-default. Each candidate needs enabledForRouting:true to ever be used -- an external/'
-      + 'non-trusted provider stays false until a separate owner GO. At most 2 candidates (hard ceiling).',
-    enabled: false,
-    candidates: [
-      { provider: 'anthropic', authProfile: 'plan:secondary', model: 'claude-sonnet-5', enabledForRouting: true, subscriptionIncluded: true },
-    ],
-    limitedThreshold: 0.9,
-    ttlMs: 1_800_000,
-  }
-  writeFileSync(examplePath, JSON.stringify(example, null, 2) + '\n')
-}
+// The config-examples scaffold (ensureCapacityRoutingConfigExample) that used
+// to sit here was dead code with zero callers, and its example content never
+// reached the repo (OPT-M8, review 2026-08-12) -- the example is now COMMITTED
+// as config-examples/capacity-routing-config.example.json, matching how every
+// other CostOps *.example.json is shipped, and a test keeps the committed file
+// normalizing cleanly through normalizeCapacityRoutingConfig above.

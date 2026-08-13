@@ -68,6 +68,56 @@ describe('deriveCapacityState', () => {
     })
   })
 
+  describe('OPT-M1: a constrained reading past its horizon degrades to unknown, never pins forever', () => {
+    it('a snapshot at 100% whose provider-stated reset has PASSED is unknown, not blocked', () => {
+      const state = deriveCapacityState(inputs({ usageFraction: 1, secondsUntilProviderReset: -60 }))
+      expect(state).toBe('unknown')
+      expect(state).not.toBe('blocked')
+    })
+
+    it('a snapshot at 100% past the staleness horizon is unknown, not blocked (the forever-pin defect)', () => {
+      expect(deriveCapacityState(inputs({ usageFraction: 1, ageSeconds: STALE_AFTER + 1 }))).toBe('unknown')
+      expect(deriveCapacityState(inputs({ usageFraction: 1.2, ageSeconds: null }))).toBe('unknown')
+    })
+
+    it('a FRESH 100% reading with the stated reset still in the future stays blocked -- the demotion needs an expired horizon', () => {
+      expect(deriveCapacityState(inputs({ usageFraction: 1, secondsUntilProviderReset: 3600 }))).toBe('blocked')
+      expect(deriveCapacityState(inputs({ usageFraction: 1 }))).toBe('blocked')
+    })
+
+    it('a limited reading past its provider-stated reset or the staleness horizon degrades to unknown too', () => {
+      expect(deriveCapacityState(inputs({ usageFraction: 0.95, secondsUntilProviderReset: 0 }))).toBe('unknown')
+      expect(deriveCapacityState(inputs({ usageFraction: 0.95, ageSeconds: STALE_AFTER + 1 }))).toBe('unknown')
+      expect(deriveCapacityState(inputs({ usageFraction: 0.95, secondsUntilProviderReset: 600 }))).toBe('limited')
+    })
+
+    it('the demotion never manufactures a routable state: unknown is not routable', () => {
+      expect(isRoutable(deriveCapacityState(inputs({ usageFraction: 1, secondsUntilProviderReset: -1 })))).toBe(false)
+    })
+
+    it('a LOW stale reading still degrades to degraded (routable), unchanged: an old low figure still bounds usage from below', () => {
+      expect(deriveCapacityState(inputs({ usageFraction: 0.05, ageSeconds: STALE_AFTER + 1 }))).toBe('degraded')
+    })
+
+    it('an active blocking signal still wins over an elapsed reset -- live ground truth beats any snapshot', () => {
+      expect(deriveCapacityState(inputs({ usageFraction: 1, secondsUntilProviderReset: -60, activeBlockingSignal: true }))).toBe('blocked')
+    })
+  })
+
+  describe('OPT-M2: limitedThreshold is a real parameter, defaulting to the committed 0.9', () => {
+    it('a configured threshold of 0.5 makes a 0.6 usage read limited', () => {
+      expect(deriveCapacityState(inputs({ usageFraction: 0.6 }), 0.5)).toBe('limited')
+    })
+
+    it('the same 0.6 usage stays available under the default threshold', () => {
+      expect(deriveCapacityState(inputs({ usageFraction: 0.6 }))).toBe('available')
+    })
+
+    it('the threshold moves the limited boundary only -- blocked at >= 1 is unaffected', () => {
+      expect(deriveCapacityState(inputs({ usageFraction: 1 }), 0.5)).toBe('blocked')
+    })
+  })
+
   describe('invariant: staleness never manufactures available', () => {
     it('degrades a would-be-available fresh-looking figure to degraded once stale', () => {
       const state = deriveCapacityState(inputs({ usageFraction: 0.05, ageSeconds: STALE_AFTER + 1 }))
