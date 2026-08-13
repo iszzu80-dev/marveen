@@ -56,6 +56,13 @@ window.Apg = window.Apg || {}
   }
 
   function severityForClaim(status) {
+    // NOT_RESOLVED_BY_ENGINE is listed first and explicitly, even though the
+    // fallthrough already returns 'muted'. Spec 5.1 assigns grey/muted to
+    // "kikapcsolt/nincs adat" -- no data -- which is exactly what it means: the
+    // kernel's claim engine has not resolved this evidence. Naming it here so a
+    // later edit to the default cannot quietly promote silence to a colour that
+    // reads as an answer.
+    if (status === 'NOT_RESOLVED_BY_ENGINE') return 'muted'
     if (status === 'VERIFIED_CURRENT' || status === 'VERIFIED_HISTORICAL') return 'success'
     if (status === 'CONFLICTING_EVIDENCE' || status === 'BLOCKED_FROM_USE') return 'danger'
     if (status === 'SUPPORTED_BUT_NOT_RUNTIME_VERIFIED') return 'warning'

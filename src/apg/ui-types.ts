@@ -22,6 +22,18 @@ export type ApgAcceptanceStatus =
   | 'returned'
   | 'blocked'
 
+/**
+ * The seven display labels spec 0.4 §10.4 pins for a claim row, plus an eighth
+ * that says the engine has not spoken at all.
+ *
+ * NOT_RESOLVED_BY_ENGINE is NOT a status the kernel can return; it is the
+ * absence of one. §3.7 (No Silent Unknown): "no resolved claim exists for this
+ * evidence" and "the engine resolved this claim to UNKNOWN" are different
+ * facts, exactly like F-9's unreadable-table-vs-empty-table, and must not
+ * collapse onto the same label. Nothing in this repo may mint any of the other
+ * seven on its own -- they arrive only by relabelling a status the kernel's
+ * claim engine already decided (see APG_KERNEL_VERIFICATION_STATUSES).
+ */
 export type ApgClaimStatus =
   | 'VERIFIED_CURRENT'
   | 'VERIFIED_HISTORICAL'
@@ -30,6 +42,24 @@ export type ApgClaimStatus =
   | 'STALE_OR_SUPERSEDED'
   | 'UNKNOWN'
   | 'BLOCKED_FROM_USE'
+  | 'NOT_RESOLVED_BY_ENGINE'
+
+/**
+ * The kernel's own seven-value verification vocabulary
+ * (`claim_verification.VERIFICATION_STATUSES`), mirrored as a type.
+ *
+ * Two repos, one contract: `apg-projection-contract.test.ts` asserts this list
+ * against the kernel source, so a rename there fails a test here instead of
+ * quietly turning one status into another on screen.
+ */
+export type ApgKernelVerificationStatus =
+  | 'VERIFIED_CURRENT'
+  | 'VERIFIED_HISTORICAL_ONLY'
+  | 'SELF_REPORTED_ONLY'
+  | 'STALE'
+  | 'UNKNOWN'
+  | 'MISSING'
+  | 'CONTRADICTED'
 
 export interface ApgDisplayStateMeta {
   key: ApgDisplayState
@@ -180,11 +210,28 @@ export interface ApgUiWorkItemSummary {
     conflicting: number
     unknown: number
     blocked: number
+    // Additive to spec 0.4 §6.2's five counters, and load-bearing: without it a
+    // work item whose evidence the claim engine has never resolved reads as
+    // "0 verified, 0 conflicting, 0 unknown, 0 blocked" -- four zeroes that look
+    // like a clean bill of health rather than like silence.
+    not_resolved: number
   }
   acceptance_status: ApgAcceptanceStatus
   updated_at: string
 }
 
+/**
+ * One claim row on the work-item detail page.
+ *
+ * The first block is what the DASHBOARD knows: the evidence row this claim is
+ * attached to. The `kernel_*` block and everything after it is what the KERNEL
+ * decided, projected verbatim -- and every one of those fields is OPTIONAL AND
+ * OMITTED, never `null`, when the kernel has not supplied it. That distinction
+ * is the whole point of the WP2 §10.3-b fix: a hardcoded `superseded_by: null`
+ * reads as "the kernel checked and there is no supersede", which was never true
+ * -- the kernel had not been asked. An absent key says "not supplied"; a null
+ * says "supplied, and it is nothing".
+ */
 export interface ApgClaim {
   id: string
   text: string
@@ -192,10 +239,28 @@ export interface ApgClaim {
   allowed_wording: string
   source: string | null
   observed_at: string | null
-  verified_at: string | null
-  verifier: string | null
   receipt_id: string | null
-  superseded_by: string | null
+  /** The `claims.id` whose stored resolution produced `status`. */
+  kernel_claim_id?: string
+  /** The kernel's status string, unmapped, so nothing is lost in translation. */
+  kernel_verification_status?: ApgKernelVerificationStatus
+  /** `claims.allowed_wording` verbatim -- the kernel's own conservative phrasing. */
+  kernel_allowed_wording?: string
+  /** Receipt `observed_at`: when the verification actually ran, not when the row was written. */
+  verified_at?: string
+  /**
+   * Who performed the verification. The kernel receipt records a METHOD, not a
+   * principal, so this stays absent until WP3 (execution identity) gives the
+   * kernel someone to name. It is not `null` here because "no verifier
+   * recorded" and "verified by nobody" are not the same statement.
+   */
+  verifier?: string
+  /** §10.3 supersede relation, present only once the kernel stores one. */
+  superseded_by?: string
+  /** §10.2 currentness dimension, present only once the kernel stores one. */
+  currentness?: string
+  /** §10.1 product identity, present only once the kernel stores one. */
+  product_id?: string
 }
 
 export interface ApgWorkItemDetail extends ApgUiWorkItemSummary {
@@ -218,6 +283,10 @@ export interface ApgWorkItemDetail extends ApgUiWorkItemSummary {
   rollback_info: string | null
   side_effect_status: string | null
   source_ids: string[]
+  // Same defect channel the summary carries (F-9). A detail page that could not
+  // read `claims` must say so rather than render every claim as unresolved and
+  // let the reader assume the engine simply had nothing to say.
+  projection_error?: string
 }
 
 export interface ApgEvent {

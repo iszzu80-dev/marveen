@@ -10,7 +10,57 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { deriveDisplayState, APG_CHECKPOINT_RESULTS } from '../apg/ui-projection.js'
+import {
+  deriveDisplayState,
+  APG_CHECKPOINT_RESULTS,
+  APG_KERNEL_VERIFICATION_STATUSES,
+} from '../apg/ui-projection.js'
+
+/**
+ * Where the kernel repo is on THIS machine, or null.
+ *
+ * The cross-repo assertions below used to be guarded by a bare
+ * `if (!existsSync(kernel)) return` — which reports a PASS for a comparison
+ * that never happened. "Two repos, one contract" then held only on a machine
+ * with both repos checked out, and the test said nothing about which machine it
+ * was on. A test that reports success for work it did not do is the same class
+ * of defect as the projection findings this file covers.
+ *
+ * Now: found → assert; not found → vitest reports an explicit SKIP (visible in
+ * the run summary, not a green tick); and `APG_REQUIRE_KERNEL_CONTRACT=1` turns
+ * the skip into a failure, so CI can demand the real comparison.
+ */
+function resolveKernelSrc(): string | null {
+  const candidates = [
+    process.env.APG_KERNEL_SRC_ROOT,
+    join(homedir(), 'marveen-local', 'apg-kernel', 'src'),
+    join(process.cwd(), '..', 'marveen-apg-kernel', 'src'),
+  ].filter((value): value is string => typeof value === 'string' && value.length > 0)
+  return candidates.find((dir) => existsSync(join(dir, 'checkpoints.py'))) ?? null
+}
+
+const KERNEL_SRC = resolveKernelSrc()
+const KERNEL_REQUIRED = process.env.APG_REQUIRE_KERNEL_CONTRACT === '1'
+const NO_KERNEL_REASON =
+  'kernel checkout not found — set APG_KERNEL_SRC_ROOT to the kernel repo src/ '
+  + 'directory (or APG_REQUIRE_KERNEL_CONTRACT=1 to make this a failure)'
+
+/**
+ * Read one `NAME = (...)` / `NAME = [...]` list of quoted UPPERCASE tokens out
+ * of a kernel module. The kernel writes one as a list and one as a tuple, so
+ * the close is whichever bracket the literal actually opened with — matching on
+ * the wrong one silently swallows the rest of the file and turns this contract
+ * into a much weaker assertion.
+ */
+function kernelTokenList(file: string, name: string): string[] {
+  const src = readFileSync(join(KERNEL_SRC as string, file), 'utf8')
+  const start = src.indexOf(`${name} = `)
+  expect(start, `${name} not found in kernel ${file}`).toBeGreaterThanOrEqual(0)
+  const open = src.indexOf('=', start) + 1
+  const bracket = src.slice(open).trimStart().startsWith('[') ? ']' : ')'
+  const body = src.slice(open, src.indexOf(bracket, open) + 1)
+  return [...body.matchAll(/"([A-Z_]+)"/g)].map((m) => m[1]).sort()
+}
 
 // The REAL DeriveDisplayStateInput. The first version of this fixture invented
 // field names; vitest passed it happily (it does not typecheck) and tsc caught
@@ -23,18 +73,35 @@ const base = {
   recommendationEvidenceCompleteness: null,
 }
 
-describe('F-8: the kernel result vocabulary is one contract, not two', () => {
-  it('HEADLINE: the UI list matches the kernel RESULT_VALUES', () => {
-    // Two repos, one contract. The kernel renamed NOT_APPLICABLE to EXCLUDED
-    // and added ERROR; the UI still matched the old name, so both new values
-    // fell through to "executing".
-    const kernel = join(homedir(), 'marveen-local', 'apg-kernel', 'src', 'checkpoints.py')
-    if (!existsSync(kernel)) return // kernel not checked out here — nothing to compare against
-    const line = readFileSync(kernel, 'utf8').split('\n').find(l => l.includes('RESULT_VALUES'))
-    expect(line).toBeTruthy()
-    const kernelValues = [...line!.matchAll(/"([A-Z_]+)"/g)].map(m => m[1]).sort()
-    expect([...APG_CHECKPOINT_RESULTS].sort()).toEqual(kernelValues)
+describe('the two-repo contract is actually checked, or loudly not checked', () => {
+  it('HEADLINE: this run knows whether it compared against a real kernel checkout', () => {
+    // The one assertion that must never skip. It does not check the vocabulary;
+    // it checks that the SKIP is a decision with a reason, so a green run can
+    // never be mistaken for a verified contract.
+    if (KERNEL_SRC === null) {
+      expect(
+        KERNEL_REQUIRED,
+        `cross-repo contract NOT verified in this run: ${NO_KERNEL_REASON}`,
+      ).toBe(false)
+      return
+    }
+    expect(existsSync(join(KERNEL_SRC, 'checkpoints.py'))).toBe(true)
+    expect(existsSync(join(KERNEL_SRC, 'claim_verification.py'))).toBe(true)
   })
+})
+
+describe('F-8: the kernel result vocabulary is one contract, not two', () => {
+  it.skipIf(KERNEL_SRC === null && !KERNEL_REQUIRED)(
+    `HEADLINE: the UI list matches the kernel RESULT_VALUES [${KERNEL_SRC ?? NO_KERNEL_REASON}]`,
+    () => {
+      // Two repos, one contract. The kernel renamed NOT_APPLICABLE to EXCLUDED
+      // and added ERROR; the UI still matched the old name, so both new values
+      // fell through to "executing".
+      expect(KERNEL_SRC, NO_KERNEL_REASON).not.toBeNull()
+      expect([...APG_CHECKPOINT_RESULTS].sort())
+        .toEqual(kernelTokenList('checkpoints.py', 'RESULT_VALUES'))
+    },
+  )
 
   it('EXCLUDED is not "executing" — a gate that never ran is not work in progress', () => {
     expect(deriveDisplayState({ ...base, latestCheckpointResult: 'EXCLUDED' })).toBe('clarification')
@@ -55,6 +122,21 @@ describe('F-8: the kernel result vocabulary is one contract, not two', () => {
   it('a genuinely running gate is still "executing" — the counter-case', () => {
     expect(deriveDisplayState({ ...base, latestCheckpointResult: 'PASS' })).toBe('executing')
   })
+})
+
+describe('WP2 §10.3-b: the claim vocabulary is one contract, not two', () => {
+  it.skipIf(KERNEL_SRC === null && !KERNEL_REQUIRED)(
+    `HEADLINE: the UI list matches the kernel VERIFICATION_STATUSES [${KERNEL_SRC ?? NO_KERNEL_REASON}]`,
+    () => {
+      // The projection no longer decides a claim's verification status; it
+      // relabels the kernel's. That only stays honest while both sides agree on
+      // the vocabulary — a status the kernel adds and this list does not know
+      // would render as UNKNOWN, which is a downgrade nobody asked for.
+      expect(KERNEL_SRC, NO_KERNEL_REASON).not.toBeNull()
+      expect([...APG_KERNEL_VERIFICATION_STATUSES].sort())
+        .toEqual(kernelTokenList('claim_verification.py', 'VERIFICATION_STATUSES'))
+    },
+  )
 })
 
 describe('F-3: the Activity endpoint uses the driver, not a global nobody sets', () => {
