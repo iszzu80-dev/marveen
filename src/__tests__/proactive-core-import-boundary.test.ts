@@ -117,14 +117,23 @@ const FORBIDDEN_PACKAGES = [
   'node-fetch', 'axios', 'got', 'undici', 'superagent', 'request',
   'node:http', 'node:https', 'node:net', 'node:tls', 'node:dgram', 'http', 'https', 'net', 'tls',
   'nodemailer', 'googleapis', 'ws',
-  // The model client is on this list on purpose, and it is the entry most likely
-  // to be argued with. A model call is not a NEW external surface — the Reader
-  // has made them since before v1.4 — but it is egress carrying case content,
-  // and the v1.4 qualification policy is deterministic precisely so it does not
-  // need one (§6: "the Reader/model suggestion is only input"). The Proactive
-  // Core consumes Reader OUTPUT; it does not hold the client. If a later
-  // detector genuinely needs its own call, this line is where that decision gets
-  // made in the open rather than arriving inside an unrelated diff.
+  // THE MODEL CLIENT. The reason stated here is deliberately not the one that
+  // first suggests itself.
+  //
+  // The tempting argument is "the v1.4 qualification policy is deterministic, so
+  // it does not need a model". That is true today and it is the WRONG reason,
+  // because it makes the ban contingent on a property. The day someone decides
+  // the policy needs a model call — a decision they are entitled to make — the
+  // ban stops looking like a boundary and starts looking like an obstacle, and
+  // obstacles get removed by whoever is in a hurry.
+  //
+  // The reason is: THE PROACTIVE CORE HAS NO RIGHT TO ADDRESS A MODEL. That is a
+  // boundary, not a property. It holds whether or not the policy is
+  // deterministic, and it is the same shape as every other line on this list —
+  // the module detects and qualifies from stored evidence, and it consumes
+  // Reader OUTPUT rather than holding the client that produces it. Changing it
+  // means granting a right, which is a decision someone has to make out loud.
+  // (Marveen's correction, 2026-08-13.)
   '@anthropic-ai/sdk', 'openai', '@google/generative-ai',
 ]
 
