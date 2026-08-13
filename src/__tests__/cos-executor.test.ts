@@ -8,6 +8,7 @@ import {
   idempotencyKey, SendError,
   type OutboundAdapter, type OutboundAction, type ReadbackResult,
 } from '../cos/executor.js'
+import { READBACK_ABSENT_GRACE_SEC, SENDING_RECOVERY_GRACE_SEC } from '../cos/executor-core.js'
 
 // COS Action Executor. These tests PROVE the crash-safety invariants, not just
 // the happy path: SENDING is durable before the call, a prior attempt is never
@@ -163,11 +164,79 @@ describe('COS Action Executor', () => {
     const p = planAction(db, PLAN, 1000)
     // Simulate the crash window: SENDING is durable, and the provider already
     // has the message (the send had reached it before we died).
-    db.prepare(`UPDATE outbound_ledger SET status='SENDING' WHERE ledger_id=?`).run(p.ledgerId)
+    // CHANGED 2026-08-13 (E1): sending_at is set EXPLICITLY and the recovery runs
+    // past the grace window. The test used to rely on `updated_at` happening to
+    // be old enough, which made it pass for a reason it did not state — and the
+    // row it modelled (a genuinely abandoned one) is exactly the row recovery
+    // must still pick up after E1.
+    db.prepare(`UPDATE outbound_ledger SET status='SENDING', sending_at=? WHERE ledger_id=?`).run(1000, p.ledgerId)
     ad.provider.add(p.externalIdempotencyMarker)
-    const r = await exec(db, ad, p.ledgerId, 2000) // sees SENDING → recover
+    const r = await exec(db, ad, p.ledgerId, 1000 + SENDING_RECOVERY_GRACE_SEC + 1) // sees SENDING → recover
     expect(r.status).toBe('VERIFIED')
     expect(ad.sendCalls).toBe(0) // never re-sent
+  })
+
+  // E1 HEADLINE (review 2026-08-13). SENDING is written BEFORE the provider call,
+  // so an in-flight row and a crashed one look identical on the ledger. Recovery
+  // used to accept a SENDING row at ANY age: a concurrent tick read back a marker
+  // the provider had not indexed yet, called it absent, and reset the row to
+  // PLANNED — from where the same message is sent a SECOND time.
+  it('E1: a freshly-SENDING row is NOT recovered — an in-flight send is not an abandoned one', async () => {
+    const db = getDb(), ad = new MockAdapter()
+    const p = planAction(db, PLAN, 1000)
+    // the row a concurrent worker sees while OUR send is still awaiting the provider
+    db.prepare(`UPDATE outbound_ledger SET status='SENDING', sending_at=? WHERE ledger_id=?`).run(1000, p.ledgerId)
+    // the provider has not indexed it yet → readback finds nothing
+    const r = await exec(db, ad, p.ledgerId, 1000 + 30)
+    expect(r.status).toBe('SENDING')   // NOT reset to PLANNED
+    expect(ad.sendCalls).toBe(0)
+    // and a direct recoverAction call is guarded too, not only the queue
+    expect((await recoverAction(db, ad, p.ledgerId, 1000 + 60)).status).toBe('SENDING')
+    expect(ad.sendCalls).toBe(0)
+    // CONTROL: once the row is genuinely old, recovery does its job — the guard
+    // is a delay, not a refusal to ever recover.
+    const rec = await recoverAction(db, ad, p.ledgerId, 1000 + SENDING_RECOVERY_GRACE_SEC + 1)
+    expect(rec.status).toBe('PLANNED')
+  })
+
+  it('E1: a status write cannot overwrite a row that moved — the provider accepted, so a human is pinned', async () => {
+    // Models the end of the race: our send was in flight, a recovery moved the
+    // row back to PLANNED, and then the provider answered "accepted". The old
+    // unconditional UPDATE stamped APPLIED_UNVERIFIED over it and the second send
+    // sitting in the queue left no trace at all.
+    const db = getDb()
+    const p = planAction(db, PLAN, 1000)
+    const racer: OutboundAdapter = {
+      actionType: 'EMAIL_SEND',
+      async send() {
+        // the concurrent recovery, happening while we are inside adapter.send()
+        db.prepare(`UPDATE outbound_ledger SET status='PLANNED' WHERE ledger_id=?`).run(p.ledgerId)
+        return { externalRef: 'ext-1' }
+      },
+      async readback() { return { found: true, externalRef: 'ext-1' } },
+    }
+    const r = await exec(db, racer, p.ledgerId, 1001)
+    expect(r.status).toBe('RECOVERY_REQUIRED')
+    expect(String(r.lastError)).toMatch(/second delivery may be queued/)
+  })
+
+  // E4 (review 2026-08-13). Every refusal path wrote PLANNED regardless of the
+  // status the row came in with, so a row that had already failed N times
+  // re-entered as a fresh one: the F-15 ceiling counts only from
+  // FAILED_RETRYABLE, so it could never fire, and the backoff never applied.
+  it('E4: a refusal KEEPS the entry status instead of resetting the row to PLANNED', async () => {
+    const db = getDb(), ad = new MockAdapter()
+    const p = planAction(db, PLAN, 1000)
+    db.prepare(`UPDATE outbound_ledger SET status='FAILED_RETRYABLE', attempt=4, sending_at=? WHERE ledger_id=?`)
+      .run(1000, p.ledgerId)
+    // no ticket → refused at the §22.2 door, well past any backoff
+    const r = await executeAction(db, ad, p.ledgerId, 100_000, { retry: { maxAttempts: 5, baseBackoffSec: 1 } })
+    expect(r.status).toBe('FAILED_RETRYABLE')  // not laundered back into PLANNED
+    expect(r.attempt).toBe(4)                  // and the count it is judged on survives
+    expect(ad.sendCalls).toBe(0)
+    // so the F-15 ceiling can still fire on the next real attempt
+    const done = await exec(db, ad, p.ledgerId, 200_000, { retry: { maxAttempts: 4, baseBackoffSec: 1 } })
+    expect(done.status).toBe('FAILED_TERMINAL')
   })
 
   it('unknown-outcome failure → OUTCOME_UNKNOWN → recovery to PLANNED → safe resend', async () => {
@@ -246,15 +315,42 @@ describe('COS Action Executor', () => {
     expect(ad.sendCalls).toBe(1)
   })
 
-  it('P1.1 provider claimed success but marker PROVABLY absent → RECOVERY_REQUIRED (human, never resent)', async () => {
+  // CHANGED 2026-08-13 (E5). This asserted RECOVERY_REQUIRED on the FIRST probe,
+  // milliseconds after the provider accepted the message — i.e. it asserted the
+  // defect. A mail provider routinely has not indexed an accepted message yet,
+  // so the common case of "delivered fine, not searchable for another few
+  // seconds" was pinned in a state only a human can leave and nothing ever
+  // re-checks. The property the test cared about (a claimed success is NEVER
+  // blind-resent) is still asserted, on both sides of the grace window.
+  it('P1.1 provider claimed success but marker absent: the FIRST miss waits, a CONFIRMED absence → RECOVERY_REQUIRED', async () => {
     const db = getDb(), ad = new MockAdapter()
     const p = planAction(db, PLAN, 1000)
     ad.mode = 'ok-but-vanish' // send "succeeds" but provider never really has it, readback available
     const r = await exec(db, ad, p.ledgerId, 1001)
-    expect(r.status).toBe('RECOVERY_REQUIRED') // we refuse to resend on a claimed success
+    expect(r.status).toBe('APPLIED_UNVERIFIED') // not yet proof — the provider may still be indexing
+    // and it is still not proof one minute later
+    const soon = await exec(db, ad, p.ledgerId, 1001 + 60)
+    expect(soon.status).toBe('APPLIED_UNVERIFIED')
+    // Once the marker is STILL absent past the grace window, the absence is
+    // evidence: a human must reconcile it.
+    const later = await exec(db, ad, p.ledgerId, 1001 + READBACK_ABSENT_GRACE_SEC + 1)
+    expect(later.status).toBe('RECOVERY_REQUIRED')
     // RECOVERY_REQUIRED is not auto-resent: re-running does not send again.
-    const again = await exec(db, ad, p.ledgerId, 1002)
+    const again = await exec(db, ad, p.ledgerId, 1001 + READBACK_ABSENT_GRACE_SEC + 2)
     expect(again.status).toBe('RECOVERY_REQUIRED')
+    expect(ad.sendCalls).toBe(1) // <-- never resent, in any of the four passes
+  })
+
+  it('E5: a marker that shows up during the grace window VERIFIES instead of alarming', async () => {
+    // The case the old first-probe escalation made unreachable: a perfectly
+    // delivered letter whose provider indexed it a minute later.
+    const db = getDb(), ad = new MockAdapter()
+    const p = planAction(db, PLAN, 1000)
+    ad.mode = 'ok-but-vanish'
+    expect((await exec(db, ad, p.ledgerId, 1001)).status).toBe('APPLIED_UNVERIFIED')
+    ad.provider.add(p.externalIdempotencyMarker) // the provider finished indexing
+    const r = await exec(db, ad, p.ledgerId, 1001 + 120)
+    expect(r.status).toBe('VERIFIED')
     expect(ad.sendCalls).toBe(1)
   })
 

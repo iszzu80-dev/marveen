@@ -17,6 +17,7 @@ import type {
   ApgEvent,
   ApgKernelVerificationStatus,
   ApgMode,
+  ApgModeSource,
   ApgUiSummary,
   ApgUiWorkItemSummary,
   ApgWorkItemDetail,
@@ -666,10 +667,34 @@ function nextActionFor(state: ApgDisplayState): string {
   }
 }
 
-function acceptanceStatusFor(state: ApgDisplayState): ApgAcceptanceStatus {
+/**
+ * Acceptance status (F-2, review 2026-08-10, fixed 2026-08-12).
+ *
+ * TWO CLAIMS USED TO BE MADE HERE THAT NOTHING SUPPORTED.
+ *
+ * 1. `accepted` came from a PASSING GATE. A green `release_ready` means the
+ *    checks ran and agreed; it does not mean a person or an agent accepted the
+ *    work. `accepter_agent` was structurally null, so the Kanban wrote
+ *    "Independently accepted" over an item nobody had accepted. Spec §9.2:
+ *    "NEVER show acceptance from the done status alone."
+ * 2. `returned` came from WAITING. An item needing evidence or clarification had
+ *    not been returned to anyone — nobody sent it back, there is no return
+ *    event, and the word describes an action that did not occur.
+ *
+ * So acceptance now requires an accepter, and waiting is called waiting. The
+ * `accepter` argument is what the sidecar recorded; while the kernel records no
+ * accepter identity (WP3 of the 1.8 gap map), it is null and this correctly
+ * never returns `accepted` — the state is `gates_passed`, which is true and is
+ * also the honest input to the decision about building the missing half.
+ */
+function acceptanceStatusFor(
+  state: ApgDisplayState, accepter: string | null,
+): ApgAcceptanceStatus {
   switch (state) {
     case 'accepted':
-      return 'accepted'
+      // The gate passed. Whether that is ACCEPTANCE depends on there being
+      // somebody who accepted, and only the sidecar can answer that.
+      return accepter ? 'accepted' : 'gates_passed'
     case 'blocked':
       return 'blocked'
     case 'verifying':
@@ -677,7 +702,7 @@ function acceptanceStatusFor(state: ApgDisplayState): ApgAcceptanceStatus {
     case 'evidence_needed':
     case 'decision_needed':
     case 'clarification':
-      return 'returned'
+      return 'needs_input'
     case 'executing':
       return 'produced'
     case 'off':
@@ -708,6 +733,20 @@ function acceptanceStatusFor(state: ApgDisplayState): ApgAcceptanceStatus {
 //
 // Where the engine has not spoken, we say so (§3.7 No Silent Unknown) rather
 // than guessing in either direction.
+//
+// MERGE NOTE (develop <- APG 1.9). The develop line reached the same finding
+// from the other end: F-1 hardened the local `claimStatus()` so VERIFIED_CURRENT
+// required a RUNTIME gate (`runtime_acceptance` / `release_ready`) passing in
+// the same replay run AND a receipt with `runtime_status === 'OBSERVED'` --
+// because a PASS on `spec_ready` had been enough to render "citable as a
+// current, verified fact". That fix is not dropped here, it is SUBSUMED: the
+// kernel's `resolve_verification_status()` that this file now reads applies
+// strictly more than F-1 did (method authority, source-type exclusion, required
+// receipt keys, and the seven-day recency ceiling F-1 still lacked). Keeping the
+// hardened local copy would reinstate exactly the two-rules-for-one-label
+// problem above, with the weaker rule deciding. The property F-1 was defending
+// -- a documents-only PASS must not read as runtime-verified -- is asserted
+// against the kernel path instead.
 // ---------------------------------------------------------------------------
 
 function asNonEmptyString(value: unknown): string | null {
@@ -953,7 +992,16 @@ export interface ProjectionRoleDeps {
 function summaryFor(
   candidate: CandidateProjection,
   mode: ApgMode,
+  // No default any more: WP2 §10.3-b made `claimsFor` require the kernel claim
+  // index, so the caller -- which is the only side that has the sidecar handle
+  // -- must resolve the claims and pass them in.
   claims: ApgClaim[],
+  // F-7 (review 2026-08-10, fixed 2026-08-12). This was the literal 'global' on
+  // every work item ever projected. The resolver already returns which scope
+  // decided the mode -- global, project or card -- and the caller already had
+  // it; only this field was not told. So a card-level override was invisible on
+  // the screen that exists to show whether the override took effect.
+  modeSource: ApgModeSource = 'global',
   roleDeps: ProjectionRoleDeps = {},
 ): ApgUiWorkItemSummary {
   const displayState = mode === 'off' ? 'off' : candidate.displayState
@@ -990,19 +1038,29 @@ function summaryFor(
     project: null,
     title: candidate.id,
     effective_mode: mode,
-    mode_source: 'global',
+    mode_source: modeSource,
     display_state: displayState,
     internal_state: displayState,
     risk: 'unknown',
     attention_reason: attentionReason({ ...candidate, displayState }),
     next_action: nextActionFor(displayState),
+    // F-2 asked for these to be honest rather than convenient, and noted that
+    // the honest answer was `null` "because the 1.8 gap map calls this WP3:
+    // producer/verifier identity separation does not exist yet". WP3 is what
+    // this merge brings in, so the producer half can now be RESOLVED instead of
+    // hardcoded -- which is the same honesty requirement, one gap later. The
+    // distinction F-2 cared about is preserved and sharpened: a hardcoded null
+    // can never become non-null, so an operator reading "producer: —" could not
+    // tell "nobody" from "not implemented". Now it can.
     producer_agent: roleAgents?.producer ?? null,
     // §9.3's dual-sided acceptance needs an accepter that is NOT self-declared.
     // The only acceptance signal Marveen has today is the `actor` field on the
     // kanban move request -- a request-body string, i.e. precisely what §11.4
     // and §26.3 refuse to treat as attribution. So this stays null until an
     // owner-role dispatch exists to name, rather than being filled with the
-    // most convenient available lie.
+    // most convenient available lie. F-2's downstream invariant is therefore
+    // untouched: `acceptanceStatusFor` reads this field, so an item with no
+    // owner-role dispatch still can never display as accepted.
     accepter_agent: roleAgents?.owner ?? null,
     gate_progress: {
       passed: latestGates.filter((checkpoint) => checkpoint.result === 'PASS').length,
@@ -1023,7 +1081,7 @@ function summaryFor(
       not_resolved: claims.filter((claim) =>
         claim.status === 'NOT_RESOLVED_BY_ENGINE').length,
     },
-    acceptance_status: acceptanceStatusFor(displayState),
+    acceptance_status: acceptanceStatusFor(displayState, null),
     updated_at: toIso(candidate.updatedAt),
   }
 }
@@ -1158,6 +1216,9 @@ export function buildApgUiSummary(nowIso: string, mode: ApgMode): ApgUiSummary {
 export function buildApgWorkItemSummaries(
   mode: ApgMode,
   filters: {
+    /** Which scope decided `mode` (F-7). Passed through to every row so a card
+     *  or project override is visible on the screen that exists to show it. */
+    modeSource?: ApgModeSource
     project?: string
     state?: string
     attention?: boolean
@@ -1179,7 +1240,10 @@ export function buildApgWorkItemSummaries(
     const kernelClaims = indexKernelClaims(data.claims)
     let items = candidateIds(data, true)
       .map((id) => buildCandidateProjection(data, id))
-      .map((candidate) => summaryFor(candidate, mode, claimsFor(candidate, kernelClaims), roleDeps))
+      .map((candidate) => summaryFor(
+        candidate, mode, claimsFor(candidate, kernelClaims),
+        filters.modeSource ?? 'global', roleDeps,
+      ))
 
     // Project is deliberately always null until the sidecar owns a project field.
     if (filters.project !== undefined) items = []
@@ -1214,6 +1278,7 @@ export function buildApgWorkItemSummaries(
 export function buildApgWorkItemDetail(
   mode: ApgMode,
   workItemId: string,
+  modeSource: ApgModeSource = 'global',
   roleDeps: ProjectionRoleDeps = {},
 ): ApgWorkItemDetail | { error: string; notFound?: boolean } {
   const db = openApgKernelReadonly()
@@ -1226,7 +1291,7 @@ export function buildApgWorkItemDetail(
 
     const candidate = buildCandidateProjection(data, workItemId)
     const claims = claimsFor(candidate, indexKernelClaims(data.claims))
-    const summary = summaryFor(candidate, mode, claims, roleDeps)
+    const summary = summaryFor(candidate, mode, claims, modeSource, roleDeps)
     const transitions = data.transitions.filter(
       (row) => row.change_logical_id === workItemId,
     )

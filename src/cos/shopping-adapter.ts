@@ -18,6 +18,24 @@ export interface ProductRef {
   productId: string
 }
 
+/**
+ * Minor-unit exponent per currency (HUF and JPY have none: 100 Ft = 100 minor).
+ *
+ * ONE table, deliberately. It used to exist twice — once in the eMAG adapter
+ * (major → minor on the way in) and once in radar-runner (minor → major on the
+ * way out) — which is a pair that must agree exactly: a currency added to one
+ * side and not the other mis-scales every price on that radar item by 100×, and
+ * the direction of the error decides whether the owner is spammed with fake HITs
+ * or never told about a real one. Adapters convert INTO minor units, the radar
+ * converts back OUT; both read this.
+ */
+export const CURRENCY_MINOR_EXPONENT: Record<string, number> = { HUF: 0, JPY: 0, EUR: 2, USD: 2, GBP: 2, CHF: 2 }
+
+/** Exponent for a currency, defaulting to 2 (the common case) for unknown codes. */
+export function currencyMinorExponent(currency: string | null | undefined): number {
+  return CURRENCY_MINOR_EXPONENT[(currency ?? 'HUF').toUpperCase()] ?? 2
+}
+
 export interface ProductSearchResult {
   ref: ProductRef
   name: string

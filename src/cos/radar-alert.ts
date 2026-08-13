@@ -11,6 +11,7 @@ import type Database from 'better-sqlite3'
 import { createAgentMessage, appendDailyLog } from '../db.js'
 import { enqueueOutbox } from './channel-outbox.js'
 import { channelForRoute, ROUTE_RADAR } from './cos-telegram.js'
+import { logger } from '../logger.js'
 
 interface ItemRow { label: string; kind: string; target_price: number | null; currency: string | null; best_seen_price: number | null; notification_reason: string | null }
 interface ObsRow {
@@ -102,9 +103,15 @@ export function alertRadarHit(
       dedupeKey: `radar:${radarId}:${newestObservationStamp(db, radarId)}`,
       text: content,
     })
-  } catch {
+  } catch (e) {
     // A queueing failure must not take down the radar tick. The bus post and the
     // daily-log entry above already happened, so the hit is not lost.
+    //
+    // But it must not vanish either: a bare catch here made a broken outbox
+    // indistinguishable from a successful queue, on the one path whose entire
+    // job is to tell the owner something. The tick still survives; the failure
+    // is now on the record.
+    logger.warn({ err: e, radarId }, 'radar hit could not be queued to the channel outbox')
   }
 }
 

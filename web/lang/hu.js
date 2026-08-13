@@ -1981,6 +1981,7 @@ window._i18n.hu = {
   'apg.kanban.filter.done_not_accepted':  'APG: Kész, nincs elfogadva',
   'apg.kanban.badge.label':               'APG · {state}',
   'apg.kanban.badge.accepted':            'Függetlenül elfogadva',
+  'apg.kanban.badge.gates_passed':        'Kapuk rendben · még nincs elfogadva',
   'apg.kanban.badge.done_not_accepted':   'Elkészült · még nincs elfogadva',
 
   'apg.detail.risk':                  'Kockázat',

@@ -16,6 +16,7 @@ import { effectiveZstSensitivity, coerceZstSensitivity } from './zst-sensitivity
 import { IDEMPOTENCY_HEADER } from './adapters/gmail-send.js'
 import { ingestZstInvoiceEmail } from './zst-invoice-extract.js'
 import { ingestZstContractEmail } from './zst-contract-extract.js'
+import { seedCaseProgressionState } from './case-progression-seed.js'
 
 const INVOICE_CASE_TYPES = new Set(['INVOICE_INCOMING', 'INVOICE_OUTGOING'])
 const CONTRACT_CASE_TYPES = new Set(['CONTRACT', 'LICENSE_SUBSCRIPTION'])
@@ -41,6 +42,11 @@ export interface ZstTriagedEmail {
   priority?: string
   followUpAt?: number
   headers?: Record<string, string>
+  /** The FULL message body, when the caller has it. The extractors used to run
+   *  on `snippet` — 300 characters — so an amount, an invoice number, a date or
+   *  a notice period further down the mail was unrecoverable, and the modules'
+   *  promise that it would be "re-extracted later" was met by nothing. */
+  body?: string
 }
 
 export type ZstIntakeOutcome =
@@ -64,11 +70,26 @@ function recordLedger(
 }
 
 function findActiveZstCaseByThread(db: Database.Database, threadId: string): { case_id: string } | undefined {
-  return db.prepare(
+  const byCase = db.prepare(
     `SELECT case_id FROM zst_cases
      WHERE gmail_thread_ids LIKE ? AND archived_at IS NULL
        AND status NOT IN ('COMPLETED','CANCELLED','ARCHIVED','FAILED_TERMINAL') LIMIT 1`
   ).get(`%"${threadId}"%`) as { case_id: string } | undefined
+  if (byCase) return byCase
+
+  // Second source, ported from the personal intake (2026-08-13) and not
+  // redundant: gmail_thread_ids is written ONLY at case creation, from the
+  // intake message's thread. A case that we WROTE to — where the thread exists
+  // because our own letter created it — has nothing in that column, so the
+  // company's answer to a company letter would find no case and open a second
+  // one. The ledger knows which thread each sent action landed in.
+  return db.prepare(
+    `SELECT l.case_id FROM zst_outbound_ledger l
+     JOIN zst_cases c ON c.case_id = l.case_id
+     WHERE l.thread_ref = ? AND c.archived_at IS NULL
+       AND c.status NOT IN ('COMPLETED','CANCELLED','ARCHIVED','FAILED_TERMINAL')
+     ORDER BY l.created_at DESC LIMIT 1`
+  ).get(threadId) as { case_id: string } | undefined
 }
 
 /** Ingest one triaged ZST email into a zst_case. Idempotent per (account,
@@ -83,6 +104,26 @@ export function ingestTriagedZstEmail(db: Database.Database, input: ZstTriagedEm
   if (input.headers && input.headers[IDEMPOTENCY_HEADER]) {
     recordLedger(db, input, 'EXCLUDED_SELF_SEND', null, now)
     return { outcome: 'EXCLUDED_SELF_SEND', messageStatus: 'EXCLUDED_SELF_SEND' }
+  }
+
+  // The same check without headers (ported 2026-08-13; the personal intake has
+  // had it since 2026-08-10, live). The triage feeder queries BOTH accounts'
+  // `in:sent` and posts candidates carrying no headers at all, so the marker
+  // check above cannot fire for them — the feeder's own comment claiming it
+  // does is wrong for this path. Without this, a corporate letter we sent on a
+  // NEW thread comes back as an OUTBOUND candidate inside the feeder's window,
+  // matches no case, and opens a SECOND zst_case in WAITING_EXTERNAL with a
+  // follow-up: duplicate work, and a self-follow-up loop on company mail.
+  //
+  // Linked to the originating case rather than merely excluded: the sent letter
+  // IS part of that case's history, and dropping it loses the record of what
+  // went out.
+  const ownSend = db.prepare(
+    `SELECT case_id FROM zst_outbound_ledger WHERE external_ref = ? LIMIT 1`
+  ).get(input.messageId) as { case_id: string | null } | undefined
+  if (ownSend?.case_id) {
+    recordLedger(db, input, 'DUPLICATE', ownSend.case_id, now)
+    return { outcome: 'LINKED_DUPLICATE', caseId: ownSend.case_id, messageStatus: 'DUPLICATE' }
   }
 
   if (!input.actionable) {
@@ -131,7 +172,11 @@ export function ingestTriagedZstEmail(db: Database.Database, input: ZstTriagedEm
     // the case creation (the invoice can be re-extracted later).
     if (INVOICE_CASE_TYPES.has(input.caseType ?? '')) {
       try {
-        ingestZstInvoiceEmail(db, { caseId, from: input.from, subject: input.subject, body: input.snippet }, now)
+        ingestZstInvoiceEmail(db, {
+          caseId, from: input.from, subject: input.subject,
+          body: input.body ?? input.snippet,
+          extractionSource: input.body ? 'FULL_BODY' : 'SNIPPET',
+        }, now)
       } catch { /* extraction is best-effort; the case still stands */ }
     }
     // If this is a contract/subscription-renewal case, run the contract extractor
@@ -141,24 +186,15 @@ export function ingestTriagedZstEmail(db: Database.Database, input: ZstTriagedEm
     // (never auto-signed).
     if (CONTRACT_CASE_TYPES.has(input.caseType ?? '')) {
       try {
-        ingestZstContractEmail(db, { caseId, from: input.from, subject: input.subject, body: input.snippet }, now)
+        ingestZstContractEmail(db, {
+          caseId, from: input.from, subject: input.subject,
+          body: input.body ?? input.snippet,
+          extractionSource: input.body ? 'FULL_BODY' : 'SNIPPET',
+        }, now)
       } catch { /* extraction is best-effort; the case still stands */ }
     }
     recordLedger(db, input, 'LOCAL_APPLIED', caseId, now)
-    // Seed progression state for the new case so it doesn't stagnate at NEW.
-    // Guarded by table existence — if the progression schema hasn't been deployed
-    // yet, the intake path is unchanged (existing brownfield behavior).
-    const progTableExists = db.prepare(
-      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='case_progression_state'",
-    ).get() as { 1: number } | undefined
-    if (progTableExists) {
-      db.prepare(
-        `INSERT OR IGNORE INTO case_progression_state
-         (domain, case_id, progression_enabled, progression_mode,
-          next_progression_at, created_at, updated_at)
-         VALUES ('zst', ?, 1, 'internal', ?, ?, ?)`,
-      ).run(caseId, now, now, now)
-    }
+    seedCaseProgressionState(db, 'zst', caseId, now)
     return { outcome: 'CASE_CREATED', caseId, messageStatus: 'LOCAL_APPLIED', sensitivity: tier }
   })
   return tx()

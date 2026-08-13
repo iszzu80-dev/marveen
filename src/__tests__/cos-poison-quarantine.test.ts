@@ -70,7 +70,7 @@ describe('poison quarantine (A.1)', () => {
   describe('each missing condition blocks it on its own', () => {
     it('no alert → refused', () => {
       const db = seedPoison()
-      const r = quarantinePoison(db, ACC, 'poison', 'ok', deps({ raiseAlert: () => false }), NOW)
+      const r = quarantinePoison(db, ACC, 'poison', 'sérült melléklet', deps({ raiseAlert: () => false }), NOW)
       expect(r.quarantined).toBe(false)
       expect(r.missing).toContain('alertRaised')
       expect(statusOf('poison').status).not.toBe('QUARANTINED')
@@ -78,13 +78,13 @@ describe('poison quarantine (A.1)', () => {
 
     it('no review task → refused', () => {
       const db = seedPoison()
-      const r = quarantinePoison(db, ACC, 'poison', 'ok', deps({ createReviewTask: () => false }), NOW)
+      const r = quarantinePoison(db, ACC, 'poison', 'sérült melléklet', deps({ createReviewTask: () => false }), NOW)
       expect(r.missing).toContain('reviewTaskCreated')
     })
 
     it('no policy → refused, and the batch stays non-terminal', () => {
       const db = seedPoison()
-      const r = quarantinePoison(db, ACC, 'poison', 'ok', deps({ policyAllowsCursorAdvance: () => false }), NOW)
+      const r = quarantinePoison(db, ACC, 'poison', 'sérült melléklet', deps({ policyAllowsCursorAdvance: () => false }), NOW)
       expect(r.missing).toContain('policyAllowsCursorAdvance')
       expect(isBatchTerminal(db, 'b1')).toBe(false)   // the cursor cannot pass
     })
@@ -103,9 +103,50 @@ describe('poison quarantine (A.1)', () => {
     })
   })
 
+  // P8 (review 2026-08-13). raiseAlert and createReviewTask ran BEFORE the full
+  // condition set was evaluated. An attempt that then failed on a later
+  // condition had already created the `qtn-<mid>` kanban card, so the NEXT sweep
+  // hit the primary-key conflict inside createReviewTask, its catch returned
+  // false, and the condition read "review task NOT created" — the message could
+  // never be quarantined again, the batch was pinned forever, and every sweep
+  // inserted one more duplicate CRITICAL alert row.
+  describe('a precondition failure costs nothing', () => {
+    it('does not alert or create a review task when the policy forbids the advance', () => {
+      const db = seedPoison()
+      const alerts: string[] = [], tasks: string[] = []
+      const r = quarantinePoison(db, ACC, 'poison', 'sérült melléklet', deps({
+        policyAllowsCursorAdvance: () => false,
+        raiseAlert: (_a, m) => { alerts.push(m); return true },
+        createReviewTask: (_a, m) => { tasks.push(m); return true },
+      }), NOW)
+      expect(r.quarantined).toBe(false)
+      expect(alerts, 'no duplicate CRITICAL alert per sweep').toEqual([])
+      expect(tasks, 'no orphan qtn- card that the next retry then collides with').toEqual([])
+    })
+
+    it('does not alert when the reason is unusable (unaudited)', () => {
+      const db = seedPoison()
+      const tasks: string[] = []
+      quarantinePoison(db, ACC, 'poison', 'x', deps({ createReviewTask: (_a, m) => { tasks.push(m); return true } }), NOW)
+      expect(tasks).toEqual([])
+    })
+
+    it('a later retry with the policy granted still succeeds — the jam is not permanent', () => {
+      const db = seedPoison()
+      // sweep 1: refused on policy, nothing written anywhere
+      let allow = false
+      const d = deps({ policyAllowsCursorAdvance: () => allow })
+      expect(quarantinePoison(db, ACC, 'poison', 'sérült melléklet', d, NOW).quarantined).toBe(false)
+      // sweep 2: the owner grants the policy
+      allow = true
+      expect(quarantinePoison(db, ACC, 'poison', 'sérült melléklet', d, NOW + 60).quarantined).toBe(true)
+      expect(statusOf('poison').status).toBe('QUARANTINED')
+    })
+  })
+
   it('a refusal keeps the cursor stuck — the visible failure, on purpose', () => {
     const db = seedPoison()
-    quarantinePoison(db, ACC, 'poison', 'ok', deps({ raiseAlert: () => false }), NOW)
+    quarantinePoison(db, ACC, 'poison', 'sérült melléklet', deps({ raiseAlert: () => false }), NOW)
     expect(isBatchTerminal(db, 'b1')).toBe(false)
   })
 

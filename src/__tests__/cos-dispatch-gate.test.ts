@@ -52,6 +52,42 @@ describe('COS dispatch gate', () => {
     expect(hs.allowed).toBe(false)
   })
 
+  // E13 (review 2026-08-13). evaluateDispatch never passed `channel` or
+  // `usedVariables` to authorizeSend, so three envelope checks the approval
+  // engine implements — channel_not_allowed, forbidden_variable,
+  // variable_not_in_schema — could not fire on the personal path at all.
+  // approveSend stored allowedChannels:['EMAIL'] on every approval and nothing
+  // on this side ever read it; the ZST door passed the channel, the personal one
+  // did not. Same asymmetry that hid AC-4 from the personal store in August.
+  it('E13: the approval envelope CHANNEL is checked on the personal path', () => {
+    const db = getDb()
+    createCase(db, { caseId: 'c1', title: 'T', caseType: 'X' }, 900)
+    registerConnector(db, 'gmail', 'email', 'READ_WRITE', 1000)
+    recordSuccess(db, 'gmail', 1000)
+    createCampaign(db, { campaignId: 'k1', caseId: 'c1', campaignType: 'QUOTE_REQUEST', templateHash: TH }, 1000)
+    approveCampaign(db, 'k1', 1001)
+    setLadder(db, 'QUOTE_REQUEST', { rung: 'EXECUTE_WITH_APPROVAL' }, 1000)
+    // Istvan approved this payload for the CHAT channel only.
+    recordApproval(db, { approvalId: 'a1', campaignId: 'k1', approvedBy: 'istvan', templateHash: TH,
+      renderedPayloadHash: RH, allowedRecipients: ['teszt@pelda.hu'], allowedChannels: ['CHAT'] }, 1002)
+
+    const d = evaluateDispatch(db, REQ) // the gate sends EMAIL
+    expect(d.allowed).toBe(false)
+    expect(d.reasons.join()).toMatch(/channel EMAIL is not approved/)
+  })
+
+  it('E13: a forbidden template variable in the rendered payload vetoes the send', () => {
+    const db = seedGreen()
+    db.prepare(`UPDATE campaign_approvals SET forbidden_variables=? WHERE approval_id='a1'`)
+      .run(JSON.stringify(['bank_account']))
+    // CONTROL first: with no variables declared there is nothing to check, and the
+    // gate must not start refusing hand-composed mail.
+    expect(evaluateDispatch(db, REQ).allowed).toBe(true)
+    const d = evaluateDispatch(db, { ...REQ, usedVariables: ['greeting', 'bank_account'] })
+    expect(d.allowed).toBe(false)
+    expect(d.reasons.join()).toMatch(/forbidden variable/)
+  })
+
   it('connector layer vetoes: READ_ONLY connector blocks a write', () => {
     const db = seedGreen()
     setMode(db, 'gmail', 'READ_ONLY', 1100)
@@ -95,6 +131,18 @@ describe('COS dispatch gate', () => {
     expect(evaluateDispatch(db, REQ).allowed).toBe(false)
   })
 
+  // ASSERTED BY CONTENT, NOT BY COUNT (2026-08-12). This used to require
+  // exactly three reasons, and §21 made it five: when the campaign approval
+  // refuses, the gate now also reports why the standing delegation would not
+  // have covered the send either. That is the point of the layer — "no
+  // approval" and "and no delegation applies" are different facts, and a caller
+  // that sees only the first goes looking for an approval when the real answer
+  // is that a human has to read this letter.
+  //
+  // A hardcoded count tests the arithmetic of the reason list rather than the
+  // property the test is named for. Naming the layers means a NEW layer that
+  // forgets to report itself still fails this, while one that reports itself
+  // correctly does not.
   it('reports ALL failing layers at once (fail-closed, no short-circuit)', () => {
     const db = seedGreen()
     setMode(db, 'gmail', 'READ_ONLY', 1100) // connector veto
@@ -103,6 +151,40 @@ describe('COS dispatch gate', () => {
       renderedPayloadHash: 'nope', // campaign veto
     })
     expect(d.allowed).toBe(false)
-    expect(d.reasons.length).toBe(3)   // connector + sensitivity + campaign; the rung permits
+    const joined = d.reasons.join(' | ')
+    expect(joined).toMatch(/connector "gmail" is not write-usable/)
+    expect(joined).toMatch(/profile "routine_lowcost" is not allowed/)
+    expect(joined).toMatch(/campaign not authorized/)
+    // The rung permits here, so it must NOT appear — a test that only checks
+    // for presence would pass on a gate that vetoed everything.
+    expect(joined).not.toMatch(/autonómia-fokozat/)
+  })
+
+  // §21 — the send that the approval path refuses and the delegation covers.
+  //
+  // This is the only test in this file where `allowed` goes TRUE without an
+  // approval, and it is worth stating plainly what it means: Marveen replies in
+  // Istvan's name, in an existing thread, without asking him first. Everything
+  // else in the gate still had to pass.
+  it('a standing delegation can substitute for the approval — and only for it', () => {
+    const db = seedGreen()
+    const delegable = {
+      ...REQ,
+      renderedPayloadHash: 'nope',            // no approval matches this payload
+      content: 'Megkaptam a tervezetet.',
+      subject: 'Visszajelzés', body: 'Megkaptam a tervezetet.',
+      outboundKind: 'REPLY' as const,
+    }
+    const ok = evaluateDispatch(db, delegable)
+    expect(ok.allowed).toBe(true)
+    expect(ok.delegationEnvelopeId).toBe('pri-email-v1')
+    expect(ok.delegatedIntent).toBe('factual_reply')
+    // …and it is NOT recorded as an approval, because none happened.
+    expect(ok.approvalId).toBeUndefined()
+
+    // The same letter with the connector down still cannot go: a delegation is
+    // permission to skip the QUESTION, never a safety layer.
+    setMode(db, 'gmail', 'READ_ONLY', 1100)
+    expect(evaluateDispatch(db, delegable).allowed).toBe(false)
   })
 })

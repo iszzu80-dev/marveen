@@ -18,6 +18,7 @@
 // than by inspection: a step exists BECAUSE of a piece of evidence, and carries
 // its reference.
 import type { ReaderEvidencePacket, ProgressionDecision } from './reader.js'
+import { CONFIDENCE_THRESHOLDS } from './reader-arbitration.js'
 
 export interface EvidencePlanStep {
   step: number
@@ -128,7 +129,14 @@ export function planFromEvidence(packet: ReaderEvidencePacket): EvidencePlan {
     // Only a step that needs nobody else may proceed on its own — and low
     // confidence removes that permission whatever the step says (§13.1's
     // fail-safe: low confidence must not produce an external effect).
-    canProceedAutonomously: !first.needsExternal && first.blockedBy === null && packet.confidence >= 0.6,
+    //
+    // The number is READ from the arbitration table, not repeated here. This
+    // said 0.6 while the arbiter that actually gates the decision required 0.7,
+    // so the plan JSON — which is stored and shown to a human — could promise
+    // "can proceed on its own" about a step the engine would then refuse. Two
+    // copies of a threshold are two thresholds.
+    canProceedAutonomously: !first.needsExternal && first.blockedBy === null
+      && packet.confidence >= (CONFIDENCE_THRESHOLDS.CONTINUE_AUTONOMOUSLY ?? 0.7),
     evidenceRefs: first.evidenceRefs,
   }
 

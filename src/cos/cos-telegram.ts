@@ -28,6 +28,16 @@ export interface CosBotConfig {
   /** The chat the questions go to. Unknown until Istvan messages the bot once —
    *  Telegram does not disclose a user to a bot before that. */
   chatId?: string
+  /** WHOSE replies this channel accepts as owner answers (review 2026-08-12,
+   *  T-4).
+   *
+   *  This is an AUTHORISATION boundary, not a display setting: a message that
+   *  passes it closes questions and writes OWNER_DECISION events onto cases. The
+   *  bot is reachable by anyone who finds it, so the check has to exist — it
+   *  just must not live as a literal in a tracked script, which is where it was.
+   *  Config is where deployment-local identity belongs, and a second deployment
+   *  has no way to discover a constant buried in a poller. */
+  ownerId?: string
   botUsername?: string
   /** WHICH KINDS OF MESSAGE this channel carries.
    *
@@ -48,6 +58,28 @@ export interface CosBotConfig {
  *  drift apart on a spelling. */
 export const ROUTE_RADAR = 'radar'
 
+/**
+ * The CoS bot config. Deployment-local, gitignored, and the file that decides
+ * WHO may answer:
+ *
+ * ```json
+ * {
+ *   "token": "...",              // from BotFather
+ *   "channel_id": "telegram:cos",
+ *   "chat_id": "...",            // known once the owner messages the bot
+ *   "owner_id": "123456789",     // REQUIRED for the inbox — see below
+ *   "routes": []
+ * }
+ * ```
+ *
+ * `owner_id` is the Telegram user id whose replies count as OWNER answers. Until
+ * 2026-08-12 it was a literal inside `scripts/cos-channel-poll.ts`; it is
+ * deployment-local identity on an authorisation path, so it belongs here.
+ *
+ * ON UPGRADE: an existing config has no `owner_id`, and the poller then REFUSES
+ * every message and says so in its cycle line rather than accepting anyone. That
+ * is the intended direction of failure — add the field to resume the inbox.
+ */
 export const COS_BOT_CONFIG_PATH = 'store/.cos-telegram-bot.json'
 
 /** The RADAR bot (Istvan's decision, 2026-08-11: "legyen harmadik bot").
@@ -101,6 +133,13 @@ export function loadCosBotConfig(path = COS_BOT_CONFIG_PATH): CosBotConfig | nul
         ? j.channel_id
         : (path.endsWith('.cos-telegram-bot.json') ? 'telegram:cos' : `telegram:${basename(path)}`),
       chatId: typeof j.chat_id === 'string' ? j.chat_id : undefined,
+      // Accepts a number too: Telegram user ids are numeric in every payload
+      // Istvan would copy from, and a config that silently ignores `12345`
+      // because it wanted `"12345"` fails CLOSED in the most confusing way —
+      // the poller would then accept nobody and report only `rejected`.
+      ownerId: typeof j.owner_id === 'string'
+        ? j.owner_id
+        : (typeof j.owner_id === 'number' ? String(j.owner_id) : undefined),
       botUsername: typeof j.bot_username === 'string' ? j.bot_username : undefined,
       routes: Array.isArray(j.routes) ? j.routes.filter(r => typeof r === 'string') as string[] : [],
     }

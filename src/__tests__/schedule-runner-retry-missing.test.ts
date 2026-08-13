@@ -44,6 +44,17 @@ vi.mock('../web/atomic-write.js', () => ({
 }))
 
 vi.mock('../db.js', () => ({
+  // `getDb` is needed by the FIRE path (createDispatchSafe stamps the dispatch
+  // row), and this mock did not provide it — so the moment attemptFireTask got
+  // past the readiness checks it threw "No getDb export is defined on the
+  // ../db.js mock", the catch turned that into `error`, and the retry row was
+  // never deleted. The test then read as "the runner does not delete a fired
+  // retry", which is a claim about the RUNNER; the runner was fine and the
+  // harness was short one export. Fixed 2026-08-13 — it had been sitting in the
+  // permanently-red set, which is exactly where a mislabelled failure survives.
+  getDb: () => ({
+    prepare: () => ({ run: () => ({ changes: 1 }), get: () => undefined, all: () => [] }),
+  }),
   appendTaskRun: (...a: unknown[]) => mockAppendTaskRun(...a),
   listPendingTaskRetries: () => mockListPendingRetries(),
   deletePendingTaskRetry: (...a: unknown[]) => mockDeletePendingRetry(...a),

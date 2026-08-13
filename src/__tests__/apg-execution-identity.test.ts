@@ -424,17 +424,30 @@ describe('§11.4: resolved_by comes from the credential, not the body', () => {
       status: 'approved', resolved_by: 'Gábor',
     }, FLEET_TOKEN)
     expect(await tryHandleApprovals(ctx)).toBe(true)
-    expect(out.status).toBe(200)
 
-    const stored = getApproval('ap-1')!
-    expect(stored.status).toBe('approved')
-    // The decisive assertion: the owner's name is NOT the stored attribution.
-    expect(stored.resolved_by).not.toBe('Gábor')
-    expect(stored.resolved_by).toBe('fleet_token:shared')
-    // The claim survives, next to the attribution, labelled as a claim.
+    // This used to assert 200 + approved, and inspect the attribution on the
+    // way through. It cannot any more, and the reason is a STRICTER control
+    // arriving from the other development line: a shared fleet token cannot
+    // prove it is not the requesting agent, so the permissive direction is
+    // refused for EVERY category, not only human_required. Refusing outright
+    // is a superset of refusing the claim, so the property this test exists
+    // for is stronger than before -- but it now has to be proved against the
+    // refusal, not against a grant that no longer happens.
+    expect(out.status).toBe(403)
+    expect(out.body.code).toBe('unattributable_caller')
+    expect(getApproval('ap-1')!.status).toBe('pending')
+
+    // The decisive assertion, unchanged in substance: the owner's name is
+    // never an attribution. It survives only as a labelled claim, beside the
+    // credential the server actually verified.
     const resolved = auditEvents().filter((e) => e.type === 'approval_resolved')
-    expect(resolved.at(-1)!.detail.claimed_by).toBe('Gábor')
-    expect(resolved.at(-1)!.detail.resolved_by).toBe('fleet_token:shared')
+    const receipt = resolved.at(-1)!.detail
+    expect(receipt.status).toBe('refused:approved')
+    expect(receipt.resolved_by).not.toBe('Gábor')
+    expect(receipt.resolved_by).toBe('fleet_token:shared')
+    expect(receipt.claimed_by).toBe('Gábor')
+    // And nowhere in the stored approval either.
+    expect(getApproval('ap-1')!.resolved_by ?? '').not.toBe('Gábor')
   })
 
   it('the self-approval guard still fires on the CLAIMED name, and still admits it is best-effort', async () => {
@@ -528,14 +541,31 @@ describe('§11.4/§26.2: the human_required approval category', () => {
     expect(getApproval('hr-apg')!.status).toBe('pending')
   })
 
-  it('an ordinary category is unaffected -- the gate is scoped to human_required', async () => {
+  it('an ordinary category is refused by the OTHER control, not by the human_required gate', async () => {
+    // Two independent controls now cover this endpoint, and keeping them
+    // distinguishable is the point of this test. The human_required gate is
+    // still scoped exactly as designed -- it does not reach an ordinary
+    // category -- but an ordinary category is no longer approvable with a
+    // fleet token either, because the operator-principal rule refuses the
+    // permissive direction for everything. Asserting the REASON is what keeps
+    // the two apart: if the human_required gate ever silently widened, this
+    // would still be refused and nobody would notice, so the reason code is
+    // the assertion that has to carry the weight.
     setOverride('APG_MODE', 'enforced')
     createApproval({
       id: 'ordinary', agent_id: 'buildfejleszto', category: 'deploy',
       action_description: 'ship it', action_payload: null, timeout_at: null,
     })
-    const { ctx } = fakeCtx('/api/approvals/ordinary', 'PATCH', { status: 'approved' }, FLEET_TOKEN)
+    const { ctx, out } = fakeCtx('/api/approvals/ordinary', 'PATCH', { status: 'approved' }, FLEET_TOKEN)
     expect(await tryHandleApprovals(ctx)).toBe(true)
-    expect(getApproval('ordinary')!.status).toBe('approved')
+    expect(out.status).toBe(403)
+    expect(out.body.code).toBe('unattributable_caller')
+    expect(getApproval('ordinary')!.status).toBe('pending')
+
+    // The scoping claim itself: the receipt records this category as NOT
+    // human_required, so the refusal provably came from the other rule.
+    const receipt = auditEvents().filter((e) => e.type === 'approval_resolved').at(-1)!.detail
+    expect(receipt.human_required).toBe(false)
+    expect(receipt.status).toBe('refused:approved')
   })
 })

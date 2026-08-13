@@ -4,9 +4,10 @@
 // `initCostOpsSchema(db)`, marked `// LOCAL-FORK: costops seam`. Every table
 // this feature has ever added (v0.1 through Phase 0) is consolidated here,
 // verbatim, so the upstream-owned db.ts stops growing a table per CostOps
-// release. Idempotent by construction (CREATE TABLE IF NOT EXISTS, ALTER
-// TABLE wrapped in try/catch) -- calling this on an already-migrated DB is a
-// safe no-op, exactly like the individual statements were before the move.
+// release. Idempotent by construction (CREATE TABLE IF NOT EXISTS, and
+// `addColumn` below, which tolerates ONLY "already there") -- calling this on
+// an already-migrated DB is a safe no-op, exactly like the individual
+// statements were before the move.
 
 import type Database from 'better-sqlite3'
 import { initForecastSchema } from './forecast.js'
@@ -24,6 +25,35 @@ import { initSaturationEventsSchema } from './saturation-events.js'
 // docs/fork-upstream-policy.md §2a allows db.ts exactly one local-fork call.
 import { initCompletionClaimSchema } from '../apg/completion-claim.js'
 
+/**
+ * Add a column, tolerating ONLY "it is already there" (C-7).
+ *
+ * WHAT WAS WRONG. Twenty `try { db.exec('ALTER TABLE …') } catch { /* already
+ * exists }` lines ran on every boot, and the catch swallowed EVERYTHING.
+ * "The column is already there" and "this migration is broken" produced exactly
+ * the same silence — a typo in a column type, a table that does not exist yet
+ * because an ordering assumption changed, a disk error: all of them looked like
+ * a successful no-op, and the feature that needed the column failed later
+ * somewhere else entirely.
+ *
+ * SQLite has one specific error for the benign case, and it names the column:
+ * `duplicate column name: x`. That is the only one worth ignoring; everything
+ * else is a migration that did not do what it says.
+ *
+ * Kept as a throw rather than a log: boot-time schema is the one place where
+ * carrying on with a half-applied migration is worse than stopping, because
+ * every later read then produces a plausible wrong answer instead of an error.
+ */
+function addColumn(db: Database.Database, table: string, columnDef: string): void {
+  try {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${columnDef}`)
+  } catch (err) {
+    const message = String((err as Error)?.message ?? err)
+    if (/duplicate column name/i.test(message)) return
+    throw new Error(`CostOps schema: ALTER TABLE ${table} ADD COLUMN ${columnDef} failed: ${message}`)
+  }
+}
+
 export function initCostOpsSchema(db: Database.Database): void {
   // CostOps v0.2: model/provider enrichment on the CORE token_usage table
   // (not CostOps-owned, but this feature bolts 3 nullable columns onto it for
@@ -31,9 +61,9 @@ export function initCostOpsSchema(db: Database.Database): void {
   // the model from the transcript; existing rows stay NULL (unknown) -> left
   // unpriced, never guessed. Must run after token_usage itself exists --
   // db.ts calls initCostOpsSchema() after that table's own setup.
-  try { db.exec(`ALTER TABLE token_usage ADD COLUMN model TEXT`) } catch { /* column already exists */ }
-  try { db.exec(`ALTER TABLE token_usage ADD COLUMN provider TEXT`) } catch { /* column already exists */ }
-  try { db.exec(`ALTER TABLE token_usage ADD COLUMN model_source TEXT`) } catch { /* column already exists */ }
+  addColumn(db, 'token_usage', `model TEXT`)
+  addColumn(db, 'token_usage', `provider TEXT`)
+  addColumn(db, 'token_usage', `model_source TEXT`)
   // --- CostOps (local cost ledger, v0.1) ---
   // Read-mostly, FOCUS-inspired. cost_sources = provider/subscription origin,
   // cost_line_items = individual charge rows (estimate or provider-sourced),
@@ -61,7 +91,7 @@ export function initCostOpsSchema(db: Database.Database): void {
   // optimization). 'decommissioned' is a terminal state; a source cannot be
   // reactivated (the provider account no longer exists). For a source that is
   // merely paused/disabled, use active=0 with lifecycle_state='active'.
-  try { db.exec(`ALTER TABLE cost_sources ADD COLUMN lifecycle_state TEXT NOT NULL DEFAULT 'active'`) } catch { /* already exists */ }
+  addColumn(db, 'cost_sources', `lifecycle_state TEXT NOT NULL DEFAULT 'active'`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cost_sources_lifecycle ON cost_sources(lifecycle_state, active)`)
   db.exec(`
     CREATE TABLE IF NOT EXISTS cost_line_items (
@@ -91,30 +121,30 @@ export function initCostOpsSchema(db: Database.Database): void {
   // amount/currency/fx_rate/fx_date alongside it so the UI can show "11.15 USD ->
   // 4014 HUF" instead of just the converted number. NULL for lines that were never
   // converted (already-HUF entries) -- never fabricated, no existing calc touched.
-  try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN original_amount REAL`) } catch { /* already exists */ }
-  try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN original_currency TEXT`) } catch { /* already exists */ }
-  try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN fx_rate REAL`) } catch { /* already exists */ }
-  try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN fx_date INTEGER`) } catch { /* already exists */ }
+  addColumn(db, 'cost_line_items', `original_amount REAL`)
+  addColumn(db, 'cost_line_items', `original_currency TEXT`)
+  addColumn(db, 'cost_line_items', `fx_rate REAL`)
+  addColumn(db, 'cost_line_items', `fx_date INTEGER`)
   // v0.8 (card 6f4d1332): distinguishes "we queried the provider API live" (provider_api) from
   // "we read an email invoice" (email_invoice) from "config-driven fixed cost" (manual_entry) --
   // neither `confidence` (the priority/authoritativeness axis) nor `cost_sources.source_type`
   // (a category axis) cleanly carries this. Nullable, no default: every write site sets it
   // explicitly; a NULL row (pre-migration history) falls back to 'no_data' at read time, never guessed.
-  try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN actual_source TEXT`) } catch { /* already exists */ }
+  addColumn(db, 'cost_line_items', `actual_source TEXT`)
   // CostOps Phase 0 (card 73e8914a decision, docs/costops/phase0-73e8914a-void-vs-delete.md):
   // a financial ledger row must never silently disappear -- void/archive instead of hard
   // DELETE, so a mistaken/superseded manual entry stays auditable. NULL = active (the
   // overwhelming majority of rows, including all pre-Phase-0 history); every read path
   // that aggregates cost_line_items must filter `voided_at IS NULL`.
-  try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN voided_at INTEGER`) } catch { /* already exists */ }
-  try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN void_reason TEXT`) } catch { /* already exists */ }
+  addColumn(db, 'cost_line_items', `voided_at INTEGER`)
+  addColumn(db, 'cost_line_items', `void_reason TEXT`)
   // Phase 1 (GAP-05/GAP-06/GAP-14, docs/costops/phase0-73e8914a-void-vs-delete.md's
   // deferred "no supersede/correction relationship" follow-up): a correction
   // voids the wrong row (same mechanism as above) AND inserts a new row
   // pointing back at it via corrects_line_id, so "what replaced this, and
   // why" stays traceable instead of two unrelated void+POST rows correlated
   // only by matching source_id/month/timing. See correction.ts.
-  try { db.exec(`ALTER TABLE cost_line_items ADD COLUMN corrects_line_id INTEGER REFERENCES cost_line_items(id)`) } catch { /* already exists */ }
+  addColumn(db, 'cost_line_items', `corrects_line_id INTEGER REFERENCES cost_line_items(id)`)
   // Phase 1 (GAP-09, Anvil's fx.ts): fx_source/conversion_method columns +
   // the fx_rates history table. Must run after cost_line_items exists.
   initFxSchema(db)
@@ -169,7 +199,7 @@ export function initCostOpsSchema(db: Database.Database): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_import_runs_provider ON import_runs(provider, started_at)`)
   // v0.5: sanitized per-run detail (service_count, plan breakdown, not_covered) as JSON.
   // NO raw service/account IDs -- the breakdown carries only type/plan labels + counts.
-  try { db.exec(`ALTER TABLE import_runs ADD COLUMN detail_json TEXT`) } catch { /* already exists */ }
+  addColumn(db, 'import_runs', `detail_json TEXT`)
   // Phase 1 (GAP-07): per-provider import lock, so two concurrent syncs of the
   // same provider (e.g. a manual "sync now" racing the scheduled one) never
   // race each other's upserts. See collectors/import-durability.ts.
@@ -234,10 +264,10 @@ export function initCostOpsSchema(db: Database.Database): void {
   // every scheduled tick idempotent, instead of accumulating 24 identical rows a
   // day that would then look like 24 independent observations. Pre-migration rows
   // keep dedup_key NULL, which SQLite's UNIQUE index permits repeatedly.
-  try { db.exec(`ALTER TABLE provider_ratelimit_snapshots ADD COLUMN usage_confidence TEXT`) } catch { /* already exists */ }
-  try { db.exec(`ALTER TABLE provider_ratelimit_snapshots ADD COLUMN snapshot_source TEXT`) } catch { /* already exists */ }
-  try { db.exec(`ALTER TABLE provider_ratelimit_snapshots ADD COLUMN reset_label TEXT`) } catch { /* already exists */ }
-  try { db.exec(`ALTER TABLE provider_ratelimit_snapshots ADD COLUMN dedup_key TEXT`) } catch { /* already exists */ }
+  addColumn(db, 'provider_ratelimit_snapshots', `usage_confidence TEXT`)
+  addColumn(db, 'provider_ratelimit_snapshots', `snapshot_source TEXT`)
+  addColumn(db, 'provider_ratelimit_snapshots', `reset_label TEXT`)
+  addColumn(db, 'provider_ratelimit_snapshots', `dedup_key TEXT`)
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ratelimit_snapshots_dedup ON provider_ratelimit_snapshots(dedup_key)`)
   // Card 3ce58384 (Phase 3 P2-C follow-up, 2026-07-30): the fleet runs TWO
   // independent Anthropic quota pools (auth profiles host_default and
@@ -248,7 +278,7 @@ export function initCostOpsSchema(db: Database.Database): void {
   // above: a pre-migration row (auth_profile NULL) stays a legitimate
   // PROVIDER-WIDE observation, not a broken row -- see capacity-snapshots.ts's
   // latestRateLimitSnapshot() for the exact-match-vs-provider-wide contract.
-  try { db.exec(`ALTER TABLE provider_ratelimit_snapshots ADD COLUMN auth_profile TEXT`) } catch { /* already exists */ }
+  addColumn(db, 'provider_ratelimit_snapshots', `auth_profile TEXT`)
   // CostOps Phase 0: baseline for the 7-day source-reliability observation window
   // (gap-analysis P0.4). One row per capture -- the whole source inventory
   // (lifecycle + freshness + sync status per source) as a sanitized JSON snapshot,
@@ -282,7 +312,7 @@ export function initCostOpsSchema(db: Database.Database): void {
   // v0.7/v2 gap-fill (card 65da75e6): the actual suspension DEADLINE date, when the ingest
   // sweep can read it from the email (e.g. "suspended on Aug 4") -- lets the warning show a
   // real due_date + severity that rises as the date approaches, not just a flat flag.
-  try { db.exec(`ALTER TABLE workspace_alerts ADD COLUMN suspension_date INTEGER`) } catch { /* already exists */ }
+  addColumn(db, 'workspace_alerts', `suspension_date INTEGER`)
   // CostOps v1.0 (card ef6c6a2c, spec section 5.1): included-usage/entitlement model, kept
   // SEPARATE from cost_line_items -- included usage must never leak into operational_spend.
   // This is a presentational/status view only, same role as the existing limits.ts output for

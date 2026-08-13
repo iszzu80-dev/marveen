@@ -10,7 +10,7 @@
 import type Database from 'better-sqlite3'
 import { type RentalAdapter, type RentalSearchParams, filterByCategory, cheapestByFullPrice } from './rental-adapter.js'
 import { recordObservation, type RadarItemRow, type ObservationResult } from './radar.js'
-import type { ShoppingAdapter, ProductSearchResult } from './shopping-adapter.js'
+import { currencyMinorExponent, type ShoppingAdapter, type ProductSearchResult } from './shopping-adapter.js'
 
 export interface RentalRadarQuery {
   search: RentalSearchParams
@@ -66,13 +66,12 @@ export interface ProductRadarQuery {
   maxResults?: number
 }
 
-// Minor-unit exponent per currency (HUF has none: 100 Ft = 100 minor). Used to
-// bring the adapter's priceMinor into the SAME major unit the radar target_price
-// is stored in, so `best <= target` compares like-for-like.
-const CURRENCY_MINOR_EXPONENT: Record<string, number> = { HUF: 0, JPY: 0, EUR: 2, USD: 2, GBP: 2, CHF: 2 }
+// Bring the adapter's priceMinor into the SAME major unit the radar target_price
+// is stored in, so `best <= target` compares like-for-like. The exponent table is
+// shopping-adapter's single copy — the adapters scale INTO minor units with it,
+// this scales back OUT, and the two must never diverge.
 export function minorToMajor(priceMinor: number, currency: string | null): number {
-  const exp = CURRENCY_MINOR_EXPONENT[(currency ?? 'HUF').toUpperCase()] ?? 2
-  return Math.round(priceMinor / 10 ** exp)
+  return Math.round(priceMinor / 10 ** currencyMinorExponent(currency))
 }
 
 function matchesFilters(name: string, q: ProductRadarQuery): boolean {

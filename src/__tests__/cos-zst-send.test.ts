@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
-import { createZstCase } from '../cos/zst-case-store.js'
+import { createZstCase, acquireZstClaim } from '../cos/zst-case-store.js'
 import { registerConnector, setMode } from '../cos/connector-health.js'
 import { setLadder } from '../cos/autonomy-ladder.js'
 import {
@@ -66,22 +66,121 @@ describe('ZST approval-gated send (Slice 1 write-half, AT-ZA)', () => {
     expect(m.sent).toHaveLength(0)
   })
 
-  it('F-9: an EXPIRED approval refuses — the corporate path used to ignore valid_until', async () => {
-    // authorizeZstSend reimplemented a narrower check locally and never looked
-    // at valid_until, stop conditions, channel or quotas. It delegates to the
-    // shared engine now, so all of them apply to both namespaces.
+  it('F-9: an approval EXPIRES on its own — no test fixture propping up valid_until', async () => {
+    // CHANGED 2026-08-13. This test used to UPDATE valid_until by hand before
+    // dispatching, which proved the shared engine READS the column and proved
+    // nothing about what approveZstSend WRITES into it — and what it wrote was
+    // NULL, which that same engine reads as "never expires". The fixture was
+    // standing in for the bug. Nothing is patched now: the approval is recorded
+    // the way the door records it, and the clock does the rest.
     const db = getDb()
-    const d = draftZstSend(db, { caseId: 'ZST-ACC-1', templateId: 'accounting-package', email: EMAIL }, T0)
-    approveZstSend(db, {
-      campaignId: d.campaignId, templateHash: d.templateHash,
-      renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', allowedRecipients: [EMAIL.to],
-    }, T0 + 1)
-    db.prepare('UPDATE zst_campaign_approvals SET valid_until = ? WHERE campaign_id = ?').run(T0 + 5, d.campaignId)
+    const d = draftAndApprove()
     const m = mockAdapter()
-    const res = await dispatchZstSend(db, m.adapter, { ...dispatchInput(d), now: T0 + 999 }, T0 + 999)
+    const eightDays = T0 + 8 * 24 * 3600
+    const res = await dispatchZstSend(db, m.adapter, { ...dispatchInput(d), now: eightDays }, eightDays)
     expect(res.sent).toBe(false)
     expect(res.decision.reasons.join(' ')).toMatch(/expired/i)
     expect(m.sent).toHaveLength(0)
+  })
+
+  it('§3.2: one YES is not a standing permission — the envelope carries a TTL and a ceiling', () => {
+    // The raw INSERT this replaced left both columns NULL: never-expiring and
+    // uncapped. Reproduced live before the fix — a new draft of the same payload
+    // a YEAR later dispatched with no new approval.
+    const d = draftAndApprove()
+    const a = getDb().prepare(
+      'SELECT valid_until, max_total_outbound, allowed_channels FROM zst_campaign_approvals WHERE campaign_id = ?',
+    ).get(d.campaignId) as { valid_until: number | null; max_total_outbound: number | null; allowed_channels: string }
+    expect(a.valid_until).toBe(T0 + 1 + 7 * 24 * 3600)
+    expect(a.max_total_outbound).toBe(1)
+    expect(JSON.parse(a.allowed_channels)).toEqual(['EMAIL'])
+  })
+
+  it('§3.2: a SECOND letter on the same campaign needs more than the first YES', async () => {
+    // The owner approved one message. A new draft, even freshly approved, meets
+    // the campaign ceiling the approval carries — a second send is a second
+    // decision, and widening the ceiling is how the owner takes it.
+    const db = getDb()
+    const first = draftAndApprove()
+    const m = mockAdapter()
+    expect((await dispatchZstSend(db, m.adapter, dispatchInput(first), T0 + 2)).sent).toBe(true)
+
+    const second = { ...EMAIL, body: 'Még egy kérdés a júliusi csomaghoz.' }
+    const d2 = draftZstSend(db, { caseId: 'ZST-ACC-1', templateId: 'accounting-package', email: second }, T0 + 10)
+    approveZstSend(db, {
+      campaignId: d2.campaignId, templateHash: d2.templateHash,
+      renderedPayloadHash: d2.renderedPayloadHash, approvedBy: 'istvan', allowedRecipients: [EMAIL.to],
+    }, T0 + 11)
+    const res = await dispatchZstSend(db, m.adapter, { ...dispatchInput(d2, second), now: T0 + 12 }, T0 + 12)
+    expect(res.sent).toBe(false)
+    expect(res.decision.reasons.join(' ')).toMatch(/quota/i)
+    expect(m.sent).toHaveLength(1) // still the first one only
+  })
+
+  it('N-2: the claim and the ceilings actually reach the executor', async () => {
+    // Both used to be dropped on this path: dispatchZstSend passed no claim and
+    // no campaignLimit, so the executor's fence check and its in-transaction
+    // ceiling count sat behind `if (opts.claim)` / `if (opts.campaignLimit)` that
+    // no caller ever satisfied — and authorizeZstSend threw away the `limits` the
+    // shared engine had already computed for it.
+    const db = getDb()
+    const d = draftAndApprove()
+    const dec = evaluateZstSendGate(db, dispatchInput(d))
+    expect(dec.limits?.maxTotal).toBe(1)
+    expect(dec.approvalId).toBeTruthy()
+
+    const m = mockAdapter()
+    await dispatchZstSend(db, m.adapter, dispatchInput(d), T0 + 2)
+    // claim_fence is written by the executor ONLY when a claim is supplied.
+    const row = db.prepare('SELECT claim_fence, run_id FROM zst_outbound_ledger WHERE ledger_id = ?')
+      .get(d.ledgerId) as { claim_fence: number | null; run_id: string | null }
+    expect(row.claim_fence).not.toBeNull()
+    expect(row.run_id).toBeTruthy()
+    // …and the claim is released again, or the row could never be retried.
+    const held = db.prepare('SELECT COUNT(*) AS n FROM zst_case_claims WHERE claim_key = ?')
+      .get(`zst-outbound:${d.ledgerId}`) as { n: number }
+    expect(held.n).toBe(0)
+  })
+
+  it('N-2: a row another run is already sending is not sent a second time', async () => {
+    const db = getDb()
+    const d = draftAndApprove()
+    // Another worker holds the row. Its run id is NOT ours — a deterministic
+    // `dispatch-${ledgerId}` run id would have matched here and handed the claim
+    // straight back, which is a claim that can never refuse anyone.
+    acquireZstClaim(db, { claimKey: `zst-outbound:${d.ledgerId}`, ownerRunId: 'masik-run', ttlSeconds: 120 }, T0 + 1)
+    const m = mockAdapter()
+    const res = await dispatchZstSend(db, m.adapter, dispatchInput(d), T0 + 2)
+    expect(res.sent).toBe(false)
+    expect(res.decision.reasons.join(' ')).toMatch(/küldés alatt/)
+    expect(m.sent).toHaveLength(0)
+  })
+
+  it('F-1/F-2: the drafted row is attributable from birth, and the seq is MAX+1', () => {
+    const db = getDb()
+    const d = draftZstSend(db, { caseId: 'ZST-ACC-1', templateId: 'accounting-package', email: EMAIL }, T0)
+    const row = db.prepare(
+      `SELECT campaign_id, recipient, rendered_payload_hash, case_version, outbound_kind, sequence_number
+       FROM zst_outbound_ledger WHERE ledger_id = ?`,
+    ).get(d.ledgerId) as {
+      campaign_id: string | null; recipient: string | null; rendered_payload_hash: string | null
+      case_version: number | null; outbound_kind: string | null; sequence_number: number
+    }
+    expect(row.campaign_id).toBe(d.campaignId)
+    expect(row.recipient).toBe(EMAIL.to)
+    expect(row.rendered_payload_hash).toBe(d.renderedPayloadHash)
+    expect(row.case_version).not.toBeNull()
+    // Without outbound_kind the envelope's per-kind quotas count nothing at all.
+    expect(row.outbound_kind).toBe('INITIAL')
+    expect(row.sequence_number).toBe(1)
+
+    // The next draft takes MAX(seq)+1 — and survives a hole in the sequence that
+    // COUNT(*)+1 would have walked straight into, re-using a live number.
+    const d2 = draftZstSend(db, { caseId: 'ZST-ACC-1', templateId: 'accounting-package', email: { ...EMAIL, body: 'másik' } }, T0 + 1)
+    expect(d2.sequenceNumber).toBe(2)
+    db.prepare('DELETE FROM zst_outbound_ledger WHERE ledger_id = ?').run(d.ledgerId)
+    const d3 = draftZstSend(db, { caseId: 'ZST-ACC-1', templateId: 'accounting-package', email: { ...EMAIL, body: 'harmadik' } }, T0 + 2)
+    expect(d3.sequenceNumber).toBe(3)
   })
 
   it('happy path: draft → approve → dispatch → VERIFIED (one send)', async () => {

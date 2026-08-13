@@ -20,6 +20,7 @@
 // — otherwise the gate vetoes, so the flow is inert until deliberately activated.
 
 import type Database from 'better-sqlite3'
+import { randomUUID } from 'node:crypto'
 import { sha256Hex } from './attachments.js'
 import { createCampaign, getCampaign, approveCampaign, recordApproval } from './campaigns.js'
 import type { ApprovalEnvelope } from './approval-core.js'
@@ -212,11 +213,49 @@ export interface DispatchSendInput {
   /** F-2 / AC-21: which run drove this send. Optional because a send triggered
    *  by the owner from the UI belongs to no run. */
   runId?: string
+  /** E13: the template variable names the rendered payload used, when the caller
+   *  rendered from a template and knows them. Absent for a hand-composed mail —
+   *  and absent means the variable checks have nothing to check, not that they
+   *  passed. */
+  usedVariables?: string[]
 }
 export interface DispatchSendResult {
   sent: boolean
   decision: DispatchDecision
   action?: OutboundAction
+  /** E18: why nothing was sent when the GATE allowed it. The gate's own vetoes
+   *  are in `decision.reasons`; everything that refuses AFTER it — the kill
+   *  switch, a dead ticket, a stale claim fence, a campaign ceiling, the quota —
+   *  is written to the ledger row's last_error and used to end here as
+   *  `{sent:false}` with no reason attached, which reads to a caller (and to the
+   *  UI) as an unexplained failure. */
+  lastError?: string | null
+}
+
+/** E7 / §C. The per-connector rolling cap the atomic quota layer enforces when
+ *  the caller does not name one.
+ *
+ *  `quota.ts` implements a correct check-and-increment in one transaction, and
+ *  until now the only thing that ever passed `opts.quota` was a test: no rate
+ *  cap of any kind existed on the live personal send path. A bug that plans in a
+ *  loop, a retry storm, or a prompt that decides to chase forty suppliers at once
+ *  had nothing between it and the mailbox.
+ *
+ *  Twenty a day per connector, because this is ONE person's assistant: a day on
+ *  which Istvan's COS legitimately sends more than twenty emails through one
+ *  connector has not happened, and if it does, the cap refusing is the correct
+ *  first response — the row stays PLANNED with the reason on it, nothing is
+ *  lost, and a human raises the ceiling deliberately by passing `opts.quota`.
+ *  A rolling 24h window rather than a calendar day, so a burst cannot be reset
+ *  by midnight arriving in the middle of it. */
+export const DEFAULT_SEND_QUOTA_MAX = 20
+export const DEFAULT_SEND_QUOTA_WINDOW_SEC = 24 * 3600
+export function defaultSendQuota(connectorId: string): { key: string; maxCount: number; windowSec: number } {
+  return {
+    key: `personal:EMAIL_SEND:${connectorId}`,
+    maxCount: DEFAULT_SEND_QUOTA_MAX,
+    windowSec: DEFAULT_SEND_QUOTA_WINDOW_SEC,
+  }
 }
 
 /** Actually send — but ONLY through the full gate. evaluateDispatch must pass
@@ -243,9 +282,17 @@ export async function dispatchApprovedSend(
     content: `${input.email.subject}\n${input.email.body}`,
     targetProfile: input.targetProfile,
     campaignId: input.campaignId, templateHash: input.templateHash, renderedPayloadHash: input.renderedPayloadHash,
+    // §21: the classifier needs the letter, and needs subject and body apart —
+    // `content` above is already their concatenation.
+    envelopeDomain: 'personal', subject: input.email.subject, body: input.email.body,
     // The address on the envelope we are about to put in the post, not a stored
     // intention: the allowlist must be checked against what actually goes out.
     recipient: input.email.to,
+    // E13: the channel this actually goes out on. draftSend stamps
+    // channel='EMAIL' on the row and approveSend stores allowedChannels:['EMAIL']
+    // — and until now nothing compared the two.
+    channel: 'EMAIL',
+    ...(input.usedVariables ? { usedVariables: input.usedVariables } : {}),
     // §22: the case's OWN type decides the rung, read from the store rather than
     // taken from the caller. A caller-asserted type would let the same code path
     // pick a more permissive rung by claiming to be a different kind of case.
@@ -274,7 +321,18 @@ export async function dispatchApprovedSend(
   // double-click, a retried HTTP call) — which is exactly what a per-row claim
   // serialises. Short TTL: it guards one send, not a work session.
   const claimKey = `outbound:${input.ledgerId}`
-  const runId = opts.audit?.runId ?? input.runId ?? `dispatch-${input.ledgerId}`
+  // E2 (review 2026-08-13). The fallback used to be `dispatch-${ledgerId}` —
+  // DETERMINISTIC, and that quietly disabled the claim it was supposed to take.
+  // acquireClaim is re-entrant for the same owner: on a live claim the upsert is
+  // a no-op and the follow-up SELECT reports acquired = (owner === ours), so two
+  // concurrent dispatches of the same row computed the SAME owner id, both got
+  // acquired:true and both got the same fence. The comment above said this
+  // serialises a double-click; it serialised nothing. A per-invocation id makes
+  // the second caller a genuine contender, which is what the check assumes.
+  //
+  // A caller-supplied runId is still honoured: a run really is one owner, and
+  // its own claim discipline is not this function's to override.
+  const runId = opts.audit?.runId ?? input.runId ?? `dispatch-${randomUUID()}`
   const claim = acquireClaim(db, { claimKey, ownerRunId: runId, ttlSeconds: 120 }, now)
   if (!claim.acquired) {
     return { sent: false, decision: { ...decision, allowed: false, reasons: [...decision.reasons, `a sor mar kuldes alatt van (${claim.ownerRunId})`] } }
@@ -289,11 +347,22 @@ export async function dispatchApprovedSend(
     goalVersion: null,
     actionId: input.ledgerId,
     actionType: 'EMAIL_SEND',
-    intent: 'SEND_APPROVED_EMAIL',
+    // §21: the intent the gate's deterministic classifier recognised, when this
+    // send is going out on a standing delegation. Falls back to the old constant
+    // when a human approved it — there the intent is not what justified the
+    // send, the approval is.
+    intent: decision.delegatedIntent ?? 'SEND_APPROVED_EMAIL',
     targetReference: input.campaignId,
     recipient: input.email.to,
     payloadHash: input.renderedPayloadHash,
     approvalId: decision.approvalId ?? null,
+    // THE COLUMN FINALLY GETS A VALUE. `delegation_envelope_id` has existed and
+    // counted towards policyEvaluationHash since §22.2 was built, and was NULL
+    // on every row ever written because no caller set it — the audit for the
+    // 2026-08-12 review found the pipeline complete and the concept absent.
+    // Binding it here means a ticket issued under a delegation cannot be
+    // consumed as though a human had approved it: the hash would differ.
+    delegationEnvelopeId: decision.delegationEnvelopeId ?? null,
   }
   const ticket = issueAuthorization(db, authContext, now, {}, decision)
 
@@ -303,6 +372,8 @@ export async function dispatchApprovedSend(
       authorizationId: ticket.authorizationId,
       authorizationContext: authContext,
       claim: { claimKey, ownerRunId: runId, fence: claim.fence },
+      // E7: the quota layer joins the traffic. Caller-supplied wins.
+      quota: opts.quota ?? defaultSendQuota(input.connectorId),
       campaignLimit: decision.limits
         ? {
             campaignId: input.campaignId,
@@ -318,7 +389,14 @@ export async function dispatchApprovedSend(
         approvalVersion: decision.approvalVersion ?? null,
       },
     })
-    return { sent: action.status === 'VERIFIED' || action.status === 'APPLIED_UNVERIFIED', decision, action }
+    return {
+      sent: action.status === 'VERIFIED' || action.status === 'APPLIED_UNVERIFIED',
+      decision, action,
+      // E18: the gate said yes and the send still did not happen — the reason is
+      // on the row, and a caller that only gets `sent:false` cannot tell a quota
+      // ceiling from a dead connector.
+      lastError: action.lastError ?? null,
+    }
   } finally {
     // Released whatever happened: a claim left behind would block the row's next
     // legitimate attempt for its whole TTL.

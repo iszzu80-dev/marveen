@@ -6,6 +6,7 @@
 // of their own, so they are trivially testable and the runtime stays thin.
 
 import type Database from 'better-sqlite3'
+import { SENDING_RECOVERY_GRACE_SEC } from './executor-core.js'
 
 const TERMINAL_CASE_STATUSES = ['COMPLETED', 'CANCELLED', 'ARCHIVED'] as const
 
@@ -81,17 +82,28 @@ export interface OutboundWorkItem {
  * offers PLANNED, and executeAction refuses to leave PLANNED without an
  * evaluated decision.
  */
-export function reconcileOutbound(db: Database.Database, limit = 100): OutboundWorkItem[] {
+export function reconcileOutbound(
+  db: Database.Database, limit = 100, now: number = Math.floor(Date.now() / 1000),
+): OutboundWorkItem[] {
   // N-3: FAILED_RETRYABLE joins PLANNED. A row the adapter proved never reached
   // the provider needs a FIRST delivery, and this loop evaluates no gate. Its
   // retry now goes through the gated path, where the ceiling and backoff from
   // F-15 still apply — the bound moved, it did not disappear.
   const excluded = [...OUTBOUND_NO_AUTO_WORK, 'PLANNED', 'FAILED_RETRYABLE']
   const ph = excluded.map(() => '?').join(',')
+  // E1: a SENDING row is only offered once it is OLDER than the recovery grace
+  // window. SENDING is written before the provider call, so a row that entered
+  // it moments ago is very probably still in flight — and recovery of an
+  // in-flight row reads back a marker the provider has not indexed yet, calls it
+  // absent, and puts the row back on the queue. That is the double-send path,
+  // and this query was its entrance: it offered SENDING rows at any age.
+  // executor-core's recoverAction repeats the check; neither alone is the fix.
   return db.prepare(
     `SELECT ledger_id, case_id, action_type, status, attempt FROM outbound_ledger
-     WHERE status NOT IN (${ph}) ORDER BY created_at ASC LIMIT ?`
-  ).all(...excluded, limit) as OutboundWorkItem[]
+     WHERE status NOT IN (${ph})
+       AND (status <> 'SENDING' OR COALESCE(sending_at, updated_at) <= ?)
+     ORDER BY created_at ASC LIMIT ?`
+  ).all(...excluded, now - SENDING_RECOVERY_GRACE_SEC, limit) as OutboundWorkItem[]
 }
 
 /**

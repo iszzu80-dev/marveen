@@ -15,6 +15,7 @@ import {
 } from '../web/agent-config.js'
 import {
   capacityStateFor,
+  isPackageOpen,
 } from '../web/capacity-routing-runner.js'
 import {
   readCapacityRoutingConfig,
@@ -164,12 +165,25 @@ export function previewRuntimeRouting(
     )
   }
 
+  // THE PREVIEW ASKS THE SAME QUESTION THE RUNNER WOULD (review 2026-08-13,
+  // R-13). These three were hardcoded, so the preview could never show
+  // `ceiling_reached` or `hold_current_overlay` — the two answers an operator
+  // most needs before flipping a switch — and `would_change` could disagree with
+  // what the runner actually does. A preview that differs from production is
+  // worse than no preview: it is a confident wrong answer, which is the failure
+  // shape this whole review round is about.
+  //
+  // `errorClass` stays null on purpose and is the one honest constant here: it
+  // describes an error that has not happened yet, and a preview is asked BEFORE
+  // the dispatch it previews.
+  const { open: packageOpen } = isPackageOpen(db, input.agent, now)
+  const overlay = readRuntimeOverlay(input.agent)
   const decision = resolveRuntimeRouting({
     primaryState,
     candidates,
     candidateStates,
-    packageOpen: false,
-    fallbacksUsedThisPackage: 0,
+    packageOpen,
+    fallbacksUsedThisPackage: overlay?.fallbacksUsedThisPackage ?? 0,
     errorClass: null,
   })
 

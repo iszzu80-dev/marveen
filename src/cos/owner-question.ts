@@ -23,6 +23,7 @@ import type Database from 'better-sqlite3'
 import { createAgentMessage, appendDailyLog } from '../db.js'
 import { foldName, type ReaderEvidencePacket } from './reader.js'
 import type { EvidencePlan } from './evidence-planner.js'
+import { collectDecisionPackage, formatDeadline, type DecisionPackage } from './decision-package.js'
 
 export interface OwnerQuestion {
   caseId: string
@@ -50,7 +51,17 @@ function ownerSteps(plan: EvidencePlan): string[] {
  * a notification channel becomes noise and then becomes muted.
  */
 export function buildOwnerQuestion(
-  input: { caseId: string; domain: string; title: string; packet: ReaderEvidencePacket; plan: EvidencePlan },
+  input: {
+    caseId: string; domain: string; title: string
+    packet: ReaderEvidencePacket; plan: EvidencePlan
+    /** §20 — the four elements the question used to be missing. Optional so the
+     *  composer stays pure and every existing caller keeps working: without it
+     *  the question is exactly what it was, with it the question is a Decision
+     *  Package. Gathered by collectDecisionPackage, which does the DB reads. */
+    pkg?: DecisionPackage
+    /** Only used to say how far away the deadline is. */
+    now?: number
+  },
 ): OwnerQuestion | null {
   const steps = ownerSteps(input.plan)
   const ballIsHis = input.packet.ballHolder === 'ISTVAN'
@@ -72,6 +83,24 @@ export function buildOwnerQuestion(
   if (context.length > 0) {
     lines.push('Amit tudunk:')
     lines.push(...context)
+    lines.push('')
+  }
+
+  // §20.2 — WHAT THE SYSTEM ALREADY DID. Placed before the ask, because it is
+  // the context that changes the answer: "I already emailed them twice" and "I
+  // have done nothing yet" call for different replies to the same question, and
+  // until now the question said neither.
+  const pkg = input.pkg
+  if (pkg && pkg.handled.length > 0) {
+    lines.push('Amit eddig elintéztem:')
+    lines.push(...pkg.handled.slice(0, 5).map(h => `• ${h}`))
+    lines.push('')
+  }
+
+  // §20.3 — the CAUSE. "Ami Tőled kell" names the symptom; this names why the
+  // machine could not get past it on its own.
+  if (pkg?.stoppedBecause) {
+    lines.push(`Miért állt meg: ${pkg.stoppedBecause}`)
     lines.push('')
   }
 
@@ -97,16 +126,61 @@ export function buildOwnerQuestion(
   }
   lines.push(...asks)
 
+  // §20.5 and §20.4 — the suggestion, and what may be answered to it.
+  //
+  // In this order and not the reverse: options before a recommendation is a
+  // menu, and a menu is what the owner already has. The recommendation is the
+  // system doing the thinking it was built to do; the options exist so he can
+  // refuse it in one word.
+  if (pkg?.recommendation) {
+    lines.push('')
+    lines.push(`Javaslatom: ${pkg.recommendation}`)
+    if (pkg.options.length > 0) {
+      lines.push('Válaszolhatsz:')
+      lines.push(...pkg.options.map(o => `• ${o}`))
+    }
+  }
+
   if (input.packet.uncertainty.length > 0) {
     lines.push('')
     lines.push(`Bizonytalanság: ${input.packet.uncertainty.slice(0, 2).join('; ')}`)
   }
+
+  // §20.7 — the date. Last, and on its own line, because it is the one element
+  // that is read at a glance and decides whether the rest is read now or later.
+  if (pkg?.deadline) {
+    lines.push('')
+    lines.push(formatDeadline(pkg.deadline, input.now ?? Math.floor(Date.now() / 1000)))
+  }
+
   lines.push('')
   lines.push(`(ügy: ${input.caseId} · magabiztosság: ${input.packet.confidence})`)
 
   const text = lines.join('\n')
   // The hash covers WHAT IS ASKED, not the whole packet: a new fact that does
   // not change the ask must not re-ask.
+  //
+  // §20 CHANGES NOTHING HERE, AND THAT IS THE SECOND VERSION OF THIS LINE.
+  //
+  // The first version added the recommendation to the hash, reasoning that
+  // "Javaslatom: X" and "Javaslatom: Y" are different questions because one word
+  // of his answer means something different against each. The reasoning is
+  // sound; the consequence was not, and it was measured within the hour.
+  //
+  // A changed hash makes `hasOtherOpenQuestion` true, and `replacesOwn`
+  // deliberately EXEMPTS a replacement from both the six-hour cooldown and the
+  // outstanding ceiling -- an exemption written for a REWORDING that makes a
+  // vague question answerable, not for a stream of fresh proposals. The next
+  // best action is re-planned whenever the case's status moves, so with the
+  // recommendation in the hash, one case sent FOUR questions in thirty minutes
+  // with its reading completely unchanged. That is the failure ASK_COOLDOWN_SEC
+  // exists to stop, arriving through a door §20 had just opened.
+  //
+  // So the hash stays what it was: the identity of the ASK. A changed proposal
+  // about an unchanged ask is not a new question -- it is the engine changing
+  // its mind, and it does not get to interrupt him for that. The open question's
+  // stored text is refreshed in place instead (see isHandled's caller below), so
+  // the current proposal is what the dashboard and the eventual answer see.
   const hash = createHash('sha256')
     .update([input.caseId, ...asks].join(''))
     .digest('hex')
@@ -132,6 +206,15 @@ export interface AskResult {
    *  the same reason as everything else here: a channel that went quiet because
    *  of a rule must not look like a system with nothing to say. */
   cooldown: number
+  /** §11 C-invariant: candidate cases the scan window (50) never looked at.
+   *
+   *  Every other count here explains a case the sweep SAW and declined. This one
+   *  covers the cases it did not see at all, which until now were invisible in
+   *  exactly the way the ordering fix above makes matter: once the order is by
+   *  deadline, the cases past the window are the least urgent ones — but only
+   *  a number can say whether the window is holding back three cases or three
+   *  hundred. */
+  windowExhausted: number
 }
 
 /** Has this exact question already been HANDLED — either still waiting for an
@@ -190,6 +273,86 @@ export const STALE_READING_GRACE_SEC = 120
  *  ANSWER clears it immediately, so a conversation the owner is actually having
  *  is never slowed down — only a case talking to itself is. */
 export const ASK_COOLDOWN_SEC = 6 * 3600
+
+/** How many candidate cases one sweep looks at. Everything past it is reported
+ *  as `windowExhausted`, never silently dropped. */
+export const QUESTION_SCAN_WINDOW = 50
+
+/** The candidate set: every case whose latest reading could still produce a
+ *  question. Written once and used by both the page and its count, because two
+ *  hand-kept copies of a clause this long describe different sets within a
+ *  release, and then the "how many are left" number is about a different
+ *  population than the list it accompanies. */
+const QUESTION_CANDIDATES_SQL = `
+  FROM case_evidence_packets p
+  JOIN (
+    SELECT case_id, MAX(created_at) AS created_at
+    FROM case_evidence_packets WHERE packet_json IS NOT NULL GROUP BY case_id
+  ) latest ON latest.case_id = p.case_id AND latest.created_at = p.created_at
+  LEFT JOIN personal_cases pc ON pc.case_id = p.case_id AND p.domain <> 'zst'
+  LEFT JOIN zst_cases      zc ON zc.case_id = p.case_id AND p.domain =  'zst'
+  WHERE p.packet_json IS NOT NULL AND p.plan_json IS NOT NULL
+    -- A finished case has no open question. Live 2026-08-11: a COMPLETED rental
+    -- case produced one anyway, because this query only ever looked at packets
+    -- and never at the case behind them.
+    --
+    -- Aliased away from the outer pc/zc on purpose: an inner alias that shadows
+    -- an outer one is legal and unreadable, and the next person to touch the
+    -- ORDER BY would be reading the wrong row.
+    AND NOT EXISTS (
+      SELECT 1 FROM personal_cases xp WHERE xp.case_id = p.case_id
+        AND (xp.status IN ('COMPLETED','CANCELLED','ARCHIVED') OR xp.archived_at IS NOT NULL))
+    AND NOT EXISTS (
+      SELECT 1 FROM zst_cases xz WHERE xz.case_id = p.case_id
+        AND (xz.status IN ('COMPLETED','CANCELLED','ARCHIVED') OR xz.archived_at IS NOT NULL))`
+
+/** A deadline this close is treated as hard: it lands inside the window in which
+ *  an answer can still change the outcome. Beyond it, a deadline is a date, and
+ *  what decides the order is materiality. */
+export const DEADLINE_IMMINENT_SEC = 72 * 3600
+
+/** Priority as a sort key. Anything unrecognised sorts last rather than
+ *  silently in the middle, so a typo in the column never gets promoted. */
+const PRIORITY_RANK_SQL = `CASE COALESCE(pc.priority, zc.priority)
+  WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 WHEN 'P3' THEN 3 ELSE 4 END`
+
+/**
+ * §11.2 E (card `0d2121a9`). The order in which cases get to ask.
+ *
+ * This query used to end `ORDER BY p.created_at DESC` — the created_at of the
+ * EVIDENCE PACKET, so the most recently read case asked first. That is the
+ * "pure latest read order" the spec names and rejects, and it is not a
+ * theoretical problem: the sweep bound (50) and the ask ceiling (5 outstanding)
+ * are both real, so whatever sorts first consumes them. A case whose deadline
+ * passed last week, read a week ago, sat behind every case read this morning —
+ * permanently, because a case that is not read again never moves up.
+ *
+ * The order now is deadline class, then materiality, then oldest waiting:
+ *
+ *  0. overdue          — the deadline is behind us; nothing outranks this
+ *  1. imminent         — inside DEADLINE_IMMINENT_SEC
+ *  2. has a deadline   — a date exists, it is not near
+ *  3. no deadline      — nothing to be late for
+ *
+ * Materiality breaks ties inside a class, and `due_at ASC` then `packet_at ASC`
+ * break the rest — oldest first, so the queue drains rather than churns. Sorting
+ * by the raw timestamp instead of by class would have made materiality dead
+ * weight: two deadlines are almost never equal to the second.
+ *
+ * The joins are domain-scoped. The exclusion subqueries below are deliberately
+ * not — an exclusion that matches across domains can only suppress a question,
+ * never invent one, and that is the safe direction to be loose in.
+ */
+const QUESTION_ORDER_SQL = `
+  CASE
+    WHEN COALESCE(pc.due_at, zc.due_at) IS NULL THEN 3
+    WHEN COALESCE(pc.due_at, zc.due_at) <= @now THEN 0
+    WHEN COALESCE(pc.due_at, zc.due_at) <= @now + ${DEADLINE_IMMINENT_SEC} THEN 1
+    ELSE 2
+  END,
+  ${PRIORITY_RANK_SQL},
+  COALESCE(pc.due_at, zc.due_at) ASC,
+  p.created_at ASC`
 
 /** Has this case already asked recently, with no answer since?
  *
@@ -263,6 +426,7 @@ export function askPendingOwnerQuestions(
   const now = opts.now ?? Math.floor(Date.now() / 1000)
   const result: AskResult = {
     asked: 0, alreadyAsked: 0, nothingToAsk: 0, heldBacklogFull: 0, staleReading: 0, cooldown: 0,
+    windowExhausted: 0,
   }
 
   // Questions that GREW the open pile this sweep. A superseding rewrite does
@@ -280,23 +444,16 @@ export function askPendingOwnerQuestions(
     rows = db.prepare(
       `SELECT p.case_id, p.domain, p.packet_json, p.plan_json, p.created_at AS packet_at,
               p.progression_run_id
-       FROM case_evidence_packets p
-       JOIN (
-         SELECT case_id, MAX(created_at) AS created_at
-         FROM case_evidence_packets WHERE packet_json IS NOT NULL GROUP BY case_id
-       ) latest ON latest.case_id = p.case_id AND latest.created_at = p.created_at
-       WHERE p.packet_json IS NOT NULL AND p.plan_json IS NOT NULL
-         -- A finished case has no open question. Live 2026-08-11: a COMPLETED
-         -- rental case produced one anyway, because this query only ever looked
-         -- at packets and never at the case behind them.
-         AND NOT EXISTS (
-           SELECT 1 FROM personal_cases pc WHERE pc.case_id = p.case_id
-             AND (pc.status IN ('COMPLETED','CANCELLED','ARCHIVED') OR pc.archived_at IS NOT NULL))
-         AND NOT EXISTS (
-           SELECT 1 FROM zst_cases zc WHERE zc.case_id = p.case_id
-             AND (zc.status IN ('COMPLETED','CANCELLED','ARCHIVED') OR zc.archived_at IS NOT NULL))
-       ORDER BY p.created_at DESC LIMIT 50`,
-    ).all() as never
+       ${QUESTION_CANDIDATES_SQL}
+       ORDER BY ${QUESTION_ORDER_SQL} LIMIT ${QUESTION_SCAN_WINDOW}`,
+    ).all({ now }) as never
+    // The window's overflow, counted rather than probed. A `LIMIT window + 1`
+    // trick would only ever answer "at least one more", and the number is the
+    // whole point: three cases past the window is a bound doing its job, three
+    // hundred is a queue nobody is draining. The count reuses the candidate
+    // clause verbatim so the two can never describe different sets.
+    const total = (db.prepare(`SELECT COUNT(*) AS n ${QUESTION_CANDIDATES_SQL}`).get({ now }) as { n: number }).n
+    result.windowExhausted = Math.max(0, total - rows.length)
   } catch {
     return result
   }
@@ -332,8 +489,13 @@ export function askPendingOwnerQuestions(
     }
 
     const title = caseTitle(db, row.domain, row.case_id) ?? row.case_id
+    // §20 — the Decision Package. THE CALLER IS THE POINT: buildOwnerQuestion
+    // has been able to take a `pkg` since it was written, and a package nobody
+    // collects is the defect this review has spent a week naming. Gathered here,
+    // once per question, from state that already exists.
+    const pkg = collectDecisionPackage(db, row.domain === 'zst' ? 'zst' : 'personal', row.case_id)
     const question = buildOwnerQuestion({
-      caseId: row.case_id, domain: row.domain, title, packet, plan,
+      caseId: row.case_id, domain: row.domain, title, packet, plan, pkg, now,
     })
     if (!question) { result.nothingToAsk++; continue }
     if (isHandled(db, row.case_id, row.domain, question.hash)) {
@@ -350,6 +512,22 @@ export function askPendingOwnerQuestions(
             WHERE case_id = ? AND question_hash = ? AND answered_at IS NULL AND superseded_at IS NULL`,
         ).run(row.progression_run_id, row.case_id, question.hash)
       }
+      // AND REFRESH THE TEXT, WITHOUT RE-NOTIFYING (§20, 2026-08-12).
+      //
+      // The ask is unchanged, so nothing new goes out -- that is the whole point
+      // of this branch. But the Decision Package around the ask CAN have moved:
+      // the engine re-planned, another mail went out, the deadline came closer.
+      // Leaving the stored text at its first version means the dashboard, the
+      // held-message follow-up, and anyone reading the row later see a proposal
+      // the engine no longer makes.
+      //
+      // Text only. `asked_at` is deliberately NOT touched: it is what the
+      // cooldown measures from, and refreshing it would turn a silent update
+      // into a permanently postponed one.
+      db.prepare(
+        `UPDATE cos_owner_questions SET question_text = ?
+          WHERE case_id = ? AND question_hash = ? AND answered_at IS NULL AND superseded_at IS NULL`,
+      ).run(question.text, row.case_id, question.hash)
       result.alreadyAsked++; continue
     }
     // A REPLACEMENT is not an addition. When this case already has an open
@@ -446,8 +624,30 @@ function caseTitle(db: Database.Database, domain: string, caseId: string): strin
 // version of that, and guessing here would put words in his mouth on a case
 // record that is append-only. Free text is stored as INFORMATION, verbatim.
 
-const YES = /^\s*(igen|ok(é|e)?|rendben|jó|jo|persze|mehet|yes|y)\b/i
-const NO = /^\s*(nem|ne|elutasít|elutasit|no|n)\b/i
+// A YES/NO IS A WHOLE SENTENCE, NOT A PREFIX.
+//
+// The old pair matched a prefix and nothing else: /^\s*(igen|ok|jó|…)\b/. So
+// "Jó kérdés, még gondolkodom" — a sentence that says the opposite — was
+// recorded as OWNER_DECISION{choice:'YES'}, and on an approval question that
+// used to be enough to move the case to READY under the words "Owner approved
+// the request". "Nem tudom" read as NO in exactly the same way.
+//
+// The rule now: the answer counts as a decision only when the WHOLE message is
+// the decision — the word, optionally with punctuation, optionally with one of
+// the short intensifiers people actually type ("igen, mehet", "ok rendben").
+// Anything longer is a sentence, and a sentence is INFORMATION: it is stored
+// verbatim, the engine does not advance on it, and the owner is not second-
+// guessed. That is the codebase's fail-closed posture and the 2026-08-11
+// postmortem's finding in one line — a wrong pairing is worse than none.
+//
+// Note the deliberate asymmetry with the old list: bare "y"/"n" are gone. A
+// single letter is as likely to be a typo as an answer, and this is the input
+// that grants approvals.
+const AFFIRM = '(igen|ok|oké|oke|okay|rendben|jó|jo|persze|mehet|yes|jöhet|johet|csináld|csinald)'
+const DENY = '(nem|ne|no|elutasítom|elutasitom|elutasít|elutasit|nem kell|hagyjuk)'
+const CLOSER = '[\\s.!,;:]*'
+const YES = new RegExp(`^${CLOSER}${AFFIRM}(${CLOSER}${AFFIRM})*${CLOSER}$`, 'i')
+const NO = new RegExp(`^${CLOSER}${DENY}(${CLOSER}${DENY})*${CLOSER}$`, 'i')
 
 export interface RecordedAnswer {
   caseId: string
@@ -490,20 +690,28 @@ export function recordOwnerAnswer(
   // A question with NO recorded channel (asked before the split) still matches
   // anything -- it predates the distinction, and refusing it would strand every
   // question asked today.
+  //
+  // THE DOMAIN IS PART OF THE MATCH (review 2026-08-12, T-5). It used to be
+  // ignored here while the EVENT was written to the domain's own table, so a
+  // caller that passed the wrong domain closed the question and wrote nothing:
+  // the answer vanished and the question looked answered. The live caller reads
+  // the domain off the matched row, so this could not fire today — but the next
+  // caller (an HTTP route, a CLI) is under no obligation to be that careful, and
+  // a guard that depends on every future caller being careful is not a guard.
   const open = input.channel
     ? db.prepare(
         `SELECT question_hash, progression_run_id FROM cos_owner_questions
-         WHERE case_id = ? AND answered_at IS NULL AND superseded_at IS NULL
+         WHERE case_id = ? AND domain = ? AND answered_at IS NULL AND superseded_at IS NULL
            AND (channel IS NULL OR channel = ?)
            AND asked_at <= ?
          ORDER BY asked_at DESC LIMIT 1`,
-      ).get(input.caseId, input.channel.channel, now) as
+      ).get(input.caseId, input.domain, input.channel.channel, now) as
         { question_hash: string; progression_run_id: string | null } | undefined
     : db.prepare(
         `SELECT question_hash, progression_run_id FROM cos_owner_questions
-         WHERE case_id = ? AND answered_at IS NULL AND superseded_at IS NULL
+         WHERE case_id = ? AND domain = ? AND answered_at IS NULL AND superseded_at IS NULL
          ORDER BY asked_at DESC LIMIT 1`,
-      ).get(input.caseId) as
+      ).get(input.caseId, input.domain) as
         { question_hash: string; progression_run_id: string | null } | undefined
   if (!open) return null
 
@@ -512,8 +720,8 @@ export function recordOwnerAnswer(
 
   db.prepare(
     `UPDATE cos_owner_questions SET answered_at = ?, answer_text = ?
-     WHERE case_id = ? AND question_hash = ?`,
-  ).run(now, input.text, input.caseId, open.question_hash)
+     WHERE case_id = ? AND domain = ? AND question_hash = ?`,
+  ).run(now, input.text, input.caseId, input.domain, open.question_hash)
 
   const table = input.domain === 'zst' ? 'zst_cases' : 'personal_cases'
   const row = db.prepare(`SELECT version FROM ${table} WHERE case_id = ?`).get(input.caseId) as
@@ -575,6 +783,19 @@ export function recordOwnerAnswer(
     // answered_at`, and equal satisfies it.
     db.prepare(`UPDATE ${table} SET last_event_id = ?, updated_at = ? WHERE case_id = ?`)
       .run(Number(info.lastInsertRowid), now, input.caseId)
+
+    // AND MAKE IT DUE. The two columns above make the case ELIGIBLE (the trigger
+    // sees a new state); this makes it VISIBLE to the sweep, which only looks at
+    // cases whose next_progression_at has come round. The heartbeat now backs a
+    // quiet case off by fifteen minutes, and an answer must not sit behind that
+    // backoff — an owner who answers and sees nothing happen for a quarter of an
+    // hour stops answering.
+    try {
+      db.prepare(
+        `UPDATE case_progression_state SET next_progression_at = ?, updated_at = ?
+          WHERE case_id = ? AND progression_enabled = 1`,
+      ).run(now, now, input.caseId)
+    } catch { /* no progression table on this store: nothing to wake */ }
   }
   return { caseId: input.caseId, questionHash: open.question_hash, eventType, choice }
 }
@@ -652,6 +873,74 @@ export function heldOwnerMessages(
          ORDER BY received_at ASC LIMIT ?`,
     ).all(limit) as never
   } catch { return [] }
+}
+
+/**
+ * What to send back about a message that could not be placed (review
+ * 2026-08-12, T-3).
+ *
+ * WHY A REPLY AND NOT JUST A ROW. `holdOwnerMessage` kept the words, which was
+ * the fix for losing them — but nothing read the table, nothing set
+ * `resolved_at`, and the owner got NO answer at all. From his side: he replies,
+ * nothing happens, and he is not told the message was not understood. A held
+ * message with no reply is the same silence as a dropped one, with a better
+ * audit trail.
+ *
+ * WHAT THE TEXT HAS TO DO. Not apologise — hand him the one action that
+ * resolves it. `matchAnswerTarget` already treats a Telegram reply-to as the
+ * exact, unambiguous signal, so the follow-up quotes what he wrote and lists the
+ * open questions by name: replying to one of THOSE messages lands the answer
+ * without any guessing.
+ *
+ * Pure on purpose: it takes the rows, returns the string, and touches nothing.
+ * The sending and the marking are the caller's, so a delivery failure leaves the
+ * row open for the next sweep instead of marking it dealt-with.
+ */
+export function buildHeldFollowUp(
+  held: { text: string; reason: string },
+  open: Array<{ caseId: string; text: string }>,
+): string {
+  const quoted = held.text.length > 200 ? `${held.text.slice(0, 200)}…` : held.text
+  const lines = [
+    '❓ Ezt nem tudtam ügyhöz kötni:',
+    `„${quoted}"`,
+    '',
+    `Ok: ${held.reason}`,
+  ]
+  if (open.length > 0) {
+    lines.push('')
+    // The titles are what he sees in the channel, so naming them is enough to
+    // pick one. The instruction is the point: reply-to is the only signal that
+    // needs no guessing, and it is the one the matcher prefers.
+    lines.push('Nyitott kérdések — válaszolj közvetlenül arra az üzenetre (reply):')
+    for (const q of open.slice(0, 5)) {
+      lines.push(`• ${firstLine(q.text)} (${q.caseId})`)
+    }
+  } else {
+    // Saying so matters: "I could not place it" reads very differently when
+    // there is nothing open at all, and that is a different bug to report.
+    lines.push('')
+    lines.push('Jelenleg nincs nyitott kérdés, amihez köthetném.')
+  }
+  return lines.join('\n')
+}
+
+/** The question's own first line — its title as it appeared in the channel. */
+function firstLine(text: string): string {
+  const line = (text.split('\n')[0] ?? '').replace(/^❓\s*/, '').trim()
+  return line.length > 80 ? `${line.slice(0, 80)}…` : (line || '(cím nélkül)')
+}
+
+/** Mark a held message as dealt with. Called only AFTER the reply left the
+ *  machine — the other order turns one delivery failure into a lost message,
+ *  which is the exact bug this whole table exists to prevent. */
+export function markHeldResolved(
+  db: Database.Database, heldId: number, resolution: string, now?: number,
+): void {
+  db.prepare(
+    `UPDATE cos_channel_held SET resolved_at = ?, resolution = ?
+      WHERE held_id = ? AND resolved_at IS NULL`,
+  ).run(now ?? Math.floor(Date.now() / 1000), resolution, heldId)
 }
 
 /** The questions still waiting on him — so "what did it ask me?" is a query. */

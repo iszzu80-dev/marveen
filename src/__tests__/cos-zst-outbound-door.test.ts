@@ -12,13 +12,24 @@
 // send never constructs one. That is not a limitation of the test; it is the
 // property being tested.
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import { createZstCase } from '../cos/zst-case-store.js'
 import { registerConnector, setMode } from '../cos/connector-health.js'
+import { setLadder } from '../cos/autonomy-ladder.js'
 import { draftZstSend, renderedPayloadHash } from '../cos/zst-send.js'
 import { isProfileAllowedForZstSensitivity } from '../cos/zst-sensitivity.js'
 import { approveAndDispatchZst, escalationNeedsIstvanInPerson } from '../web/routes/cos.js'
+
+// The door builds its own live Gmail transport. Swapped for the in-memory
+// DryRunTransport so the SUCCESS case can be driven end-to-end: the adapter, the
+// executor, the readback and the ledger are all the real ones, and only the
+// socket is not. Without this, "every test is a refusal" is not a choice about
+// coverage, it is the only thing the file can do.
+vi.mock('../cos/adapters/gmail-api-transport.js', async () => {
+  const { DryRunTransport } = await import('../cos/adapters/gmail-send.js')
+  return { GmailApiTransport: DryRunTransport }
+})
 
 const T0 = 1_700_000_000
 const EMAIL = { to: 'zoltan@drvamosi.hu', subject: 'Üzletrész-adásvétel', body: 'Csatolva az igazolványok.' }
@@ -37,6 +48,61 @@ describe('the corporate outbound door', () => {
     const db = getDb()
     createZstCase(db, { caseId: 'ZST-LEGAL-1', title: 'Üzletrész-adásvétel', caseType: 'CONTRACT' }, T0)
     registerConnector(db, 'gmail-zst', 'email', 'READ_WRITE', T0)
+  })
+
+  // ── The case this file did not have ──────────────────────────────────────
+  //
+  // Every other test here asserts a refusal, and a door that only ever refuses
+  // is indistinguishable from a door that is nailed shut. It WAS nailed shut:
+  // dispatchZstSend read the autonomy rung of the string 'UNKNOWN' — the route
+  // never passed a case type and the gate defaulted to that literal — and an
+  // unknown type sits at PREPARE, which cannot SEND. So with CONTRACT raised to
+  // EXECUTE_WITH_APPROVAL the door still answered "UNKNOWN fokozata PREPARE".
+  // The only way that door was open in production is if somebody raised the rung
+  // of 'UNKNOWN' itself in the SHARED ladder table, which would have unlocked
+  // SEND for every unknown case type on the personal path too.
+  //
+  // The gate reads the type off the ledger row now. This test is what makes that
+  // checkable: it is the only one in the corporate suite that ends with a letter
+  // actually leaving.
+  it('a fully approved corporate mail actually goes out — the whole door, end to end', async () => {
+    const db = getDb()
+    // The case's OWN type, at the rung that permits an approved send.
+    setLadder(db, 'CONTRACT', { rung: 'EXECUTE_WITH_APPROVAL' }, T0 - 1000)
+    const d = draft()
+    const res = await approveAndDispatchZst(db, d.ledgerId, d.renderedPayloadHash, 'istvan', undefined, T0 + 5)
+
+    expect(res.reasons).toBeUndefined()
+    expect(res.sent).toBe(true)
+    expect(res.status).toBe('VERIFIED')
+    expect(res.externalRef).toBeTruthy()
+    // …and the ledger says so, with the audit trail F-2 asks for.
+    const row = db.prepare(
+      `SELECT status, external_ref, run_id, campaign_id, recipient, campaign_version, claim_fence
+       FROM zst_outbound_ledger WHERE ledger_id = ?`,
+    ).get(d.ledgerId) as {
+      status: string; external_ref: string | null; run_id: string | null
+      campaign_id: string | null; recipient: string | null; campaign_version: number | null
+      claim_fence: number | null
+    }
+    expect(row.status).toBe('VERIFIED')
+    expect(row.external_ref).toBeTruthy()
+    expect(row.recipient).toBe(EMAIL.to)
+    expect(row.campaign_id).toBe(d.campaignId)
+    expect(row.run_id).toBeTruthy()
+    expect(approvals()).toBe(1)
+  })
+
+  it('the rung that decides is the CASE\'s, not the string "UNKNOWN"', async () => {
+    // The other half of the same defect: raising 'UNKNOWN' must NOT open the
+    // corporate door, because that entry is shared with the personal path, where
+    // approveOutbound falls back to 'UNKNOWN' for any case type it cannot read.
+    const db = getDb()
+    setLadder(db, 'UNKNOWN', { rung: 'EXECUTE_WITH_APPROVAL' }, T0 - 1000)
+    const d = draft()
+    const res = await approveAndDispatchZst(db, d.ledgerId, d.renderedPayloadHash, 'istvan', undefined, T0 + 5)
+    expect(res.sent).toBe(false)
+    expect(res.reasons?.join(' ')).toMatch(/CONTRACT fokozata PREPARE/)
   })
 
   it('drafting writes a ledger row and sends nothing', () => {
@@ -60,11 +126,16 @@ describe('the corporate outbound door', () => {
   })
 
   it('refuses a recipient the owner did not authorise', async () => {
+    // CHANGED 2026-08-13: the door no longer records whatever list the caller
+    // supplies, so the refusal names the address the caller tried to ADD rather
+    // than the drafted addressee. The property under test is unchanged — a
+    // recipient the owner never saw cannot end up on the envelope, and no
+    // approval is written.
     const d = draft()
     const res = await approveAndDispatchZst(
       getDb(), d.ledgerId, d.renderedPayloadHash, 'istvan', ['valaki.mas@example.com'], T0 + 5)
     expect(res.sent).toBe(false)
-    expect(res.reasons?.join(' ')).toContain(EMAIL.to)
+    expect(res.reasons?.join(' ')).toContain('valaki.mas@example.com')
     expect(approvals()).toBe(0)
   })
 

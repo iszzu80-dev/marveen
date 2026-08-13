@@ -54,3 +54,57 @@ describe('ZST Slice 5 Product Lab escalation gateway', () => {
     expect(open.map(e => e.escalation_id)).toEqual(['esc-1'])
   })
 })
+
+describe('an escalation decision is not a last-writer-wins race', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  const ready = () => {
+    const db = getDb()
+    createEscalation(db, {
+      escalationId: 'esc-r', sourceWorkspace: 'PRODUCT_LAB', targetWorkspace: 'ZST',
+      requestType: 'SIGNIFICANT_COST', summary: 'Új szintre lépés',
+    }, T0)
+    transitionEscalation(db, 'esc-r', 'ACKNOWLEDGED', 'marveen', T0 + 1)
+    transitionEscalation(db, 'esc-r', 'IN_PROGRESS', 'marveen', T0 + 2)
+    transitionEscalation(db, 'esc-r', 'RESULT_READY', 'marveen', T0 + 3)
+  }
+
+  /** A database handle that lets somebody else write between the legality check
+   *  and the UPDATE — the interleaving the old check-then-act could not survive.
+   *  Deterministic: the race runs exactly once, at the moment the UPDATE is
+   *  prepared. */
+  function withRacer(db: ReturnType<typeof getDb>, race: () => void): ReturnType<typeof getDb> {
+    let fired = false
+    return new Proxy(db, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver)
+        if (prop === 'prepare') {
+          return (sql: string) => {
+            if (!fired && /^\s*UPDATE zst_product_escalations/.test(sql)) { fired = true; race() }
+            return (value as (s: string) => unknown).call(target, sql)
+          }
+        }
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    }) as ReturnType<typeof getDb>
+  }
+
+  it('refuses to land on a row somebody else already decided', () => {
+    const db = getDb()
+    ready()
+    const racing = withRacer(db, () => {
+      // The other decision-maker gets there first and REJECTS it.
+      db.prepare(`UPDATE zst_product_escalations SET status='REJECTED', completed_at=? WHERE escalation_id='esc-r'`).run(T0 + 4)
+    })
+    expect(() => transitionEscalation(racing, 'esc-r', 'ACCEPTED', 'istvan', T0 + 4))
+      .toThrow(/moved to REJECTED/)
+    // The first decision stands. Without the compare-and-swap the ACCEPT landed
+    // on top of it, and a commitment somebody had refused was live.
+    expect(getEscalation(db, 'esc-r')!.status).toBe('REJECTED')
+  })
+
+  it('an ordinary transition is unaffected', () => {
+    ready()
+    expect(transitionEscalation(getDb(), 'esc-r', 'ACCEPTED', 'istvan', T0 + 4).status).toBe('ACCEPTED')
+  })
+})

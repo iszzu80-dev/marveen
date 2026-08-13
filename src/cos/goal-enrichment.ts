@@ -23,9 +23,8 @@ import type Database from 'better-sqlite3'
 import { enrichCaseGoal } from './progression-pipeline.js'
 import type { LlmClient } from './progression-interpreter.js'
 import { readDocumentBytes } from './cos-documents.js'
-import { effectiveSensitivity } from './sensitivity.js'
-import { coerceZstSensitivity } from './zst-sensitivity.js'
-import { isProviderAllowedForSensitivity, providersAllowedFor } from './provider-data-policy.js'
+import { roundRobinByDomain } from './reader-cycle.js'
+import { egressTierFor, isProviderAllowedForSensitivity, providersAllowedFor } from './provider-data-policy.js'
 import type { CaseSensitivity } from './schema.js'
 
 export interface GoalEnrichmentResult {
@@ -68,19 +67,25 @@ export function casesNeedingGoal(db: Database.Database, limit: number): Candidat
       for (const r of found) rows.push({ domain, caseId: r.caseId })
     } catch { /* a missing table is not a candidate, and not an error either */ }
   }
-  return limit > 0 ? rows.slice(0, limit) : rows
+  // The same fairness rule the Reader uses, from the same function: enumerating
+  // `personal` in full and then slicing meant a personal backlog starved the
+  // corporate namespace indefinitely at 3-5 cases per cycle.
+  return roundRobinByDomain(rows, limit)
 }
 
-/** The tier the case itself claims. Unknown/missing coerces to the strictest
- *  class inside effectiveSensitivity, so a case with no tier is not a case that
- *  may go anywhere. */
-function declaredSensitivity(db: Database.Database, domain: 'personal' | 'zst', caseId: string): unknown {
+/** The case fields that leave this machine, plus the tier the case itself claims.
+ *  Unknown/missing sensitivity coerces to the strictest class inside
+ *  effectiveSensitivity, so a case with no tier is not a case that may go
+ *  anywhere. Missing row / missing table reads as "nothing known", which the
+ *  gate then treats as strictly as it treats an unknown tier. */
+interface CaseMeta { sensitivity: unknown; title: string; description: string }
+function caseMeta(db: Database.Database, domain: 'personal' | 'zst', caseId: string): CaseMeta {
   const table = domain === 'zst' ? 'zst_cases' : 'personal_cases'
   try {
-    const row = db.prepare(`SELECT sensitivity FROM ${table} WHERE case_id = ?`).get(caseId) as
-      { sensitivity?: unknown } | undefined
-    return row?.sensitivity
-  } catch { return undefined }
+    const row = db.prepare(`SELECT sensitivity, title, description FROM ${table} WHERE case_id = ?`).get(caseId) as
+      { sensitivity?: unknown; title?: string | null; description?: string | null } | undefined
+    return { sensitivity: row?.sensitivity, title: row?.title ?? '', description: row?.description ?? '' }
+  } catch { return { sensitivity: undefined, title: '', description: '' } }
 }
 
 /** The best text we have about a case, in descending order of usefulness:
@@ -126,20 +131,17 @@ export interface EnrichRoutes { general?: EnrichRoute | null; contracted?: Enric
  *  would have silently stopped all corporate enrichment; a pre-existing test
  *  ("covers the corporate namespace too") caught it.
  *
- *  The corporate mapping is NOT invented here. zst-sensitivity.ts already states
- *  the owner-sanctioned policy per tier, and its shape maps cleanly onto the
- *  personal scale: ZST_INTERNAL is the everyday tier and is the only one that
- *  admits the cheap `analysis_efficient` profile, exactly as PERSONAL does; every
- *  class above it is restricted to the strong profiles, as SENSITIVE_PERSONAL is.
- *  PUBLIC is PUBLIC in both. Anything unrecognised lands on the strict side
- *  through coerceZstSensitivity's own fail-closed default. */
-function tierFor(domain: 'personal' | 'zst', declared: unknown, content: string): CaseSensitivity {
-  if (domain !== 'zst') return effectiveSensitivity(declared, content)
-  const z = coerceZstSensitivity(declared)
-  if (z === 'PUBLIC') return 'PUBLIC'
-  if (z === 'ZST_INTERNAL') return 'PERSONAL'
-  return 'SENSITIVE_PERSONAL'
-}
+ *  THIS USED TO BE A PRIVATE COPY, AND THE COPY WAS THE PROBLEM (review
+ *  2026-08-12, T-1). The Reader sweep — the module this file copied `routeFor`
+ *  from — never got the same treatment, so it kept reading corporate cases with
+ *  the personal coercer. One question, two paths, one answer. The mapping now
+ *  lives in provider-data-policy.ts and both sweeps call it, with a standing
+ *  check that fails if they ever diverge again.
+ *
+ *  The shared version is also stricter than this one was: it runs the CORPORATE
+ *  content classifier as well, so an IBAN in a ZST_INTERNAL thread lifts the
+ *  tier instead of riding on the declaration alone. */
+const tierFor = egressTierFor
 
 /** §10: pick the cheapest provider CLEARED for this content, or null.
  *  Byte-for-byte the Reader's rule (reader-cycle routeFor): try the general
@@ -183,8 +185,24 @@ export async function enrichPendingGoals(
       // The tier comes from the case's declared sensitivity ESCALATED by what
       // the content actually looks like — the declared value alone is a claim,
       // and effectiveSensitivity is what the Reader trusts too.
-      const declared = declaredSensitivity(db, c.domain, c.caseId)
-      const tier = tierFor(c.domain, declared, content ?? '')
+      const meta = caseMeta(db, c.domain, c.caseId)
+      // CLASSIFY EXACTLY WHAT IS SENT. This used to pass `content` alone — the
+      // stored email thread, or the empty string when no thread doc existed —
+      // while enrichCaseGoal below hands the provider the case TITLE and
+      // DESCRIPTION as well. Sender-authored text in those two fields was
+      // therefore never content-classified on this path. Intake escalates the
+      // declared tier from subject+snippet, which partly covers intake-born
+      // personal cases and nothing else: not cases created by other paths, not
+      // retitled cases, not ZST cases. A ZST_INTERNAL case (→ PERSONAL →
+      // DeepSeek-eligible) whose description holds an IBAN went to the
+      // THIRD_PARTY provider. The reader path has always classified the actual
+      // context items it sends (reader-cycle.ts); this is the same rule.
+      //
+      // enrichCaseGoal falls back to the description when there is no thread, so
+      // the description is in the payload either way — it belongs in the
+      // classified text either way too.
+      const classified = [meta.title, meta.description, content ?? ''].filter(t => t && t.trim()).join('\n')
+      const tier = tierFor(c.domain, meta.sensitivity, classified)
       const route = routeFor(routes, tier)
       if (!route) {
         result.sensitivityBlocked++

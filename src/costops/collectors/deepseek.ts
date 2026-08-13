@@ -208,7 +208,7 @@ export async function syncDeepSeekBalance(
     // never retained original_amount/original_currency/fx_rate -- unlike email-ingest.ts's
     // equivalent conversion, which does. Only set when a rate was actually available (fxUsdHuf >
     // 0); a 0 rate means amountHuf is already 0 and there's nothing real to retain.
-    upsertProviderLines(db, [{
+    const outcome = upsertProviderLines(db, [{
       provider: 'deepseek', service: DEEPSEEK_API_SOURCE,
       billing_period_start: w.start, billing_period_end: w.end,
       amount: amountHuf, currency: 'HUF', confidence: 'provider_api',
@@ -219,7 +219,22 @@ export async function syncDeepSeekBalance(
       fx_rate: fxUsdHuf ? fxUsdHuf : null,
       fx_date: fxUsdHuf ? now : null,
     }], now)
-    record('ok', 1, null)
+    // MERGE 2026-08-13, C-1/C-2 on this path too. The shared writer now refuses
+    // a line whose month is CLOSED (§23 AC-9), and this caller used to report a
+    // hardcoded `ok, 1` regardless — so a refused write would have been recorded
+    // as a successful import of a line that is not in the ledger. That is the
+    // same shape as the `sync_cadence` lie: a user-visible number resting on an
+    // assumption the code below it stopped guaranteeing.
+    const refusedMonths = Object.keys(outcome.refusedByClosedPeriod).sort()
+    if (refusedMonths.length > 0) {
+      record('partial', 0, `a(z) ${refusedMonths.join(', ')} honap le van zarva — korrekciot kell hasznalni`)
+      return {
+        ok: true, provider: 'deepseek', status: 'partial', imported_count: 0,
+        balance_usd: balanceUsd, mtd_spend_usd: mtdSpendUsd, period: w.key,
+        error: `a(z) ${refusedMonths.join(', ')} honap le van zarva`,
+      }
+    }
+    record('ok', outcome.imported, null)
     // Forecast uses ALL-time snapshots (not the this-month-only window above) -- a steadier
     // burn-rate base, especially right after a month boundary when the MTD window has only 1-2
     // points of its own.

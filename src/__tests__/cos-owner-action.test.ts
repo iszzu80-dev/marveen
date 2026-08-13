@@ -97,6 +97,18 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
   })
 
   // ── Gate (h): event-not-state ──
+// SCOPED TO `source_system = 'mission_control'` ON 2026-08-12, and the scoping
+// is a correction to the TEST, not a relaxation of it.
+//
+// Every count below asks "did the endpoint write exactly one event?", and it used
+// to measure that by counting EVERY event on the case. The endpoint also runs one
+// progression cycle for instant feedback, and since §8 the progression writes its
+// own history into the same table — so the old query measured two subsystems and
+// asserted about one, and adding a producer anywhere in the engine would have
+// turned these red without anything being wrong with the endpoint.
+//
+// `source_system` is the column that separates them, and the endpoint already
+// sets it. The claim under test is unchanged and now says what it means.
   describe('event-not-state (gate h)', () => {
     it('inserts an event row but does NOT change the case row', async () => {
       const db = getDb()
@@ -105,7 +117,7 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
       ).get(PRI_CASE) as { status: string }
 
       const eventsBefore = db.prepare(
-        'SELECT count(*) c FROM personal_case_events WHERE case_id = ?'
+        'SELECT count(*) c FROM personal_case_events WHERE case_id = ? AND source_system = \'mission_control\''
       ).get(PRI_CASE) as { c: number }
 
       const { ctx, out } = fakeCtxWithBody(
@@ -122,7 +134,7 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
 
       // Event was inserted.
       const eventsAfter = db.prepare(
-        'SELECT count(*) c FROM personal_case_events WHERE case_id = ?'
+        'SELECT count(*) c FROM personal_case_events WHERE case_id = ? AND source_system = \'mission_control\''
       ).get(PRI_CASE) as { c: number }
       expect(eventsAfter.c).toBe(eventsBefore.c + 1)
 
@@ -199,7 +211,7 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
     it('same idempotencyKey twice returns duplicate:true, only one event', async () => {
       const db = getDb()
       const eventsBefore = db.prepare(
-        'SELECT count(*) c FROM personal_case_events WHERE case_id = ?'
+        'SELECT count(*) c FROM personal_case_events WHERE case_id = ? AND source_system = \'mission_control\''
       ).get(PRI_CASE) as { c: number }
 
       const body = {
@@ -221,7 +233,7 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
       expect(out2.body.duplicate).toBe(true)
 
       const eventsAfter = db.prepare(
-        'SELECT count(*) c FROM personal_case_events WHERE case_id = ?'
+        'SELECT count(*) c FROM personal_case_events WHERE case_id = ? AND source_system = \'mission_control\''
       ).get(PRI_CASE) as { c: number }
       expect(eventsAfter.c).toBe(eventsBefore.c + 1)
     })
@@ -265,7 +277,7 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
       seedProgressionRun(db, 'personal', PRI_CASE, newRunId, 'ASK_INFORMATION', baseTime + 60)
 
       const eventsBefore = db.prepare(
-        'SELECT count(*) c FROM personal_case_events WHERE case_id = ?'
+        'SELECT count(*) c FROM personal_case_events WHERE case_id = ? AND source_system = \'mission_control\''
       ).get(PRI_CASE) as { c: number }
 
       const { ctx, out } = fakeCtxWithBody(
@@ -285,7 +297,7 @@ describe('Owner-action endpoint (card 9193eedd)', () => {
 
       // No event was inserted.
       const eventsAfter = db.prepare(
-        'SELECT count(*) c FROM personal_case_events WHERE case_id = ?'
+        'SELECT count(*) c FROM personal_case_events WHERE case_id = ? AND source_system = \'mission_control\''
       ).get(PRI_CASE) as { c: number }
       expect(eventsAfter.c).toBe(eventsBefore.c)
     })

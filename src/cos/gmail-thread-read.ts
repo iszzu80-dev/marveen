@@ -88,12 +88,15 @@ export function decodeMessage(m: Record<string, unknown>): ThreadMessage {
   const payload = (m.payload ?? {}) as Record<string, unknown>
   const headers = (payload.headers ?? []) as Array<{ name: string; value: string }>
   let text = ''
-  const stack: Array<Record<string, unknown>> = [payload]
-  while (stack.length) {
-    const p = stack.pop()!
+  // Depth-first in DOCUMENT order. This used to be a LIFO stack that pushed the
+  // sub-parts and popped them, so sibling text/plain parts came out BACKWARDS —
+  // a multipart/mixed mail whose body is split across two parts was stored with
+  // its halves swapped, and nothing about the stored text said so.
+  const walk = (p: Record<string, unknown>): void => {
     if (p.mimeType === 'text/plain') text += decodePart(p)
-    for (const sub of ((p.parts ?? []) as Array<Record<string, unknown>>)) stack.push(sub)
+    for (const sub of ((p.parts ?? []) as Array<Record<string, unknown>>)) walk(sub)
   }
+  walk(payload)
   if (!text) text = decodePart(payload)
   return {
     id: String(m.id ?? ''), from: header(headers, 'From'), to: header(headers, 'To'),
@@ -181,7 +184,7 @@ export async function storeCaseThread(
 
   const text = renderThread(messages)
   const doc = storeDocument(db, {
-    namespace, caseId, source: 'email' as never, sourceRef: threadId,
+    namespace, caseId, source: 'email', sourceRef: threadId,
     filename: `thread-${threadId}.txt`, mimeType: 'text/plain',
     bytes: Buffer.from(text, 'utf8'), docKind: 'email_thread',
   }, { now })
@@ -206,10 +209,16 @@ export function casesMissingThreadText(
            WHERE f.case_id = c.case_id AND f.attempts >= ${THREAD_FETCH_MAX_ATTEMPTS})
        ORDER BY c.updated_at DESC LIMIT ?`
     ).all(limit) as never
-  } catch {
+  } catch (e) {
     // The failures table may not exist yet on a fresh install; fall back to the
     // unfiltered query rather than returning nothing, because "no candidates"
     // and "cannot tell" must not look the same.
+    //
+    // Only that one cause is absorbed. A bare catch here also swallowed disk
+    // errors and a corrupted personal_cases, and the fallback below would then
+    // fail too and return [] — "nothing to fetch" from a store that cannot be
+    // read at all.
+    if (!/no such table/i.test(String((e as Error)?.message ?? e))) throw e
     try {
       return db.prepare(
         `SELECT c.case_id, json_extract(c.gmail_thread_ids, '$[0]') AS thread_id
@@ -220,7 +229,13 @@ export function casesMissingThreadText(
              WHERE d.case_id = c.case_id AND d.doc_kind = 'email_thread')
          ORDER BY c.updated_at DESC LIMIT ?`
       ).all(limit) as never
-    } catch { return [] }
+    } catch (inner) {
+      // The fallback failing means the CASES table is unreadable, not that the
+      // optional failures table is absent. Returning [] here is the exact
+      // "cannot tell looks like nothing to do" the comment above rejects.
+      if (/no such table/i.test(String((inner as Error)?.message ?? inner))) return []
+      throw inner
+    }
   }
 }
 

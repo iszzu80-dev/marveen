@@ -16,7 +16,8 @@ import type Database from 'better-sqlite3'
 import { randomUUID } from 'crypto'
 import { initProgressionSchema } from './schema.js'
 import { runProgressionCycle, enrichCaseGoal, type PipelineOptions } from './progression-pipeline.js'
-import { scheduleNextProgression } from './progression-scheduler.js'
+import { scheduleNextProgression, tryClaimProgression, releaseProgressionClaim } from './progression-scheduler.js'
+import { acquireClaim, releaseClaim } from './case-store.js'
 
 export interface MigrationResult {
   tablesCreated: boolean
@@ -133,8 +134,38 @@ export function runInitialProgressionForAll(
   ).all() as Array<{ domain: 'personal' | 'zst'; case_id: string }>
 
   for (const dc of dueCases) {
+    // CLAIM FIRST — this runs on every runner invocation, not just at install.
+    //
+    // It used to call the cycle with no claim at all, while the heartbeat runs
+    // as a separate cron process: two runners on the same case, two run rows,
+    // and two answer-consumption transitions racing on the same seenVersion.
+    // The loser throws, and a throw here is caught and counted rather than
+    // fixing anything — which is why the claim, not the catch, is the guard.
+    //
+    // A case that is claimed by somebody else is SKIPPED silently: the other
+    // runner is doing this exact work.
+    // The FENCED claim is the exclusion here, not the progression lease: the
+    // lease only grants a case that is enabled AND due, and this sweep exists
+    // precisely for cases that have never been scheduled. The lease is still
+    // taken when it can be, so a concurrent heartbeat's findDueCases sees the
+    // case as claimed rather than merely losing the race later.
+    const runId = `migrate-${randomUUID()}`
+    const claimKey = `progression:${dc.domain}:${dc.case_id}`
+    let fenced: { acquired: boolean; fence: number } | null = null
     try {
-      const opts: PipelineOptions = { triggerType: 'INTAKE', triggerReference: triggerRef }
+      fenced = acquireClaim(db, { claimKey, ownerRunId: runId, ttlSeconds: 300 }, now)
+    } catch {
+      // No case_claims table on this store: exclusion is not available, and a
+      // missing mirror never blocks the run (same posture as the heartbeat).
+      fenced = null
+    }
+    if (fenced && !fenced.acquired) continue
+    const leased = tryClaimProgression(db, dc.domain, dc.case_id, runId, 300, now)
+
+    try {
+      const opts: PipelineOptions = {
+        triggerType: 'INTAKE', triggerReference: triggerRef, claimedBy: runId,
+      }
       runProgressionCycle(db, dc.domain, dc.case_id, now, opts)
 
       // Schedule the next progression based on the decision
@@ -144,6 +175,12 @@ export function runInitialProgressionForAll(
       else zstProgressed++
     } catch (err) {
       errors.push(`${dc.domain}/${dc.case_id}: ${(err as Error).message}`)
+    } finally {
+      if (leased) releaseProgressionClaim(db, dc.domain, dc.case_id, runId, now)
+      if (fenced?.acquired) {
+        try { releaseClaim(db, { claimKey, ownerRunId: runId, fence: fenced.fence }) }
+        catch { /* the lease expiry frees it anyway */ }
+      }
     }
   }
 

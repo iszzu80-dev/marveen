@@ -44,7 +44,35 @@ export interface OutboundAction {
   /** F-15. */
   lastError?: string | null
   sendingAt?: number | null
+  /** E1/E5: the two clocks the grace windows below are measured against. Both
+   *  were columns the state machine wrote and never read back. */
+  appliedAt?: number | null
+  updatedAt?: number
 }
+
+/** E1 (review 2026-08-13). How long a row may sit in SENDING before anything is
+ *  allowed to treat it as abandoned.
+ *
+ *  SENDING is written BEFORE `await adapter.send(...)` on purpose, so a crash
+ *  leaves a trail. The price is that an in-flight row and a crashed one look
+ *  identical. With no floor on the age, a concurrent tick picked up a row whose
+ *  send was still in the provider's hands, read back a marker the provider had
+ *  not indexed yet, concluded "absent" and reset the row to PLANNED — which is
+ *  the one door through which the same message goes out twice.
+ *
+ *  Fifteen minutes is longer than any send call this system makes (the Gmail
+ *  transport gives up far below it) and short enough that a genuinely crashed
+ *  run is still picked up on the next reconcile cycle. */
+export const SENDING_RECOVERY_GRACE_SEC = 15 * 60
+
+/** E5. How long the provider is given to make an accepted message findable
+ *  before its absence counts as proof.
+ *
+ *  A readback that misses on the FIRST probe is the normal state of a mail
+ *  provider indexing a message it accepted a second ago. Treating that first
+ *  miss as proof pinned perfectly delivered letters in RECOVERY_REQUIRED — a
+ *  state nothing ever re-checks and only a human can leave. */
+export const READBACK_ABSENT_GRACE_SEC = 10 * 60
 
 export interface ReadbackResult { found: boolean; available?: boolean; externalRef?: string }
 
@@ -129,6 +157,8 @@ interface Row {
   attempt: number
   last_error: string | null
   sending_at: number | null
+  applied_at: number | null
+  updated_at: number
 }
 
 function toAction(r: Row): OutboundAction {
@@ -141,6 +171,7 @@ function toAction(r: Row): OutboundAction {
     // F-15: the retry ceiling and the backoff both need these, and they were
     // columns nothing surfaced. `attempt` was already here and nothing READ it.
     lastError: r.last_error ?? null, sendingAt: r.sending_at ?? null,
+    appliedAt: r.applied_at ?? null, updatedAt: r.updated_at,
   }
 }
 
@@ -237,17 +268,53 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
     return toAction(r)
   }
 
+  /**
+   * E1. A status write is a COMPARE-AND-SWAP on the status we believe the row is
+   * in, not an unconditional `WHERE ledger_id = ?`.
+   *
+   * Unconditional was the shape that let the last writer win regardless of what
+   * happened to the row in between: a send that took thirty seconds could come
+   * back and stamp APPLIED_UNVERIFIED over a recovery that had already settled
+   * the row — or, worse, over a row a recovery had put back in the send queue,
+   * hiding the fact that the same message now had two owners.
+   *
+   * Returns false when the row moved under us. No call site may drop that
+   * answer on the floor; each one below says what it does with a conflict.
+   */
   function setStatus(
     db: Database.Database, ledgerId: string, status: OutboundStatus,
     fields: Partial<Record<'external_ref' | 'last_error' | 'sending_at' | 'applied_at' | 'verified_at' | 'attempt'
       | 'run_id' | 'campaign_version' | 'approval_version' | 'rendered_variables_hash'
-      | 'provider_message_id' | 'rfc_message_id' | 'thread_ref', unknown>>,
+      | 'provider_message_id' | 'rfc_message_id' | 'thread_ref' | 'claim_fence', unknown>>,
     now: number,
-  ): void {
+    expected?: OutboundStatus,
+  ): boolean {
     const cols = ['status = @status', 'updated_at = @now']
     const params: Record<string, unknown> = { ledgerId, status, now }
     for (const [k, v] of Object.entries(fields)) { cols.push(`${k} = @${k}`); params[k] = v }
-    db.prepare(`UPDATE ${T} SET ${cols.join(', ')} WHERE ledger_id = @ledgerId`).run(params)
+    let where = 'ledger_id = @ledgerId'
+    if (expected !== undefined) { where += ' AND status = @expectedStatus'; params.expectedStatus = expected }
+    return db.prepare(`UPDATE ${T} SET ${cols.join(', ')} WHERE ${where}`).run(params).changes > 0
+  }
+
+  /** Thrown inside the admission transaction so the whole thing ROLLS BACK — a
+   *  quota slot reserved for a send that is not going to happen must not stay
+   *  spent. Never escapes executeAction. */
+  class AdmissionConflict extends Error {}
+
+  /**
+   * E1. The row left SENDING while our call was in the provider's hands. This is
+   * the one conflict that can end in a second delivery, so it is never
+   * swallowed: a row that has already SETTLED keeps its settlement (a recovery
+   * that verified it was right, and nothing further will be sent from a terminal
+   * row), and a row that is back in the send queue is pinned for a human rather
+   * than left to be sent again by the next tick.
+   */
+  function pinSendConflict(db: Database.Database, ledgerId: string, note: string, now: number): OutboundAction {
+    const cur = loadOrThrow(db, ledgerId)
+    if (TERMINAL_STATUSES.includes(cur.status)) return cur
+    setStatus(db, ledgerId, 'RECOVERY_REQUIRED', { last_error: note }, now, cur.status)
+    return loadOrThrow(db, ledgerId)
   }
 
   function planAction(db: Database.Database, input: PlanInput, now: number): OutboundAction {
@@ -302,9 +369,11 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
     if (a.status === 'FAILED_RETRYABLE') {
       const maxAttempts = opts.retry?.maxAttempts ?? DEFAULT_MAX_SEND_ATTEMPTS
       if (a.attempt >= maxAttempts) {
+        // Conflict = another worker already moved the row on; its decision is as
+        // current as ours and the reloaded row is the answer either way.
         setStatus(db, ledgerId, 'FAILED_TERMINAL', {
           last_error: `giving up after ${a.attempt} attempts: ${a.lastError ?? 'repeated retryable failure'}`,
-        }, now)
+        }, now, a.status)
         return loadOrThrow(db, ledgerId)
       }
       // Exponential backoff from the last attempt. Without it every tick retried
@@ -339,7 +408,12 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
       // settle.
       const stopped = killSwitchRefusal(db)
       if (stopped) {
-        setStatus(db, ledgerId, 'PLANNED', { last_error: `refused: ${stopped}` }, now)
+        // E4: the entry status is KEPT. Writing PLANNED here reset a row that had
+        // already failed N times into a fresh one: the F-15 ceiling counts only
+        // from FAILED_RETRYABLE, so a refusal on every attempt meant the ceiling
+        // could never fire and the backoff never applied. A refusal is not
+        // progress, and it must not look like progress.
+        setStatus(db, ledgerId, a.status, { last_error: `refused: ${stopped}` }, now, a.status)
         return loadOrThrow(db, ledgerId)
       }
       // §22.2. Consumed HERE, not at the door: between the gate's decision and
@@ -352,7 +426,8 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
         now,
       )
       if (!consumed.ok) {
-        setStatus(db, ledgerId, 'PLANNED', { last_error: `refused: ${consumed.reason}` }, now)
+        // E4, as above: refused, not restarted.
+        setStatus(db, ledgerId, a.status, { last_error: `refused: ${consumed.reason}` }, now, a.status)
         return loadOrThrow(db, ledgerId)
       }
     }
@@ -363,7 +438,7 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
     // campaign ceiling was a COUNT(*) outside the write, so two concurrent sends
     // both read "there is still room".
     let quotaReserved = false
-    const admission = db.transaction((): { ok: true } | { ok: false; reason: string } => {
+    const admit = db.transaction((): { ok: true } | { ok: false; reason: string } => {
       if (opts.claim) {
         if (!CLAIMS) return { ok: false, reason: 'a claim was supplied but this executor has no claims table bound' }
         const c = db.prepare(
@@ -408,7 +483,7 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
         quotaReserved = true
       }
 
-      setStatus(db, ledgerId, 'SENDING', {
+      const claimed = setStatus(db, ledgerId, 'SENDING', {
         sending_at: now, attempt: a.attempt + 1,
         // F-2: written BEFORE the call, with the same reasoning that puts SENDING
         // before the call — if the process dies mid-send, the row still says which
@@ -418,12 +493,31 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
         ...(opts.audit?.campaignVersion !== undefined ? { campaign_version: opts.audit.campaignVersion } : {}),
         ...(opts.audit?.approvalVersion !== undefined ? { approval_version: opts.audit.approvalVersion } : {}),
         ...(opts.audit?.renderedVariablesHash !== undefined ? { rendered_variables_hash: opts.audit.renderedVariablesHash } : {}),
-      }, now)
+      }, now, a.status)
+      // E1: the SENDING write is the moment this run takes ownership of the row,
+      // so it is a compare-and-swap like every other transition. Losing it means
+      // somebody else moved the row between the load at the top of this function
+      // and here — thrown rather than returned, so the quota slot reserved three
+      // lines up is rolled back with it.
+      if (!claimed) throw new AdmissionConflict(`the row left ${a.status} while this send was being admitted`)
       return { ok: true }
-    })()
+    })
+
+    let admission: { ok: true } | { ok: false; reason: string }
+    try {
+      admission = admit()
+    } catch (err) {
+      if (!(err instanceof AdmissionConflict)) throw err
+      // The transaction rolled back, so the reservation went with it.
+      quotaReserved = false
+      admission = { ok: false, reason: err.message }
+    }
 
     if (!admission.ok) {
-      setStatus(db, ledgerId, 'PLANNED', { last_error: `refused: ${admission.reason}` }, now)
+      // E4: the entry status is kept — see the kill-switch refusal above.
+      // Conditional, because a row that has moved on is no longer ours to
+      // annotate; the reloaded row below is what the caller gets either way.
+      setStatus(db, ledgerId, a.status, { last_error: `refused: ${admission.reason}` }, now, a.status)
       return loadOrThrow(db, ledgerId)
     }
     let externalRef: string
@@ -443,9 +537,11 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
         // cannot tell, the slot stays spent, because refunding a send that may
         // have gone out is the error that lets a duplicate through.
         if (quotaReserved && opts.quota) releaseQuota(db, opts.quota.key, now)
-        setStatus(db, ledgerId, hints.terminal ? 'FAILED_TERMINAL' : 'FAILED_RETRYABLE', { last_error: msg }, now)
+        const settled = setStatus(db, ledgerId, hints.terminal ? 'FAILED_TERMINAL' : 'FAILED_RETRYABLE', { last_error: msg }, now, 'SENDING')
+        if (!settled) return pinSendConflict(db, ledgerId, `send failed (${msg}) but the row had already left SENDING`, now)
       } else {
-        setStatus(db, ledgerId, 'OUTCOME_UNKNOWN', { last_error: msg }, now)
+        const settled = setStatus(db, ledgerId, 'OUTCOME_UNKNOWN', { last_error: msg }, now, 'SENDING')
+        if (!settled) return pinSendConflict(db, ledgerId, `send outcome unknown (${msg}) and the row had already left SENDING`, now)
       }
       return loadOrThrow(db, ledgerId)
     }
@@ -453,10 +549,19 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
     // is a trap — it looks like the provider's own id is on file. external_ref
     // IS that id for every adapter we have; recording it under both names keeps
     // the AC-21 query answerable without guessing which column is real.
-    setStatus(db, ledgerId, 'APPLIED_UNVERIFIED', {
+    const applied = setStatus(db, ledgerId, 'APPLIED_UNVERIFIED', {
       external_ref: externalRef, applied_at: now, provider_message_id: externalRef,
       ...(threadRef ? { thread_ref: threadRef } : {}),
-    }, now)
+    }, now, 'SENDING')
+    // E1: the provider ACCEPTED the message and the row is not the one we left in
+    // SENDING. Blindly stamping APPLIED_UNVERIFIED here is what made the race
+    // invisible: it erased whatever the concurrent recovery had decided, and if
+    // that decision was "back to PLANNED", the same message was queued for a
+    // second send with nothing on the row to say so.
+    if (!applied) {
+      return pinSendConflict(db, ledgerId,
+        `provider accepted ${externalRef} but the row had already left SENDING — a second delivery may be queued`, now)
+    }
     return verifyAction(db, adapter, ledgerId, now)
   }
 
@@ -465,18 +570,44 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
   ): Promise<OutboundAction> {
     const a = loadOrThrow(db, ledgerId)
     let rb: ReadbackResult
+    // A readback sends nothing, so losing a compare-and-swap here costs nothing:
+    // whoever won wrote a conclusion drawn from the same provider. The reloaded
+    // row is returned in every branch, so the caller sees the state that won.
     try {
       rb = await adapter.readback(a.externalIdempotencyMarker, a.externalRef ?? undefined)
     } catch (err) {
-      setStatus(db, ledgerId, 'APPLIED_UNVERIFIED', { last_error: `readback unavailable: ${String((err as Error)?.message ?? err)}` }, now)
+      setStatus(db, ledgerId, 'APPLIED_UNVERIFIED', { last_error: `readback unavailable: ${String((err as Error)?.message ?? err)}` }, now, a.status)
       return loadOrThrow(db, ledgerId)
     }
     if (rb.found) {
-      setStatus(db, ledgerId, 'VERIFIED', { verified_at: now, external_ref: rb.externalRef ?? a.externalRef }, now)
+      setStatus(db, ledgerId, 'VERIFIED', { verified_at: now, external_ref: rb.externalRef ?? a.externalRef }, now, a.status)
     } else if (rb.available === false) {
-      setStatus(db, ledgerId, 'APPLIED_UNVERIFIED', { last_error: 'readback unavailable' }, now)
+      setStatus(db, ledgerId, 'APPLIED_UNVERIFIED', { last_error: 'readback unavailable' }, now, a.status)
     } else {
-      setStatus(db, ledgerId, 'RECOVERY_REQUIRED', { last_error: 'provider reported success but marker absent on readback' }, now)
+      // E5. The readback WORKED and did not find the marker. That is evidence,
+      // not proof: a provider that accepted a message a second ago routinely has
+      // not indexed it yet, and the first miss used to go straight to
+      // RECOVERY_REQUIRED — a human-pinned alarm on a perfectly delivered letter,
+      // in a state nothing ever re-checks. The absence has to still be true after
+      // the grace window before it counts.
+      //
+      // The re-probe is not hypothetical: APPLIED_UNVERIFIED is in the scheduler's
+      // reconcile queue, and executeAction routes that status back into this
+      // function, so every tick re-asks until it either finds the marker or the
+      // window closes.
+      const appliedAt = a.appliedAt
+      if (appliedAt !== null && appliedAt !== undefined && now >= appliedAt + READBACK_ABSENT_GRACE_SEC) {
+        setStatus(db, ledgerId, 'RECOVERY_REQUIRED', {
+          last_error: `provider reported success but marker still absent ${now - appliedAt}s after acceptance`,
+        }, now, a.status)
+      } else {
+        // applied_at missing (a row moved here by hand or by an older build):
+        // start the clock now rather than treating "unknown age" as "expired".
+        setStatus(db, ledgerId, 'APPLIED_UNVERIFIED', {
+          last_error: 'marker not visible on readback yet',
+          ...(appliedAt === null || appliedAt === undefined ? { applied_at: now } : {}),
+        }, now, a.status)
+      }
     }
     return loadOrThrow(db, ledgerId)
   }
@@ -485,19 +616,36 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
     db: Database.Database, adapter: OutboundAdapter, ledgerId: string, now: number,
   ): Promise<OutboundAction> {
     const a = loadOrThrow(db, ledgerId)
+    // E1, belt and braces with reconcileOutbound's filter. A SENDING row younger
+    // than the grace window may still be in the provider's hands: its marker is
+    // legitimately not findable yet, and the `else` branch below would read that
+    // as "never sent" and put the row back on the queue — a second delivery of a
+    // message already accepted. The reconcile queue no longer offers such rows;
+    // this guard covers every OTHER way here: executeAction on a SENDING row, a
+    // direct call, a maintenance script.
+    //
+    // Only SENDING. OUTCOME_UNKNOWN is written AFTER the send call returned, so
+    // nothing is in flight and recovery is exactly what it needs.
+    if (a.status === 'SENDING') {
+      const startedAt = a.sendingAt ?? a.updatedAt ?? 0
+      if (startedAt > now - SENDING_RECOVERY_GRACE_SEC) return a
+    }
     let rb: ReadbackResult
     try {
       rb = await adapter.readback(a.externalIdempotencyMarker, a.externalRef ?? undefined)
     } catch (err) {
-      setStatus(db, ledgerId, 'OUTCOME_UNKNOWN', { last_error: `readback unavailable: ${String((err as Error)?.message ?? err)}` }, now)
+      setStatus(db, ledgerId, 'OUTCOME_UNKNOWN', { last_error: `readback unavailable: ${String((err as Error)?.message ?? err)}` }, now, a.status)
       return loadOrThrow(db, ledgerId)
     }
     if (rb.found) {
-      setStatus(db, ledgerId, 'VERIFIED', { verified_at: now, external_ref: rb.externalRef ?? a.externalRef }, now)
+      setStatus(db, ledgerId, 'VERIFIED', { verified_at: now, external_ref: rb.externalRef ?? a.externalRef }, now, a.status)
     } else if (rb.available === false) {
-      setStatus(db, ledgerId, 'OUTCOME_UNKNOWN', { last_error: 'readback unavailable' }, now)
+      setStatus(db, ledgerId, 'OUTCOME_UNKNOWN', { last_error: 'readback unavailable' }, now, a.status)
     } else {
-      setStatus(db, ledgerId, 'PLANNED', {}, now)
+      // Back to the queue for a safe resend. Conditional on the status we read:
+      // if the row moved in the meantime, the mover knew something we did not,
+      // and re-queuing a row somebody else settled is the double-send again.
+      setStatus(db, ledgerId, 'PLANNED', {}, now, a.status)
     }
     return loadOrThrow(db, ledgerId)
   }
@@ -507,7 +655,12 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
     if (a.status !== 'PLANNED' && a.status !== 'FAILED_RETRYABLE') {
       throw new Error(`cannot cancel ${a.status} action ${ledgerId} (provider may already have it)`)
     }
-    setStatus(db, ledgerId, 'CANCELLED', { last_error: reason }, now)
+    if (!setStatus(db, ledgerId, 'CANCELLED', { last_error: reason }, now, a.status)) {
+      // The row left PLANNED/FAILED_RETRYABLE between the read and the write —
+      // i.e. a send started. Cancelling it now would mark a message the provider
+      // may already hold as never sent.
+      throw new Error(`cannot cancel ${ledgerId}: it left ${a.status} while being cancelled`)
+    }
     return loadOrThrow(db, ledgerId)
   }
 

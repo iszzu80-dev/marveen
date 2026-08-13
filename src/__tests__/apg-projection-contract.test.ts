@@ -8,7 +8,7 @@
 // gates on is unreachable.
 import { describe, it, expect } from 'vitest'
 import { readFileSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import {
   deriveDisplayState,
@@ -43,8 +43,17 @@ const VECTOR_ALL_UNKNOWN = 'ex-a939ce43ca4c30f717c6eec6c4c398c0'
 function resolveKernelSrc(): string | null {
   const candidates = [
     process.env.APG_KERNEL_SRC_ROOT,
+    // develop's R-10 shipped the same escape hatch under a different name and a
+    // different shape: APG_KERNEL_SRC_PATH pointed at checkpoints.py itself, not
+    // at the directory. Honoured here so a machine already configured that way
+    // keeps COMPARING instead of quietly dropping to a skip after this merge.
+    process.env.APG_KERNEL_SRC_PATH ? dirname(process.env.APG_KERNEL_SRC_PATH) : undefined,
     join(homedir(), 'marveen-local', 'apg-kernel', 'src'),
     join(process.cwd(), '..', 'marveen-apg-kernel', 'src'),
+    // Kept from develop's R-10 candidate list: a plain sibling checkout in the
+    // home directory. Every extra place the kernel is actually found is one
+    // more run where the contract is really compared instead of skipped.
+    join(homedir(), 'marveen-apg-kernel', 'src'),
   ].filter((value): value is string => typeof value === 'string' && value.length > 0)
   return candidates.find((dir) => existsSync(join(dir, 'checkpoints.py'))) ?? null
 }
@@ -112,6 +121,16 @@ describe('F-8: the kernel result vocabulary is one contract, not two', () => {
         .toEqual(kernelTokenList('checkpoints.py', 'RESULT_VALUES'))
     },
   )
+
+  it('the UI vocabulary is pinned even when the kernel is not checked out', () => {
+    // The half that must hold WITHOUT the sibling repo, so a machine that cannot
+    // run the comparison above is not left with no check at all. If somebody
+    // edits APG_CHECKPOINT_RESULTS, this fails and sends them to the kernel to
+    // confirm the rename really happened there too.
+    expect([...APG_CHECKPOINT_RESULTS].sort()).toEqual(
+      ['ERROR', 'EXCLUDED', 'FAIL', 'PASS', 'UNKNOWN'],
+    )
+  })
 
   it('EXCLUDED is not "executing" — a gate that never ran is not work in progress', () => {
     expect(deriveDisplayState({ ...base, latestCheckpointResult: 'EXCLUDED' })).toBe('clarification')

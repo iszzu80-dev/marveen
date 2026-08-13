@@ -14,7 +14,7 @@ import { initDatabase, getDb } from '../db.js'
 import { createCase, transitionCase } from '../cos/case-store.js'
 import { setNextWake } from '../cos/scheduler.js'
 import { decideTrigger, recordProgressionState, effectiveStateHash, dueDeadline } from '../cos/progression-trigger.js'
-import { runProgressionHeartbeat } from '../cos/progression-heartbeat.js'
+import { runProgressionHeartbeat, POST_RUN_RECHECK_SEC } from '../cos/progression-heartbeat.js'
 import { initProgressionSchema } from '../cos/schema.js'
 import { seedProgressionState } from '../cos/progression-migrate.js'
 
@@ -115,9 +115,29 @@ describe('§10.8 trigger contract', () => {
     seedProgressionState(db, T0)
     const first = runProgressionHeartbeat(db, T0 + 10)
     expect(first.personal).toBeGreaterThan(0)
+    const runsAfterFirst = (db.prepare(
+      'SELECT COUNT(*) AS n FROM case_progression_runs',
+    ).get() as { n: number }).n
+
+    // Ten seconds later the cases are not even DUE any more: a case that ran is
+    // pushed out by POST_RUN_RECHECK_SEC. Until 2026-08-13 nothing ever advanced
+    // next_progression_at after a run, so every enabled case stayed permanently
+    // due and each sweep claimed and released all of them. "Does no work" is
+    // asserted on the ledger rather than on a counter, because which counter it
+    // lands in depends on how far out the brake pushed it.
     const second = runProgressionHeartbeat(db, T0 + 20)
     expect(second.personal).toBe(0)
-    expect(second.skippedNoTrigger).toBeGreaterThan(0)
+    expect((db.prepare('SELECT COUNT(*) AS n FROM case_progression_runs')
+      .get() as { n: number }).n).toBe(runsAfterFirst)
+
+    // And once the backoff HAS expired, the case is examined and still does no
+    // work — that is the §10.8 trigger contract doing its job, and it is the
+    // half that must not be masked by the brake.
+    const third = runProgressionHeartbeat(db, T0 + 10 + POST_RUN_RECHECK_SEC + 1)
+    expect(third.personal).toBe(0)
+    expect(third.skippedNoTrigger).toBeGreaterThan(0)
+    expect((db.prepare('SELECT COUNT(*) AS n FROM case_progression_runs')
+      .get() as { n: number }).n).toBe(runsAfterFirst)
   })
 })
 

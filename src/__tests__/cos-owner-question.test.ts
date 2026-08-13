@@ -15,6 +15,7 @@ import { join } from 'node:path'
 import { initDatabase, getDb, listAgentMessages } from '../db.js'
 import { initProgressionSchema } from '../cos/schema.js'
 import { createCase } from '../cos/case-store.js'
+import { createZstCase } from '../cos/zst-case-store.js'
 import {
   buildOwnerQuestion, askPendingOwnerQuestions, recordOwnerAnswer, outstandingOwnerQuestions,
   ASK_COOLDOWN_SEC,
@@ -692,5 +693,105 @@ describe('per-case ask cooldown', () => {
     ).run(T0 + 600, JSON.stringify(p2), JSON.stringify(planFromEvidence(p2)), p2.confidence)
     const res = askPendingOwnerQuestions(getDb(), { now: T0 + 601 })
     expect(res.asked).toBe(1)
+  })
+})
+
+// §11.2 E / card `0d2121a9`: WHICH case gets to ask.
+//
+// The sweep is bounded (50 candidates, 2 asks, 5 outstanding), so the order is
+// not cosmetic — whatever sorts first spends the budget. The query used to end
+// `ORDER BY p.created_at DESC` on the EVIDENCE PACKET, meaning the most recently
+// read case asked first: pure latest-read order, which §11.2 E rejects by name.
+// The failure it produces is a quiet one. A case whose deadline passed last week
+// sits behind every case read this morning, and because it is not being read
+// again, it never moves up.
+//
+// Each test below drives the two orders apart on purpose: the case that SHOULD
+// ask is always the one with the OLDER packet, so read order alone would put it
+// last.
+describe('the question queue is ordered by deadline, not by read order', () => {
+  const DAY = 86400
+
+  beforeEach(() => {
+    initDatabase(':memory:')
+    initProgressionSchema(getDb())
+  })
+
+  /** A case with a packet, where the packet's age and the case's deadline can be
+   *  set independently — which is the whole point of these tests. */
+  function candidate(
+    caseId: string, opts: { packetAt: number; dueAt?: number | null; priority?: string },
+  ): void {
+    const db = getDb()
+    createCase(db, { caseId, title: caseId, caseType: 'ADMIN' }, T0)
+    db.prepare(`UPDATE personal_cases SET due_at = ?, priority = ?, updated_at = ? WHERE case_id = ?`)
+      .run(opts.dueAt ?? null, opts.priority ?? 'P2', T0, caseId)
+    const p = packet({ caseId })
+    db.prepare(
+      `INSERT INTO case_evidence_packets
+         (packet_id, domain, case_id, created_at, packet_json, plan_json, confidence, policy_result)
+       VALUES (?, 'personal', ?, ?, ?, ?, ?, 'WAIT_EXTERNAL')`,
+    ).run(`pk-${caseId}`, caseId, opts.packetAt, JSON.stringify(p), JSON.stringify(planFromEvidence(p)), p.confidence)
+  }
+
+  /** The cases that actually got to ask, in the order they asked. */
+  function asked(): string[] {
+    return (getDb().prepare(
+      `SELECT case_id FROM cos_owner_questions ORDER BY asked_at, rowid`,
+    ).all() as Array<{ case_id: string }>).map(r => r.case_id)
+  }
+
+  it('HEADLINE: an overdue case outranks a case read minutes ago with no deadline', () => {
+    candidate('c-overdue', { packetAt: T0, dueAt: T0 - DAY })
+    candidate('c-fresh', { packetAt: T0 + 600, dueAt: null })
+    askPendingOwnerQuestions(getDb(), { limit: 1, now: T0 + 601 })
+    expect(asked()).toEqual(['c-overdue'])
+  })
+
+  it('a deadline inside 72 hours outranks one three weeks out', () => {
+    candidate('c-imminent', { packetAt: T0, dueAt: T0 + 2 * DAY })
+    candidate('c-distant', { packetAt: T0 + 600, dueAt: T0 + 21 * DAY })
+    askPendingOwnerQuestions(getDb(), { limit: 1, now: T0 + 601 })
+    expect(asked()).toEqual(['c-imminent'])
+  })
+
+  it('inside one deadline class, materiality decides', () => {
+    // Same class (a real deadline, weeks away), so priority is what is left.
+    candidate('c-p0', { packetAt: T0, dueAt: T0 + 20 * DAY, priority: 'P0' })
+    candidate('c-p3', { packetAt: T0 + 600, dueAt: T0 + 21 * DAY, priority: 'P3' })
+    askPendingOwnerQuestions(getDb(), { limit: 1, now: T0 + 601 })
+    expect(asked()).toEqual(['c-p0'])
+  })
+
+  it('with class and materiality equal, the oldest deadline goes first', () => {
+    candidate('c-older-due', { packetAt: T0, dueAt: T0 - 10 * DAY })
+    candidate('c-newer-due', { packetAt: T0 + 600, dueAt: T0 - DAY })
+    askPendingOwnerQuestions(getDb(), { limit: 1, now: T0 + 601 })
+    expect(asked()).toEqual(['c-older-due'])
+  })
+
+  it('an unrecognised priority sorts last instead of quietly in the middle', () => {
+    candidate('c-known', { packetAt: T0, dueAt: T0 + 20 * DAY, priority: 'P3' })
+    candidate('c-typo', { packetAt: T0 + 600, dueAt: T0 + 20 * DAY, priority: 'p1' })
+    askPendingOwnerQuestions(getDb(), { limit: 1, now: T0 + 601 })
+    expect(asked()).toEqual(['c-known'])
+  })
+
+  it('a corporate case is ranked on its OWN deadline, not a namesake in the other domain', () => {
+    // The joins are domain-scoped. If they were not, a zst packet would read its
+    // deadline off a personal_cases row with the same id — a domain leak that
+    // would show up as an inexplicable ordering rather than as an error.
+    const db = getDb()
+    createZstCase(db, { caseId: 'shared-id', title: 'Ceges ugy', caseType: 'ADMIN' }, T0)
+    db.prepare(`UPDATE zst_cases SET due_at = ?, updated_at = ? WHERE case_id = 'shared-id'`).run(T0 - DAY, T0)
+    const p = packet({ caseId: 'shared-id', domain: 'zst' })
+    db.prepare(
+      `INSERT INTO case_evidence_packets
+         (packet_id, domain, case_id, created_at, packet_json, plan_json, confidence, policy_result)
+       VALUES ('pk-z', 'zst', 'shared-id', ?, ?, ?, ?, 'WAIT_EXTERNAL')`,
+    ).run(T0, JSON.stringify(p), JSON.stringify(planFromEvidence(p)), p.confidence)
+    candidate('c-fresh', { packetAt: T0 + 600, dueAt: null })
+    askPendingOwnerQuestions(getDb(), { limit: 1, now: T0 + 601 })
+    expect(asked()).toEqual(['shared-id'])
   })
 })

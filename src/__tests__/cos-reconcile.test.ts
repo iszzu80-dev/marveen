@@ -97,6 +97,44 @@ describe('COS daily reconcile', () => {
     expect(f?.action).toMatch(/TILOS/)
   })
 
+  // E6 (review 2026-08-13). FAILED_RETRYABLE is correctly kept out of the
+  // auto-reconcile queue (N-3: a retry is a FIRST delivery and needs the gate),
+  // and NOTHING reported it either — so a transient provider failure stranded an
+  // approved send forever and the daily report stayed silent about it.
+  it('E6: names an aging FAILED_RETRYABLE row nothing will retry on its own', () => {
+    const db = getDb()
+    createCase(db, { caseId: 'c1', title: 'T', caseType: 'ADMIN' }, NOW - 100)
+    const ins = (id: string, at: number) => db.prepare(
+      `INSERT INTO outbound_ledger (ledger_id, case_id, action_type, sequence_number,
+         internal_idempotency_key, status, created_at, updated_at)
+       VALUES (?, 'c1', 'EMAIL_SEND', ?, ?, 'FAILED_RETRYABLE', ?, ?)`
+    ).run(id, id.charCodeAt(1), `k-${id}`, at, at)
+
+    ins('f1', NOW - 600) // a fresh failure: the backoff has not even run out
+    expect(ids(runDailyReconcile(db, NOW).findings)).not.toContain('failed_retryable_stranded')
+    ins('f2', NOW - 2 * DAY) // two days: nobody is coming for it
+    const f = runDailyReconcile(db, NOW).findings.find((x) => x.id === 'failed_retryable_stranded')
+    expect(f?.severity).toBe('WARNING')
+    expect(f?.action).toMatch(/dispatch/)
+  })
+
+  // E10 (review 2026-08-13). count() has always said a null means "unreadable,
+  // report it, never treat it as zero" — and only ONE check obeyed. Everywhere
+  // else `if (n === null || n === 0) return null` turned a missing table into a
+  // clean bill of health, which is the exact failure this module exists to
+  // prevent: silence that reads like health.
+  it('E10: an unreadable table becomes a CRITICAL finding, not a clean report', () => {
+    const db = getDb()
+    createCase(db, { caseId: 'c1', title: 'T', caseType: 'ADMIN' }, NOW - 100)
+    db.exec('DROP TABLE outbound_ledger') // e.g. a half-applied migration
+    const r = runDailyReconcile(db, NOW)
+    const f = r.findings.find((x) => x.id === 'outbound_ledger_unreadable')
+    expect(f?.severity).toBe('CRITICAL')
+    expect(r.clean).toBe(false)
+    // and the checks that used to answer "nothing found" now answer "I am blind"
+    expect(ids(r.findings)).not.toContain('outbound_needs_human')
+  })
+
   it('flags a DOWN connector as critical', () => {
     const db = getDb()
     registerConnector(db, 'gmail', 'email', 'READ_WRITE', NOW - 1000)
@@ -226,6 +264,41 @@ describe('COS daily reconcile', () => {
       const f = runDailyReconcile(db, NOW).findings.find((x) => x.id === 'cursor_past_open_batch')
       expect(f?.severity).toBe('CRITICAL')
       expect(f?.action).toMatch(/adatveszt/i)
+    })
+
+    // The three below are the same defect seen from three sides: both columns
+    // are TEXT and historyIds are decimal integers, so the check used to order
+    // them as strings. Digit-count is what decided the verdict, not position.
+    it('stays silent when the cursor is BEHIND the open batch but has fewer digits', () => {
+      const db = getDb()
+      // '999' >= '1000' is TRUE as text and FALSE as a number. The cursor has
+      // not reached the batch; a CRITICAL "data loss" here is invented.
+      openBatch(db, { batchId: 'b1', accountId: ACC, cursorBefore: '900', cursorAfter: '1000', messages: [{ messageId: 'm1' }] }, NOW - 2 * DAY)
+      db.prepare(`INSERT INTO email_source_checkpoints (gmail_account_id, history_cursor, updated_at) VALUES (?, '999', ?)`)
+        .run(ACC, NOW - DAY)
+      expect(ids(runDailyReconcile(db, NOW).findings)).not.toContain('cursor_past_open_batch')
+    })
+
+    it('complains when the cursor is PAST the open batch but has more digits', () => {
+      const db = getDb()
+      // '10000' >= '9999' is FALSE as text and TRUE as a number. This is real
+      // data loss, and text ordering reported nothing — the dangerous direction.
+      openBatch(db, { batchId: 'b1', accountId: ACC, cursorBefore: '9000', cursorAfter: '9999', messages: [{ messageId: 'm1' }] }, NOW - 2 * DAY)
+      db.prepare(`INSERT INTO email_source_checkpoints (gmail_account_id, history_cursor, updated_at) VALUES (?, '10000', ?)`)
+        .run(ACC, NOW - DAY)
+      const f = runDailyReconcile(db, NOW).findings.find((x) => x.id === 'cursor_past_open_batch')
+      expect(f?.severity).toBe('CRITICAL')
+    })
+
+    it('ignores a triage batch, which carries no history position at all', () => {
+      const db = getDb()
+      // CAST('triage-1755000000' AS INTEGER) is 0 in SQLite, so an unguarded
+      // numeric comparison would read every synthetic batch as position zero
+      // and report every account with any cursor as having passed it.
+      openBatch(db, { batchId: 'triage-1', accountId: ACC, cursorBefore: null, cursorAfter: 'triage-1755000000', messages: [{ messageId: 'm1' }] }, NOW - 2 * DAY)
+      db.prepare(`INSERT INTO email_source_checkpoints (gmail_account_id, history_cursor, updated_at) VALUES (?, '10000', ?)`)
+        .run(ACC, NOW - DAY)
+      expect(ids(runDailyReconcile(db, NOW).findings)).not.toContain('cursor_past_open_batch')
     })
   })
 

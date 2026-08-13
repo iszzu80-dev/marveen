@@ -16,6 +16,7 @@
 // pure "has anything changed?" check would never fire for a case waiting on a
 // deadline; a pure "is it due?" check is what we have now.
 import type Database from 'better-sqlite3'
+import { readWaitSystem, capabilityRecovered } from './capability-preflight.js'
 import { createHash } from 'node:crypto'
 
 /** §10.8's trigger list. `SCHEDULED` is deliberately NOT here: "the clock came
@@ -159,6 +160,29 @@ export function decideTrigger(
   // A case that has never reasoned must reason once, whatever else is true.
   if (!s || s.last_effective_state === null) {
     return yes('NEW_RELEVANT_EVENT', `first:${hash.slice(0, 8)}`, 'the case has never been progressed')
+  }
+
+  // §19: a case parked on a CAPABILITY, and the door the CAPABILITY_RECOVERED
+  // doorbell has been ringing for since this vocabulary was written.
+  //
+  // Checked BEFORE the deadline rule, and that ordering is the whole fix. A
+  // parked case's effective state does not change while it waits — same case
+  // version, same deadlines, same hash — so the rule below would answer "nothing
+  // has changed" for ever, and the case would stay parked after the connector
+  // came back. And an overdue deadline must NOT pull it out either: running with
+  // the capability still dead only re-parks it, once per sweep, for as long as
+  // the outage lasts.
+  //
+  // So the wait ends on one condition and one only: the same capability probes
+  // healthy again. Deterministic, as §19 requires, and reproducible on a replay
+  // corpus where nothing is reachable at all.
+  const wait = readWaitSystem(db, domain, caseId)
+  if (wait) {
+    const rec = capabilityRecovered(db, domain, caseId, now)
+    return rec.recovered
+      ? yes('CAPABILITY_RECOVERED', `capability:${wait.capability}`,
+          `the capability came back: ${wait.capability}`)
+      : no(`waiting on a capability: ${wait.capability}`)
   }
 
   // A DUE deadline that has not been handled yet fires, whatever the hash says.

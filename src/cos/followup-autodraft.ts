@@ -52,6 +52,9 @@ interface CaseRow {
   next_action_owner: string | null
   follow_up_at: number | null
   gmail_thread_ids: string | null
+  created_at?: number | null
+  /** Last outbound send on this case — the actual "inquiry" the letter refers to. */
+  last_sent_at?: number | null
 }
 
 /**
@@ -125,7 +128,9 @@ export interface DraftedFollowUp {
  * ends up over his name.
  */
 export function draftFollowUp(c: FollowUpCandidate): DraftedFollowUp {
-  const subject = c.lastSubject.startsWith('Re:') ? c.lastSubject : `Re: ${c.lastSubject}`
+  // Case-insensitive: a subject already carrying "RE:" or "re:" was getting a
+  // second prefix, so a follow-up on a follow-up read "Re: RE: …".
+  const subject = /^re:/i.test(c.lastSubject.trim()) ? c.lastSubject : `Re: ${c.lastSubject}`
   const body = [
     'Tisztelt Címzett!',
     '',
@@ -148,12 +153,22 @@ export function draftFollowUp(c: FollowUpCandidate): DraftedFollowUp {
 export function sweepFollowUpCandidates(
   db: Database.Database, now: number, limit = 10,
 ): { eligible: Array<FollowUpCandidate>; skipped: Array<{ caseId: string; code: string; reason: string }> } {
+  // The scan window is bounded so one sweep cannot walk the whole store, but a
+  // bound nobody reports is a silent truncation: cases past it were never
+  // considered and nothing said so. One extra row is fetched purely to detect
+  // that the window was full, and the exhaustion is reported as a skip.
+  const scanWindow = limit * 3
   const rows = db.prepare(
-    `SELECT case_id, title, status, waiting_on, next_action_owner, follow_up_at, gmail_thread_ids
-     FROM personal_cases
-     WHERE archived_at IS NULL AND status IN ('WAITING_EXTERNAL','FOLLOW_UP_DUE')
-     ORDER BY follow_up_at LIMIT ?`
-  ).all(limit * 3) as CaseRow[]
+    `SELECT c.case_id, c.title, c.status, c.waiting_on, c.next_action_owner,
+            c.follow_up_at, c.gmail_thread_ids, c.created_at,
+            (SELECT MAX(COALESCE(l.applied_at, l.created_at))
+               FROM outbound_ledger l
+              WHERE l.case_id = c.case_id
+                AND l.status IN ('VERIFIED','APPLIED_UNVERIFIED')) AS last_sent_at
+     FROM personal_cases c
+     WHERE c.archived_at IS NULL AND c.status IN ('WAITING_EXTERNAL','FOLLOW_UP_DUE')
+     ORDER BY c.follow_up_at LIMIT ?`
+  ).all(scanWindow + 1) as CaseRow[]
 
   const eligible: FollowUpCandidate[] = []
   const skipped: Array<{ caseId: string; code: string; reason: string }> = []
@@ -172,10 +187,23 @@ export function sweepFollowUpCandidates(
     }
     eligible.push({
       caseId: r.case_id, title: r.title, recipient, threadId: thread,
-      waitingSinceDays: Math.floor((now - (r.follow_up_at ?? now)) / DAY),
+      // The letter tells a REAL counterparty how long it has been since the
+      // inquiry, so the number has to be that. It used to be measured from
+      // follow_up_at — the moment the follow-up became DUE, typically days
+      // after the inquiry itself — and the letter stated it as "days since the
+      // inquiry". A wrong number in a letter over Istvan's name is not a
+      // rounding issue. Measured from the last send on the case, or from when
+      // the case opened if nothing was ever sent from here.
+      waitingSinceDays: Math.floor((now - (r.last_sent_at ?? r.created_at ?? now)) / DAY),
       lastSubject: r.title,
     })
     if (eligible.length >= limit) break
+  }
+  if (rows.length > scanWindow) {
+    skipped.push({
+      caseId: '—', code: 'scan_window_exhausted',
+      reason: `a vizsgált ablak (${scanWindow} ügy) betelt — a határidő szerint hátrébb lévő ügyeket ez a futás nem nézte meg`,
+    })
   }
   return { eligible, skipped }
 }

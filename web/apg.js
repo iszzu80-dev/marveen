@@ -401,8 +401,13 @@ window.Apg = window.Apg || {}
     if (filterId === 'blocked') return item.display_state === 'blocked'
     if (filterId === 'verifying') return item.display_state === 'verifying'
     if (filterId === 'done-not-accepted') {
+      // F-2: `gates_passed` is the state that used to be MISREPORTED as accepted,
+      // so it is precisely what this filter is for. `needs_input` belongs here
+      // too — a done card still waiting on something is not accepted either.
       return card?.status === 'done'
-        && (item.acceptance_status === 'produced' || item.acceptance_status === 'verifying')
+        && item.acceptance_status !== 'accepted'
+        && item.acceptance_status !== 'not_started'
+        && item.acceptance_status !== 'blocked'
     }
     return false
   }
@@ -483,6 +488,11 @@ window.Apg = window.Apg || {}
       let severity = severityForState(item.display_state)
       if (item.acceptance_status === 'accepted') {
         label = t('apg.kanban.badge.accepted')
+        severity = 'success'
+      } else if (item.acceptance_status === 'gates_passed') {
+        // F-2: the gates passed, and nobody accepted it. The old code wrote
+        // "Independently accepted" here, over an item with no accepter at all.
+        label = t('apg.kanban.badge.gates_passed')
         severity = 'success'
       } else if (
         card?.status === 'done'

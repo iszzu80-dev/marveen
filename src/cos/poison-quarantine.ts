@@ -86,12 +86,19 @@ export function quarantinePoison(
      WHERE gmail_account_id = ? AND message_id = ?`
   ).get(accountId, messageId) as { message_id: string; attempt: number } | undefined
 
-  const conditions: QuarantineConditions = {
+  // THE CHEAP, SIDE-EFFECT-FREE CONDITIONS FIRST.
+  //
+  // INCIDENT (review 2026-08-13). raiseAlert and createReviewTask used to run
+  // BEFORE the full condition set was evaluated, so an attempt that then failed
+  // on, say, policyAllowsCursorAdvance had already created the `qtn-<mid>`
+  // kanban card. On the next sweep createReviewTask's plain INSERT hit the
+  // primary-key conflict, its catch returned false, the condition read "review
+  // task NOT created" — and the message could NEVER be quarantined again. The
+  // batch was pinned permanently while every sweep inserted one more duplicate
+  // CRITICAL alert. A precondition that fails must cost nothing.
+  const preconditions: Omit<QuarantineConditions, 'alertRaised' | 'reviewTaskCreated'> = {
     // 1. The source reference is the message id itself, still on the row.
     sourceReferenceKept: !!row?.message_id,
-    // 2/3. Attempted now; a failure to alert is a failure of the condition.
-    alertRaised: false,
-    reviewTaskCreated: false,
     // 4. Audited: the reason is written to the row, below.
     audited: !!reason && reason.length > 5,
     policyAllowsCursorAdvance: deps.policyAllowsCursorAdvance(),
@@ -99,8 +106,21 @@ export function quarantinePoison(
   if (!row) {
     return { quarantined: false, missing: ['sourceReferenceKept'], reason: `nincs ilyen üzenet: ${messageId}` }
   }
-  conditions.alertRaised = deps.raiseAlert(accountId, messageId, reason, 'POISON_QUARANTINE')
-  conditions.reviewTaskCreated = deps.createReviewTask(accountId, messageId, reason, 'POISON_QUARANTINE')
+  const failedEarly = (Object.keys(preconditions) as Array<keyof typeof preconditions>)
+    .filter((k) => !preconditions[k])
+  if (failedEarly.length) {
+    return {
+      quarantined: false, missing: failedEarly,
+      reason: `A.1 feltételek nem teljesültek: ${failedEarly.join(', ')} — az üzenet marad, a köteg blokkolt`,
+    }
+  }
+
+  // 2/3. Attempted only now; a failure to alert is a failure of the condition.
+  const conditions: QuarantineConditions = {
+    ...preconditions,
+    alertRaised: deps.raiseAlert(accountId, messageId, reason, 'POISON_QUARANTINE'),
+    reviewTaskCreated: deps.createReviewTask(accountId, messageId, reason, 'POISON_QUARANTINE'),
+  }
 
   const missing = (Object.keys(conditions) as Array<keyof QuarantineConditions>)
     .filter((k) => !conditions[k])

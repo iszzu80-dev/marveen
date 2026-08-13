@@ -195,12 +195,50 @@ function ensureColumns(db: Database.Database, table: string, defs: Record<string
 
 import { ensureLadderSchema } from './autonomy-ladder.js'
 import { ensureQuoteSchema } from './quote-campaign.js'
+import { ensureEnvelopeSchema } from './delegation-envelope.js'
+
+/**
+ * E9 (review 2026-08-13). A ledger of one-time migrations that have already run.
+ *
+ * initCosSchema runs on EVERY process start, and everything in it has to be
+ * idempotent. CREATE TABLE IF NOT EXISTS and ensureColumns are; a bare `UPDATE
+ * ... SET scope='MIGRATED_UNVERIFIED'` is not — it is a one-time §17 data
+ * migration written in the shape of a recurring one, so a case Istvan had
+ * reviewed and confirmed was silently demoted back to "unverified" on the next
+ * restart. Rewriting a human's judgement on a timer is the worst class of this
+ * bug, because it looks like the system simply never learned.
+ *
+ * runOnce is the general answer, not a patch for that one statement: any future
+ * data migration goes through it, and the marker says when it ran.
+ */
+function runOnce(db: Database.Database, migrationId: string, body: () => void): boolean {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cos_schema_migrations (
+      migration_id TEXT PRIMARY KEY,
+      applied_at   INTEGER NOT NULL
+    )
+  `)
+  const done = db.prepare(`SELECT 1 FROM cos_schema_migrations WHERE migration_id = ?`).get(migrationId)
+  if (done) return false
+  // The marker is written in the SAME transaction as the migration: a crash
+  // between the two would otherwise leave a migration that is either applied
+  // twice or never marked, and both are how one-time migrations become forever.
+  db.transaction(() => {
+    body()
+    db.prepare(`INSERT INTO cos_schema_migrations (migration_id, applied_at) VALUES (?, ?)`)
+      .run(migrationId, Math.floor(Date.now() / 1000))
+  })()
+  return true
+}
 
 export function initCosSchema(db: Database.Database): void {
   // §22 fokozatos autonomia tablai
   ensureLadderSchema(db)
   // §13.1 ajanlatkero-kampany
   ensureQuoteSchema(db)
+  // §21 delegation envelope -- csak az allapot (visszavonva/visszakapcsolva);
+  // maga a jogosultsag kodkonstans, mert az tulajdonosi dontes es reviewalando.
+  ensureEnvelopeSchema(db)
 
   // ── personal_cases (P0.5 version; §6.1) ──────────────────────────────
   // version: optimistic concurrency. Every domain command reads the version it
@@ -617,10 +655,18 @@ export function initCosSchema(db: Database.Database): void {
   // ── §17: a migralt ugyek bizonytalansagi jelolese ────────────────────
   // "bizonytalan = MIGRATED_UNVERIFIED". A Drive-bol hozott ugyek eddig
   // ugyanolyan magabiztosnak latszottak, mint a sajat forrasbol szarmazok.
-  db.exec(`
-    UPDATE personal_cases SET scope = 'MIGRATED_UNVERIFIED'
-    WHERE source_system = 'chatgpt-cos-drive' AND scope = 'PERSONAL_CONFIRMED'
-  `)
+  //
+  // E9: ONCE. This statement sat bare in a function that runs on every process
+  // start, so a case Istvan reviewed and moved back to PERSONAL_CONFIRMED was
+  // demoted again by the next restart — his decision quietly overwritten by a
+  // migration that had already finished months ago. It is a one-time backfill of
+  // an import, not a rule about the column, and it now says so.
+  runOnce(db, '2026-08-13-s17-mark-drive-imports-unverified', () => {
+    db.exec(`
+      UPDATE personal_cases SET scope = 'MIGRATED_UNVERIFIED'
+      WHERE source_system = 'chatgpt-cos-drive' AND scope = 'PERSONAL_CONFIRMED'
+    `)
+  })
 
   // ── §3.2 approval envelope (2026-08-09) ──────────────────────────────
   // Approving a template is not approving a message. The envelope carries the
@@ -640,6 +686,14 @@ export function initCosSchema(db: Database.Database): void {
   // The ledger needs to say WHICH campaign and WHICH kind of send it was, or the
   // per-kind and total quotas above have nothing to count.
   ensureColumns(db, 'outbound_ledger', LEDGER_SHARED_COLUMNS)
+  // E19 (review 2026-08-13). Every authorizeSend and every admission check counts
+  // `WHERE campaign_id=? [AND outbound_kind=?] AND status NOT IN (...)`, and the
+  // only indexes were on status and case_id — so the hottest query on the send
+  // path scanned the ledger, INSIDE the transaction that holds the SENDING write.
+  // Created here rather than in the CREATE TABLE because campaign_id arrives via
+  // ensureColumns one line up. Additive and IF NOT EXISTS: safe to re-run.
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_outbound_campaign_status ON outbound_ledger(campaign_id, status)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_outbound_campaign_kind ON outbound_ledger(campaign_id, outbound_kind, status)`)
   // The ZST ledger is created LATER in this same function, so the guarded call
   // that used to stand here was a no-op on every fresh database and only ever
   // fired on one that already had the table. It has moved to just after the
@@ -693,6 +747,24 @@ export function initCosSchema(db: Database.Database): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_action_auth_action ON action_authorizations(action_id)`)
+  // E8 (review 2026-08-13). Revocation used to be spelled "set consumed_at", and
+  // consumeAuthorization only treats consumed_at as blocking when single_use=1
+  // (`consumed_at IS NULL OR single_use = 0`). So a ticket issued with
+  // singleUse:false SURVIVED the kill switch's "revoked every outstanding
+  // ticket" while the audit row counted it as revoked — the §22.2 revocation
+  // contract broken and the audit trail agreeing that it was not. Latent today
+  // only because every issuer happens to pass single-use.
+  //
+  // A dedicated column, checked UNCONDITIONALLY, also fixes the second half of
+  // the complaint: consumed and revoked were the same fact in the same field, so
+  // "was this ticket spent or killed?" had no answer afterwards.
+  // Additive, and ensureColumns is a no-op when the columns are already there,
+  // so this is safe to re-run on every start.
+  ensureColumns(db, 'action_authorizations', {
+    revoked_at:     'INTEGER',
+    revoked_reason: 'TEXT',
+  })
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_action_auth_live ON action_authorizations(revoked_at, consumed_at)`)
 
   // ── connector_health (Slice 1 reliability; §20 connector matrix) ──────
   // F-10 / B.3: where the marker-persistence proof is recorded. Without a
@@ -1177,6 +1249,11 @@ export function initZstSendSchema(db: Database.Database): void {
   // database as well as an existing one. One executor writes both ledgers, so
   // the column set must be identical on both.
   ensureColumns(db, 'zst_outbound_ledger', LEDGER_SHARED_COLUMNS)
+  // E19: the same campaign+status count runs on the corporate ledger, from the
+  // same shared approval and executor cores. One implementation, two table sets
+  // — so one missing index is two missing indexes.
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_zst_outbound_campaign_status ON zst_outbound_ledger(campaign_id, status)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_zst_outbound_campaign_kind ON zst_outbound_ledger(campaign_id, outbound_kind, status)`)
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS zst_campaigns (
@@ -1708,11 +1785,22 @@ export function initProgressionSchema(db: Database.Database): void {
   // place for existing dbs; the column defaults to NULL for pre-C rows.
   // Checkpoint D (card 6b7e7e5e): LLM-interpreted case summary (§10.2).
   // Checkpoint E.4 (card 25e06d97): DoD verification state (§10.4).
+  // §19 / §26(28): WAIT_SYSTEM. A case parked on a CAPABILITY, not on a person.
+  //
+  // Deliberately a column on the existing progression state and not a table of
+  // its own: this is one more thing the engine knows about a case it already
+  // tracks, and §3 spends its whole length forbidding the parallel subsystem
+  // that a `case_capability_waits` table would be the first brick of.
   ensureColumns(db, 'case_progression_state', {
     resolution_audit_json: 'TEXT',
     summary: 'TEXT',
     dod_verification_json: 'TEXT',
+    wait_system_json: 'TEXT',
   })
+  // Partial: almost every row is NULL here, and the query that reads it asks
+  // "which cases are waiting on the machine" — never "which are not".
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_cps_wait_system ON case_progression_state(domain, case_id)
+           WHERE wait_system_json IS NOT NULL`)
   // Migration: completed_plan_step added post-GATE-2 (card 52250c7f follow-up).
   // ALTER TABLE ADD COLUMN with NOT NULL needs an explicit DEFAULT in SQLite.
   try {

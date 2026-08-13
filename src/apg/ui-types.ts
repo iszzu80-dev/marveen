@@ -1,6 +1,13 @@
 export type ApgMode = 'off' | 'observe' | 'assisted' | 'enforced'
 
-export type ApgModeSource = 'global' | 'project' | 'card'
+export type ApgModeSource =
+  | 'global'
+  | 'project'
+  | 'card'
+  /** A `?mode=` preview on this request, clamped to what the configuration
+   *  already allows (F-13). Named so the screen can say the mode came from the
+   *  URL rather than from any configured scope. */
+  | 'request'
 
 export type ApgDisplayState =
   | 'clarification'
@@ -14,11 +21,30 @@ export type ApgDisplayState =
 
 export type ApgRisk = 'low' | 'medium' | 'high' | 'critical' | 'unknown'
 
+/**
+ * How far a work item has travelled towards ACCEPTANCE — which is not the same
+ * question as which gate last ran.
+ *
+ * `gates_passed` and `needs_input` exist because of review finding F-2. Before
+ * them the projection said `accepted` whenever the last checkpoint was a PASS on
+ * `release_ready` or `runtime_acceptance`, and `returned` whenever the item was
+ * waiting for evidence or clarification. Neither event had happened: there was
+ * no accepter (the field was structurally null) and nothing had been returned to
+ * anyone. §9.2 of the spec forbids exactly this — "NEVER show acceptance from
+ * the done status alone" — and §24's "a producer cannot accept its own work"
+ * cannot even be checked while nobody is recorded as accepting.
+ */
 export type ApgAcceptanceStatus =
   | 'not_started'
   | 'produced'
   | 'verifying'
+  /** Every required gate passed. NOT acceptance: no principal has accepted it. */
+  | 'gates_passed'
+  /** A named principal accepted it. Requires `accepter_agent`. */
   | 'accepted'
+  /** Waiting on evidence, a decision or a clarification. NOT the same as
+   *  `returned`, which claims somebody sent it back. */
+  | 'needs_input'
   | 'returned'
   | 'blocked'
 

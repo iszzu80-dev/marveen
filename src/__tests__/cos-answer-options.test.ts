@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import { deriveAnswerOptions, hasButtons } from '../cos/answer-options.js'
+import {
+  deriveAnswerOptions, hasButtons, answerIntentOf, declaredOptionValues, OPTION_INTENTS,
+} from '../cos/answer-options.js'
 
 // Answer options derived from the question.
 //
@@ -84,5 +86,56 @@ describe('answer options', () => {
     for (const q of ['Jóváhagyod?', 'Mi legyen a spanyol úttal?', 'Nyitott kérdés valamiről']) {
       expect(deriveAnswerOptions(q).freeText, q).toBe(true)
     }
+  })
+})
+
+// ── Every button has a consumer ───────────────────────────────────────────
+//
+// This module built real alternatives and Mission Control submitted them, and
+// NOTHING outside this file ever read the values: the pipeline compared
+// `choice === 'NO'` and treated everything else as go-ahead. So "Lemondjuk"
+// (cancel) and "Várjunk még rá" (keep waiting) advanced the plan exactly as if
+// the owner had approved. Offering a real choice and ignoring which one he
+// picked is worse than the false yes/no pair it replaced.
+describe('option meanings', () => {
+  it('every value this module can render has a declared meaning', () => {
+    // The standing check: a new PATTERN option with no entry here is a button
+    // that silently means nothing. That is precisely how the first six got
+    // ignored for months.
+    for (const v of declaredOptionValues()) {
+      expect(OPTION_INTENTS[v], `option ${v} has no declared engine meaning`).toBeDefined()
+    }
+  })
+
+  it('the cancel-shaped options are ABANDON, never proceed', () => {
+    expect(answerIntentOf('CANCEL')).toBe('ABANDON')
+    expect(answerIntentOf('DROP')).toBe('ABANDON')
+  })
+
+  it('the wait-shaped options are HOLD, never proceed', () => {
+    expect(answerIntentOf('KEEP_WAITING')).toBe('HOLD')
+    expect(answerIntentOf('POSTPONE')).toBe('HOLD')
+    expect(answerIntentOf('LATER')).toBe('HOLD')
+  })
+
+  it('only an affirmative settles the question', () => {
+    expect(answerIntentOf('YES')).toBe('PROCEED')
+    expect(answerIntentOf('GO')).toBe('PROCEED')
+    expect(answerIntentOf('NO')).toBe('REFUSE')
+  })
+
+  it('an unknown or absent choice is UNMAPPED, never PROCEED', () => {
+    // Case-supplied options (the providers who actually quoted) arrive here
+    // too. A provider name must not read as approval merely because it is not
+    // the string 'NO' — which is exactly what the old comparison did.
+    expect(answerIntentOf('SZOMSZED_KFT')).toBe('UNMAPPED')
+    expect(answerIntentOf(null)).toBe('UNMAPPED')
+    expect(answerIntentOf('')).toBe('UNMAPPED')
+  })
+
+  it('no option means PROCEED by accident: every mapping is deliberate', () => {
+    const proceeds = Object.entries(OPTION_INTENTS)
+      .filter(([, v]) => v === 'PROCEED').map(([k]) => k).sort()
+    expect(proceeds).toEqual(['GO', 'NOW', 'REPAIR', 'REPLACE', 'YES'])
   })
 })

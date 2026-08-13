@@ -28,7 +28,13 @@ function fakePost(path: string, body: unknown): { ctx: RouteContext; out: { stat
   return { ctx: { req, res, path: url.pathname, method: 'POST', url } as RouteContext, out }
 }
 
-function fakePatch(id: string, body: unknown): { ctx: RouteContext; out: { status: number; body: any } } {
+/** `auth` is what the GATE resolved for this request, and it is the only
+ *  identity the route may believe. Defaults to the shared fleet bearer, because
+ *  that is what every fleet curl call carries — and what proves nothing. */
+function fakePatch(
+  id: string, body: unknown,
+  auth: RouteContext['auth'] = { kind: 'token' },
+): { ctx: RouteContext; out: { status: number; body: any } } {
   const out: { status: number; body: any } = { status: 0, body: null }
   const res: any = {
     writeHead(status: number) { out.status = status; return res },
@@ -43,7 +49,16 @@ function fakePatch(id: string, body: unknown): { ctx: RouteContext; out: { statu
       if (event === 'end') cb()
     },
   }
-  return { ctx: { req, res, path, method: 'PATCH', url } as RouteContext, out }
+  return { ctx: { req, res, path, method: 'PATCH', url, auth } as RouteContext, out }
+}
+
+async function createApprovalFor(agentId: string): Promise<string> {
+  const { ctx, out } = fakePost('/api/approvals', {
+    agent_id: agentId, category: 'email_send', action_description: 'Send report',
+  })
+  await tryHandleApprovals(ctx)
+  expect(out.status).toBe(201)
+  return out.body.id as string
 }
 
 describe('approvals notification target', () => {
@@ -75,50 +90,87 @@ describe('approvals notification target', () => {
   })
 })
 
-describe('approvals self-approval guard', () => {
+describe('approval resolution is bound to an authenticated principal', () => {
+  // WHAT THIS REPLACES. Resolution identity was `resolved_by` from the request
+  // BODY, guarded only by `resolved_by === target.agent_id`. Every fleet agent
+  // holds the same bearer token, so any of them approved its own request by
+  // writing `resolved_by: "istvan"`. The guard was not weak — it checked a value
+  // the caller picks.
   beforeEach(() => {
     initDatabase(':memory:')
   })
 
-  it('returns 403 when resolved_by matches the requesting agent_id', async () => {
-    // Create an approval for agent-b
-    const { ctx: postCtx, out: postOut } = fakePost('/api/approvals', {
-      agent_id: 'agent-b',
-      category: 'email_send',
-      action_description: 'Send report',
-    })
-    await tryHandleApprovals(postCtx)
-    expect(postOut.status).toBe(201)
-    const id = postOut.body.id
-
-    // agent-b attempts to approve its own request
-    const { ctx: patchCtx, out: patchOut } = fakePatch(id, {
-      status: 'approved',
-      resolved_by: 'agent-b',
-    })
-    const handled = await tryHandleApprovals(patchCtx)
-    expect(handled).toBe(true)
-    expect(patchOut.status).toBe(403)
-    expect(patchOut.body.error).toMatch(/cannot approve its own request/)
+  it('REFUSES to approve for a shared-token caller: it cannot prove it is not the requester', async () => {
+    const id = await createApprovalFor('agent-b')
+    const { ctx, out } = fakePatch(id, { status: 'approved', resolved_by: 'istvan' })
+    expect(await tryHandleApprovals(ctx)).toBe(true)
+    expect(out.status).toBe(403)
+    expect(out.body.code).toBe('unattributable_caller')
   })
 
-  it('allows approval when resolved_by differs from the requesting agent_id', async () => {
-    const { ctx: postCtx, out: postOut } = fakePost('/api/approvals', {
-      agent_id: 'agent-b',
-      category: 'email_send',
-      action_description: 'Send report',
-    })
-    await tryHandleApprovals(postCtx)
-    const id = postOut.body.id
+  it('the same token caller MAY reject — the safe direction needs no identity', async () => {
+    // Rejecting takes authority away. A self-rejection gains an agent nothing,
+    // so the Telegram "NEM" relay keeps working on the shared token.
+    const id = await createApprovalFor('agent-b')
+    const { ctx, out } = fakePatch(id, { status: 'rejected', resolved_by: 'telegram_text' })
+    expect(await tryHandleApprovals(ctx)).toBe(true)
+    expect(out.status).toBe(200)
+    expect(out.body.status).toBe('rejected')
+  })
 
-    // A different caller (e.g. the owner via telegram_text) approves
-    const { ctx: patchCtx, out: patchOut } = fakePatch(id, {
-      status: 'approved',
-      resolved_by: 'telegram_text',
-    })
-    const handled = await tryHandleApprovals(patchCtx)
-    expect(handled).toBe(true)
-    expect(patchOut.status).toBe(200)
-    expect(patchOut.body.status).toBe('approved')
+  it('a logged-in human MAY approve, and the audit records the PROVEN identity', async () => {
+    const id = await createApprovalFor('agent-b')
+    const { ctx, out } = fakePatch(
+      id, { status: 'approved', resolved_by: 'telegram_text' },
+      { kind: 'session', user: 'istvan' },
+    )
+    expect(await tryHandleApprovals(ctx)).toBe(true)
+    expect(out.status).toBe(200)
+    expect(out.body.status).toBe('approved')
+    // The claimed label survives as provenance; the principal is what is proved.
+    //
+    // MERGE (APG 1.9 §11.4): the same two facts, in two fields instead of one
+    // string. This used to assert `'user:istvan (telegram_text)'` -- proved and
+    // claimed concatenated into the audit column. §11.4 forbids any part of a
+    // request body from reaching that column, so the claim moved to its own
+    // field. Nothing is lost and nothing new is trusted: `resolved_by` is still
+    // the server-derived identity, `claimed_by` is still the caller's label,
+    // and a reader can now tell them apart without parsing.
+    expect(out.body.resolved_by).toBe('session:istvan')
+    expect(out.body.claimed_by).toBe('telegram_text')
+  })
+
+  it('an enrolled device MAY approve', async () => {
+    const id = await createApprovalFor('agent-b')
+    const { ctx, out } = fakePatch(
+      id, { status: 'approved', resolved_by: 'cli' },
+      { kind: 'device', device: 'istvan-laptop' },
+    )
+    expect(await tryHandleApprovals(ctx)).toBe(true)
+    expect(out.status).toBe(200)
+    // Same split as above: proved identity in `resolved_by`, claim in `claimed_by`.
+    expect(out.body.resolved_by).toBe('device:istvan-laptop')
+    expect(out.body.claimed_by).toBe('cli')
+  })
+
+  it('self-approval stays refused even for a strong principal', async () => {
+    const id = await createApprovalFor('agent-b')
+    const { ctx, out } = fakePatch(
+      id, { status: 'approved', resolved_by: 'agent-b' },
+      { kind: 'session', user: 'istvan' },
+    )
+    expect(await tryHandleApprovals(ctx)).toBe(true)
+    expect(out.status).toBe(403)
+    expect(out.body.error).toMatch(/cannot approve its own request/)
+  })
+
+  it('a federation peer may not resolve this instance\'s approvals at all', async () => {
+    const id = await createApprovalFor('agent-b')
+    const { ctx, out } = fakePatch(
+      id, { status: 'approved', resolved_by: 'peer' },
+      { kind: 'federation', peer: 'other-instance' },
+    )
+    expect(await tryHandleApprovals(ctx)).toBe(true)
+    expect(out.status).toBe(403)
   })
 })

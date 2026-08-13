@@ -4,6 +4,7 @@ import { getCase, createCase } from '../cos/case-store.js'
 import { openBatch } from '../cos/email-ingest.js'
 import { ingestEmail } from '../cos/intake.js'
 import { IDEMPOTENCY_HEADER } from '../cos/adapters/gmail-send.js'
+import { linkedCases } from '../cos/case-link.js'
 
 // COS email → case intake. Proves the inbound behavior: noise is excluded, an
 // actionable email becomes a case with the escalated sensitivity, a message
@@ -84,6 +85,53 @@ describe('COS email intake', () => {
     expect(c.description).toMatch(/Sent to: vendor@example.com/)
     expect(c.waiting_on).toMatch(/reply from vendor@example.com/)
     expect(c.follow_up_at).toBe(NOW + 259200)
+  })
+})
+
+// P7 (review 2026-08-13). Intake auto-linked every STRONG candidate found in
+// `subject + snippet` — text written by whoever sent the mail. A sender who
+// names another case's order number therefore got the two cases wired together,
+// deterministically, with nobody in the loop. Auto-linking now additionally
+// requires the identifier to appear in a field the owner or this system wrote.
+describe('a stranger cannot wire the case graph', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('an order number quoted by an unrelated sender is SUGGESTED, not linked', () => {
+    const db = getDb()
+    // The victim case was itself born from a correspondent's mail, so its title
+    // and description are sender-authored.
+    createCase(db, { caseId: 'PRI-CLAIM-1', title: 'eCipő reklamáció 120001419444', caseType: 'ADMIN', description: 'rendelésszám 120001419444' }, NOW - 100)
+    discover('m-attack', 't-attack')
+    const r = ingestEmail(db, {
+      accountId: ACC, messageId: 'm-attack', threadId: 't-attack',
+      subject: 'Számla a 120001419444 rendeléshez', from: 'idegen@valahol.hu',
+      snippet: 'kérem az utalást', actionable: true,
+    }, NOW)
+    expect(r.outcome).toBe('CASE_CREATED')
+    expect(linkedCases(db, 'PRI-CLAIM-1'), 'no link may be written').toEqual([])
+    expect(linkedCases(db, r.caseId!)).toEqual([])
+    // …but it is on the record, so a human can see what was proposed.
+    const ev = db.prepare(
+      `SELECT reason FROM personal_case_events WHERE event_type='CASE_LINK_SUGGESTED'`,
+    ).all() as Array<{ reason: string }>
+    expect(ev).toHaveLength(1)
+    expect(ev[0].reason).toContain('PRI-CLAIM-1')
+    expect(ev[0].reason).toContain('120001419444')
+  })
+
+  it('an identifier the OWNER recorded on the case still auto-links', () => {
+    // The counter-check: the feature this narrowing must not delete.
+    const db = getDb()
+    createCase(db, { caseId: 'PRI-CLAIM-2', title: 'eCipő reklamáció', caseType: 'ADMIN' }, NOW - 100)
+    db.prepare(`UPDATE personal_cases SET waiting_on='visszatérítés a 120001419444 rendelésre' WHERE case_id='PRI-CLAIM-2'`).run()
+    discover('m-gls', 't-gls')
+    const r = ingestEmail(db, {
+      accountId: ACC, messageId: 'm-gls', threadId: 't-gls',
+      subject: 'Csomagfelvétel', from: 'noreply@gls.hu',
+      snippet: 'a 120001419444 rendeléshez tartozó csomagot felvettük', actionable: true,
+    }, NOW)
+    expect(linkedCases(db, 'PRI-CLAIM-2')).toContain(r.caseId)
+    expect(linkedCases(db, r.caseId!)).toContain('PRI-CLAIM-2')
   })
 })
 

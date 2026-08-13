@@ -26,8 +26,8 @@ import type { LlmClient } from './progression-interpreter.js'
 import { planFromEvidence } from './evidence-planner.js'
 import { arbitrate } from './reader-arbitration.js'
 import { killSwitchRefusal } from './kill-switch.js'
-import { effectiveSensitivity, escalateSensitivity } from './sensitivity.js'
-import { isProviderAllowedForSensitivity, providersAllowedFor } from './provider-data-policy.js'
+import { escalateSensitivity } from './sensitivity.js'
+import { egressTierFor, isProviderAllowedForSensitivity, providersAllowedFor } from './provider-data-policy.js'
 import type { CaseSensitivity } from './schema.js'
 
 /**
@@ -40,16 +40,27 @@ import type { CaseSensitivity } from './schema.js'
  * §10 of v4.2 says a sensitive case may only be processed by an explicitly
  * allowed model profile — enforced on the SENDING path, absent on the reading one.
  *
- * Declared tier AND content: `effectiveSensitivity` escalates the case's own
+ * Declared tier AND content: `egressTierFor` escalates the case's own
  * declaration with what the classifier finds, so an IBAN in a thread lifts the
  * tier even when nobody labelled the case.
+ *
+ * THE DOMAIN IS AN ARGUMENT, NOT AN ASSUMPTION (review 2026-08-12, T-1). This
+ * function used to read every item with the PERSONAL coercer. A corporate case
+ * carries `ZST_INTERNAL` and friends, which that coercer does not know, so it
+ * fail-closed to HIGHLY_SENSITIVE — and the whole corporate domain was routed to
+ * the contracted provider by DATA ABSENCE, with a stored refusal reason that
+ * made a false claim about the content. The mapping now lives in
+ * provider-data-policy.ts, shared with the enrichment sweep.
  */
-export function contextSensitivity(items: Array<{ sensitivity: string; content: string }>): CaseSensitivity {
+export function contextSensitivity(
+  domain: 'personal' | 'zst' | string,
+  items: Array<{ sensitivity: string; content: string }>,
+): CaseSensitivity {
   // Starts at PUBLIC and only ever escalates. Starting fail-closed instead would
   // make an EMPTY context maximally sensitive, which reads as a policy verdict
   // about content nobody has.
   let tier: CaseSensitivity = 'PUBLIC'
-  for (const i of items) tier = escalateSensitivity(tier, effectiveSensitivity(i.sensitivity, i.content))
+  for (const i of items) tier = escalateSensitivity(tier, egressTierFor(domain, i.sensitivity, i.content))
   return tier
 }
 
@@ -80,6 +91,14 @@ export interface ReaderCandidate {
   runId: string | null
   policyDecision: string
 }
+
+/** §11.2 A fairness. MOVED to `fair-interleave.ts` so the v1.4 proactive sweep
+ *  can use the same rule: this module imports the Reader, the Reader imports the
+ *  model client, and the model client is on the §15.3 forbidden list — so the
+ *  proactive module cannot import from here at all. Re-exported rather than
+ *  re-pointed, because the existing callers named this file. */
+export { roundRobinByDomain } from './fair-interleave.js'
+import { roundRobinByDomain } from './fair-interleave.js'
 
 /**
  * Cases that RAN since they were last read.
@@ -116,7 +135,9 @@ export function casesNeedingReading(db: Database.Database, limit: number): Reade
       }
     } catch { /* table absent on a fresh store: not a candidate, not an error */ }
   }
-  return limit > 0 ? out.slice(0, limit) : out
+  // FAIR, not first-come: see roundRobinByDomain for what slicing a
+  // personal-then-zst list costs the corporate namespace.
+  return roundRobinByDomain(out, limit)
 }
 
 /** Store one reading — successful or refused. Both are rows; see the schema
@@ -226,7 +247,7 @@ export async function runReaderPass(
       // §10 SENSITIVITY GATE — the last thing before the content leaves the
       // machine. Everything above this line is local; everything below is a
       // request to a third party.
-      const tier = contextSensitivity(ctx.items)
+      const tier = contextSensitivity(c.domain, ctx.items)
       const route = routeFor(tier)
       if (!route) {
         result.sensitivityBlocked++
