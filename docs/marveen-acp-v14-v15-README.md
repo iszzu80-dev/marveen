@@ -25,6 +25,7 @@ Korábbi baseline-ok ugyanebben a mappában: `...-v1.2.md`, `...-v1.3.md`, `...-
 | `docs/cos-v14-wait-system-es-hatarido-ontologia-2026-08-13.md` | A §26 sorrend 28. és 13. pontja megépítve |
 | `docs/cos-v14-replay-kontroll-ag-2026-08-13.md` | A §26 sorrend 26. pontja megépítve (§1.4.6 kontroll-ág) |
 | `docs/cos-v14-adjudikacios-csomag-2026-08-13.md` | A §26 sorrend 29. és 30. pontja megépítve (§1.4.3 vak adjudikáció) |
+| `docs/cos-v14-replay-eval-value-gate-2026-08-13.md` | A §26 sorrend 32. pontja megépítve (§24.2 value gate) |
 
 **Az audit összegzése:** M4=5, M3=9, M2=4, M1=5, M0=8. A v1.4 nem egyenletesen brownfield —
 kétharmada meglévő infrastruktúra, egyharmada (mérési apparátus + jóváhagyási csatorna) új építés.
