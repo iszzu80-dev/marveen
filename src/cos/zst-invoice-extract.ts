@@ -9,55 +9,65 @@
 
 import type Database from 'better-sqlite3'
 import { upsertZstInvoice, type ZstInvoiceInput } from './zst-finance.js'
+import { parseHufAmounts, parseDates, nameFromSender, normaliseExtractionText } from './zst-extract-common.js'
 
 export interface InvoiceEmailSource {
   caseId?: string
   from: string
   subject: string
   body: string
+  /** How much of the mail `body` actually is. The intake used to pass the
+   *  300-character Gmail SNIPPET here and the module advertised that the invoice
+   *  would be "re-extracted later" — nothing re-extracts, so an amount or an
+   *  invoice number past character 300 was simply lost, and a truncated amount
+   *  list made Math.max pick a non-gross figure. The full body is passed now
+   *  when the caller has it; when it does not, the row says so instead of
+   *  looking like a complete extraction. */
+  extractionSource?: 'FULL_BODY' | 'SNIPPET'
 }
+
+/** Marker written to zst_invoices.notes so a partial extraction is visible in
+ *  the store. Machine-readable on purpose: it is a data marker, not a message. */
+export const SNIPPET_EXTRACTION_NOTE = 'extraction_source=SNIPPET'
 
 export interface ExtractedInvoice extends ZstInvoiceInput {
   confidence: 'HIGH' | 'PARTIAL' | 'LOW'
   extracted: string[]  // which fields were parsed
 }
 
-// "1 234 567 Ft", "1.234.567 Ft", "15 484 HUF", "15484Ft" → 1234567 (forint int).
-const HUF_AMOUNT = /(\d{1,3}(?:[ . ]\d{3})+|\d{3,})\s?(?:Ft|HUF|forint)\b/gi
-function parseHufAmounts(text: string): number[] {
-  const out: number[] = []
-  for (const m of text.matchAll(HUF_AMOUNT)) {
-    const n = parseInt(m[1].replace(/[ . ]/g, ''), 10)
-    if (!Number.isNaN(n)) out.push(n)
-  }
-  return out
-}
-
-// ISO or hu date "2026-07-22", "2026.07.22", "2026. 07. 22." → ISO.
-const DATE_RE = /\b(20\d{2})[.\-/ ]\s?(\d{1,2})[.\-/ ]\s?(\d{1,2})\b/g
-function parseDates(text: string): string[] {
-  const out: string[] = []
-  for (const m of text.matchAll(DATE_RE)) {
-    out.push(`${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`)
-  }
-  return out
-}
+// Amounts, dates and the supplier name come from the shared extractor helpers
+// (zst-extract-common.ts) — the same functions the contract extractor uses. They
+// used to be a copy each, and the copies had already drifted on the one detail
+// that matters most here: whether a NO-BREAK SPACE counts as a thousands
+// separator. It does; an HTML-derived body is full of them.
 
 // Invoice number: "számlaszám: X", "invoice no. X", "bizonylatszám X".
-const INV_NO_RE = /(?:számlaszám|bizonylatszám|invoice\s*(?:no\.?|number)|sorszám)\s*[:#]?\s*([A-Za-z0-9\-/]{4,})/i
-// Supplier: the sender's display name or domain.
-function supplierFromSender(from: string): string | null {
-  const disp = /"?([^"<]+?)"?\s*</.exec(from)
-  if (disp && disp[1].trim()) return disp[1].trim()
-  const dom = /@([\w.-]+)/.exec(from)
-  return dom ? dom[1] : null
-}
+//
+// The lookbehind is the whole point of this line. Without it the cue
+// `számlaszám` also matched INSIDE "Bankszámlaszám", and most real Hungarian
+// invoice emails carry the payment details — so the extractor stored the
+// supplier's BANK ACCOUNT as the invoice number, at HIGH confidence, and keyed
+// the dedup hash (supplier + number + gross + date) on it. A later ingest
+// carrying the genuine number then hashed differently and opened a SECOND row
+// for the same invoice: AT-ZF01 defeated silently, by an invoice we had already
+// booked.
+//
+// \p{L} rather than \b: \b is ASCII-only here, so "folyószámlaszám" (an accented
+// letter before the cue) would still have counted as a word boundary. The regex
+// is global so the FIRST cue that is not part of a longer word wins — a mail
+// whose bank line precedes its invoice line still yields the invoice number.
+const INV_NO_RE = /(?<!\p{L})(?:számlaszám|bizonylatszám|invoice\s*(?:no\.?|number)|sorszám)\s*[:#]?\s*([A-Za-z0-9\-/]{4,})/giu
 
 /** Extract invoice fields from an email. Returns null if it does not look like an
  *  invoice at all (no amount and no invoice-number cue). */
 export function extractInvoice(src: InvoiceEmailSource): ExtractedInvoice | null {
-  const text = `${src.subject}\n${src.body}`
+  // Normalised once here too: INV_NO_RE and the cue tests below run on the same
+  // text the amount parser sees, so a NO-BREAK SPACE cannot make one of them
+  // disagree with the others about where a word ends.
+  const text = normaliseExtractionText(`${src.subject}\n${src.body}`)
   const amounts = parseHufAmounts(text)
+  // A global regex carries lastIndex between calls; exec from a fresh position.
+  INV_NO_RE.lastIndex = 0
   const invNoMatch = INV_NO_RE.exec(text)
   const looksLikeInvoice = amounts.length > 0 || invNoMatch != null ||
     /\b(számla|invoice|díjbekérő|bizonylat)\b/i.test(text)
@@ -73,15 +83,20 @@ export function extractInvoice(src: InvoiceEmailSource): ExtractedInvoice | null
   if (dueDate && dueDate !== issueDate) extracted.push('due_date')
   const invoiceNumber = invNoMatch?.[1]
   if (invoiceNumber) extracted.push('invoice_number')
-  const supplierId = supplierFromSender(src.from) ?? undefined
+  const supplierId = nameFromSender(src.from) ?? undefined
   if (supplierId) extracted.push('supplier_id')
 
+  // A snippet-only read cannot be HIGH, whatever it happened to find: the fields
+  // it did not find may simply be past character 300.
+  const full = gross != null && invoiceNumber
   const confidence: ExtractedInvoice['confidence'] =
-    gross != null && invoiceNumber ? 'HIGH' : gross != null || invoiceNumber ? 'PARTIAL' : 'LOW'
+    full && src.extractionSource !== 'SNIPPET' ? 'HIGH'
+      : gross != null || invoiceNumber ? 'PARTIAL' : 'LOW'
 
   return {
     caseId: src.caseId, invoiceType: 'INCOMING', supplierId, invoiceNumber,
     issueDate, dueDate, grossAmount: gross, currency: 'HUF', confidence, extracted,
+    ...(src.extractionSource === 'SNIPPET' ? { notes: SNIPPET_EXTRACTION_NOTE } : {}),
   }
 }
 

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdtempSync, rmSync, existsSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -258,19 +258,33 @@ describe('the streak file, executed for real and read back', () => {
     }
   })
 
-  it('an unwritable store/ does not fake success: the counter stays put and the exit still happens', () => {
+  it('an unwritable streak file does not fake success: the counter stays put and the exit still happens', () => {
     const dir = mkdtempSync(join(tmpdir(), 'streak-ro-'))
     try {
       const storeDir = join(dir, 'store')
+      const streak = join(storeDir, '.channel-neverstart-streak')
       execFileSync('mkdir', ['-p', storeDir])
-      execFileSync('chmod', ['500', storeDir])
+      // THE WRITE FAILS FOR EVERYONE, NOT JUST FOR NON-ROOT (review 2026-08-13,
+      // R-11). This used to `chmod 500` the store directory — and permission
+      // bits do not stop uid 0, so under a containerised CI (which runs as root)
+      // the write SUCCEEDED and the test failed on an assertion about a
+      // hypothetical. It sat in the permanently-red set for weeks, and a
+      // permanently-red set is how a genuinely new failure goes unnoticed: on
+      // 2026-08-13 exactly that happened, with three "known" reds hiding a
+      // fourth.
+      //
+      // A directory where the file should be is refused by the kernel for every
+      // uid: `> "$streak"` gets EISDIR. Same failure the test wanted, no
+      // dependence on who is running it.
+      execFileSync('mkdir', ['-p', streak])
       const r = runChain(dir, { ageSeconds: 700, pluginAlive: false })
       // the watchdog still asks for the restart -- the signal survives a
       // failed write, which is the behaviour we want on a broken host
       expect(r.out).toContain('restart_requested=1')
-      expect(existsSync(join(storeDir, '.channel-neverstart-streak'))).toBe(false)
+      // The counter did not advance: the path is still the directory we made,
+      // never a streak file with a number in it.
+      expect(statSync(streak).isDirectory()).toBe(true)
     } finally {
-      execFileSync('chmod', ['700', join(dir, 'store')])
       rmSync(dir, { recursive: true, force: true })
     }
   })

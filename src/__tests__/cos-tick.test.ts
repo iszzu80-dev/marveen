@@ -8,6 +8,7 @@ import { GmailSendAdapter, DryRunTransport } from '../cos/adapters/gmail-send.js
 import { createRadarItem, getRadarItem } from '../cos/radar.js'
 import { setNextWake } from '../cos/scheduler.js'
 import { cosTick } from '../cos/tick.js'
+import { deliverRadarNotifications } from '../cos/runtime.js'
 import type { RentalAdapter, RentalOffer, RentalSearchParams } from '../cos/rental-adapter.js'
 
 // §22.2: a first send needs a gate-issued ticket, not a caller-side boolean.
@@ -93,12 +94,18 @@ describe('cosTick (one full cycle)', () => {
     expect(getRadarItem(db, 'r1')!.status).toBe('HIT')
   })
 
+  // CHANGED 2026-08-13 (P1). The tick no longer persists the notify decision —
+  // it hands it out and the caller marks it only after the alert has actually
+  // been posted (runtime.deliverRadarNotifications), because marking first meant
+  // a crash in between silenced the hit for good. The dedup this test is about is
+  // unchanged; the test now performs the delivery step the runtime performs.
   it('AC-29: a second cycle on the same unchanged HIT offer does NOT re-alert', async () => {
     const db = getDb()
     createRadarItem(db, { radarId: 'r1', caseId: 'c1', kind: 'RENTAL', label: 'VLC→AGP', query: RENTAL_QUERY, targetPrice: 90000, currency: 'HUF', checkIntervalSec: 3600 }, NOW - 7200)
     const deps = { rentalAdapter: new MockRental() }
     const first = await cosTick(db, deps, NOW)
     expect(first.radarHits).toEqual(['r1']) // first HIT → alert
+    deliverRadarNotifications(db, first, NOW)
     // make it due again without changing the offer, run another cycle
     db.prepare(`UPDATE radar_items SET next_check_at=? WHERE radar_id='r1'`).run(NOW + 10)
     const second = await cosTick(db, deps, NOW + 20)

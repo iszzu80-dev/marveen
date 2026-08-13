@@ -57,6 +57,29 @@ function count(db: Database.Database, sql: string, ...args: unknown[]): number |
   }
 }
 
+/**
+ * E10 (review 2026-08-13). The finding a null count MUST produce.
+ *
+ * `count()` has said "the caller reports that, never treats it as zero" since it
+ * was written, and exactly one caller obeyed. Everywhere else the shape was
+ * `if (n === null || n === 0) return null` — which folds "this table could not
+ * be read" into "there is nothing wrong here", and the daily reconcile then
+ * reports a clean day for a surface it is blind to. That is the precise failure
+ * this whole module exists to prevent: silence that reads like health.
+ *
+ * A missing or unreadable table is CRITICAL, not a warning: every check here
+ * exists because its absence once cost days, and a check that cannot run is a
+ * check that is not running.
+ */
+function unreadable(table: string, ref: string): Finding {
+  return {
+    id: `${table}_unreadable`, severity: 'CRITICAL', ref,
+    title: 'Egy ellenőrzött tábla nem olvasható',
+    detail: `${table}: a lekérdezés hibára futott, tehát erre a területre az egyeztetés VAK — a "nincs találat" itt nem jelent rendben lévő állapotot.`,
+    action: 'Ellenőrizd a séma-migrációt és a store épségét. Amíg ez fennáll, a napi jelentés csendje ezen a területen nem bizonyít semmit.',
+  }
+}
+
 /** Every check is a small function so each can be exercised on its own; a check
  *  that can only be tested through the whole report is a check whose failure
  *  mode nobody has seen. */
@@ -64,9 +87,9 @@ type Check = (db: Database.Database, now: number) => Finding | null
 
 const stuckLocalApplied: Check = (db, now) => {
   const n = count(db, `SELECT COUNT(*) AS n FROM email_processing WHERE status='LOCAL_APPLIED' AND updated_at < ?`, now - DAY)
-  if (n === null) return { id: 'email_processing_unreadable', severity: 'CRITICAL', ref: '§8',
-    title: 'A feldolgozási tábla nem olvasható', detail: 'email_processing lekérdezés hibára futott',
-    action: 'Ellenőrizd a séma-migrációt és a store épségét.' }
+  // The one check that always honoured count()'s contract; it now says so in the
+  // same words as every other, from the shared helper.
+  if (n === null) return unreadable('email_processing', '§8')
   if (n === 0) return null
   return {
     id: 'messages_never_source_committed', severity: 'CRITICAL', ref: '§8, AC-10',
@@ -78,7 +101,8 @@ const stuckLocalApplied: Check = (db, now) => {
 
 const openBatches: Check = (db, now) => {
   const n = count(db, `SELECT COUNT(*) AS n FROM email_processing_batches WHERE status IN ('OPEN','PROCESSING') AND updated_at < ?`, now - DAY)
-  if (n === null || n === 0) return null
+  if (n === null) return unreadable('email_processing_batches', '§8, AC-11')
+  if (n === 0) return null
   return {
     id: 'batches_never_closed', severity: 'CRITICAL', ref: '§8, AC-11',
     title: 'Kötegek maradtak nyitva',
@@ -106,7 +130,8 @@ const missingCheckpoint: Check = (db) => {
 
 const outboundNeedsHuman: Check = (db) => {
   const n = count(db, `SELECT COUNT(*) AS n FROM outbound_ledger WHERE status IN ('RECOVERY_REQUIRED','FAILED_TERMINAL')`)
-  if (n === null || n === 0) return null
+  if (n === null) return unreadable('outbound_ledger', '§7.3, §19')
+  if (n === 0) return null
   return {
     id: 'outbound_needs_human', severity: 'CRITICAL', ref: '§7.3, §19',
     title: 'Kimenő művelet emberre vár',
@@ -119,7 +144,8 @@ const outcomeUnknown: Check = (db, now) => {
   const n = count(db,
     `SELECT COUNT(*) AS n FROM outbound_ledger WHERE status IN ('OUTCOME_UNKNOWN','APPLIED_UNVERIFIED') AND updated_at < ?`,
     now - DAY)
-  if (n === null || n === 0) return null
+  if (n === null) return unreadable('outbound_ledger', 'v4.2.1 B.1')
+  if (n === 0) return null
   return {
     id: 'outcome_unknown_aging', severity: 'WARNING', ref: 'v4.2.1 B.1',
     title: 'Bizonytalan kimenetelű küldés áll egy napja',
@@ -130,12 +156,41 @@ const outcomeUnknown: Check = (db, now) => {
 
 const stuckSending: Check = (db, now) => {
   const n = count(db, `SELECT COUNT(*) AS n FROM outbound_ledger WHERE status='SENDING' AND updated_at < ?`, now - 3600)
-  if (n === null || n === 0) return null
+  if (n === null) return unreadable('outbound_ledger', '§7.3')
+  if (n === 0) return null
   return {
     id: 'sending_stuck', severity: 'CRITICAL', ref: '§7.3',
     title: 'Küldés ragadt SENDING állapotban',
     detail: `${n} sor egy óránál régebben SENDING. A folyamat vagy elszállt a hívás közben, vagy a readback nem futott le.`,
     action: 'Visszaolvasás a kereshető jel alapján, MIELŐTT bármit újraküldenél.',
+  }
+}
+
+/**
+ * E6 (review 2026-08-13). FAILED_RETRYABLE was an ORPHAN STATE.
+ *
+ * N-3 correctly took it out of the auto-reconcile queue: a row the adapter
+ * proved never reached the provider needs a FIRST delivery, and the queue
+ * evaluates no gate, so its retry has to go back through dispatchApprovedSend.
+ * What nothing did was NOTICE that it never went back. No check reported it, so
+ * an approved send knocked over by a transient provider failure sat in the
+ * ledger forever and the daily report stayed silent — the exact shape of the
+ * 2026-08-09 incident this module was written for, one status along.
+ *
+ * Reported, never auto-redispatched: redispatching here would put the gate back
+ * where N-3 removed it from.
+ */
+const failedRetryableStranded: Check = (db, now) => {
+  const n = count(db,
+    `SELECT COUNT(*) AS n FROM outbound_ledger WHERE status='FAILED_RETRYABLE' AND updated_at < ?`,
+    now - 6 * 3600)
+  if (n === null) return unreadable('outbound_ledger', '§7.3, N-3')
+  if (n === 0) return null
+  return {
+    id: 'failed_retryable_stranded', severity: 'WARNING', ref: '§7.3, §19, N-3',
+    title: 'Újrapróbálható hiba áll, és senki nem próbálja újra',
+    detail: `${n} sor FAILED_RETRYABLE állapotban 6 óránál régebben. Az automata egyeztetés szándékosan nem nyúl hozzájuk (a újraküldés ELSŐ kézbesítés, kapun kell átmennie), tehát csak a jóváhagyott küldési úton mozdulhatnak.`,
+    action: 'Nézd meg, mi bukott el rajtuk. Ha a küldés még aktuális, a jóváhagyott küldési ajtón (dispatch) kell újraindítani; ha nem, zárd le.',
   }
 }
 
@@ -158,7 +213,8 @@ const connectorDown: Check = (db) => {
 
 const staleClaims: Check = (db, now) => {
   const n = count(db, `SELECT COUNT(*) AS n FROM case_claims WHERE claim_expires_at < ?`, now)
-  if (n === null || n === 0) return null
+  if (n === null) return unreadable('case_claims', '§9')
+  if (n === 0) return null
   return {
     id: 'stale_claims', severity: 'WARNING', ref: '§9',
     title: 'Lejárt foglalás maradt a táblában',
@@ -233,7 +289,8 @@ const duplicateSendAttempt: Check = (db) => {
 const failedReadback: Check = (db) => {
   // §19 minimum #3: a send the provider accepted but we could never verify.
   const n = count(db, `SELECT COUNT(*) AS n FROM outbound_ledger WHERE status='APPLIED_UNVERIFIED'`)
-  if (n === null || n === 0) return null
+  if (n === null) return unreadable('outbound_ledger', '§19, v4.2.1 B.1')
+  if (n === 0) return null
   return {
     id: 'readback_never_succeeded', severity: 'WARNING', ref: '§19, v4.2.1 B.1',
     title: 'Sikertelen visszaolvasás',
@@ -266,7 +323,8 @@ const expiredApproval: Check = (db, now) => {
   const n = count(db,
     `SELECT COUNT(*) AS n FROM campaign_approvals WHERE status='APPROVED' AND valid_until IS NOT NULL AND valid_until < ?`,
     now)
-  if (n === null || n === 0) return null
+  if (n === null) return unreadable('campaign_approvals', '§19, §3.2')
+  if (n === 0) return null
   return {
     id: 'approval_expired', severity: 'WARNING', ref: '§19, §3.2',
     title: 'Lejárt jóváhagyás',
@@ -299,7 +357,8 @@ const radarCheckFailing: Check = (db, now) => {
   const n = count(db,
     `SELECT COUNT(*) AS n FROM radar_items WHERE status='ACTIVE' AND next_check_at IS NOT NULL AND next_check_at < ?`,
     now - DAY)
-  if (n === null || n === 0) return null
+  if (n === null) return unreadable('radar_items', '§19, §16')
+  if (n === 0) return null
   return {
     id: 'radar_check_overdue', severity: 'WARNING', ref: '§19, §16',
     title: 'Radar-ellenőrzés csúszik',
@@ -395,7 +454,7 @@ const zstStuckSending: Check = (db, now) => {
   const n = count(db,
     `SELECT COUNT(*) AS n FROM zst_outbound_ledger WHERE status='SENDING' AND sending_at < ?`,
     now - 3600)
-  if (n === null) return null
+  if (n === null) return unreadable('zst_outbound_ledger', '§7, §19')
   if (n === 0) return null
   return {
     id: 'zst_outbound_stuck_sending', severity: 'CRITICAL', ref: '§7, §19',
@@ -408,7 +467,8 @@ const zstStuckSending: Check = (db, now) => {
 /** A corporate claim left behind by a crashed run blocks that case forever. */
 const zstStaleClaims: Check = (db, now) => {
   const n = count(db, `SELECT COUNT(*) AS n FROM zst_case_claims WHERE claim_expires_at < ?`, now)
-  if (n === null || n === 0) return null
+  if (n === null) return unreadable('zst_case_claims', '§9')
+  if (n === 0) return null
   return {
     id: 'zst_stale_claims', severity: 'WARNING', ref: '§9',
     title: 'Lejárt céges claim maradt a táblában',
@@ -421,7 +481,8 @@ const zstStaleClaims: Check = (db, now) => {
 const zstMessagesWithoutThread: Check = (db) => {
   const n = count(db,
     `SELECT COUNT(*) AS n FROM zst_email_processing WHERE thread_id IS NULL OR thread_id = ''`)
-  if (n === null || n === 0) return null
+  if (n === null) return unreadable('zst_email_processing', '§8')
+  if (n === 0) return null
   return {
     id: 'zst_message_without_thread', severity: 'WARNING', ref: '§8',
     title: 'Céges üzenet szálazonosító nélkül',
@@ -535,7 +596,7 @@ const awaitingOwnerTooLong: Check = (db) => {
 
 export const CHECKS: Check[] = [
   stuckLocalApplied, openBatches, missingCheckpoint,
-  outboundNeedsHuman, outcomeUnknown, stuckSending,
+  outboundNeedsHuman, outcomeUnknown, stuckSending, failedRetryableStranded,
   connectorDown, staleClaims, corporateInPersonal, outputFloorBreaches,
   // §19 further minimum + critical alerts
   duplicateSendAttempt, failedReadback, stalledCampaign, expiredApproval,

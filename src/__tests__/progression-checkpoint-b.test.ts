@@ -23,7 +23,6 @@ import {
   getMissionControlProgressionView,
   VALID_DECISIONS,
   deriveOutcomeContract,
-  resolveContext,
   buildRollingPlan,
   determineNextBestAction,
   decide,
@@ -137,18 +136,14 @@ describe('Checkpoint B — Thin shadow vertical slice (card 4a809934)', () => {
       expect(contract.definitionOfDone.length).toBeGreaterThanOrEqual(3)
     })
 
-    it('resolveContext reads event count and last event correctly', () => {
-      const ctx = resolveContext(db, 'personal_cases', 'personal_case_events', PRI_CASE_ID, now)
-      expect(ctx.eventCount).toBeGreaterThanOrEqual(1)
-      expect(ctx.ageDays).toBeGreaterThanOrEqual(2)
-      expect(ctx.sensitivity).toBe('PERSONAL')
-      expect(ctx.hasParent).toBe(false)
-      expect(ctx.hasChildren).toBe(false)
-    })
+    // (The `resolveContext` unit test that stood here is gone with the function.
+    //  It was production-dead — only tests called it — and duplicated the deep
+    //  resolver's first source. The context the pipeline actually uses is
+    //  exercised end-to-end in Stage 2 below.)
 
     it('buildRollingPlan produces plan for WAITING_EXTERNAL status', () => {
       const contract = deriveOutcomeContract('Test', 'HOME_REPAIR', 'WAITING_EXTERNAL', 'PERSONAL')
-      const ctx = { eventCount: 2, lastEventType: 'STATUS_CHANGED', lastEventReason: 'test', hasParent: false, hasChildren: false, ageDays: 3, sensitivity: 'PERSONAL' }
+      const ctx = { eventCount: 2, lastEventType: 'STATUS_CHANGED', lastEventReason: 'test', hasParent: false, hasChildren: false, ageDays: 3, statusAgeDays: 3, nextWakeAt: null, sensitivity: 'PERSONAL' }
       const plan = buildRollingPlan(contract, ctx, 'WAITING_EXTERNAL')
       expect(plan.length).toBeGreaterThanOrEqual(3)
       expect(plan[0].kind).toBe('VERIFY')
@@ -159,7 +154,7 @@ describe('Checkpoint B — Thin shadow vertical slice (card 4a809934)', () => {
 
     it('buildRollingPlan produces plan for NEW status', () => {
       const contract = deriveOutcomeContract('Test', 'INVOICE_INCOMING', 'NEW', 'ZST_INTERNAL')
-      const ctx = { eventCount: 1, lastEventType: 'CREATED', lastEventReason: null, hasParent: false, hasChildren: false, ageDays: 0, sensitivity: 'ZST_INTERNAL' }
+      const ctx = { eventCount: 1, lastEventType: 'CREATED', lastEventReason: null, hasParent: false, hasChildren: false, ageDays: 0, statusAgeDays: 0, nextWakeAt: null, sensitivity: 'ZST_INTERNAL' }
       const plan = buildRollingPlan(contract, ctx, 'NEW')
       expect(plan.length).toBeGreaterThanOrEqual(3)
       expect(plan[0].kind).toBe('VERIFY')
@@ -171,7 +166,7 @@ describe('Checkpoint B — Thin shadow vertical slice (card 4a809934)', () => {
         { step: 2, label: 'Wait', kind: 'AWAIT_EXTERNAL' as const, needsExternal: true },
         { step: 3, label: 'Execute', kind: 'EXECUTE' as const, needsExternal: false },
       ]
-      const ctx = { eventCount: 2, lastEventType: null, lastEventReason: null, hasParent: false, hasChildren: false, ageDays: 3, sensitivity: 'PERSONAL' }
+      const ctx = { eventCount: 2, lastEventType: null, lastEventReason: null, hasParent: false, hasChildren: false, ageDays: 3, statusAgeDays: 3, nextWakeAt: null, sensitivity: 'PERSONAL' }
       const nba = determineNextBestAction(plan, ctx)
       expect(nba.planStep).toBe(1) // picks Verify (first non-external)
       expect(nba.canProceedAutonomously).toBe(true)
@@ -179,28 +174,28 @@ describe('Checkpoint B — Thin shadow vertical slice (card 4a809934)', () => {
 
     it('decide returns WAIT_EXTERNAL for a waiting case with external dependency', () => {
       const nba = { planStep: 2, description: 'Check for external response', kind: 'AWAIT_EXTERNAL' as const, canProceedAutonomously: false, estimatedEffortMinutes: 5 }
-      const ctx = { eventCount: 2, lastEventType: null, lastEventReason: null, hasParent: false, hasChildren: false, ageDays: 3, sensitivity: 'PERSONAL' }
+      const ctx = { eventCount: 2, lastEventType: null, lastEventReason: null, hasParent: false, hasChildren: false, ageDays: 3, statusAgeDays: 3, nextWakeAt: null, sensitivity: 'PERSONAL' }
       const { decision } = decide(nba, ctx, 'WAITING_EXTERNAL')
       expect(decision).toBe('WAIT_EXTERNAL')
     })
 
     it('decide returns RECOVERY_REQUIRED for overdue waiting (>7 days)', () => {
       const nba = { planStep: 2, description: 'Check', kind: 'AWAIT_EXTERNAL' as const, canProceedAutonomously: false, estimatedEffortMinutes: 5 }
-      const ctx = { eventCount: 2, lastEventType: null, lastEventReason: null, hasParent: false, hasChildren: false, ageDays: 10, sensitivity: 'PERSONAL' }
+      const ctx = { eventCount: 2, lastEventType: null, lastEventReason: null, hasParent: false, hasChildren: false, ageDays: 10, statusAgeDays: 10, nextWakeAt: null, sensitivity: 'PERSONAL' }
       const { decision } = decide(nba, ctx, 'WAITING_EXTERNAL')
       expect(decision).toBe('RECOVERY_REQUIRED')
     })
 
     it('decide returns RECOVERY_REQUIRED for BLOCKED status', () => {
       const nba = { planStep: 1, description: 'Identify', kind: 'GATHER_INFO' as const, canProceedAutonomously: true, estimatedEffortMinutes: 5 }
-      const ctx = { eventCount: 2, lastEventType: null, lastEventReason: null, hasParent: false, hasChildren: false, ageDays: 1, sensitivity: 'PERSONAL' }
+      const ctx = { eventCount: 2, lastEventType: null, lastEventReason: null, hasParent: false, hasChildren: false, ageDays: 1, statusAgeDays: 1, nextWakeAt: null, sensitivity: 'PERSONAL' }
       const { decision } = decide(nba, ctx, 'BLOCKED')
       expect(decision).toBe('RECOVERY_REQUIRED')
     })
 
     it('decide returns COMPLETE for COMPLETED status', () => {
       const nba = { planStep: 1, description: 'Verify', kind: 'VERIFY' as const, canProceedAutonomously: true, estimatedEffortMinutes: 5 }
-      const ctx = { eventCount: 2, lastEventType: null, lastEventReason: null, hasParent: false, hasChildren: false, ageDays: 1, sensitivity: 'PERSONAL' }
+      const ctx = { eventCount: 2, lastEventType: null, lastEventReason: null, hasParent: false, hasChildren: false, ageDays: 1, statusAgeDays: 1, nextWakeAt: null, sensitivity: 'PERSONAL' }
       const { decision } = decide(nba, ctx, 'COMPLETED')
       expect(decision).toBe('COMPLETE')
     })
@@ -282,13 +277,26 @@ describe('Checkpoint B — Thin shadow vertical slice (card 4a809934)', () => {
       expect(runs[0].decision).toBe('WAIT_EXTERNAL')
     })
 
-    it('PRI: safety assertions JSON contains all 7 assertions all passed', () => {
+    it('PRI: safety assertions JSON records all 7, none violated, and says which were not applicable', () => {
+      // The ledger used to claim seven passes on every run. Five of the seven
+      // could not fire against a run this engine produces (no external actions,
+      // no execution-shaped decision, no error code), so "passed" was an
+      // overstatement of the protection — see progression-eval.ts. The property
+      // worth asserting is: every assertion is accounted for, none is violated,
+      // and the ones that were genuinely evaluated say so.
       const runs = snapshotProgressionRuns('personal', PRI_CASE_ID, db)
-      const parsed = JSON.parse(runs[0].safety_assertions_json as string)
+      const parsed = JSON.parse(runs[0].safety_assertions_json as string) as
+        Array<{ assertion: string; status: string; passed: boolean | null }>
       expect(parsed.length).toBe(7)
+      expect(parsed.some(a => a.status === 'violated')).toBe(false)
       for (const a of parsed) {
-        expect(a.passed).toBe(true)
+        expect(['passed', 'not_applicable']).toContain(a.status)
+        expect(a.passed).toBe(a.status === 'passed' ? true : null)
       }
+      // cross_domain_leakage reads a field every run carries, so it is really
+      // evaluated on a clean run — if THAT ever goes not_applicable, the
+      // applicability rules have drifted into hiding the checks.
+      expect(parsed.find(a => a.assertion === 'cross_domain_leakage')!.status).toBe('passed')
     })
 
     it('PRI: ZERO side effects — original case row unchanged in personal_cases', () => {
@@ -354,13 +362,26 @@ describe('Checkpoint B — Thin shadow vertical slice (card 4a809934)', () => {
       expect(runs[0].decision).toBe('CONTINUE_AUTONOMOUSLY')
     })
 
-    it('ZST: safety assertions JSON contains all 7 assertions all passed', () => {
+    it('ZST: safety assertions JSON records all 7, none violated, and says which were not applicable', () => {
+      // The ledger used to claim seven passes on every run. Five of the seven
+      // could not fire against a run this engine produces (no external actions,
+      // no execution-shaped decision, no error code), so "passed" was an
+      // overstatement of the protection — see progression-eval.ts. The property
+      // worth asserting is: every assertion is accounted for, none is violated,
+      // and the ones that were genuinely evaluated say so.
       const runs = snapshotProgressionRuns('zst', ZST_CASE_ID, db)
-      const parsed = JSON.parse(runs[0].safety_assertions_json as string)
+      const parsed = JSON.parse(runs[0].safety_assertions_json as string) as
+        Array<{ assertion: string; status: string; passed: boolean | null }>
       expect(parsed.length).toBe(7)
+      expect(parsed.some(a => a.status === 'violated')).toBe(false)
       for (const a of parsed) {
-        expect(a.passed).toBe(true)
+        expect(['passed', 'not_applicable']).toContain(a.status)
+        expect(a.passed).toBe(a.status === 'passed' ? true : null)
       }
+      // cross_domain_leakage reads a field every run carries, so it is really
+      // evaluated on a clean run — if THAT ever goes not_applicable, the
+      // applicability rules have drifted into hiding the checks.
+      expect(parsed.find(a => a.assertion === 'cross_domain_leakage')!.status).toBe('passed')
     })
 
     it('ZST: ZERO side effects — original case row unchanged in zst_cases', () => {

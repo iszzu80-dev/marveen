@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
+import { readFileSync } from 'node:fs'
 import { dueZstItems, seedZstProducts } from '../cos/zst-watch.js'
 
 // dueZstItems uses SQLite date('now') (real clock), so test dates are computed
@@ -52,5 +53,38 @@ describe('ZST proactive due-item runner', () => {
     expect(seedZstProducts(db, NOW)).toBe(5)
     expect(seedZstProducts(db, NOW)).toBe(0) // idempotent
     expect((db.prepare(`SELECT COUNT(*) n FROM zst_products`).get() as any).n).toBe(5)
+  })
+})
+
+describe('the due runner runs on Budapest time, not UTC', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  // A wall-clock test of this would only bite between 00:00 and 02:00 local, so
+  // it would pass for 22 hours a day while the bug was present — which is worse
+  // than no test. This is a STANDING CHECK on the source instead: every
+  // date('now') in the due-item queries must carry the localtime modifier.
+  //
+  // What it protects: SQLite's date('now') is UTC. In the small hours here the
+  // UTC date is still yesterday, so an evening deadline crossing surfaced up to
+  // two hours late and the 30/60/90-day licence windows were measured from a day
+  // that had already ended in the office.
+  it("no bare date('now') survives in zst-watch.ts", () => {
+    const src = readFileSync(new URL('../cos/zst-watch.ts', import.meta.url), 'utf8')
+    // Comment lines are excluded: the explanation above the queries names the
+    // very thing being banned.
+    const code = src.split('\n').filter(l => !/^\s*(\*|\/\/)/.test(l))
+    const bare = code.filter(l => /date\('now'(?!\s*,\s*'localtime')/.test(l))
+    expect(bare, `bare UTC date('now'): ${bare.join(' | ')}`).toHaveLength(0)
+    expect(src).toContain("date('now', 'localtime'")
+  })
+
+  it('a deadline exactly at the local horizon is still surfaced', () => {
+    // The behavioural half: with a UTC clock this row falls outside the horizon
+    // during the hours the two dates disagree.
+    const db = getDb()
+    const horizonLocal = db.prepare("SELECT date('now', 'localtime', '+45 days') AS d").get() as { d: string }
+    db.prepare(`INSERT INTO zst_contracts (contract_id,title,status,termination_deadline,created_at,updated_at)
+      VALUES ('c-edge','Élő szerződés','ACTIVE',@d,@n,@n)`).run({ d: horizonLocal.d, n: NOW })
+    expect(dueZstItems(db, 45).contracts.map(c => c.contract_id)).toContain('c-edge')
   })
 })

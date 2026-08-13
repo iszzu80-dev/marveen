@@ -72,11 +72,19 @@ export function purgeExpiredEvidencePackets(
       `SELECT COUNT(*) AS n FROM case_evidence_packets WHERE packet_json IS NOT NULL`,
     ).get() as { n: number }).n
     return { purged: info.changes, kept }
-  } catch {
-    // The table only exists once the progression schema has been deployed. A
-    // fresh store is not an error, but it is also not "purged 0 of many" — both
-    // numbers are zero and the caller can tell the difference from the store.
-    return { purged: 0, kept: 0 }
+  } catch (e) {
+    // E17 (review 2026-08-13). NARROW. This catch used to swallow EVERY error and
+    // return a clean {purged:0, kept:0} — so a corrupt store, a locked database
+    // or a disk failure reported a successful retention run, and the maintenance
+    // script that fails loud on purpose was handed a success to print. The only
+    // error this is allowed to absorb is the one it was written for: a fresh
+    // store where the progression schema has not been deployed yet, so the table
+    // genuinely does not exist. Everything else is a failed purge and has to
+    // travel, because the alternative is sensitive extracted content quietly
+    // living past its policy.
+    const msg = String((e as Error)?.message ?? e)
+    if (/no such table/i.test(msg)) return { purged: 0, kept: 0 }
+    throw e
   }
 }
 

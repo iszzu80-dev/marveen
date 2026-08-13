@@ -4,7 +4,11 @@ import { setLadder } from '../cos/autonomy-ladder.js'
 import { createCase } from '../cos/case-store.js'
 import { registerConnector, setMode, recordSuccess } from '../cos/connector-health.js'
 import { GmailSendAdapter, DryRunTransport } from '../cos/adapters/gmail-send.js'
-import { draftSend, approveSend, rejectSend, dispatchApprovedSend, renderedPayloadHash } from '../cos/send-flow.js'
+import {
+  draftSend, approveSend, rejectSend, dispatchApprovedSend, renderedPayloadHash,
+  defaultSendQuota, DEFAULT_SEND_QUOTA_MAX,
+} from '../cos/send-flow.js'
+import { quotaUsage } from '../cos/quota.js'
 
 // #4: the COS can send an email — but ONLY after the owner's explicit per-payload
 // approval AND only through the full dispatch gate. These tests PROVE the
@@ -97,6 +101,68 @@ describe('COS approval-gated send flow (#4)', () => {
     expect(r.sent).toBe(false)
     expect(r.decision.reasons.join()).toMatch(/not write-usable/i)
     expect(t.sent.size).toBe(0)
+  })
+
+  // E2 (review 2026-08-13). The claim that serialises two dispatches of the same
+  // row took its owner id from `dispatch-${ledgerId}` — deterministic, and
+  // acquireClaim is re-entrant for the same owner, so both concurrent callers
+  // got acquired:true with the SAME fence. The serialisation the comment claimed
+  // did not exist; the only thing standing between a double-click and two sends
+  // was the ledger state machine.
+  it('E2: two overlapping dispatches of the same row contend — only one gets the claim', async () => {
+    const db = getDb()
+    const d = draftSend(db, draftArgs(), NOW)
+    approveSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to, envelope: { maxTotalOutbound: 5 } }, NOW + 1)
+    const t = new DryRunTransport()
+    // A transport that blocks inside send() until we let it go: the second
+    // dispatch runs while the first is genuinely mid-flight, which is the window
+    // the claim exists for.
+    let release!: () => void
+    const held = new Promise<void>((r) => { release = r })
+    const slow = new GmailSendAdapter(t)
+    const realSend = slow.send.bind(slow)
+    let first = true
+    slow.send = async (a) => { if (first) { first = false; await held } return realSend(a) }
+
+    const p1 = dispatchApprovedSend(db, slow, dispatchArgs(d), NOW + 2)
+    await new Promise((r) => setImmediate(r))
+    const r2 = await dispatchApprovedSend(db, slow, dispatchArgs(d), NOW + 2)
+    release()
+    const r1 = await p1
+
+    expect(r2.sent).toBe(false)
+    expect(r2.decision.reasons.join()).toMatch(/mar kuldes alatt van/)
+    expect(r1.sent).toBe(true)
+    expect(t.sent.size).toBe(1) // <-- exactly one delivery
+  })
+
+  // E7 (review 2026-08-13). quota.ts implemented a correct atomic rolling-window
+  // cap and NOTHING in production ever passed opts.quota — the only caller was a
+  // test. There was no per-window rate limit anywhere on the live send path.
+  it('E7: the default send quota is live on the dispatch door', async () => {
+    const db = getDb()
+    const d = draftSend(db, draftArgs(), NOW)
+    approveSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to }, NOW + 1)
+    const t = new DryRunTransport()
+    await dispatchApprovedSend(db, new GmailSendAdapter(t), dispatchArgs(d), NOW + 2)
+    // The counter exists and moved — before this, send_quotas stayed empty
+    // forever no matter how much mail went out.
+    expect(quotaUsage(db, defaultSendQuota('gmail').key)).toEqual({ used: 1, max: DEFAULT_SEND_QUOTA_MAX })
+  })
+
+  it('E7: a full quota window refuses the send, and the reason reaches the caller (E18)', async () => {
+    const db = getDb()
+    const d = draftSend(db, draftArgs(), NOW)
+    approveSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to }, NOW + 1)
+    const t = new DryRunTransport()
+    const r = await dispatchApprovedSend(db, new GmailSendAdapter(t), dispatchArgs(d), NOW + 2,
+      { quota: { key: 'personal:EMAIL_SEND:gmail', maxCount: 0, windowSec: 3600 } })
+    expect(r.sent).toBe(false)
+    expect(t.sent.size).toBe(0)
+    // The gate ALLOWED it — so decision.reasons is empty and the only place the
+    // refusal is legible is lastError. That was the E18 hole.
+    expect(r.decision.allowed).toBe(true)
+    expect(String(r.lastError)).toMatch(/quota exceeded/)
   })
 
   it('highly-sensitive content to a low profile is blocked (sensitivity gate)', async () => {

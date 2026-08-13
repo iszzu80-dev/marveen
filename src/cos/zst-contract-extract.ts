@@ -18,6 +18,7 @@
 
 import type Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
+import { parseHufAmounts, parseDates, nameFromSender, normaliseExtractionText } from './zst-extract-common.js'
 
 export interface ZstContractInput {
   contractId?: string
@@ -45,28 +46,19 @@ export interface ContractEmailSource {
   from: string
   subject: string
   body: string
+  /** Whether `body` is the whole mail or the 300-character snippet. A notice
+   *  period and a renewal date routinely sit below the fold, so a snippet read
+   *  is a partial read and is not allowed to call itself HIGH confidence.
+   *  zst_contracts has no notes column to record the marker in — the schema
+   *  change is reported rather than made here. */
+  extractionSource?: 'FULL_BODY' | 'SNIPPET'
 }
 
-// "1 234 567 Ft", "1.234.567 Ft", "15 484 HUF" → 1234567 (forint int).
-const HUF_AMOUNT = /(\d{1,3}(?:[ .]\d{3})+|\d{3,})\s?(?:Ft|HUF|forint)\b/gi
-function parseHufAmounts(text: string): number[] {
-  const out: number[] = []
-  for (const m of text.matchAll(HUF_AMOUNT)) {
-    const n = parseInt(m[1].replace(/[ .]/g, ''), 10)
-    if (!Number.isNaN(n)) out.push(n)
-  }
-  return out
-}
-
-// ISO or hu date "2026-07-22", "2026.07.22", "2026. 07. 22." → ISO.
-const DATE_RE = /\b(20\d{2})[.\-/ ]\s?(\d{1,2})[.\-/ ]\s?(\d{1,2})\b/g
-function parseDates(text: string): string[] {
-  const out: string[] = []
-  for (const m of text.matchAll(DATE_RE)) {
-    out.push(`${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`)
-  }
-  return out
-}
+// Amounts and dates come from the shared extractor helpers now
+// (zst-extract-common.ts). This file's copy of parseHufAmounts had NOT grown the
+// NO-BREAK SPACE the invoice copy had, so "1<NBSP>200<NBSP>000 Ft" fell through
+// to the `\d{3,}` fallback, matched the LAST group and recorded a financial
+// commitment of 0 — a contract worth 1.2M booked as free.
 
 // A date appearing within ~40 chars AFTER a renewal/expiry cue, e.g.
 // "a szerződés lejár: 2026-09-30" or "renews on 2026/09/30". Used to pick the
@@ -86,14 +78,6 @@ function parseNoticeDays(text: string): number | undefined {
   return Number.isNaN(n) ? undefined : n
 }
 
-// Counterparty: the sender's display name, else the domain.
-function counterpartyFromSender(from: string): string | null {
-  const disp = /"?([^"<]+?)"?\s*</.exec(from)
-  if (disp && disp[1].trim()) return disp[1].trim()
-  const dom = /@([\w.-]+)/.exec(from)
-  return dom ? dom[1] : null
-}
-
 const CONTRACT_CUE = /\b(szerződés\w*|megújít\w*|megújul\w*|előfizetés\w*|felmond\w*|hosszabbít\w*|contract\w*|agreement\w*|renew\w*|subscription\w*|auto-?renew\w*|terminat\w*|licen[cs]\w*)\b/i
 const AUTO_CUE = /\b(automatikusan\s+megújul\w*|auto-?renew\w*|magától\s+megújul\w*|önműköd\w*\s+megújul\w*)\b/i
 const MANUAL_CUE = /\b(kézi\s+megújít\w*|manual\s+renew\w*|felmond\w*\s+szükséges|meg\s+kell\s+újít\w*|explicit\s+renew\w*)\b/i
@@ -101,11 +85,14 @@ const MANUAL_CUE = /\b(kézi\s+megújít\w*|manual\s+renew\w*|felmond\w*\s+szük
 /** Extract contract fields from an email. Returns null if it does not look like a
  *  contract/renewal notice at all (no contract cue). */
 export function extractContract(src: ContractEmailSource): ExtractedContract | null {
-  const text = `${src.subject}\n${src.body}`
+  // Normalised before ANY regex runs: the expiry-near and notice-period cues
+  // scan for digits at a distance, and a NO-BREAK SPACE in between is invisible
+  // to \s in an un-normalised string.
+  const text = normaliseExtractionText(`${src.subject}\n${src.body}`)
   if (!CONTRACT_CUE.test(text)) return null
 
   const extracted: string[] = []
-  const counterpartyId = counterpartyFromSender(src.from) ?? undefined
+  const counterpartyId = nameFromSender(src.from) ?? undefined
   if (counterpartyId) extracted.push('counterparty_id')
 
   const expiryNear = parseExpiryNear(text)
@@ -140,10 +127,19 @@ export function extractContract(src: ContractEmailSource): ExtractedContract | n
     }
   }
 
-  const contractType = /\b(licen[cs]\w*|előfizetés\w*|subscription\w*)\b/i.test(text) ? 'SUBSCRIPTION' : 'SERVICE'
+  // 'SERVICE' used to be the else-branch, which made it a guess wearing the
+  // clothes of an extraction: this module's contract is that an unparseable
+  // field stays null, and every renewal notice with no licence/subscription cue
+  // was being filed as a service contract on no evidence at all. Undefined now —
+  // the column stays NULL and a human classifies it.
+  const contractType = /\b(licen[cs]\w*|előfizetés\w*|subscription\w*)\b/i.test(text) ? 'SUBSCRIPTION'
+    : /\b(szolgáltatás\w*|service\s+agreement|megbízás\w*|vállalkozás\w*)\b/i.test(text) ? 'SERVICE'
+    : undefined
+  if (contractType) extracted.push('contract_type')
 
   const confidence: ExtractedContract['confidence'] =
-    expiryDate && counterpartyId ? 'HIGH' : expiryDate || counterpartyId ? 'PARTIAL' : 'LOW'
+    expiryDate && counterpartyId && src.extractionSource !== 'SNIPPET' ? 'HIGH'
+      : expiryDate || counterpartyId ? 'PARTIAL' : 'LOW'
 
   return {
     caseId: src.caseId, title: src.subject.trim() || 'Szerződés', contractType, counterpartyId,

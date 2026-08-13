@@ -12,8 +12,10 @@
 
 import type Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync, existsSync, readFileSync, renameSync, unlinkSync } from 'node:fs'
 import { join, dirname } from 'node:path'
+import { CASE_SENSITIVITIES } from './schema.js'
+import { ZST_SENSITIVITIES } from './zst-sensitivity.js'
 
 export type DocNamespace = 'personal' | 'zst'
 export type DocSource = 'email' | 'telegram' | 'drive' | 'manual' | 'web'
@@ -82,8 +84,20 @@ export function storeDocument(
     storedPath = contentPath(root, sha)
     byteSize = input.bytes.length
     if (!existsSync(storedPath)) {
+      // Write to a sibling temp name and rename into place. A direct write left
+      // a half-written file at the content-addressed path if the process died
+      // mid-write — and every later call sees existsSync() true and trusts it,
+      // so a truncated document would be served forever under a hash it does
+      // not match. rename() within one directory is atomic.
       mkdirSync(dirname(storedPath), { recursive: true })
-      writeFileSync(storedPath, input.bytes)
+      const tmp = `${storedPath}.tmp-${process.pid}-${Date.now()}`
+      try {
+        writeFileSync(tmp, input.bytes)
+        renameSync(tmp, storedPath)
+      } catch (e) {
+        try { unlinkSync(tmp) } catch { /* the temp file may not exist */ }
+        throw e
+      }
     }
   } else if (input.storedPath) {
     // Adopt a file already on disk (Drive backfill) — hash it in place, don't move it.
@@ -219,10 +233,32 @@ export function resolveShareableAttachments(db: Database.Database, documentIds: 
 /** Mark a document shareable for outbound send (the explicit clearance the P4
  *  gate requires). Deliberately a separate, auditable action — a document is
  *  never shareable by default. */
+/** The sensitivity classes a document row may carry. Both vocabularies are
+ *  storable because a document can belong to either namespace, plus UNKNOWN,
+ *  which is the fail-closed default the module opens with. */
+export const DOCUMENT_SENSITIVITIES: readonly string[] = [
+  'UNKNOWN',
+  ...CASE_SENSITIVITIES,
+  ...ZST_SENSITIVITIES,
+]
+
+export function isKnownDocumentSensitivity(v: string): boolean {
+  return DOCUMENT_SENSITIVITIES.includes(v)
+}
+
 export function setDocumentShareable(
   db: Database.Database, documentId: string, allowed: boolean, sensitivity?: string,
   now = Math.floor(Date.now() / 1000),
 ): void {
+  // The sensitivity written here is what the share gate later reads to decide
+  // whether a document may leave. An arbitrary string was accepted and stored,
+  // and a class nobody recognises is not a restriction — it is a hole shaped
+  // like one. Only the declared vocabulary is storable; anything else refuses.
+  if (sensitivity !== undefined && !isKnownDocumentSensitivity(sensitivity)) {
+    throw new Error(
+      `unknown document sensitivity '${sensitivity}' — allowed: ${DOCUMENT_SENSITIVITIES.join(', ')}`,
+    )
+  }
   const sets = ['external_share_allowed = ?', 'updated_at = ?']
   const args: unknown[] = [allowed ? 1 : 0, now]
   if (sensitivity) { sets.splice(1, 0, 'sensitivity = ?'); args.splice(1, 0, sensitivity) }

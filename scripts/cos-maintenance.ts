@@ -23,12 +23,10 @@
  *
  * Exit code 1 on any failure so a scheduler can tell.
  */
-import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs'
-import { join } from 'node:path'
-import Database from 'better-sqlite3'
+import { existsSync, mkdirSync } from 'node:fs'
 import { getDb, initDatabase } from '../src/db.js'
-import { assertStorePermissions, anyTooOpen } from '../src/cos/store-security.js'
-import { createEncryptedBackup, pruneBackups, restoreEncryptedBackup } from '../src/cos/backup.js'
+import { assertStorePermissions, anyTooOpen, missingPaths } from '../src/cos/store-security.js'
+import { createEncryptedBackup, pruneBackups, verifyEncryptedBackup } from '../src/cos/backup.js'
 import {
   purgeExpiredAttachmentContent, deletedCasesEligibleForPurge, purgeExpiredEvidencePackets,
 } from '../src/cos/retention.js'
@@ -50,6 +48,11 @@ const perms = assertStorePermissions([
 ], { enforce: true })
 report.permissions = { checked: perms.length, fixed: perms.filter(p => p.fixed).map(p => p.path) }
 if (anyTooOpen(perms)) problems.push(`still over-open after enforcement: ${perms.filter(p => p.tooOpen).map(p => p.path).join(', ')}`)
+// E17: a path that does not exist was silently skipped — it produced no entry
+// at all, so anyTooOpen() stayed false and the check reported success while
+// checking nothing. A typo'd or moved store path is now its own problem.
+const missing = missingPaths(perms)
+if (missing.length) problems.push(`store path not found (never checked): ${missing.join(', ')}`)
 
 // ── 2. retention purge ──────────────────────────────────────────────────────
 initDatabase(DB_PATH)
@@ -84,21 +87,25 @@ if (!passphrase) {
     const made = createEncryptedBackup({ dbPath: DB_PATH, destDir: BACKUP_DIR, passphrase, now })
     const pruned = pruneBackups({ destDir: BACKUP_DIR, now })
 
-    const bytes = restoreEncryptedBackup({ encPath: made.path, passphrase })
+    // E3: the verification lives in backup.ts now, so the restore test is the
+    // same code the unit tests pin. It decrypts, OPENS the bytes as a database
+    // and runs PRAGMA integrity_check — the old probe here counted rows but
+    // never asked SQLite whether the file was internally sound, so a torn
+    // snapshot (which is what byte-copying a live WAL store produces) could
+    // return a plausible count and pass.
+    //
     // The probe is written NEXT TO THE BACKUP, not in tmpdir. On this box /tmp is
     // a 5.4 GB tmpfs and the store is 165 MB, so a probe there plus the backup
     // itself filled it and the run died with ENOSPC — found by running this
-    // against a copy of the live store. Deleted in the finally either way.
-    const probe = join(BACKUP_DIR, `.restore-probe-${now}.db`)
-    writeFileSync(probe, bytes, { mode: 0o600 })
-    let rows = 0
-    try {
-      const t = new Database(probe, { readonly: true })
-      rows = (t.prepare('SELECT COUNT(*) AS n FROM personal_cases').get() as { n: number }).n
-      t.close()
-    } finally { try { unlinkSync(probe) } catch { /* best effort */ } }
+    // against a copy of the live store. Deleted by the verifier either way.
+    const v = verifyEncryptedBackup({ encPath: made.path, passphrase, probeDir: BACKUP_DIR })
+    const rows = v.cases ?? 0
 
-    report.backup = { path: made.path, bytes: made.bytes, pruned: pruned.deleted.length, kept: pruned.kept.length, restoredCases: rows }
+    report.backup = {
+      path: made.path, bytes: made.bytes, pruned: pruned.deleted.length,
+      kept: pruned.kept.length, restoredCases: rows, integrity: v.integrity,
+    }
+    if (!v.ok) problems.push(`restore test: ${v.integrity}${v.problem ? ` — ${v.problem}` : ''}`)
     // A backup that decrypts to an openable database with no cases in it is not
     // proof of anything when the live store has cases.
     const live = (db.prepare('SELECT COUNT(*) AS n FROM personal_cases').get() as { n: number }).n

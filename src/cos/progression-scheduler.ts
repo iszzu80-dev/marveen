@@ -53,6 +53,35 @@ export function scheduleNextProgression(
   ).run(nextProgressionAt, now, domain, caseId)
 }
 
+/** Push a case's next check OUT, without ever pulling it in or resurrecting a
+ *  case that has been taken off the schedule.
+ *
+ *  scheduleNextProgression is unconditional, which is right for "arm this wait"
+ *  and wrong for "come back later": the heartbeat calls this after a sweep, and
+ *  the same sweep may have COMPLETED the case (next_progression_at set to NULL,
+ *  progression disabled). An unconditional write there would put a finished case
+ *  back into the queue. So this only moves a case that is still scheduled, still
+ *  enabled, and currently due.
+ *
+ *  Returns true when the check was actually moved. */
+export function deferProgression(
+  db: Database.Database,
+  domain: 'personal' | 'zst',
+  caseId: string,
+  nextProgressionAt: number,
+  now: number,
+): boolean {
+  const r = db.prepare(
+    `UPDATE case_progression_state
+     SET next_progression_at = ?, updated_at = ?
+     WHERE domain = ? AND case_id = ?
+       AND progression_enabled = 1
+       AND next_progression_at IS NOT NULL
+       AND next_progression_at <= ?`,
+  ).run(nextProgressionAt, now, domain, caseId, now)
+  return r.changes === 1
+}
+
 // ── Due-case discovery ───────────────────────────────────────────────────
 
 export interface DueCase {
@@ -130,23 +159,37 @@ export function tryClaimProgression(
   runId: string,
   leaseDurationSeconds: number,
   now: number,
+  opts: {
+    /** A14. The sweep claims only cases that are DUE — that is what makes it a
+     *  scheduler. A manual trigger (the Mission Control owner action) is not
+     *  scheduled and never will be, so requiring due-ness there would refuse
+     *  the cycle almost every time and quietly re-open the race it is meant to
+     *  close. Set false to contend for the SAME lease without the schedule
+     *  predicate: mutual exclusion, not eligibility. */
+    requireDue?: boolean
+  } = {},
 ): string | null {
   domainGuard(db, domain, caseId, 'tryClaimProgression')
 
   const expiresAt = now + leaseDurationSeconds
+  const requireDue = opts.requireDue !== false
+
+  const dueClause = requireDue
+    ? `AND progression_enabled = 1
+       AND next_progression_at IS NOT NULL
+       AND next_progression_at <= @now`
+    : ''
 
   const result = db.prepare(
     `UPDATE case_progression_state
-     SET progression_claimed_by = ?,
-         progression_claim_expires_at = ?,
-         updated_at = ?
-     WHERE domain = ? AND case_id = ?
-       AND progression_enabled = 1
-       AND next_progression_at IS NOT NULL
-       AND next_progression_at <= ?
+     SET progression_claimed_by = @runId,
+         progression_claim_expires_at = @expiresAt,
+         updated_at = @now
+     WHERE domain = @domain AND case_id = @caseId
+       ${dueClause}
        AND (progression_claimed_by IS NULL
-            OR progression_claim_expires_at < ?)`,
-  ).run(runId, expiresAt, now, domain, caseId, now, now)
+            OR progression_claim_expires_at < @now)`,
+  ).run({ runId, expiresAt, now, domain, caseId })
 
   return result.changes === 1 ? caseId : null
 }

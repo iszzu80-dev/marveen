@@ -75,6 +75,21 @@ describe('evidence packet retention', () => {
     expect(purgeExpiredEvidencePackets(getDb(), NOW)).toEqual({ purged: 0, kept: 0 })
   })
 
+  // E17 (review 2026-08-13). The catch above absorbed EVERY error and returned a
+  // clean {purged:0, kept:0}, so a corrupt store, a locked database or a disk
+  // failure reported a successful retention run — and cos-maintenance.ts, which
+  // fails loud on purpose, was handed a success to print. Only the error it was
+  // written for (no such table, on a store without the progression schema) may
+  // be absorbed.
+  it('E17: a REAL failure is not laundered into a clean retention run', () => {
+    const db = getDb()
+    // A table that exists but cannot answer the query — the shape of a
+    // half-applied migration, which is exactly the case the old catch hid.
+    db.exec('DROP TABLE case_evidence_packets')
+    db.exec('CREATE TABLE case_evidence_packets (packet_id TEXT PRIMARY KEY)')
+    expect(() => purgeExpiredEvidencePackets(db, NOW)).toThrow(/no such column/i)
+  })
+
   it('STANDING CHECK: the maintenance cycle actually calls it', () => {
     // The whole point of N4-2 was a policy that did not know about a table. A
     // purge function nothing runs is the same hole with more code in it.

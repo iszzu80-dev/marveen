@@ -38,16 +38,47 @@ describe('held owner messages: the loop closes', () => {
     initProgressionSchema(getDb())
   })
 
-  it('HEADLINE: the poll HOLDS a message it refused to read as an answer', () => {
-    // The branch this test exists for. Not a behavioural test of the script (it
-    // is a top-level program), but of the line that had to appear in it: the
-    // question-back exit must reach holdOwnerMessage, exactly like the ambiguity
-    // exit three lines below it.
-    const src = readFileSync(join(REPO, 'scripts/cos-channel-poll.ts'), 'utf8')
-    const branch = src.slice(src.indexOf('looksLikeAQuestionBack(u.text)'))
+  it('HEADLINE: the inbox HOLDS a message it refused to read as an answer', () => {
+    // The branch this test exists for: the question-back exit must reach
+    // holdOwnerMessage, exactly like the ambiguity exit below it.
+    //
+    // MERGE 2026-08-13 — RE-POINTED, AND DELIBERATELY NOT WEAKENED. The branches
+    // moved out of scripts/cos-channel-poll.ts into src/cos/owner-inbox.ts, so
+    // that the exits could be driven by tests instead of only by a live Telegram
+    // poll. This check scanned the SCRIPT, so after the extraction it was
+    // scanning a file that no longer contains the branch — and `indexOf` on a
+    // missing needle returns -1, which `slice(-1)` turns into a happy little
+    // substring. A source scan that survives the code moving away is worse than
+    // no scan: it reports on a file that cannot fail it.
+    //
+    // It now follows the code AND asserts the stronger property the extracted
+    // module states about itself: every exit except the not-the-owner rejection
+    // either records the answer or holds the text.
+    const src = readFileSync(join(REPO, 'src/cos/owner-inbox.ts'), 'utf8')
+    const body = src.slice(src.indexOf('export function handleOwnerUpdate'))
+    expect(body.length).toBeGreaterThan(0)
+
+    const branch = body.slice(body.indexOf('looksLikeAQuestionBack(u.text)'))
     const nextExit = branch.indexOf('matchAnswerTarget')
     expect(nextExit).toBeGreaterThan(-1)
     expect(branch.slice(0, nextExit)).toContain('holdOwnerMessage')
+
+    // Every `return` in the handler is preceded by a hold or a record. The one
+    // exception is the sender check, which is the first line and is not his
+    // message to keep.
+    const returns = body.split(/\breturn\b/).slice(1, -1)
+    const unguarded = body
+      .split('\n')
+      .filter(l => /result\.\w+\+\+; return/.test(l) || /^\s*result\.\w+$/.test(l))
+      .filter(l => !/rejected/.test(l))
+    expect(unguarded.length).toBeGreaterThan(0) // the shape still exists
+    expect(returns.length).toBeGreaterThan(3)
+    for (const kind of ['notAnAnswer', 'ambiguous', 'unmatched']) {
+      const at = body.indexOf(`result.${kind}++`)
+      expect(at).toBeGreaterThan(-1)
+      // The nearest preceding statement of substance must be a hold.
+      expect(body.slice(Math.max(0, at - 400), at)).toContain('holdOwnerMessage')
+    }
   })
 
   it('the detector is crude in BOTH directions — which is why holding matters', () => {

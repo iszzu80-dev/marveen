@@ -163,14 +163,25 @@ export function validateEvidencePacket(
       return { ok: false, reason: `readSources cites "${String(s)}", which was not in the context` }
     }
   }
+  // ELEMENT SHAPE, not just array-ness. `facts: [null]` used to reach
+  // `fact.statement` and throw a TypeError out of readCase, which the sweep then
+  // recorded as a per-case FAILURE — so the refusal packet this module exists to
+  // write was never stored, and the audit row for a bad model reply was the one
+  // row missing. A malformed reply is a refusal, not a crash.
+  const isRecord = (v: unknown): v is Record<string, unknown> =>
+    typeof v === 'object' && v !== null && !Array.isArray(v)
+
   for (const f of p.facts) {
-    const fact = f as Record<string, unknown>
-    if (typeof fact.statement !== 'string' || !fact.statement.trim()) {
+    if (!isRecord(f)) return { ok: false, reason: 'a fact is not an object' }
+    if (typeof f.statement !== 'string' || !f.statement.trim()) {
       return { ok: false, reason: 'a fact has no statement' }
     }
-    if (!supplied.has(String(fact.sourceRef))) {
-      return { ok: false, reason: `a fact cites source "${String(fact.sourceRef)}", which was not in the context` }
+    if (!supplied.has(String(f.sourceRef))) {
+      return { ok: false, reason: `a fact cites source "${String(f.sourceRef)}", which was not in the context` }
     }
+  }
+  for (const m of p.missingRequirements) {
+    if (!isRecord(m)) return { ok: false, reason: 'a missingRequirement is not an object' }
   }
 
   return {

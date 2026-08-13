@@ -20,6 +20,9 @@ export interface PermCheck {
   expected: number      // the tightest allowed (file 0o600, dir 0o700)
   tooOpen: boolean
   fixed: boolean
+  /** E17: the path was not there, so NOTHING was checked about it. Reported
+   *  rather than skipped — see anyMissing. */
+  missing?: boolean
 }
 
 /**
@@ -37,7 +40,19 @@ export function assertStorePermissions(
   for (const e of entries) {
     const expected = e.kind === 'dir' ? 0o700 : 0o600
     let mode = 0
-    try { mode = statSync(e.path).mode & 0o777 } catch { continue } // missing path: skip
+    try {
+      mode = statSync(e.path).mode & 0o777
+    } catch {
+      // E17 (review 2026-08-13). A missing path used to `continue` — it produced
+      // NO entry at all, so a typo in a caller's path list silently removed that
+      // path from the check and anyTooOpen() stayed false. The control then
+      // reported success for a file it had never looked at, which is the worst
+      // possible answer from a security check: indistinguishable from "clean".
+      // A missing path is not too open (there is nothing to open), so it does
+      // not fail anyTooOpen — it gets its own entry and its own predicate.
+      out.push({ path: e.path, kind: e.kind, mode: 0, expected, tooOpen: false, fixed: false, missing: true })
+      continue
+    }
     const tooOpen = posix && (mode & ~expected) !== 0
     let fixed = false
     if (tooOpen && opts.enforce) {
@@ -53,6 +68,15 @@ export function assertStorePermissions(
 /** True if any path is still over-open (after any enforcement). */
 export function anyTooOpen(checks: PermCheck[]): boolean {
   return checks.some(c => c.tooOpen)
+}
+
+/** E17: paths the check could not see at all. Separate from anyTooOpen because
+ *  they are a different problem with a different fix — a path that is not there
+ *  is either a typo in the caller's list or a store that is not where it is
+ *  believed to be, and neither is corrected by a chmod. A caller that treats an
+ *  empty result as "all clear" is trusting a check that never ran. */
+export function missingPaths(checks: PermCheck[]): string[] {
+  return checks.filter(c => c.missing).map(c => c.path)
 }
 
 /** Field names whose VALUES are sensitive content and must never be logged raw.

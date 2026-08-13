@@ -38,8 +38,23 @@ export function base64url(buf: Buffer): string {
  *  subject). ASCII values pass through unchanged. Without this a non-ASCII
  *  Subject reaches the recipient as mojibake. */
 export function encodeHeaderValue(v: string): string {
+  const s = stripHeaderBreaks(v)
   // eslint-disable-next-line no-control-regex
-  return /[^\x00-\x7F]/.test(v) ? `=?UTF-8?B?${Buffer.from(v, 'utf8').toString('base64')}?=` : v
+  return /[^\x00-\x7F]/.test(s) ? `=?UTF-8?B?${Buffer.from(s, 'utf8').toString('base64')}?=` : s
+}
+
+/** Remove anything that could END A HEADER LINE and start a new one.
+ *
+ *  Defence in depth, not the primary control: a recipient or filename only
+ *  reaches this builder after the approval gate bound it to what the owner saw.
+ *  But the builder concatenates raw strings with \r\n, so a single newline in
+ *  `to` or in an attachment filename would inject arbitrary headers (a Bcc, a
+ *  second To) into an approved message — and the gate compares the PAYLOAD, not
+ *  the wire format it turns into. The layer that assembles the bytes should not
+ *  depend on a layer above it having been careful. */
+export function stripHeaderBreaks(v: string): string {
+  // eslint-disable-next-line no-control-regex
+  return v.replace(/[\u0000-\u001F\u007F]+/g, ' ').trim()
 }
 
 /** Headers the builder is allowed to copy through from email.headers.
@@ -67,6 +82,13 @@ function headerValue(headers: Record<string, string>, name: string): string | un
   return undefined
 }
 
+/** A filename lands inside a quoted header parameter, so a quote closes it and a
+ *  newline ends the header entirely. Quotes were already stripped; newlines were
+ *  not, which left the more dangerous half of the pair unguarded. */
+function safeFilename(v: string): string {
+  return stripHeaderBreaks(v).replace(/"/g, '')
+}
+
 export function buildRawMessage(email: OutboundEmail, marker: string, from?: string, embedMarker = true): string {
   // The searchable marker footer is embedded only when embedMarker is true. For
   // a customer-facing send where the owner approved the EXACT body, omit it so
@@ -75,7 +97,7 @@ export function buildRawMessage(email: OutboundEmail, marker: string, from?: str
   const body = embedMarker ? `${email.body}\r\n\r\n${bodyRefLine(marker)}` : email.body
   const baseHeaders = [
     from ? `From: ${from}` : null,
-    `To: ${email.to}`,
+    `To: ${stripHeaderBreaks(email.to)}`,
     `Subject: ${encodeHeaderValue(email.subject)}`,
     // Threading, when the caller supplied it. Without these a reply arrives in
     // the recipient's mailbox as a new conversation, however the subject reads.
@@ -103,9 +125,9 @@ export function buildRawMessage(email: OutboundEmail, marker: string, from?: str
       const b64 = a.contentBase64.replace(/\s+/g, '').replace(/(.{76})/g, '$1\r\n')
       parts.push(
         `--${boundary}`,
-        `Content-Type: ${a.mimeType}; name="${a.filename.replace(/"/g, '')}"`,
+        `Content-Type: ${safeFilename(a.mimeType)}; name="${safeFilename(a.filename)}"`,
         'Content-Transfer-Encoding: base64',
-        `Content-Disposition: attachment; filename="${a.filename.replace(/"/g, '')}"`,
+        `Content-Disposition: attachment; filename="${safeFilename(a.filename)}"`,
         '',
         b64,
       )

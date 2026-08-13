@@ -16,6 +16,20 @@
 //
 // Pure over the DB (no Gmail client), so it is fully testable before the live
 // history poller (which needs the write-scope consent) exists.
+//
+// ── NOT ON THE LIVE PATH (stated 2026-08-13, review finding P5) ─────────────
+//
+// Nothing in production calls classifyHistoryEvent or recordSelfEvent, and
+// nothing writes email_processing.content_hash — so the resend branch below
+// cannot match on the live store even if it were called. That is not a bug in
+// this file: the history POLLER it guards does not exist yet. Today's inlet is
+// the triage feeder, which dedups at the poll level with its own --mark file
+// and at the case level with email_processing's UNIQUE.
+//
+// It is written down here because an audit reading "AC-28 implemented" from the
+// file list would be counting a guard that guards nothing today. Wire this the
+// same day the history poller lands — and populate content_hash at commit time,
+// or the resend branch stays decorative.
 
 import type Database from 'better-sqlite3'
 import { TERMINAL_MESSAGE_STATUSES, type MessageStatus } from './email-ingest.js'

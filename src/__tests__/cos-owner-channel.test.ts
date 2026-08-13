@@ -198,3 +198,66 @@ describe('an unattributable message is HELD, not dropped', () => {
     expect(heldOwnerMessages(getDb())).toHaveLength(0)
   })
 })
+
+// ── What counts as a YES ──────────────────────────────────────────────────
+//
+// The classifier used to match a PREFIX: /^\s*(igen|ok|jó|…)\b/. So "Jó kérdés,
+// még gondolkodom" — a sentence that says the opposite — was recorded as
+// OWNER_DECISION{choice:'YES'}, and until the same day's approval-gate fix that
+// was enough to move a case out of AWAITING_APPROVAL under the words "Owner
+// approved the request". "Nem tudom" read as NO by the same rule.
+//
+// A decision is now the WHOLE message. Anything longer is a sentence, and a
+// sentence is stored as information: the engine does not advance on it and the
+// owner is not second-guessed. A wrong pairing is worse than none.
+describe('yes/no classification', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  const answerWith = (text: string) => {
+    seed('c1', 'kell-e')
+    askPendingOwnerQuestions(getDb(), { now: NOW + 10, channel: COS })
+    return recordOwnerAnswer(getDb(), {
+      caseId: 'c1', domain: 'personal', text, now: NOW + 20, channel: COS,
+    })
+  }
+
+  it.each([
+    'Igen', 'igen.', 'IGEN!', 'ok', 'Oké', 'Rendben.', 'Mehet', 'igen, mehet',
+  ])('a bare affirmative is a decision: %s', (text) => {
+    expect(answerWith(text)).toMatchObject({ eventType: 'OWNER_DECISION', choice: 'YES' })
+  })
+
+  it.each([
+    'Nem', 'nem.', 'Ne', 'Elutasítom', 'nem kell',
+  ])('a bare negative is a decision: %s', (text) => {
+    expect(answerWith(text)).toMatchObject({ eventType: 'OWNER_DECISION', choice: 'NO' })
+  })
+
+  it.each([
+    'Jó kérdés, még gondolkodom',
+    'Nem tudom, kérdezd meg a könyvelőt',
+    'Igen ám, de előbb nézzük meg a szerződést',
+    'Rendben lesz majd valamikor jövő héten',
+    'A vízdíjról: holnap utánanézek',
+  ])('a hedged sentence is INFORMATION, not a decision: %s', (text) => {
+    expect(answerWith(text)).toMatchObject({ eventType: 'OWNER_INFORMATION', choice: null })
+  })
+
+  it('an answer re-arms the progression check so the heartbeat backoff cannot delay it', () => {
+    // The sweep now backs a quiet case off; an answer must pull it straight
+    // back in, or answering and seeing nothing happen becomes the norm.
+    seed('c1', 'kell-e')
+    askPendingOwnerQuestions(getDb(), { now: NOW + 10, channel: COS })
+    getDb().prepare(
+      `UPDATE case_progression_state SET next_progression_at = ? WHERE case_id = 'c1'`,
+    ).run(NOW + 100_000)
+    const r = recordOwnerAnswer(getDb(), {
+      caseId: 'c1', domain: 'personal', text: 'Igen', now: NOW + 20, channel: COS,
+    })
+    expect(r).not.toBeNull()
+    const st = getDb().prepare(
+      `SELECT next_progression_at AS n FROM case_progression_state WHERE case_id = 'c1'`,
+    ).get() as { n: number }
+    expect(st.n).toBe(NOW + 20)
+  })
+})

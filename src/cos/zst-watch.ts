@@ -24,7 +24,15 @@ export interface ZstDueItems {
 const OPP_DECISION_STATUSES = ['OFFER_REQUIRED', 'AWAITING_ZST_APPROVAL', 'NEGOTIATION', 'PILOT_DISCUSSION']
 
 /** Surface everything due within `horizonDays`. Dates are ISO TEXT so SQLite's
- *  date() comparisons are lexicographic-correct. Read-only. */
+ *  date() comparisons are lexicographic-correct. Read-only.
+ *
+ *  Every `date('now')` below carries 'localtime' (2026-08-13). SQLite's bare
+ *  date('now') is UTC, and this runner serves a Budapest office: between
+ *  midnight and 02:00 local the UTC date is still YESTERDAY, so a deadline
+ *  crossing in the evening surfaced up to two hours late and the 30/60/90-day
+ *  licence windows were computed from a day that had already ended here. A due
+ *  runner that is a day behind on the day it matters is the one day it had to be
+ *  right. */
 export function dueZstItems(db: Database.Database, horizonDays = 45): ZstDueItems {
   const horizon = `+${horizonDays} days`
 
@@ -34,16 +42,16 @@ export function dueZstItems(db: Database.Database, horizonDays = 45): ZstDueItem
     `SELECT contract_id, title, status, expiry_date, termination_deadline, notice_period_days,
        CASE
          WHEN status IN ('RENEWAL_DUE','TERMINATION_WINDOW') THEN status
-         WHEN termination_deadline IS NOT NULL AND date(termination_deadline) <= date('now', @h) THEN 'TERMINATION_WINDOW'
-         WHEN expiry_date IS NOT NULL AND date(expiry_date, '-' || COALESCE(notice_period_days,30) || ' days') <= date('now', @h) THEN 'RENEWAL_DUE'
+         WHEN termination_deadline IS NOT NULL AND date(termination_deadline) <= date('now', 'localtime', @h) THEN 'TERMINATION_WINDOW'
+         WHEN expiry_date IS NOT NULL AND date(expiry_date, '-' || COALESCE(notice_period_days,30) || ' days') <= date('now', 'localtime', @h) THEN 'RENEWAL_DUE'
          ELSE 'DUE'
        END AS reason
      FROM zst_contracts
      WHERE status NOT IN ('EXPIRED','TERMINATED','ARCHIVED')
        AND (
          status IN ('RENEWAL_DUE','TERMINATION_WINDOW')
-         OR (termination_deadline IS NOT NULL AND date(termination_deadline) <= date('now', @h))
-         OR (expiry_date IS NOT NULL AND date(expiry_date, '-' || COALESCE(notice_period_days,30) || ' days') <= date('now', @h))
+         OR (termination_deadline IS NOT NULL AND date(termination_deadline) <= date('now', 'localtime', @h))
+         OR (expiry_date IS NOT NULL AND date(expiry_date, '-' || COALESCE(notice_period_days,30) || ' days') <= date('now', 'localtime', @h))
        )
      ORDER BY COALESCE(termination_deadline, expiry_date)`
   ).all({ h: horizon }) as DueContract[]
@@ -51,18 +59,18 @@ export function dueZstItems(db: Database.Database, horizonDays = 45): ZstDueItem
   const licenses = db.prepare(
     `SELECT license_id, product_name, renewal_date, auto_renew, cancellation_candidate,
        CASE
-         WHEN date(renewal_date) <= date('now','+30 days') THEN '30d'
-         WHEN date(renewal_date) <= date('now','+60 days') THEN '60d'
+         WHEN date(renewal_date) <= date('now', 'localtime', '+30 days') THEN '30d'
+         WHEN date(renewal_date) <= date('now', 'localtime', '+60 days') THEN '60d'
          ELSE '90d'
        END AS window
      FROM zst_licenses
-     WHERE renewal_date IS NOT NULL AND date(renewal_date) <= date('now','+90 days')
+     WHERE renewal_date IS NOT NULL AND date(renewal_date) <= date('now', 'localtime', '+90 days')
      ORDER BY renewal_date`
   ).all() as DueLicense[]
 
   const obligations = db.prepare(
     `SELECT obligation_id, contract_id, description, due_date FROM zst_obligations
-     WHERE status = 'OPEN' AND due_date IS NOT NULL AND date(due_date) <= date('now', @h)
+     WHERE status = 'OPEN' AND due_date IS NOT NULL AND date(due_date) <= date('now', 'localtime', @h)
      ORDER BY due_date`
   ).all({ h: horizon }) as DueObligation[]
 

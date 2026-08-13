@@ -28,7 +28,7 @@
 // watches for.
 
 import type Database from 'better-sqlite3'
-import { sourceCommit, sourceCommitSkipped, tryAdvanceCheckpoint, isBatchTerminal } from './email-ingest.js'
+import { sourceCommit, sourceCommitSkipped, tryAdvanceCheckpoint, isCursorPositionClear } from './email-ingest.js'
 import { quarantineBatchPoison, type QuarantineDeps } from './poison-quarantine.js'
 
 export type CommitOutcome = 'COMMITTED' | 'SKIPPED_NO_CAPABILITY' | 'FAILED'
@@ -165,7 +165,10 @@ export async function closeBatch(
     for (const b of q.blocked) quarantineBlocked.push(b.reason)
   }
 
-  if (!isBatchTerminal(db, batchId)) {
+  // Not "is this batch done" but "is the cursor position this batch would move
+  // to clear of unprocessed mail" — see isCursorPositionClear. With overlapping
+  // deltas the two differ, and only the second one is the P0.2 invariant.
+  if (!isCursorPositionClear(db, batchId)) {
     return {
       attempted: rows.length, committed, skipped, failed, quarantined, batchClosed: false, cursor: null,
       reason: quarantineBlocked.length
@@ -178,8 +181,16 @@ export async function closeBatch(
   const adv = tryAdvanceCheckpoint(db, batchId, now)
   return {
     attempted: rows.length, committed, skipped, failed, quarantined,
-    batchClosed: adv.advanced, cursor: adv.cursor,
-    reason: adv.advanced ? 'a köteg lezárult, a pozíció lépett' : 'a köteg terminális, de a pozíció nem lépett',
+    // The batch closing and the account cursor moving are two different facts.
+    // A triage batch closes and deliberately moves no cursor (it has no history
+    // position), so reporting batchClosed from `advanced` would have shown every
+    // triage close as a stall.
+    batchClosed: adv.batchTerminal, cursor: adv.cursor,
+    reason: adv.advanced
+      ? 'a köteg lezárult, a pozíció lépett'
+      : adv.batchTerminal
+        ? `a köteg lezárult, a pozíció nem lépett: ${adv.holdReason ?? 'ismeretlen ok'}`
+        : 'a köteg terminális, de a pozíció nem lépett',
   }
 }
 

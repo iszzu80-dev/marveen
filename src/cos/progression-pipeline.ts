@@ -1,4 +1,4 @@
-// Autonomous Case Progression Layer v1.1 — Thin shadow vertical slice.
+// Autonomous Case Progression Layer v1.1 — the engine that moves cases.
 // Checkpoint B (card 4a809934): first checkpoint with actual progression LOGIC.
 // Checkpoint C (card 53f1fd06): resolver depth — email thread + memory lookup.
 // Checkpoint D (card 6b7e7e5e): outcome contract / goal interpretation (LLM-based).
@@ -9,28 +9,52 @@
 //   2. Resolver           — resolve-before-ask: DB + email thread + memory
 //   3. Rolling Plan       — ordered steps to reach the outcome
 //   4. Next Best Action   — the very next thing to do
-//   5. Decision           — one of 10 valid progression decisions (§13)
-//   6. Progression Run    — record in case_progression_runs (GATE 0 ledger)
+//   5. Owner answer       — consume an answer to the CURRENT question, once
+//   6. Decision           — one of 10 valid progression decisions (§13)
+//   7. Progression Run    — record in case_progression_runs (GATE 0 ledger)
 //
-// HARD INVARIANTS (Checkpoint B/C/D scope):
-//   - ZERO side effects EXCEPT for COMPLETED transition: when all plan steps
-//     are done AND all DoD criteria are met, the pipeline transitions the case
-//     to COMPLETED and removes it from the scheduler.
-//   - Write ONLY to case_progression_state + case_progression_runs
-//   - progression_enabled stays false, progression_mode stays 'shadow'
-//   - external_reference and action_ids_json are ALWAYS null — nothing was sent or called
+// WHAT THIS FILE IS ALLOWED TO DO, as of today (the old header said otherwise
+// and had been wrong for months — see below).
+//
+//   WRITES to personal_cases / zst_cases, via transitionCase only, in exactly
+//   three situations, each of them the resolution of a question the engine
+//   itself asked:
+//     - the owner refused or abandoned      → BLOCKED
+//     - the owner approved (AWAITING_APPROVAL, explicit YES) → READY
+//     - plan exhausted AND the completion gate allows it     → COMPLETED
+//   Everything else is a write to case_progression_state + case_progression_runs
+//   and nothing more.
+//
+//   NEVER: email, dispatch, payment, or any outbound call. action_ids_json and
+//   external_reference stay null on every row this file writes, because nothing
+//   was sent or called. That part of the old invariant is still true and is the
+//   one worth keeping.
+//
+//   REFUSES ENTIRELY while the §22 kill switch is engaged. The switch pauses the
+//   whole Personal Chief; an engine that kept consuming answers and transitioning
+//   cases through it would make the switch a label rather than a stop.
+//
+// WHY THE OLD HEADER WAS DELETED. It promised "ZERO side effects", "
+// progression_enabled stays false, progression_mode stays 'shadow'". Intake and
+// migrate seed 1/'internal', the file transitions cases to BLOCKED/READY/
+// COMPLETED, and it has done so since Checkpoint E. The header described
+// Checkpoint B and was read as though it described today — on the file with the
+// widest blast radius in the system. A header that has to be checked against the
+// code is worse than none.
 
 import type Database from 'better-sqlite3'
 import { randomUUID } from 'crypto'
-import { HARD_SAFETY_ASSERTIONS, type SafetyViolation } from './progression-eval.js'
+import { evaluateSafetyAssertions, type SafetyViolation } from './progression-eval.js'
 import { recordProgressionEvents } from './progression-events.js'
 import { resolveContextDeep, CrossDomainReadError, domainGuard, type DeepResolvedContext } from './progression-resolver.js'
 import { interpretGoal, type LlmClient, type GoalInterpretation } from './progression-interpreter.js'
 import { initializeDoDVerification, canCompleteCase, type DoDProvenance } from './progression-completion.js'
-import { transitionCase } from './case-store.js'
+import { transitionCase, acquireClaim, releaseClaim } from './case-store.js'
 import { transitionZstCase } from './zst-case-store.js'
 import { scheduleNextProgression } from './progression-scheduler.js'
 import { canonicalTriggerType } from './progression-trigger.js'
+import { killSwitchRefusal } from './kill-switch.js'
+import { answerIntentOf, type AnswerIntent } from './answer-options.js'
 
 // ── Valid progression decisions (plan §13) ──────────────────────────────
 
@@ -147,51 +171,22 @@ export interface ResolvedContext {
   hasChildren: boolean
   /** Days since case creation. */
   ageDays: number
+  /** Days since the case ENTERED its current status.
+   *
+   *  Separate from ageDays because the two answer different questions and one
+   *  of them was answering the wrong one: the external-wait escalation below
+   *  used ageDays, so ANY case older than a week escalated to
+   *  RECOVERY_REQUIRED on its FIRST cycle in WAITING_EXTERNAL — "external wait
+   *  exceeded 7 days" about a wait that started a minute ago. WAIT_EXTERNAL was
+   *  effectively unreachable for real cases (they are weeks old by the time
+   *  anything waits on a third party) and the recovery queue filled with waits
+   *  nobody had waited for. A wait is measured from when it started. */
+  statusAgeDays: number
+  /** The case's own scheduled wake, when it has one in the future. A wait
+   *  bounded by a clock we already hold is WAIT_TIME, not WAIT_EXTERNAL. */
+  nextWakeAt: number | null
   /** Case sensitivity tier. */
   sensitivity: string
-}
-
-/** Gather context for a case without calling any external source (resolve-
- *  before-ask stub). Reads only from the DB; no email/Drive/Calendar access. */
-export function resolveContext(
-  db: Database.Database,
-  tableName: string,
-  eventsTable: string,
-  caseId: string,
-  now: number,
-): ResolvedContext {
-  const row = db.prepare(
-    `SELECT sensitivity, parent_case_id, created_at FROM ${tableName} WHERE case_id = ?`,
-  ).get(caseId) as { sensitivity: string; parent_case_id: string | null; created_at: number } | undefined
-
-  const eventCount = (db.prepare(
-    `SELECT count(*) as c FROM ${eventsTable} WHERE case_id = ?`,
-  ).get(caseId) as { c: number }).c
-
-  // Same exclusion as resolveContextDeep's copy of this query: the engine's own
-  // §8 events are written at the end of every run, so without the filter "the
-  // last thing that happened" is always the engine's note about itself.
-  const lastEvent = db.prepare(
-    `SELECT event_type, reason FROM ${eventsTable}
-      WHERE case_id = ? AND (source_system IS NULL OR source_system != 'progression')
-      ORDER BY created_at DESC LIMIT 1`,
-  ).get(caseId) as { event_type: string; reason: string | null } | undefined
-
-  const childCount = (db.prepare(
-    `SELECT count(*) as c FROM ${tableName} WHERE parent_case_id = ?`,
-  ).get(caseId) as { c: number }).c
-
-  const ageDays = row ? Math.floor((now - row.created_at) / 86400) : 0
-
-  return {
-    eventCount,
-    lastEventType: lastEvent?.event_type ?? null,
-    lastEventReason: lastEvent?.reason ?? null,
-    hasParent: !!row?.parent_case_id,
-    hasChildren: childCount > 0,
-    ageDays,
-    sensitivity: row?.sensitivity ?? 'PERSONAL',
-  }
 }
 
 // ── Rolling plan ────────────────────────────────────────────────────────
@@ -326,54 +321,126 @@ export function determineNextBestAction(
 // ── Owner answer consumption ─────────────────────────────────────────────
 //
 // When the pipeline returns REQUEST_DECISION / REQUEST_APPROVAL, Mission
-// Control shows a button to the owner. The owner's answer arrives as an
-// event in personal_case_events (or zst_case_events) with:
+// Control shows a button to the owner (and the Telegram path writes the same
+// event). The answer arrives as an event in personal_case_events (or
+// zst_case_events) with:
 //   event_type      = OWNER_DECISION | OWNER_INFORMATION | OWNER_CONFIRMATION
-//   source_system   = mission_control
+//   source_system   = mission_control | telegram
 //   source_reference = the progression_run_id that was current when they pressed
-//   payload         = { choice: "YES" | "NO" } (for OWNER_DECISION)
+//   payload         = { choice: "YES" | "NO" | "CANCEL" | … } — see answer-options
 //
-// A question is identified by its CONTENT — (decision, nbaStep) — not by the
-// run that asked it. Heartbeat runs re-ask the same question every 5 minutes
-// with a new run ID, so matching by run ID would permanently strand answers
-// written between heartbeats. An answer is valid while the question is
-// unchanged; it becomes stale only when the case genuinely asks something
-// different (e.g. status changed, plan step advanced).
+// An answer has three properties this code has to get right, and it used to get
+// all three wrong at once. They are one question — what does this answer MEAN
+// and how long does it mean it — so they are answered in one place:
+//
+//   WHICH QUESTION IT ANSWERS. A question is identified by its CONTENT —
+//   (decision, nbaStep) — not by the run that asked it. Heartbeat runs re-ask
+//   the same question every 5 minutes with a new run ID, so matching by run ID
+//   would permanently strand answers written between heartbeats.
+//
+//   WHEN IT WAS GIVEN. Content identity alone has no clock in it, and plan
+//   wrap-around (completed_plan_step resets to 0 when the plan is exhausted)
+//   makes the same (decision, nbaStep) tuple recur BY DESIGN. So a YES given to
+//   an approval question in March was still a valid answer to a DIFFERENT
+//   approval question asked in November: the case re-entered AWAITING_APPROVAL,
+//   the run stabilised on the same tuple, and the year-old YES approved the new
+//   request without the owner seeing it. An answer is now only considered if it
+//   was written AFTER the case entered the status it is currently asking from.
+//
+//   HOW OFTEN IT COUNTS. Once. The consuming run records the event id in its own
+//   progress_delta_json, and an event already named by an earlier run of this
+//   case is never consumed again. The ledger row IS the consumed-marker, which
+//   is also why the audit trail can now answer "which answer moved this case".
+//
+//   WHAT IT MEANS. See answer-options.ts: the option vocabulary carries an
+//   intent, and the engine reads the intent. "Lemondjuk" is not "go ahead".
 
 interface OwnerAnswer {
+  /** Primary key of the consumed event, recorded on the run that consumes it. */
+  eventId: number
   /** The event type that was matched. */
   eventType: string
-  /** For OWNER_DECISION: the owner's choice (YES/NO). null for INFO/CONFIRMATION. */
+  /** The owner's choice, when the payload carried one. */
   choice: string | null
+  /** What the engine should DO about it. */
+  intent: AnswerIntent
   /** The progression_run_id that the answer event references. */
   answeredRunId: string
   /** The NBA step that was being asked about (from the referenced run). */
   answeredNbaStep: number
 }
 
-/** Check whether the owner has answered the CURRENT question. A question is
- *  defined by (decision, nbaStep) — two questions are the same iff both
- *  fields match, regardless of which heartbeat run emitted them.
+/** When did this case last ENTER the given status?
  *
- *  Returns the answer if the latest owner event matches the current question;
- *  null if there is no answer, or the question has changed since the answer
- *  was recorded (stale). */
+ *  Reads the append-only event log: the newest STATUS_CHANGED whose new_status
+ *  is the one asked about. A case that has never changed status (created in it)
+ *  falls back to its creation time. Used for two things that both need "since
+ *  when", not "how old": the external-wait escalation clock, and the lower bound
+ *  on which owner answers may still be about the question being asked now. */
+export function statusEnteredAt(
+  db: Database.Database,
+  domain: 'personal' | 'zst',
+  caseId: string,
+  status: string,
+): number | null {
+  const tableName = domain === 'personal' ? 'personal_cases' : 'zst_cases'
+  const eventsTable = domain === 'personal' ? 'personal_case_events' : 'zst_case_events'
+  const ev = db.prepare(
+    `SELECT created_at FROM ${eventsTable}
+     WHERE case_id = ? AND new_status = ?
+     ORDER BY created_at DESC, event_id DESC LIMIT 1`,
+  ).get(caseId, status) as { created_at: number } | undefined
+  if (ev) return ev.created_at
+  const row = db.prepare(`SELECT created_at FROM ${tableName} WHERE case_id = ?`)
+    .get(caseId) as { created_at: number } | undefined
+  return row?.created_at ?? null
+}
+
+/** What the engine should do about an answer, from the event type and the
+ *  choice. The CHOICE decides when there is one — an OWNER_INFORMATION carrying
+ *  `{choice:"CANCEL"}` is a cancellation whatever the event is labelled.
+ *
+ *  An OWNER_DECISION whose payload yielded no choice is UNMAPPED, never a yes.
+ *  That case is not hypothetical: the payload parse is a try/catch, so malformed
+ *  JSON produced choice:null, and the old branch read "not NO" as approval. A
+ *  decision event that does not say what was decided is exactly the input this
+ *  engine must refuse to interpret. */
+export function answerIntent(eventType: string, choice: string | null): AnswerIntent {
+  if (choice != null && choice.trim() !== '') return answerIntentOf(choice)
+  if (eventType === 'OWNER_DECISION') return 'UNMAPPED'
+  // OWNER_INFORMATION / OWNER_CONFIRMATION with no choice: he answered in
+  // words. That settles an information/decision step; it never grants an
+  // approval (the approval branch demands an explicit YES).
+  return 'INFORM'
+}
+
+/** Check whether the owner has answered the CURRENT question, exactly once.
+ *
+ *  Returns the answer if the latest owner event (a) references a run that asked
+ *  the same (decision, nbaStep), (b) was written after the case entered its
+ *  current status, and (c) has not already been consumed by an earlier run of
+ *  this case. Null otherwise — including "the newest answer is already spent",
+ *  which deliberately does NOT fall back to an older one. */
 function consumeOwnerAnswer(
   db: Database.Database,
   domain: 'personal' | 'zst',
   caseId: string,
   currentDecision: ProgressionDecision,
   currentNbaStep: number,
+  /** Answers older than this are about an earlier episode of this case. */
+  notBefore: number | null,
 ): OwnerAnswer | null {
-  // 1. Find the latest owner answer event for this case (any type).
+  // 1. Find the latest owner answer event for this case (any type), no older
+  //    than the current status episode.
   const eventsTable = domain === 'personal' ? 'personal_case_events' : 'zst_case_events'
   const answerEvent = db.prepare(
     `SELECT event_id, event_type, payload, source_reference
      FROM ${eventsTable}
      WHERE case_id = ?
        AND event_type IN ('OWNER_DECISION', 'OWNER_INFORMATION', 'OWNER_CONFIRMATION')
-     ORDER BY created_at DESC LIMIT 1`,
-  ).get(caseId) as {
+       AND created_at >= ?
+     ORDER BY created_at DESC, event_id DESC LIMIT 1`,
+  ).get(caseId, notBefore ?? 0) as {
     event_id: number
     event_type: string
     payload: string | null
@@ -382,7 +449,17 @@ function consumeOwnerAnswer(
 
   if (!answerEvent) return null
 
-  // 2. Look up the run that the answer references (source_reference = run ID).
+  // 2. Already consumed? The run that acted on an answer names it in its own
+  //    progress delta, so the ledger is the marker. One answer, one effect.
+  const alreadyConsumed = db.prepare(
+    `SELECT 1 FROM case_progression_runs
+     WHERE domain = ? AND case_id = ?
+       AND json_extract(progress_delta_json, '$.consumedAnswerEventId') = ?
+     LIMIT 1`,
+  ).get(domain, caseId, answerEvent.event_id)
+  if (alreadyConsumed) return null
+
+  // 3. Look up the run that the answer references (source_reference = run ID).
   //    If source_reference is missing or the run is gone, we cannot verify
   //    question identity — treat as stale.
   if (!answerEvent.source_reference) return null
@@ -398,7 +475,7 @@ function consumeOwnerAnswer(
 
   if (!referencedRun) return null
 
-  // 3. Extract the question that was asked in the referenced run.
+  // 4. Extract the question that was asked in the referenced run.
   const referencedDecision = referencedRun.decision
   let referencedNbaStep = 0
   if (referencedRun.progress_delta_json) {
@@ -408,25 +485,29 @@ function consumeOwnerAnswer(
     } catch { /* ignore */ }
   }
 
-  // 4. Does the referenced question match the CURRENT question?
+  // 5. Does the referenced question match the CURRENT question?
   //    Same decision + same nbaStep → same question → answer is valid.
   //    Different → question has genuinely changed → answer is stale.
   if (referencedDecision !== currentDecision || referencedNbaStep !== currentNbaStep) {
     return null
   }
 
-  // 5. Parse the payload for a choice.
+  // 6. Parse the payload for a choice. A payload that will not parse leaves
+  //    choice null, which answerIntent() reads as UNMAPPED for a decision
+  //    event — the failure is not swallowed, it changes the meaning.
   let choice: string | null = null
   if (answerEvent.payload) {
     try {
-      const parsed = JSON.parse(answerEvent.payload) as { choice?: string }
+      const parsed = JSON.parse(answerEvent.payload) as { choice?: string | null }
       choice = parsed.choice ?? null
-    } catch { /* ignore */ }
+    } catch { /* unparsable payload → no choice → UNMAPPED */ }
   }
 
   return {
+    eventId: answerEvent.event_id,
     eventType: answerEvent.event_type,
     choice,
+    intent: answerIntent(answerEvent.event_type, choice),
     answeredRunId: answerEvent.source_reference,
     answeredNbaStep: referencedNbaStep,
   }
@@ -450,10 +531,16 @@ export function decide(
     return { decision: 'RECOVERY_REQUIRED', reason: `Case is ${currentStatus.toLowerCase()}; recovery plan needed` }
   }
 
-  // External-wait status → WAIT_EXTERNAL (unless overdue, then escalate)
+  // External-wait status → WAIT_EXTERNAL (unless overdue, then escalate).
+  // The clock runs from when the WAIT started, not from when the case was
+  // created — see ResolvedContext.statusAgeDays for what measuring the wrong
+  // one cost.
   if (currentStatus === 'WAITING_EXTERNAL') {
-    if (context.ageDays > 7) {
-      return { decision: 'RECOVERY_REQUIRED', reason: `External wait exceeded 7 days (${context.ageDays}d); escalation needed` }
+    if (context.statusAgeDays > 7) {
+      return { decision: 'RECOVERY_REQUIRED', reason: `External wait exceeded 7 days (${context.statusAgeDays}d); escalation needed` }
+    }
+    if (context.nextWakeAt !== null) {
+      return { decision: 'WAIT_TIME', reason: `Waiting until the scheduled wake (${context.nextWakeAt})` }
     }
     return { decision: 'WAIT_EXTERNAL', reason: 'Case is waiting for external response' }
   }
@@ -482,9 +569,15 @@ export function decide(
       return { decision: 'ASK_INFORMATION', reason: 'Missing information requires external input' }
 
     case 'AWAIT_EXTERNAL':
-      // Check if case is overdue
-      if (context.ageDays > 7) {
-        return { decision: 'RECOVERY_REQUIRED', reason: `External wait exceeded 7 days (${context.ageDays}d); escalation needed` }
+      // Overdue is measured from the start of the wait, not the birth of the
+      // case. WAIT_TIME wins when the wait is bounded by a clock we hold: that
+      // is the one decision in §13 that names "nothing to do until then", and
+      // it is what gives the wake scheduler a producer.
+      if (context.statusAgeDays > 7) {
+        return { decision: 'RECOVERY_REQUIRED', reason: `External wait exceeded 7 days (${context.statusAgeDays}d); escalation needed` }
+      }
+      if (context.nextWakeAt !== null) {
+        return { decision: 'WAIT_TIME', reason: `Waiting until the scheduled wake (${context.nextWakeAt})` }
       }
       return { decision: 'WAIT_EXTERNAL', reason: 'Waiting for external response or event' }
 
@@ -518,7 +611,10 @@ export interface ProgressionRunResult {
   runId: string
   domain: 'personal' | 'zst'
   caseId: string
-  decision: ProgressionDecision
+  /** null when the cycle REFUSED to run (kill switch, claim held by another
+   *  runner). No decision was reached, and naming a plausible one would put a
+   *  state into the ledger that nothing decided. */
+  decision: ProgressionDecision | null
   reason: string
   status: 'COMPLETED' | 'FAILED'
   errorCode: string | null
@@ -633,7 +729,21 @@ export interface PipelineOptions {
     | 'DECISION_RESOLVED' | 'USER_INPUT' | 'CAPABILITY_RECOVERED' | 'MANUAL_REVIEW_REQUEST'
   /** Optional trigger reference (e.g. message ID, schedule name). */
   triggerReference?: string
+  /** The run id of a caller that ALREADY holds this case's progression claim.
+   *  The heartbeat does; every other caller (the dashboard route, the migration
+   *  sweep, a script) historically did not, and two runners on the same case
+   *  produced duplicate run rows plus a racing answer-consumption transition —
+   *  the loser threw on seenVersion, the throw was swallowed, and its state
+   *  writes stood. So the cycle claims for itself unless told otherwise: being
+   *  protected is the default, and remembering to claim is not a thing a caller
+   *  can forget any more. */
+  claimedBy?: string
 }
+
+/** Lease length for the claim the cycle takes for itself. Matches the
+ *  heartbeat's, so a crashed run blocks the case for the same bounded time
+ *  whichever path started it. */
+export const PROGRESSION_CLAIM_TTL_SEC = 300
 
 /** Record a FAILED progression run with CROSS_DOMAIN_LEAKAGE error code
  *  (shared helper — used from case lookup guard and resolver catch block). */
@@ -653,12 +763,12 @@ function recordCrossDomainLeakageRun(
     domain,
     detail: message,
   }]
-  const sJson = JSON.stringify(
-    HARD_SAFETY_ASSERTIONS.map(a => ({
-      assertion: a.name,
-      passed: a.name !== 'cross_domain_leakage',
-    })),
-  )
+  const sJson = JSON.stringify(evaluateSafetyAssertions({
+    run_id: runId, domain, case_id: caseId,
+    decision: 'RECOVERY_REQUIRED', reason: message,
+    status: 'FAILED', error_code: 'CROSS_DOMAIN_LEAKAGE', error_summary: message,
+    safety_violations: sv,
+  }))
   db.prepare(
     `INSERT INTO case_progression_runs
      (progression_run_id, domain, case_id, trigger_type, trigger_reference,
@@ -695,8 +805,73 @@ function recordCrossDomainLeakageRun(
   }
 }
 
-/** Run ONE progression cycle for a case. Read-only on personal_cases/zst_cases.
- *  Writes ONLY to case_progression_state + case_progression_runs.
+/** Record a run that did NOT happen, and why.
+ *
+ *  A refusal is a fact about the engine's behaviour and belongs in the same
+ *  ledger as the runs that did happen — otherwise "the engine went quiet for an
+ *  hour" has no record explaining it. The decision column is NULL on purpose:
+ *  no decision was reached, and writing a plausible one (the first version used
+ *  RECOVERY_REQUIRED, borrowed from the leakage path) would put a state into
+ *  Mission Control that nothing decided. */
+function recordRefusedRun(
+  db: Database.Database,
+  runId: string,
+  domain: 'personal' | 'zst',
+  caseId: string,
+  errorCode: string,
+  message: string,
+  opts: PipelineOptions,
+  now: number,
+): ProgressionRunResult {
+  const sJson = JSON.stringify(evaluateSafetyAssertions({
+    run_id: runId, domain, case_id: caseId,
+    decision: '', reason: message,
+    status: 'FAILED', error_code: errorCode, error_summary: message,
+    safety_violations: [],
+  }))
+  try {
+    db.prepare(
+      `INSERT INTO case_progression_runs
+       (progression_run_id, domain, case_id, trigger_type, trigger_reference,
+        case_version_before, case_version_after, goal_version,
+        plan_version_before, plan_version_after, decision, reason,
+        progress_delta_json, action_ids_json, escalation_id,
+        status, error_code, error_summary, safety_assertions_json,
+        started_at, completed_at)
+       VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, 0, NULL, ?, ?, NULL, NULL, 'FAILED', ?, ?, ?, ?, ?)`,
+    ).run(
+      runId, domain, caseId,
+      canonicalTriggerType(opts.triggerType ?? 'MANUAL'), opts.triggerReference ?? 'refused',
+      message, JSON.stringify({ refused: errorCode, detail: message }),
+      errorCode, message, sJson, now, now,
+    )
+  } catch { /* a store without the runs table cannot be told; the refusal stands */ }
+  return {
+    runId, domain, caseId,
+    decision: null,
+    reason: message,
+    status: 'FAILED',
+    errorCode,
+    errorSummary: message,
+    safetyViolations: [],
+  }
+}
+
+/** The §22 master switch, read defensively.
+ *
+ *  `cos_autonomy_global` is created by ensureLadderSchema, which a store that
+ *  only ran initCosSchema has never called. A missing table is not an engaged
+ *  switch — it is a store where the switch has never been installed — and
+ *  killSwitchState documents the same fail-safe direction for a missing ROW. */
+function progressionKillSwitchRefusal(db: Database.Database): string | null {
+  try {
+    return killSwitchRefusal(db)
+  } catch {
+    return null
+  }
+}
+
+/** Run ONE progression cycle for a case.
  *
  *  The pipeline:
  *    1. Reads the case row from the appropriate table
@@ -704,9 +879,26 @@ function recordCrossDomainLeakageRun(
  *    3. Resolves context (DB-only, no external sources)
  *    4. Builds or refreshes the rolling plan
  *    5. Determines the Next Best Action
- *    6. Makes a progression decision
- *    7. Evaluates hard safety assertions
- *    8. Writes progression state + run record
+ *    6. Consumes an owner answer to the CURRENT question, at most once
+ *    7. Makes a progression decision
+ *    8. Evaluates hard safety assertions
+ *    9. Writes progression state + run record
+ *
+ *  Three things wrap the cycle, and all three are the cycle's own job rather
+ *  than the caller's:
+ *
+ *    THE KILL SWITCH. §22 says the master switch pauses the whole Personal
+ *    Chief. It reached executor-core and permits(); it did not reach here, so an
+ *    engaged switch left the engine consuming answers, transitioning cases and
+ *    writing state. Checked first, refused with a recorded reason.
+ *
+ *    THE CLAIM. Taken here unless the caller says it already holds one, so a
+ *    second runner on the same case cannot interleave with this one.
+ *
+ *    THE TRANSACTION. Everything the cycle writes lands or none of it does. It
+ *    writes a run row, a state row, a step counter and possibly a status
+ *    transition; a crash between them used to leave a case advanced by a run
+ *    that is not in the ledger.
  *
  *  Returns the run result. Throws on DB errors only. */
 export function runProgressionCycle(
@@ -716,14 +908,57 @@ export function runProgressionCycle(
   now: number,
   opts: PipelineOptions = {},
 ): ProgressionRunResult {
+  const refusal = progressionKillSwitchRefusal(db)
+  if (refusal) {
+    return recordRefusedRun(db, randomUUID(), domain, caseId, 'KILL_SWITCH_ENGAGED',
+      `A haladás-motor leállt: ${refusal}`, opts, now)
+  }
+
+  const body = (): ProgressionRunResult => db.transaction(
+    () => runProgressionCycleInner(db, domain, caseId, now, opts),
+  )()
+
+  if (opts.claimedBy) return body()
+
+  // Self-claim. A failure to MIRROR the claim (no case_claims table on an old
+  // store) must never block the run — exclusion is best-effort here, the same
+  // posture the heartbeat takes. A claim held by SOMEONE ELSE is different: that
+  // is the race this exists for, and it refuses.
+  const claimKey = `progression:${domain}:${caseId}`
+  const claimRunId = `cycle-${randomUUID()}`
+  let claim: { acquired: boolean; fence: number } | null = null
+  try {
+    claim = acquireClaim(db, { claimKey, ownerRunId: claimRunId, ttlSeconds: PROGRESSION_CLAIM_TTL_SEC }, now)
+  } catch {
+    claim = null
+  }
+  if (claim && !claim.acquired) {
+    return recordRefusedRun(db, randomUUID(), domain, caseId, 'PROGRESSION_CLAIM_HELD',
+      `Another runner holds ${claimKey}`, opts, now)
+  }
+  try {
+    return body()
+  } finally {
+    if (claim?.acquired) {
+      try { releaseClaim(db, { claimKey, ownerRunId: claimRunId, fence: claim.fence }) } catch { /* the lease expires anyway */ }
+    }
+  }
+}
+
+function runProgressionCycleInner(
+  db: Database.Database,
+  domain: 'personal' | 'zst',
+  caseId: string,
+  now: number,
+  opts: PipelineOptions = {},
+): ProgressionRunResult {
   const runId = randomUUID()
   const tableName = domain === 'personal' ? 'personal_cases' : 'zst_cases'
-  const eventsTable = domain === 'personal' ? 'personal_case_events' : 'zst_case_events'
 
   // 1. Read the case
   const caseRow = db.prepare(
-    `SELECT title, case_type, status, sensitivity, version, created_at FROM ${tableName} WHERE case_id = ?`,
-  ).get(caseId) as { title: string; case_type: string; status: string; sensitivity: string; version: number; created_at: number } | undefined
+    `SELECT title, case_type, status, sensitivity, version, created_at, next_wake_at FROM ${tableName} WHERE case_id = ?`,
+  ).get(caseId) as { title: string; case_type: string; status: string; sensitivity: string; version: number; created_at: number; next_wake_at: number | null } | undefined
 
   if (!caseRow) {
     // Domain-scoped guard: if the case exists in the OTHER domain, this is
@@ -744,7 +979,8 @@ export function runProgressionCycle(
     `SELECT case_version, plan_version, goal_version, goal, summary,
             completed_plan_step, no_progress_run_count,
             next_best_action_json, rolling_plan_json,
-            semantic_completion_status
+            semantic_completion_status,
+            progression_enabled, next_progression_at, wait_version
      FROM case_progression_state WHERE domain = ? AND case_id = ?`,
   ).get(domain, caseId) as {
     case_version: number; plan_version: number; goal_version: number
@@ -756,6 +992,9 @@ export function runProgressionCycle(
     /** Read for §8: an event is written when this MOVES, not on every run
      *  that finds the case where it already was. */
     semantic_completion_status: string | null
+    progression_enabled: number
+    next_progression_at: number | null
+    wait_version: number
   } | undefined
 
   const contract = deriveOutcomeContract(caseRow.title, caseRow.case_type, caseRow.status, caseRow.sensitivity)
@@ -781,6 +1020,11 @@ export function runProgressionCycle(
     }
     throw err
   }
+  // When did this case enter the status it is in now? Two separate questions
+  // depend on it: how long the current wait has ACTUALLY been running, and how
+  // far back an owner answer may reach and still be about this episode of the
+  // case.
+  const statusSince = statusEnteredAt(db, domain, caseId, caseRow.status) ?? caseRow.created_at
   // Build a shallow context for the planner/decider (same shape as Checkpoint B)
   const context: ResolvedContext = {
     eventCount: deepCtx.eventCount,
@@ -789,6 +1033,10 @@ export function runProgressionCycle(
     hasParent: deepCtx.hasParent,
     hasChildren: deepCtx.hasChildren,
     ageDays: deepCtx.ageDays,
+    statusAgeDays: Math.floor(Math.max(0, now - statusSince) / 86400),
+    // Only a wake still ahead of us bounds a wait; a wake that has already
+    // passed is not a reason to keep waiting.
+    nextWakeAt: caseRow.next_wake_at !== null && caseRow.next_wake_at > now ? caseRow.next_wake_at : null,
     sensitivity: deepCtx.sensitivity,
   }
 
@@ -802,18 +1050,6 @@ export function runProgressionCycle(
   let currentStatus = caseRow.status
   let currentVersion = caseRow.version
 
-  const previousNbaStep = planChanged
-    ? 0
-    : ((): number => {
-        try {
-          if (existing?.next_best_action_json) {
-            const prev = JSON.parse(existing.next_best_action_json) as { planStep?: number }
-            return prev.planStep ?? 0
-          }
-        } catch { /* ignore malformed JSON */ }
-        return 0
-      })()
-
   // 5. Next Best Action — skip steps already completed in a previous run
   let nba = determineNextBestAction(plan, context, completedPlanStep)
 
@@ -822,26 +1058,23 @@ export function runProgressionCycle(
 
   // ── Owner answer consumption (card 52250c7f Phase C) ───────────────
   //
-  // Match by question CONTENT (decision + nbaStep), not by run ID.
-  // Heartbeat runs re-ask the same question every 5 minutes with new run IDs;
-  // an answer remains valid while the question is unchanged, and becomes
-  // stale only when the case genuinely asks something different.
-  const ownerAnswer = consumeOwnerAnswer(db, domain, caseId, decision, nba.planStep)
+  // Match by question CONTENT (decision + nbaStep), bounded by the current
+  // status episode, once per answer — see consumeOwnerAnswer. What follows is
+  // only the question "what does this answer mean", and it is answered by the
+  // INTENT, never by "the choice was not the string NO".
+  const ownerAnswer = consumeOwnerAnswer(db, domain, caseId, decision, nba.planStep, statusSince)
+  const consumedAnswerEventId: number | null = ownerAnswer?.eventId ?? null
   if (ownerAnswer) {
-    if (ownerAnswer.eventType === 'OWNER_DECISION' && ownerAnswer.choice === 'NO') {
-      // Owner explicitly rejected → escalate to BLOCKED for replanning.
-      const transitionFn = domain === 'personal' ? transitionCase : transitionZstCase
+    const transitionFn = domain === 'personal' ? transitionCase : transitionZstCase
+    const answerLabel = ownerAnswer.choice ?? ownerAnswer.eventType
+    /** Move the case, then replan from the new status. */
+    const moveTo = (newStatus: 'BLOCKED' | 'READY', why: string): void => {
       transitionFn(db, {
-        caseId,
-        newStatus: 'BLOCKED' as const,
-        actor: 'progression-engine',
-        seenVersion: currentVersion,
-        reason: 'Owner rejected the proposed action',
+        caseId, newStatus, actor: 'progression-engine',
+        seenVersion: currentVersion, reason: why,
       }, now)
-      currentStatus = 'BLOCKED'
+      currentStatus = newStatus
       currentVersion += 1
-
-      // Rebuild for the new status and re-determine
       plan = buildRollingPlan(contract, context, currentStatus)
       planJson = JSON.stringify(plan)
       storedPlanJson = null
@@ -851,38 +1084,65 @@ export function runProgressionCycle(
       const redone = decide(nba, context, currentStatus)
       decision = redone.decision
       reason = redone.reason
+    }
+
+    if (ownerAnswer.intent === 'REFUSE') {
+      // Explicit no → BLOCKED for replanning.
+      moveTo('BLOCKED', 'Owner rejected the proposed action')
+    } else if (ownerAnswer.intent === 'ABANDON') {
+      // "Lemondjuk" / "Hagyjuk ezt az utat" is a stronger no: not "replan this",
+      // but "stop pursuing it". The engine may not close a case on its own
+      // (that is the completion gate's job and it needs evidence), so it blocks
+      // and says why — the close intent is preserved in words, on the case, for
+      // the owner to finish. What it must NOT do is what it used to: advance the
+      // plan as if the answer had been go-ahead.
+      moveTo('BLOCKED', `Owner dropped this path (${answerLabel}); needs owner closure or a new plan`)
+    } else if (ownerAnswer.intent === 'HOLD') {
+      // "Várjunk még rá" / "Elhalasztjuk" / "Később". The step is NOT settled,
+      // so nothing advances; the answer is recorded (this run names its event
+      // id) and the same question stands. Advancing here would make waiting and
+      // proceeding the same button.
+      reason = `${reason} — owner asked to wait (${answerLabel}); step not advanced`
     } else if (currentStatus === 'AWAITING_APPROVAL') {
-      // Status-driven: decide() returns REQUEST_APPROVAL for AWAITING_APPROVAL
-      // regardless of step. Owner YES → approve → transition to READY.
-      const transitionFn = domain === 'personal' ? transitionCase : transitionZstCase
-      transitionFn(db, {
-        caseId,
-        newStatus: 'READY' as const,
-        actor: 'progression-engine',
-        seenVersion: currentVersion,
-        reason: 'Owner approved the request',
-      }, now)
-      currentStatus = 'READY'
-      currentVersion += 1
-
-      // Rebuild for the new status and re-determine
-      plan = buildRollingPlan(contract, context, currentStatus)
-      planJson = JSON.stringify(plan)
-      storedPlanJson = null
-      planChanged = true
-      completedPlanStep = 0
-      nba = determineNextBestAction(plan, context, 0)
-      const redone = decide(nba, context, currentStatus)
-      decision = redone.decision
-      reason = redone.reason
-    } else {
-      // YES / OWNER_INFORMATION / OWNER_CONFIRMATION → advance past the
-      // answered step so the NBA picks the FOLLOWING step.
+      // THE APPROVAL GATE. An approval is granted by ONE thing: an
+      // OWNER_DECISION whose choice is YES.
+      //
+      // What used to be here was `else if (currentStatus === 'AWAITING_APPROVAL')`
+      // with no test on the event type or the choice at all. So an
+      // OWNER_INFORMATION — which is what recordOwnerAnswer writes for ANY text
+      // that is not a plain yes/no — moved the case from AWAITING_APPROVAL to
+      // READY with the reason "Owner approved the request". Answering "a
+      // vízdíjról: holnap utánanézek" approved the request. So did a decision
+      // event whose payload failed to parse, because the parse failure was
+      // swallowed and left choice:null, which is not the string 'NO'.
+      //
+      // Everything that is not an explicit yes is recorded and changes nothing.
+      // A wrong pairing is worse than none (2026-08-11 postmortem), and on an
+      // approval the wrong pairing is the engine claiming permission it was
+      // never given.
+      if (ownerAnswer.eventType === 'OWNER_DECISION' && ownerAnswer.choice === 'YES') {
+        moveTo('READY', 'Owner approved the request')
+      } else {
+        reason = `${reason} — owner answer recorded (${ownerAnswer.eventType}/${answerLabel}), `
+          + 'but approval needs an explicit YES; case stays in AWAITING_APPROVAL'
+      }
+    } else if (ownerAnswer.intent === 'PROCEED' || ownerAnswer.intent === 'INFORM') {
+      // He answered the question that was asked: a go-ahead, a named course of
+      // action, or the information the step was waiting for. Advance past the
+      // answered step so the NBA picks the FOLLOWING one.
       completedPlanStep = ownerAnswer.answeredNbaStep
       nba = determineNextBestAction(plan, context, completedPlanStep)
       const redone = decide(nba, context, currentStatus)
       decision = redone.decision
       reason = redone.reason
+    } else {
+      // UNMAPPED: a choice the engine has no consumer for (ASK_OTHERS,
+      // GET_QUOTE, SPECIFY — all of them ask for an outbound action nothing
+      // performs yet), or an OWNER_DECISION that did not say what was decided.
+      // Recorded, never acted on. Fail-closed by construction: a value nobody
+      // taught this engine cannot mean "proceed" by default, which is exactly
+      // how "Lemondjuk" used to advance the plan.
+      reason = `${reason} — owner answer recorded (${answerLabel}) but has no engine meaning yet; nothing advanced`
     }
   }
 
@@ -891,7 +1151,6 @@ export function runProgressionCycle(
   // planChanged already covers this: same plan → same version.
   const planVersion = planChanged ? (existing?.plan_version ?? 0) + 1 : (existing?.plan_version ?? 0)
   const goalVersion = existing?.goal_version ?? 0
-  const caseVersion = existing?.case_version ?? 1
 
   const auditJson = JSON.stringify(deepCtx.audit)
 
@@ -944,7 +1203,11 @@ export function runProgressionCycle(
     )
   }
 
-  // 8. Evaluate hard safety assertions
+  // 8. Evaluate hard safety assertions.
+  //    The assertions are evaluated against the run's REAL facts, and the ones
+  //    that structurally cannot apply to this engine are recorded as
+  //    not_applicable rather than passed — see progression-eval.ts for why a
+  //    ledger claiming seven passes was overstating the protection.
   const safetyViolations: SafetyViolation[] = []
   const runResultForAssertions = {
     run_id: runId,
@@ -953,21 +1216,25 @@ export function runProgressionCycle(
     decision,
     reason,
     status: 'COMPLETED' as const,
-    error_code: null as string | null,
-    error_summary: null as string | null,
+    error_code: null,
+    error_summary: null,
     safety_violations: safetyViolations,
   }
 
-  // THE ASSERTIONS GET THE REAL STATE, not just the run-shaped object (§16,
-  // review 2026-08-12). `runResultForAssertions.error_code` is hard-coded null
-  // three lines up, so every assertion that tested it was being asked a question
-  // its input could never answer yes to. The external-action assertions now read
-  // this case's actual ledger and authorization rows.
-  const assertionCtx = { db, domain, caseId }
-  for (const a of HARD_SAFETY_ASSERTIONS) {
-    const detail = a.check(runResultForAssertions, assertionCtx)
-    if (detail) {
-      safetyViolations.push({ assertion: a.name, case_id: caseId, domain, detail })
+  // THE ASSERTIONS GET THE REAL STATE, AND SAY WHICH ONES RAN (§16).
+  //
+  // Two halves, merged 2026-08-13 from the two branches that fixed this file in
+  // parallel. `runResultForAssertions.error_code` is hard-coded null three lines
+  // up, so every assertion that tested it was being asked a question its input
+  // could never answer yes to -- hence the context, which lets the
+  // external-action assertions read this case's actual ledger and authorization
+  // rows. And `evaluateSafetyAssertions` records not_applicable instead of
+  // passed for an assertion that had nothing to look at, so the ledger row is
+  // evidence rather than decoration.
+  const assertionResults = evaluateSafetyAssertions(runResultForAssertions, { db, domain, caseId })
+  for (const r of assertionResults) {
+    if (r.status === 'violated') {
+      safetyViolations.push({ assertion: r.assertion, case_id: caseId, domain, detail: r.detail ?? '' })
     }
   }
 
@@ -979,12 +1246,7 @@ export function runProgressionCycle(
   // where `decision` is the value the run actually reports.
 
   // 9. Record the progression run — NO external_reference, NO action_ids
-  const safetyJson = JSON.stringify(
-    HARD_SAFETY_ASSERTIONS.map(a => ({
-      assertion: a.name,
-      passed: !safetyViolations.some(v => v.assertion === a.name),
-    })),
-  )
+  const safetyJson = JSON.stringify(assertionResults)
 
   db.prepare(
     `INSERT INTO case_progression_runs
@@ -1003,9 +1265,23 @@ export function runProgressionCycle(
   ).run(
     runId, domain, caseId,
     canonicalTriggerType(opts.triggerType ?? 'MANUAL'), opts.triggerReference ?? 'checkpoint-b',
-    caseVersion, caseVersion + 1, goalVersion,
+    // THE CASE VERSIONS ARE THE CASE'S, not the state row's counter.
+    // They used to be `caseVersion, caseVersion + 1` read off
+    // case_progression_state — a number that increments on every run whether or
+    // not the case moved, and that has nothing to do with the optimistic-
+    // concurrency version a replay would need to line up against. before is the
+    // version this cycle read; after is the version it leaves behind, which is
+    // the same number unless the cycle actually transitioned the case.
+    caseRow.version, currentVersion, goalVersion,
     existing?.plan_version ?? 0, planVersion, decision, reason,
-    JSON.stringify({ planVersion, goalVersion, nbaStep: nba.planStep, auditSummary: deepCtx.audit.summary }),
+    // consumedAnswerEventId is the consumed-marker for owner answers: this row
+    // IS the record that the answer has been acted on, and consumeOwnerAnswer
+    // refuses any event already named by a run of this case.
+    JSON.stringify({
+      planVersion, goalVersion, nbaStep: nba.planStep,
+      auditSummary: deepCtx.audit.summary,
+      consumedAnswerEventId,
+    }),
     runStatus, safetyJson,
     now, now,
   )
@@ -1105,7 +1381,11 @@ export function runProgressionCycle(
   // If decision is COMPLETE but DoD is still unmet, downgrade to
   // CONTINUE_AUTONOMOUSLY and UPDATE the run record to match.
   if (decision === 'COMPLETE' && runStatus === 'COMPLETED') {
-    const isProgressionEnabled = existing != null
+    // `existing != null` used to stand in for this. The name asserted something
+    // the expression did not check: a state row EXISTS for every case the
+    // pipeline has ever touched, enabled or not, so the guard was "has this case
+    // been progressed before" wearing the word ENABLED.
+    const isProgressionEnabled = (existing?.progression_enabled ?? 0) === 1
     if (isProgressionEnabled) {
       const gate = canCompleteCase(db, domain, caseId, 'ENGINE')
       if (!gate.allowed) {
@@ -1174,6 +1454,8 @@ export function runProgressionCycle(
       seenVersion: currentVersion,
       reason,
     }, now)
+    currentStatus = 'COMPLETED'
+    currentVersion += 1
     // Remove from heartbeat scheduler — no more polling for this case
     scheduleNextProgression(db, domain, caseId, null, now)
     db.prepare(
@@ -1207,7 +1489,7 @@ export function runProgressionCycle(
     ).get(domain, caseId, runId) as { decision: string | null } | undefined)?.decision ?? null
 
     recordProgressionEvents(db, {
-      domain, caseId, caseVersion: caseVersion + 1, runId, now,
+      domain, caseId, caseVersion: currentVersion, runId, now,
       decision, previousDecision,
       planVersion, previousPlanVersion: existing?.plan_version ?? null,
       // The goal is "defined" on the run that first gives the case one.
@@ -1215,6 +1497,38 @@ export function runProgressionCycle(
       semanticStatus,
       previousSemanticStatus: existing?.semantic_completion_status ?? null,
     })
+  }
+
+  // ── 12. WAIT_TIME arms the scheduler ───────────────────────────────────────
+  // WAIT_TIME is the one decision that names a wake, so it is the one that arms
+  // the scheduler — until now nothing produced it, and progression-scheduler's
+  // documented purpose ("set next_progression_at after a WAIT_TIME decision")
+  // had no caller at all.
+  //
+  // wait_version is bumped ONLY when the deadline actually changes. It is part
+  // of §10.8's dedup hash, so bumping it on every re-arm of the SAME wait would
+  // make each sweep look like a new state and put back the run storm the trigger
+  // contract was built to stop. A re-armed wait with a NEW deadline genuinely is
+  // a new state — that is exactly the distinction the column was added for, and
+  // it had no writer at all until this line.
+  if (decision === 'WAIT_TIME' && context.nextWakeAt !== null) {
+    const rearmed = existing?.next_progression_at !== context.nextWakeAt
+    scheduleNextProgression(db, domain, caseId, context.nextWakeAt, now)
+    if (rearmed) {
+      db.prepare(
+        `UPDATE case_progression_state SET wait_version = wait_version + 1, updated_at = ?
+         WHERE domain = ? AND case_id = ?`,
+      ).run(now, domain, caseId)
+    }
+  }
+
+  // The run row was written before the transitions above could happen. Keep its
+  // case_version_after honest rather than leaving the ledger describing a
+  // version the case no longer has.
+  if (currentVersion !== caseRow.version) {
+    db.prepare(
+      `UPDATE case_progression_runs SET case_version_after = ? WHERE progression_run_id = ?`,
+    ).run(currentVersion, runId)
   }
 
   return {

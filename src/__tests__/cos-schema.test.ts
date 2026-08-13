@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
+import Database from 'better-sqlite3'
 import { initDatabase, getDb } from '../db.js'
-import { CASE_STATUSES, CASE_SENSITIVITIES } from '../cos/schema.js'
+import { CASE_STATUSES, CASE_SENSITIVITIES, initCosSchema } from '../cos/schema.js'
 
 // COS Slice 0 -- Personal Case Engine core schema. These tests prove the
 // invariants the spec (v4.2.1) calls P0.2/P0.3/P0.5/P0.6, not just that the
@@ -35,6 +36,68 @@ describe('COS Slice 0 schema', () => {
 
     it('is idempotent -- a second initDatabase does not throw', () => {
       expect(() => initDatabase(':memory:')).not.toThrow()
+    })
+
+    // E9 (review 2026-08-13). The §17 backfill
+    // (`UPDATE personal_cases SET scope='MIGRATED_UNVERIFIED' WHERE
+    //   source_system='chatgpt-cos-drive' AND scope='PERSONAL_CONFIRMED'`)
+    // sat bare inside initCosSchema, which runs on EVERY process start. So a case
+    // Istvan had reviewed and confirmed was silently demoted back to
+    // "unverified" by the next restart: a one-time import backfill written as a
+    // recurring rule, quietly overwriting a human's decision on a timer.
+    it('E9: the §17 import backfill runs ONCE, not on every start', () => {
+      const db = getDb()
+      db.prepare(
+        `INSERT INTO personal_cases (case_id, title, case_type, source_system, scope, created_at, updated_at)
+         VALUES ('m1','Drive-bol hozott ugy','ADMIN','chatgpt-cos-drive','MIGRATED_UNVERIFIED', ?, ?)`
+      ).run(nowSec(), nowSec())
+      // Istvan reviews it and confirms the scope himself.
+      db.prepare(`UPDATE personal_cases SET scope='PERSONAL_CONFIRMED' WHERE case_id='m1'`).run()
+
+      // a restart: the whole COS schema init runs again over the same store
+      initCosSchema(db)
+
+      const after = db.prepare(`SELECT scope FROM personal_cases WHERE case_id='m1'`).get() as { scope: string }
+      expect(after.scope).toBe('PERSONAL_CONFIRMED') // his decision survives
+      // and the marker records that the migration is done
+      const mark = db.prepare(`SELECT COUNT(*) n FROM cos_schema_migrations WHERE migration_id LIKE '%s17-mark-drive-imports%'`)
+        .get() as { n: number }
+      expect(mark.n).toBe(1)
+    })
+
+    // E19 (review 2026-08-13). Every authorizeSend and every admission check
+    // counts `WHERE campaign_id=? [AND outbound_kind=?] AND status NOT IN (...)`,
+    // and the ledgers were indexed only on status and case_id — so the hottest
+    // query on the send path scanned the table, inside the transaction holding
+    // the SENDING write. An index is not observable from behaviour, so the test
+    // asserts the structure; the query plan below is what makes it more than a
+    // spelling check.
+    it('E19: the campaign+status counts are indexed on both ledgers', () => {
+      const db = getDb()
+      const idx = (t: string) => (db.prepare(`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=?`)
+        .all(t) as Array<{ name: string }>).map(r => r.name)
+      expect(idx('outbound_ledger')).toContain('idx_outbound_campaign_status')
+      expect(idx('zst_outbound_ledger')).toContain('idx_zst_outbound_campaign_status')
+      const plan = db.prepare(
+        `EXPLAIN QUERY PLAN SELECT COUNT(*) FROM outbound_ledger
+         WHERE campaign_id=? AND status NOT IN ('CANCELLED','FAILED_TERMINAL','PLANNED','FAILED_RETRYABLE')`
+      ).all('k1') as Array<{ detail: string }>
+      expect(plan.map(p => p.detail).join(' ')).toMatch(/USING (COVERING )?INDEX idx_outbound_campaign/)
+    })
+
+    it('E9 CONTROL: on a store that has never run it, the backfill still applies', () => {
+      // Without this, "runs once" could be satisfied by never running at all.
+      const fresh = new Database(':memory:')
+      initCosSchema(fresh)
+      fresh.prepare(
+        `INSERT INTO personal_cases (case_id, title, case_type, source_system, scope, created_at, updated_at)
+         VALUES ('m2','Drive','ADMIN','chatgpt-cos-drive','PERSONAL_CONFIRMED', ?, ?)`
+      ).run(nowSec(), nowSec())
+      fresh.prepare(`DELETE FROM cos_schema_migrations`).run() // as if it had never run
+      initCosSchema(fresh)
+      expect((fresh.prepare(`SELECT scope FROM personal_cases WHERE case_id='m2'`).get() as { scope: string }).scope)
+        .toBe('MIGRATED_UNVERIFIED')
+      fresh.close()
     })
   })
 

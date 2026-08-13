@@ -31,13 +31,26 @@ try {
 initDatabase()
 const now = Math.floor(Date.now() / 1000)
 
-/** Is the standing review task for this exception already open? Used to keep a
- *  permanent condition from producing one card and one alert per message. */
-function reviewTaskExists(acct: string, kind: string): boolean {
-  if (kind !== 'SOURCE_COMMIT_SKIPPED') return false
+/** The stable kanban id for this exception. ONE card per account for the
+ *  standing source-write skip, ONE card per message for a quarantine. */
+function cardIdFor(kind: string, acct: string, mid: string): string {
+  return (kind === 'SOURCE_COMMIT_SKIPPED' ? `scs-${acct}` : `qtn-${mid}`).slice(0, 36)
+}
+
+/** Is a review task for this exception already on the board (and not done)?
+ *
+ *  This used to answer `false` for anything that was not SOURCE_COMMIT_SKIPPED,
+ *  which made the quarantine kind self-poisoning: quarantinePoison created the
+ *  `qtn-<mid>` card, a later condition failed, and on the next sweep the plain
+ *  INSERT hit the PK conflict, the catch returned false, and A.1's condition 3
+ *  read "review task NOT created" — permanently. The message could never be
+ *  quarantined again and the batch stayed pinned while a fresh duplicate
+ *  CRITICAL alert row was inserted on every pass. An existing OPEN card is the
+ *  condition being satisfied, not a failure. */
+function reviewTaskExists(acct: string, kind: string, mid = ''): boolean {
   const row = getDb().prepare(
     `SELECT 1 FROM kanban_cards WHERE id = ? AND status != 'done'`,
-  ).get(`scs-${acct}`.slice(0, 36))
+  ).get(cardIdFor(kind, acct, mid))
   return row !== undefined
 }
 
@@ -57,7 +70,11 @@ const quarantine: QuarantineDeps = {
       // message until a modify scope exists. Alerting per message would put a
       // critical alert on every mail that arrives — the exact noise that gets a
       // channel muted, and the reason the review task below is deduped too.
-      if (kind === 'SOURCE_COMMIT_SKIPPED' && reviewTaskExists(acct, kind)) return true
+      //
+      // The QUARANTINE kind is deduped on the same rule: while its card is open
+      // the owner has already been told about that message, and a sweep that
+      // runs every wake must not add a CRITICAL row per pass to say it again.
+      if (reviewTaskExists(acct, kind, mid)) return true
       const content = kind === 'SOURCE_COMMIT_SKIPPED'
         ? `[FIGYELEM] A forras-jelolés kimaradt: ${acct}/${mid} -- ${reason}. A level FEL LETT DOLGOZVA; ami nem tortent meg, az a COS/Processed cimke felirasa. A pozicio ezert lephet tovabb. Amig nincs modify scope, ez minden levelnel igy lesz -- ezert errol egyszer szolok, nem levelenkent.`
         : `[KRITIKUS] Karantenba kerulo level: ${acct}/${mid} -- ${reason}. A pozicio atlep felette, ezert kezi ellenorzes kell.`
@@ -70,28 +87,34 @@ const quarantine: QuarantineDeps = {
   },
   createReviewTask: (acct, mid, reason, kind) => {
     try {
+      // An OPEN card for this exception IS the condition — for both kinds. See
+      // reviewTaskExists for the failure this replaces.
+      if (reviewTaskExists(acct, kind, mid)) return true
       if (kind === 'SOURCE_COMMIT_SKIPPED') {
         // ONE open card per account while the condition holds, not one per
         // message. A stable id makes the second insert collide and no-op, and
         // the A.1 condition is still honestly satisfied: a human review task
         // for this exception exists.
-        if (reviewTaskExists(acct, kind)) return true
         getDb().prepare(
-          `INSERT INTO kanban_cards (id, title, description, status, priority, created_at, updated_at)
+          `INSERT OR IGNORE INTO kanban_cards (id, title, description, status, priority, created_at, updated_at)
            VALUES (@id, @t, @d, 'planned', 'normal', @now, @now)`
         ).run({
-          id: `scs-${acct}`.slice(0, 36),
+          id: cardIdFor(kind, acct, mid),
           t: `COS: a forras-jelolés kimarad (${acct}) -- nincs Gmail modify scope`,
           d: `Ok: ${reason}\n\nEz NEM feldolgozatlan level. A levelek feldolgozasa terminalis es teljes; ami nem tortenik meg, az a COS/Processed cimke felirasa a Gmailben, mert a token csak gmail.send jogot hordoz.\n\nElso erintett uzenet: ${mid}. A tovabbi erintett levelek NEM kapnak kulon kartyat -- a feltetel allando, es a sorok sajat last_error mezoje orzi az okot (email_processing, status=SOURCE_COMMIT_SKIPPED).\n\nA KARTYA AKKOR ZARHATO, ha (a) modify scope-ot kap a token es a GmailLabelCommitter bekotesre kerul, VAGY (b) Istvan kimondja, hogy a forras-jelolesre nincs szukseg. Addig ez egy nyitott, tudott kivetel -- nem incidens.`,
           now,
         })
         return true
       }
+      // INSERT OR IGNORE: a card that already exists (including one the owner
+      // has already CLOSED for this very message) means the review task the
+      // condition asks for exists. A PK conflict here used to surface as
+      // "condition not met", which pinned the batch for good.
       getDb().prepare(
-        `INSERT INTO kanban_cards (id, title, description, status, priority, created_at, updated_at)
+        `INSERT OR IGNORE INTO kanban_cards (id, title, description, status, priority, created_at, updated_at)
          VALUES (@id, @t, @d, 'planned', 'high', @now, @now)`
       ).run({
-        id: `qtn-${mid}`.slice(0, 36),
+        id: cardIdFor(kind, acct, mid),
         t: `COS karanten: feldolgozhatatlan level (${acct}/${mid})`,
         d: `Ok: ${reason}\n\nA level a Gmailben MEGVAN (message id: ${mid}); a COS nem tudta feldolgozni, ezert a pozicio atlepett felette. Nezd meg kezzel, mi van benne.`,
         now,

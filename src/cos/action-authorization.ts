@@ -145,6 +145,20 @@ export function consumeAuthorization(
     // A forged or guessed id simply is not here. This is the property the random
     // 32 bytes buy: absence is the answer, not a policy decision.
     if (!row) return { ok: false, reason: 'unknown authorization ticket' }
+    // E8 (review 2026-08-13). REVOKED is checked first and UNCONDITIONALLY.
+    // Revocation used to be written as consumed_at, and the consumption rule
+    // below only blocks on consumed_at for single-use tickets — so a multi-use
+    // ticket walked straight through the kill switch that reported it revoked.
+    // Withdrawn authority blocks every ticket, whatever its reuse policy: that is
+    // the whole of §22.2's revocation clause.
+    //
+    // `!= null` on purpose (not `!== null`): on a store that predates the column
+    // the field is undefined, and a strict comparison would refuse every ticket
+    // in the system.
+    if (row.revoked_at != null) {
+      const why = row.revoked_reason ? `: ${String(row.revoked_reason)}` : ''
+      return { ok: false, reason: `authorization revoked at ${String(row.revoked_at)}${why}` }
+    }
     if (row.consumed_at !== null && row.single_use === 1) {
       return { ok: false, reason: `authorization already consumed at ${String(row.consumed_at)}` }
     }
@@ -195,19 +209,30 @@ export function consumeAuthorization(
 
     const info = db.prepare(
       `UPDATE action_authorizations SET consumed_at = @now
-       WHERE authorization_id = @id AND (consumed_at IS NULL OR single_use = 0)`
+       WHERE authorization_id = @id AND revoked_at IS NULL
+         AND (consumed_at IS NULL OR single_use = 0)`
     ).run({ id: authorizationId, now })
-    if (info.changes === 0) return { ok: false, reason: 'authorization was consumed concurrently' }
+    // The revocation is re-checked inside the conditional UPDATE as well as
+    // above, because a kill switch landing between the two would otherwise be a
+    // check-then-act window on the one operation that exists to close windows.
+    if (info.changes === 0) return { ok: false, reason: 'authorization was consumed or revoked concurrently' }
     return { ok: true, authorizationId }
   })()
 }
 
 /** Invalidate every outstanding ticket for an action — used when the authority
  *  behind it is withdrawn (campaign revoked, approval pulled, kill switch).
- *  Revocation must not wait for expiry. */
-export function revokeAuthorizationsForAction(db: Database.Database, actionId: string, now: number): number {
+ *  Revocation must not wait for expiry.
+ *
+ *  E8: written to revoked_at, not consumed_at. "Spent by the send it authorised"
+ *  and "killed because the authority behind it was withdrawn" are different
+ *  facts about a ticket, and until now they were the same column — so the audit
+ *  could not tell them apart, and a multi-use ticket survived the second one. */
+export function revokeAuthorizationsForAction(
+  db: Database.Database, actionId: string, now: number, reason = 'authority withdrawn for this action',
+): number {
   return db.prepare(
-    `UPDATE action_authorizations SET consumed_at = @now
-     WHERE action_id = @actionId AND consumed_at IS NULL`
-  ).run({ actionId, now }).changes
+    `UPDATE action_authorizations SET revoked_at = @now, revoked_reason = @reason
+     WHERE action_id = @actionId AND revoked_at IS NULL AND consumed_at IS NULL`
+  ).run({ actionId, now, reason }).changes
 }

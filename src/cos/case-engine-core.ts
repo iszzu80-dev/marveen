@@ -303,6 +303,20 @@ export function makeCaseEngine(
     return tx()
   }
 
+  /**
+   * Take (or take over) a claim. The upsert only steals an EXPIRED claim, so a
+   * live one held by somebody else answers acquired:false.
+   *
+   * E2, stated because it is load-bearing and was being relied on backwards: for
+   * the SAME owner id this call is RE-ENTRANT. On a live claim the upsert is a
+   * no-op (the WHERE excludes it) and the SELECT then reports acquired:true
+   * because the owner matches — which is right for a run re-entering its own
+   * claim, and useless as mutual exclusion for two concurrent callers that
+   * computed the same owner id. A caller using this to serialise concurrent
+   * attempts must therefore give each ATTEMPT its own owner id; a caller
+   * renewing a run's claim must reuse the run's. send-flow.ts got this wrong by
+   * deriving the owner id from the ledger row.
+   */
   function acquireClaim(
     db: Database.Database,
     args: { claimKey: string; ownerRunId: string; ttlSeconds: number },

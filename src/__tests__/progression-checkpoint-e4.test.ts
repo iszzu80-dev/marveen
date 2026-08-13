@@ -427,22 +427,36 @@ describe('Checkpoint E.4 — Semantic Completion', () => {
 
     beforeEach(() => { db = freshDb() })
 
-    it('allows completion when no progression state exists (not progression-controlled)', () => {
+    // THE ENGINE MAY NOT CLOSE A CASE IT DOES NOT DRIVE.
+    //
+    // Both of these used to return allowed:true for the ENGINE (the default
+    // actor), described as the legacy close path. But the pipeline calls this
+    // very gate as its own plan-exhaustion trigger, so a state row with
+    // progression_enabled = 0 sailed through on a generic template DoD and the
+    // engine transitioned the case to COMPLETED — the 2026-08-09 "72 false
+    // closures" failure re-entering through the disabled branch. The legitimate
+    // closures the old branch protected all arrive as OWNER, which returns
+    // before any of this is read; that half is asserted here too, because it is
+    // what makes the engine half affordable.
+    it('REFUSES the ENGINE when no progression state exists (not progression-controlled)', () => {
       seedCase(db, 'personal', 'pri-001')
 
       const gate = canCompleteCase(db, 'personal', 'pri-001')
 
-      expect(gate.allowed).toBe(true)
+      expect(gate.allowed).toBe(false)
       expect(gate.reason).toContain('not under progression control')
+      // …and the owner can still close it.
+      expect(canCompleteCase(db, 'personal', 'pri-001', 'OWNER').allowed).toBe(true)
     })
 
-    it('allows completion when progression is disabled (enabled=0)', () => {
+    it('REFUSES the ENGINE when progression is disabled (enabled=0)', () => {
       seedCaseWithProgression(db, 'personal', 'pri-002', { progression_enabled: 0 })
 
       const gate = canCompleteCase(db, 'personal', 'pri-002')
 
-      expect(gate.allowed).toBe(true)
+      expect(gate.allowed).toBe(false)
       expect(gate.reason).toContain('disabled')
+      expect(canCompleteCase(db, 'personal', 'pri-002', 'OWNER').allowed).toBe(true)
     })
 
     it('allows completion when all DoD criteria are met', () => {

@@ -23,6 +23,7 @@ import type Database from 'better-sqlite3'
 import { enrichCaseGoal } from './progression-pipeline.js'
 import type { LlmClient } from './progression-interpreter.js'
 import { readDocumentBytes } from './cos-documents.js'
+import { roundRobinByDomain } from './reader-cycle.js'
 import { egressTierFor, isProviderAllowedForSensitivity, providersAllowedFor } from './provider-data-policy.js'
 import type { CaseSensitivity } from './schema.js'
 
@@ -66,19 +67,25 @@ export function casesNeedingGoal(db: Database.Database, limit: number): Candidat
       for (const r of found) rows.push({ domain, caseId: r.caseId })
     } catch { /* a missing table is not a candidate, and not an error either */ }
   }
-  return limit > 0 ? rows.slice(0, limit) : rows
+  // The same fairness rule the Reader uses, from the same function: enumerating
+  // `personal` in full and then slicing meant a personal backlog starved the
+  // corporate namespace indefinitely at 3-5 cases per cycle.
+  return roundRobinByDomain(rows, limit)
 }
 
-/** The tier the case itself claims. Unknown/missing coerces to the strictest
- *  class inside effectiveSensitivity, so a case with no tier is not a case that
- *  may go anywhere. */
-function declaredSensitivity(db: Database.Database, domain: 'personal' | 'zst', caseId: string): unknown {
+/** The case fields that leave this machine, plus the tier the case itself claims.
+ *  Unknown/missing sensitivity coerces to the strictest class inside
+ *  effectiveSensitivity, so a case with no tier is not a case that may go
+ *  anywhere. Missing row / missing table reads as "nothing known", which the
+ *  gate then treats as strictly as it treats an unknown tier. */
+interface CaseMeta { sensitivity: unknown; title: string; description: string }
+function caseMeta(db: Database.Database, domain: 'personal' | 'zst', caseId: string): CaseMeta {
   const table = domain === 'zst' ? 'zst_cases' : 'personal_cases'
   try {
-    const row = db.prepare(`SELECT sensitivity FROM ${table} WHERE case_id = ?`).get(caseId) as
-      { sensitivity?: unknown } | undefined
-    return row?.sensitivity
-  } catch { return undefined }
+    const row = db.prepare(`SELECT sensitivity, title, description FROM ${table} WHERE case_id = ?`).get(caseId) as
+      { sensitivity?: unknown; title?: string | null; description?: string | null } | undefined
+    return { sensitivity: row?.sensitivity, title: row?.title ?? '', description: row?.description ?? '' }
+  } catch { return { sensitivity: undefined, title: '', description: '' } }
 }
 
 /** The best text we have about a case, in descending order of usefulness:
@@ -178,8 +185,24 @@ export async function enrichPendingGoals(
       // The tier comes from the case's declared sensitivity ESCALATED by what
       // the content actually looks like — the declared value alone is a claim,
       // and effectiveSensitivity is what the Reader trusts too.
-      const declared = declaredSensitivity(db, c.domain, c.caseId)
-      const tier = tierFor(c.domain, declared, content ?? '')
+      const meta = caseMeta(db, c.domain, c.caseId)
+      // CLASSIFY EXACTLY WHAT IS SENT. This used to pass `content` alone — the
+      // stored email thread, or the empty string when no thread doc existed —
+      // while enrichCaseGoal below hands the provider the case TITLE and
+      // DESCRIPTION as well. Sender-authored text in those two fields was
+      // therefore never content-classified on this path. Intake escalates the
+      // declared tier from subject+snippet, which partly covers intake-born
+      // personal cases and nothing else: not cases created by other paths, not
+      // retitled cases, not ZST cases. A ZST_INTERNAL case (→ PERSONAL →
+      // DeepSeek-eligible) whose description holds an IBAN went to the
+      // THIRD_PARTY provider. The reader path has always classified the actual
+      // context items it sends (reader-cycle.ts); this is the same rule.
+      //
+      // enrichCaseGoal falls back to the description when there is no thread, so
+      // the description is in the payload either way — it belongs in the
+      // classified text either way too.
+      const classified = [meta.title, meta.description, content ?? ''].filter(t => t && t.trim()).join('\n')
+      const tier = tierFor(c.domain, meta.sensitivity, classified)
       const route = routeFor(routes, tier)
       if (!route) {
         result.sensitivityBlocked++

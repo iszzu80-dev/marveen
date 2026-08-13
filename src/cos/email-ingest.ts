@@ -133,45 +133,150 @@ export const markRecoveryRequired = (db: Database.Database, a: string, m: string
 /** P0.1: park a poison message terminally so the batch can finish. */
 export const quarantineMessage = (db: Database.Database, a: string, m: string, reason: string, now: number) => setMessageStatus(db, a, m, 'QUARANTINED', { quarantineReason: reason }, now)
 
+const TERMINAL_PLACEHOLDERS = [...TERMINAL_MESSAGE_STATUSES].map(() => '?').join(',')
+/** All-digits test for a TEXT column, so CAST(... AS INTEGER) is meaningful.
+ *  SQLite's CAST silently yields 0 for 'triage-1755000000', which would make
+ *  every synthetic batch compare as position zero. */
+const NUMERIC_CURSOR_SQL = `b.cursor_after GLOB '[0-9]*' AND b.cursor_after NOT GLOB '*[^0-9]*'`
+
 /** Is every message in the batch terminal? (empty batch → true.) */
 export function isBatchTerminal(db: Database.Database, batchId: string): boolean {
-  const placeholders = [...TERMINAL_MESSAGE_STATUSES].map(() => '?').join(',')
   const row = db.prepare(
-    `SELECT COUNT(*) AS n FROM email_processing WHERE batch_id = ? AND status NOT IN (${placeholders})`
+    `SELECT COUNT(*) AS n FROM email_processing WHERE batch_id = ? AND status NOT IN (${TERMINAL_PLACEHOLDERS})`
   ).get(batchId, ...TERMINAL_MESSAGE_STATUSES) as { n: number }
   return row.n === 0
 }
 
+/**
+ * P0.2's REAL question: is there any non-terminal message at or before this
+ * batch's cursor position?
+ *
+ * "Every message in THIS batch is terminal" is a narrower question that happens
+ * to coincide with it only while batches never overlap. They do overlap the
+ * moment a history poller re-lists a message in a newer delta: openBatch is
+ * INSERT OR IGNORE, so the re-listed message keeps its ORIGINAL batch_id, the
+ * new batch does not count it, the new batch terminalizes, and the cursor moves
+ * PAST a message still sitting in the old batch — forever, because the cursor
+ * never comes back. The per-message triage flow in production today cannot
+ * produce that shape, but it is exactly the shape overlapping deltas produce,
+ * and the invariant should say what it means rather than what is convenient.
+ *
+ * Batches whose cursor_after is not a historyId (triage) carry no position, so
+ * they neither block a real batch nor get this treatment themselves.
+ */
+export function isCursorPositionClear(db: Database.Database, batchId: string): boolean {
+  const batch = db.prepare(
+    `SELECT gmail_account_id, cursor_after FROM email_processing_batches WHERE batch_id = ?`,
+  ).get(batchId) as { gmail_account_id: string; cursor_after: string } | undefined
+  const rank = batch ? cursorRank(batch.cursor_after) : null
+  if (!batch || rank == null) return isBatchTerminal(db, batchId)
+  const row = db.prepare(
+    `SELECT COUNT(*) AS n
+       FROM email_processing p
+       JOIN email_processing_batches b ON b.batch_id = p.batch_id
+      WHERE b.gmail_account_id = ?
+        AND ${NUMERIC_CURSOR_SQL}
+        AND CAST(b.cursor_after AS INTEGER) <= ?
+        AND p.status NOT IN (${TERMINAL_PLACEHOLDERS})`,
+  ).get(batch.gmail_account_id, rank, ...TERMINAL_MESSAGE_STATUSES) as { n: number }
+  return row.n === 0
+}
+
 export interface AdvanceResult {
+  /** The ACCOUNT history cursor moved to this batch's cursor_after. */
   advanced: boolean
+  /** The BATCH closed (TERMINAL). True even when the cursor deliberately stayed
+   *  put — a triage batch carries no history position to advance to. */
+  batchTerminal: boolean
+  /** The account checkpoint as it stands after this call. */
   cursor: string | null
+  /** Why the cursor did not move although the batch closed. Absent when it did
+   *  move, or when the batch is not terminal at all. */
+  holdReason?: string
+}
+
+/** Synthetic per-message batches minted by the triage bridge carry this prefix.
+ *
+ *  INCIDENT (review 2026-08-13). triage-bridge opens one batch per triaged email
+ *  with `cursorAfter: 'triage-<unix>'` — a wall-clock stamp, not a Gmail
+ *  historyId — for the REAL Gmail account id. Every batch that closed therefore
+ *  wrote that string into email_source_checkpoints, so the P0.2 checkpoint the
+ *  whole inbound state machine is built on held garbage, and a future historyId
+ *  poller seeded from getCheckpoint() would start from a non-historyId. The
+ *  triage path has its own dedup (the heartbeat's --mark file plus
+ *  email_processing's UNIQUE); it has no history position and must not pretend
+ *  to one. */
+export const TRIAGE_BATCH_PREFIX = 'triage-'
+export function isTriageBatch(batchId: string): boolean { return batchId.startsWith(TRIAGE_BATCH_PREFIX) }
+
+/** A Gmail historyId as a comparable number, or null when the string is not one.
+ *
+ *  Cursors are stored as TEXT and historyIds are decimal integers, so ordering
+ *  them as text is simply wrong: '999' > '1000' lexicographically. That is the
+ *  same defect reconcile.ts has in its `cp.history_cursor >= b.cursor_after`
+ *  CRITICAL check, which both false-positives and false-negatives on it. */
+export function cursorRank(cursor: string | null | undefined): number | null {
+  if (cursor == null || !/^\d+$/.test(cursor)) return null
+  const n = Number(cursor)
+  return Number.isSafeInteger(n) ? n : null
 }
 
 /**
  * P0.2: advance the account cursor to the batch's cursor_after ONLY if the batch
  * is terminal. Otherwise a no-op (cursor stays where it is). Marks the batch
- * TERMINAL and moves the account checkpoint in one transaction. The checkpoint
- * never regresses.
+ * TERMINAL and moves the account checkpoint in one transaction.
+ *
+ * THE CHECKPOINT NEVER REGRESSES — and now something enforces that. The upsert
+ * used to set history_cursor unconditionally while the comment above it already
+ * claimed monotonicity, so batches terminalizing out of creation order (which
+ * closeOpenBatches does not guarantee against — a blocked older batch closes
+ * after a newer one) moved the cursor BACKWARDS and mail between the two
+ * positions was served, and processed, twice. The guard is numeric because the
+ * column is TEXT and historyIds are decimal integers.
+ *
+ * A batch that cannot advance the cursor still CLOSES: holding a batch open on
+ * account of a cursor it was never going to move would pin the whole queue.
  */
 export function tryAdvanceCheckpoint(db: Database.Database, batchId: string, now: number): AdvanceResult {
   const tx = db.transaction((): AdvanceResult => {
     const batch = db.prepare(`SELECT * FROM email_processing_batches WHERE batch_id = ?`).get(batchId) as
       | { gmail_account_id: string; cursor_after: string; status: string } | undefined
     if (!batch) throw new Error(`batch not found: ${batchId}`)
-    if (!isBatchTerminal(db, batchId)) {
+    const readCursor = () => (db.prepare(
+      `SELECT history_cursor FROM email_source_checkpoints WHERE gmail_account_id=?`,
+    ).get(batch.gmail_account_id) as { history_cursor: string | null } | undefined)?.history_cursor ?? null
+
+    if (!isCursorPositionClear(db, batchId)) {
       db.prepare(`UPDATE email_processing_batches SET status='PROCESSING', updated_at=? WHERE batch_id=? AND status='OPEN'`).run(now, batchId)
-      const cp = db.prepare(`SELECT history_cursor FROM email_source_checkpoints WHERE gmail_account_id=?`).get(batch.gmail_account_id) as { history_cursor: string | null } | undefined
-      return { advanced: false, cursor: cp?.history_cursor ?? null }
+      return { advanced: false, batchTerminal: false, cursor: readCursor() }
     }
     db.prepare(`UPDATE email_processing_batches SET status='TERMINAL', updated_at=? WHERE batch_id=?`).run(now, batchId)
+
+    const current = readCursor()
+    const hold = checkpointHoldReason(batchId, batch.cursor_after, current)
+    if (hold) return { advanced: false, batchTerminal: true, cursor: current, holdReason: hold }
+
     db.prepare(
       `INSERT INTO email_source_checkpoints (gmail_account_id, history_cursor, updated_at)
        VALUES (@acct, @cursor, @now)
        ON CONFLICT(gmail_account_id) DO UPDATE SET history_cursor=@cursor, updated_at=@now`
     ).run({ acct: batch.gmail_account_id, cursor: batch.cursor_after, now })
-    return { advanced: true, cursor: batch.cursor_after }
+    return { advanced: true, batchTerminal: true, cursor: batch.cursor_after }
   })
   return tx()
+}
+
+/** Null when this batch's cursor_after may be written to the account checkpoint,
+ *  otherwise the one-line reason it may not. */
+function checkpointHoldReason(batchId: string, cursorAfter: string, current: string | null): string | null {
+  if (isTriageBatch(batchId)) return 'triage batch carries no history position'
+  const next = cursorRank(cursorAfter)
+  // A non-historyId cursor is never written. Whatever produced it, the account
+  // checkpoint is not the place to find out.
+  if (next == null) return `cursor_after is not a historyId: ${cursorAfter}`
+  const now = cursorRank(current)
+  if (now != null && next <= now) return `cursor would regress: ${cursorAfter} <= ${current}`
+  return null
 }
 
 export function getCheckpoint(db: Database.Database, accountId: string): string | null {

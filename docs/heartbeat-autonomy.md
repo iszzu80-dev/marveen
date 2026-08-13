@@ -41,7 +41,29 @@ level 2  → nem cselekszik magától; üzenetben javasolja, és vár a jóváha
 level 1  → csak listázza/jelzi, semmit nem tesz
 ```
 
-Hiányzó config vagy kulcs esetén a default a 3. szint (a korábbi viselkedés).
+**Hiányzó config vagy kulcs esetén a default az 1. szint (csak jelez).** Korábban 3
+volt — vagyis egy hiányzó kulcs csendben a legmegengedőbb szintet adta. Ez pont
+fordítottja a rendszer többi kapujának (ismeretlen ügytípus → `PREPARE`, ismeretlen
+érzékenység → `HIGHLY_SENSITIVE`, ismeretlen lezáró → `ENGINE`, azaz a szigorú oldal):
+egy kategória, amit senki nem konfigurált, egy kategória, amin senki nem gondolkodott.
+A szintet mindig a `autonomyLevel(key)` helper adja vissza (`src/web/routes/autonomy.ts`),
+hogy ne szóródjon szét saját `?? 3` fallback-ekben.
+
+### Melyik rendszer az illetékes
+
+Két, egymástól független autonómia-rendszer van, és nem ugyanarra valók:
+
+| | JSON-config (`store/autonomy-config.json`) | SQLite-létra (`cos_autonomy_ladder`) |
+|---|---|---|
+| Hatókör | **flotta-szintű kategóriák**: ütemezett feladatok / heartbeat-ek viselkedése (kanban-archiválás, stall-nudge, email-küldés, publikálás, pénzmozgás) | **Personal Chief ügytípusai** (`INVOICE_INCOMING`, `HOME_REPAIR`, …) |
+| Skála | 1–3 | `OFF → OBSERVE → PREPARE → EXECUTE_WITH_APPROVAL → LIMITED_AUTONOMOUS` |
+| Ki olvassa | heartbeat-promptok, ütemezett szkriptek, dashboard | `permits()` a COS cselekvési útjain |
+| Default hiánykor | 1 (csak jelez) | `PREPARE` (készíthet elő, nem küldhet) |
+| Főkapcsoló | — | `cos_autonomy_global` (§22 kill switch, a haladás-motort is megállítja) |
+
+A kettő nem szinkronizál automatikusan; a létra a COS-on belüli igazság, a JSON-config
+a flotta-szintű feladatoké. Az egyirányú megfeleltetés (`fleetLevelFor(rung)`) csak
+megjelenítéshez van, nem írja felül a configot.
 
 ### Config-séma
 

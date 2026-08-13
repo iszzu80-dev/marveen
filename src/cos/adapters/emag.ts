@@ -19,10 +19,15 @@
 // offers", never a fabricated price. Relevance is the engine's job (mustMatch /
 // excludeTerms on the radar item), so a "Cloud" query that hits headphones is
 // filtered out downstream rather than mis-reported here.
+//
+// And "0 offers" is reserved for that answer alone: a page we could not fetch
+// throws EmagFetchError rather than degrading into an empty result — see the
+// class comment for what an empty result costs the radar.
 
 import type {
   ShoppingAdapter, ShoppingAdapterCapabilities, ProductSearchResult, ProductDetail, ProductRef,
 } from '../shopping-adapter.js'
+import { currencyMinorExponent } from '../shopping-adapter.js'
 
 const BASE = 'https://www.emag.hu'
 const HEADERS: Record<string, string> = {
@@ -35,10 +40,10 @@ const HEADERS: Record<string, string> = {
 // the intended product is near the top when eMAG carries it.
 const MAX_PRICE_FETCH = 6
 
-const CURRENCY_MINOR_EXPONENT: Record<string, number> = { HUF: 0, JPY: 0, EUR: 2, USD: 2, GBP: 2, CHF: 2 }
+// The exponent table lives in shopping-adapter.ts — see the comment there for why
+// it may not be copied per adapter.
 function priceToMinor(price: number, currency: string): number {
-  const exp = CURRENCY_MINOR_EXPONENT[currency.toUpperCase()] ?? 2
-  return Math.round(price * 10 ** exp)
+  return Math.round(price * 10 ** currencyMinorExponent(currency))
 }
 
 export interface SearchCard { name: string; url: string }
@@ -98,6 +103,26 @@ export function parseProductJsonLd(
 
 export interface EmagAdapterOpts { fetchImpl?: typeof fetch }
 
+/** "We could not look" — as opposed to "we looked and eMAG does not carry it".
+ *
+ *  INCIDENT (review 2026-08-13): getText returned null on !r.ok AND on a thrown
+ *  fetch, so a Cloudflare 403, a DNS failure or a timeout arrived at the radar as
+ *  an EMPTY SEARCH RESULT. That is not a near-miss, it is a three-step failure:
+ *  (1) a null-price observation is recorded and recordObservation computes
+ *  hit=false, flipping a HIT item back to ACTIVE; (2) the next successful check
+ *  therefore takes decideNotify's re-entry branch and RE-ALERTS the owner about
+ *  the same unchanged offer — one network blip per repeat ping; (3) nothing ever
+ *  threw, so connector_health stayed green through it all. The DiscoverCars
+ *  adapter has always thrown here. Now so does this one. */
+export class EmagFetchError extends Error {
+  readonly status?: number
+  constructor(url: string, detail: string, status?: number) {
+    super(`eMAG fetch failed (${detail}): ${url}`)
+    this.name = 'EmagFetchError'
+    this.status = status
+  }
+}
+
 export class EmagAdapter implements ShoppingAdapter {
   readonly id = 'emag'
   readonly displayName = 'eMAG.hu'
@@ -108,21 +133,31 @@ export class EmagAdapter implements ShoppingAdapter {
     this.fetch = opts.fetchImpl ?? fetch
   }
 
-  private async getText(url: string): Promise<string | null> {
+  /** Fetch a page or THROW. Never returns null — "no page" and "no product" are
+   *  different answers and the radar must not confuse them (EmagFetchError). */
+  private async getText(url: string): Promise<string> {
+    let r: Response
     try {
-      const r = await this.fetch(url, { headers: HEADERS })
-      if (!r.ok) return null
+      r = await this.fetch(url, { headers: HEADERS })
+    } catch (e) {
+      // DNS failure, TCP reset, timeout — we never reached eMAG.
+      throw new EmagFetchError(url, String((e as Error)?.message ?? e))
+    }
+    if (!r.ok) throw new EmagFetchError(url, `HTTP ${r.status}`, r.status)
+    try {
       return await r.text()
-    } catch {
-      return null
+    } catch (e) {
+      // 200 with a truncated/aborted body is still "we could not look".
+      throw new EmagFetchError(url, `body read failed: ${String((e as Error)?.message ?? e)}`)
     }
   }
 
   async searchProducts(query: string, opts: { limit?: number } = {}): Promise<ProductSearchResult[]> {
     const q = query.trim()
     if (!q) return []
+    // A failing search page propagates: the scheduler records a failed check and
+    // connector_health degrades, instead of the radar reading "eMAG has nothing".
     const html = await this.getText(`${BASE}/search/${encodeURIComponent(q)}`)
-    if (!html) return []
     const cards = parseSearchCards(html)
     const budget = Math.min(opts.limit ?? MAX_PRICE_FETCH, MAX_PRICE_FETCH)
     const out: ProductSearchResult[] = []
@@ -140,10 +175,22 @@ export class EmagAdapter implements ShoppingAdapter {
   }
 
   /** Fetch one product page and read its JSON-LD price. `fallbackName` is the
-   *  search-card name, used when the page has no JSON-LD name. */
+   *  search-card name, used when the page has no JSON-LD name.
+   *
+   *  null means "this listing carries no readable Product/Offer" — a real,
+   *  honest answer about the product. A page we could not fetch is NOT that: it
+   *  throws, with the single exception of 404/410, which is eMAG telling us the
+   *  listing is gone. Anything else (403, 5xx, network) would let a rate-limited
+   *  sweep silently report the second-cheapest offer as the cheapest, which is
+   *  the same HIT→ACTIVE→re-alert flap in a quieter costume. */
   private async priceFor(url: string, fallbackName: string): Promise<ProductSearchResult | null> {
-    const html = await this.getText(url)
-    if (!html) return null
+    let html: string
+    try {
+      html = await this.getText(url)
+    } catch (e) {
+      if (e instanceof EmagFetchError && (e.status === 404 || e.status === 410)) return null
+      throw e
+    }
     const ld = parseProductJsonLd(html)
     if (!ld) return null
     return {

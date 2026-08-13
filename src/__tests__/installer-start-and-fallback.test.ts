@@ -113,11 +113,28 @@ describe('the ERR-trap abort is real (guards the premise of the tests above)', (
   // substitution fails, inside the `then` branch of an `if`. bash blames the
   // enclosing `fi`, which is why the installer reported line 658 for a command
   // that lives on line 644.
-  it('an unguarded capture aborts, and bash blames the enclosing `fi`', () => {
+  it('an unguarded capture aborts, and the blamed line is not the one you would guess', () => {
     const r = runScriptFile([...TRAP, 'if [ -n "x" ]; then', '  out="$(false)"', 'fi', 'echo REACHED'])
-    expect(r.out).toBe('TRAP:6')
+    // THE PROPERTY: the trap fires and the script never reaches the next line.
+    // That is the premise the tests above rest on, and it is version-stable.
+    expect(r.out).toMatch(/^TRAP:\d+$/)
     expect(r.out).not.toContain('REACHED')
     expect(r.code).toBe(9)
+
+    // The LINE NUMBER is not. This asserted `TRAP:6` exactly — the enclosing
+    // `fi` — because that is what the bash on the install host reported, and it
+    // is the observation that explained the installer blaming line 658 for a
+    // command on line 644. Newer bash blames the command itself (line 5). Both
+    // are the same defect; pinning one spelling of it made the test a report on
+    // the local bash build rather than on the installer, and it had been red
+    // ever since (review 2026-08-13, R-11).
+    //
+    // What still earns its place: the blamed line is inside the if-block, never
+    // the `echo REACHED` after it — so a reader chasing the trap is sent to the
+    // right region even though the exact line moves.
+    const blamed = Number(r.out.slice('TRAP:'.length))
+    expect(blamed).toBeGreaterThanOrEqual(5)
+    expect(blamed).toBeLessThanOrEqual(6)
   })
 
   // The tempting fix that does NOTHING here. A `trap ... ERR` fires regardless

@@ -12,7 +12,7 @@
 // heartbeat) and passed in.
 
 import type Database from 'better-sqlite3'
-import { openBatch } from './email-ingest.js'
+import { openBatch, TRIAGE_BATCH_PREFIX } from './email-ingest.js'
 import { ingestEmail, type EmailIntakeInput, type IntakeOutcome } from './intake.js'
 import type { CaseSensitivity } from './schema.js'
 
@@ -57,9 +57,17 @@ export function ingestTriagedEmail(db: Database.Database, input: TriagedEmail, n
   // A minimal per-email batch (the authoritative history-sync checkpoint model
   // is not used here — the heartbeat's own --mark file is the poll-level dedup,
   // and email_processing's UNIQUE is the case-level dedup).
-  const batchId = `triage-${input.accountId}-${input.messageId}`
+  //
+  // The TRIAGE_BATCH_PREFIX is load-bearing, not cosmetic: it is how
+  // tryAdvanceCheckpoint knows this batch's cursor_after is a wall-clock stamp
+  // and not a Gmail historyId, so closing it must never write the account
+  // checkpoint. Every triage batch that closed used to stamp `triage-<unix>`
+  // into email_source_checkpoints for the real account id, filling the P0.2
+  // cursor the whole state machine reads with a string no history poller can
+  // start from.
+  const batchId = `${TRIAGE_BATCH_PREFIX}${input.accountId}-${input.messageId}`
   openBatch(db, {
-    batchId, accountId: input.accountId, cursorBefore: null, cursorAfter: `triage-${now}`,
+    batchId, accountId: input.accountId, cursorBefore: null, cursorAfter: `${TRIAGE_BATCH_PREFIX}${now}`,
     messages: [{ messageId: input.messageId, threadId: input.threadId }],
   }, now)
 

@@ -541,8 +541,30 @@ function caseTitle(db: Database.Database, domain: string, caseId: string): strin
 // version of that, and guessing here would put words in his mouth on a case
 // record that is append-only. Free text is stored as INFORMATION, verbatim.
 
-const YES = /^\s*(igen|ok(é|e)?|rendben|jó|jo|persze|mehet|yes|y)\b/i
-const NO = /^\s*(nem|ne|elutasít|elutasit|no|n)\b/i
+// A YES/NO IS A WHOLE SENTENCE, NOT A PREFIX.
+//
+// The old pair matched a prefix and nothing else: /^\s*(igen|ok|jó|…)\b/. So
+// "Jó kérdés, még gondolkodom" — a sentence that says the opposite — was
+// recorded as OWNER_DECISION{choice:'YES'}, and on an approval question that
+// used to be enough to move the case to READY under the words "Owner approved
+// the request". "Nem tudom" read as NO in exactly the same way.
+//
+// The rule now: the answer counts as a decision only when the WHOLE message is
+// the decision — the word, optionally with punctuation, optionally with one of
+// the short intensifiers people actually type ("igen, mehet", "ok rendben").
+// Anything longer is a sentence, and a sentence is INFORMATION: it is stored
+// verbatim, the engine does not advance on it, and the owner is not second-
+// guessed. That is the codebase's fail-closed posture and the 2026-08-11
+// postmortem's finding in one line — a wrong pairing is worse than none.
+//
+// Note the deliberate asymmetry with the old list: bare "y"/"n" are gone. A
+// single letter is as likely to be a typo as an answer, and this is the input
+// that grants approvals.
+const AFFIRM = '(igen|ok|oké|oke|okay|rendben|jó|jo|persze|mehet|yes|jöhet|johet|csináld|csinald)'
+const DENY = '(nem|ne|no|elutasítom|elutasitom|elutasít|elutasit|nem kell|hagyjuk)'
+const CLOSER = '[\\s.!,;:]*'
+const YES = new RegExp(`^${CLOSER}${AFFIRM}(${CLOSER}${AFFIRM})*${CLOSER}$`, 'i')
+const NO = new RegExp(`^${CLOSER}${DENY}(${CLOSER}${DENY})*${CLOSER}$`, 'i')
 
 export interface RecordedAnswer {
   caseId: string
@@ -678,6 +700,19 @@ export function recordOwnerAnswer(
     // answered_at`, and equal satisfies it.
     db.prepare(`UPDATE ${table} SET last_event_id = ?, updated_at = ? WHERE case_id = ?`)
       .run(Number(info.lastInsertRowid), now, input.caseId)
+
+    // AND MAKE IT DUE. The two columns above make the case ELIGIBLE (the trigger
+    // sees a new state); this makes it VISIBLE to the sweep, which only looks at
+    // cases whose next_progression_at has come round. The heartbeat now backs a
+    // quiet case off by fifteen minutes, and an answer must not sit behind that
+    // backoff — an owner who answers and sees nothing happen for a quarter of an
+    // hour stops answering.
+    try {
+      db.prepare(
+        `UPDATE case_progression_state SET next_progression_at = ?, updated_at = ?
+          WHERE case_id = ? AND progression_enabled = 1`,
+      ).run(now, now, input.caseId)
+    } catch { /* no progression table on this store: nothing to wake */ }
   }
   return { caseId: input.caseId, questionHash: open.question_hash, eventType, choice }
 }

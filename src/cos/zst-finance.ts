@@ -56,10 +56,10 @@ export function upsertZstInvoice(db: Database.Database, input: ZstInvoiceInput, 
     `INSERT INTO zst_invoices
        (invoice_id, case_id, invoice_type, supplier_id, customer_id, invoice_number, issue_date,
         due_date, currency, net_amount, vat_amount, gross_amount, document_id, product_id,
-        contract_id, accounting_period, validation_status, duplicate_hash, created_at, updated_at)
+        contract_id, accounting_period, validation_status, duplicate_hash, notes, created_at, updated_at)
      VALUES (@invoiceId, @caseId, @invoiceType, @supplierId, @customerId, @invoiceNumber, @issueDate,
         @dueDate, @currency, @netAmount, @vatAmount, @grossAmount, @documentId, @productId,
-        @contractId, @accountingPeriod, 'UNVALIDATED', @dupHash, @now, @now)`
+        @contractId, @accountingPeriod, 'UNVALIDATED', @dupHash, @notes, @now, @now)`
   ).run({
     invoiceId, caseId: input.caseId ?? null, invoiceType: input.invoiceType ?? 'INCOMING',
     supplierId: input.supplierId ?? null, customerId: input.customerId ?? null,
@@ -68,7 +68,11 @@ export function upsertZstInvoice(db: Database.Database, input: ZstInvoiceInput, 
     netAmount: input.netAmount ?? null, vatAmount: input.vatAmount ?? null,
     grossAmount: input.grossAmount ?? null, documentId: input.documentId ?? null,
     productId: input.productId ?? null, contractId: input.contractId ?? null,
-    accountingPeriod: input.accountingPeriod ?? null, dupHash, now,
+    accountingPeriod: input.accountingPeriod ?? null, dupHash,
+    // `notes` was in the input type and in the table and was never written by
+    // this INSERT, so anything a caller put there vanished. It is the only place
+    // an extractor can record HOW MUCH of the mail it actually saw.
+    notes: input.notes ?? null, now,
   })
   return { invoiceId, duplicate: false }
 }
@@ -95,21 +99,48 @@ export interface BankMatchSuggestion { bankTransactionId: string; invoiceId: str
  *  to another transaction is skipped so one txn ≠ two full invoices (AT-ZF04). */
 export function suggestBankMatches(db: Database.Database, now: number): BankMatchSuggestion[] {
   const txns = db.prepare(
-    `SELECT bank_transaction_id, amount, counterparty FROM zst_bank_transactions
+    `SELECT bank_transaction_id, amount, counterparty, currency, direction FROM zst_bank_transactions
      WHERE reconciliation_status = 'UNMATCHED' AND amount IS NOT NULL`
-  ).all() as Array<{ bank_transaction_id: string; amount: number; counterparty: string | null }>
+  ).all() as Array<{
+    bank_transaction_id: string; amount: number; counterparty: string | null
+    currency: string | null; direction: string | null
+  }>
   const out: BankMatchSuggestion[] = []
   const usedInvoices = new Set(
     (db.prepare(`SELECT invoice_id FROM zst_reconciliation_items WHERE status IN ('SUGGESTED','CONFIRMED')`)
       .all() as Array<{ invoice_id: string }>).map(r => r.invoice_id),
   )
+  // A pairing a human has already REJECTED is not offered again. Without this the
+  // rejected invoice returns to the pool (only SUGGESTED/CONFIRMED are excluded),
+  // the next pass picks the same one, and the run re-proposes a match somebody has
+  // already looked at and refused.
+  const rejectedPairs = new Set(
+    (db.prepare(`SELECT bank_transaction_id, invoice_id FROM zst_reconciliation_items WHERE status = 'REJECTED'`)
+      .all() as Array<{ bank_transaction_id: string; invoice_id: string }>)
+      .map(r => `${r.bank_transaction_id}|${r.invoice_id}`),
+  )
   for (const t of txns) {
-    // Candidate invoices: same gross (absolute), not already spoken for, not paid.
+    // Candidate invoices: same gross, SAME CURRENCY, right direction, not already
+    // spoken for, not paid.
+    //
+    // Amount alone used to be the whole test, and both tables have carried a
+    // `currency` column the query never looked at: a 100 EUR debit matched a
+    // 100 HUF invoice. Direction was ignored too, so an incoming payment could be
+    // suggested against a supplier invoice we owe. Neither mistake is quiet —
+    // a suggested invoice enters usedInvoices, so one false cross-currency
+    // suggestion also BLOCKS the correct match for the rest of the pass.
+    //
+    // Sign is the direction of record when the column is empty (the importer
+    // writes both): negative = money out = a supplier invoice we pay (INCOMING);
+    // positive = money in = one we issued (OUTGOING).
+    const debit = t.direction ? t.direction === 'DEBIT' : t.amount < 0
+    const wantType = debit ? 'INCOMING' : 'OUTGOING'
     const cands = db.prepare(
       `SELECT invoice_id, supplier_id FROM zst_invoices
-       WHERE gross_amount = ? AND payment_status <> 'PAID'`
-    ).all(Math.abs(t.amount)) as Array<{ invoice_id: string; supplier_id: string | null }>
-    const pick = cands.find(c => !usedInvoices.has(c.invoice_id))
+       WHERE gross_amount = ? AND currency = ? AND invoice_type = ? AND payment_status <> 'PAID'`
+    ).all(Math.abs(t.amount), t.currency ?? 'HUF', wantType) as Array<{ invoice_id: string; supplier_id: string | null }>
+    const pick = cands.find(c => !usedInvoices.has(c.invoice_id)
+      && !rejectedPairs.has(`${t.bank_transaction_id}|${c.invoice_id}`))
     if (!pick) continue
     // Confidence: amount match = 0.7; +0.3 if counterparty text contains supplier id.
     let confidence = 0.7
@@ -119,9 +150,16 @@ export function suggestBankMatches(db: Database.Database, now: number): BankMatc
       db.prepare(`UPDATE zst_bank_transactions SET reconciliation_status='MATCH_SUGGESTED',
         matched_invoice_id=@inv, match_confidence=@conf, updated_at=@now WHERE bank_transaction_id=@txn`)
         .run({ inv: pick.invoice_id, conf: confidence, now, txn: t.bank_transaction_id })
+      // The id carries the run's clock, and the insert tolerates a collision.
+      // `rec-${txn}-${inv}` with a plain INSERT meant that any second suggestion
+      // of a pair that had ever been recorded threw a PRIMARY KEY violation —
+      // and that throw is not local, it aborts the WHOLE suggestion pass, so one
+      // stale row stopped every other transaction in the batch from being
+      // reconciled.
       db.prepare(`INSERT INTO zst_reconciliation_items (recon_id, bank_transaction_id, invoice_id, status, confidence, created_at)
-        VALUES (@rid, @txn, @inv, 'SUGGESTED', @conf, @now)`)
-        .run({ rid: `rec-${t.bank_transaction_id}-${pick.invoice_id}`, txn: t.bank_transaction_id, inv: pick.invoice_id, conf: confidence, now })
+        VALUES (@rid, @txn, @inv, 'SUGGESTED', @conf, @now)
+        ON CONFLICT(recon_id) DO NOTHING`)
+        .run({ rid: `rec-${t.bank_transaction_id}-${pick.invoice_id}-${now}`, txn: t.bank_transaction_id, inv: pick.invoice_id, conf: confidence, now })
     })
     tx()
     out.push({ bankTransactionId: t.bank_transaction_id, invoiceId: pick.invoice_id, confidence })
@@ -141,7 +179,17 @@ export function ensureAccountingPackage(db: Database.Database, period: string, n
   const incoming = (db.prepare(`SELECT COUNT(*) n FROM zst_invoices WHERE accounting_period=? AND invoice_type='INCOMING'`).get(period) as { n: number }).n
   const outgoing = (db.prepare(`SELECT COUNT(*) n FROM zst_invoices WHERE accounting_period=? AND invoice_type='OUTGOING'`).get(period) as { n: number }).n
   const missingDocs = (db.prepare(`SELECT COUNT(*) n FROM zst_invoices WHERE accounting_period=? AND document_id IS NULL`).get(period) as { n: number }).n
-  const unmatched = (db.prepare(`SELECT COUNT(*) n FROM zst_bank_transactions WHERE reconciliation_status='UNMATCHED'`).get() as { n: number }).n
+  // Scoped to the period, like every other count in this roll-up. It used to be
+  // a global COUNT(*), so a January package carried July's unreconciled noise:
+  // the number grew forever, every closed period "reopened" whenever an
+  // unrelated transaction landed, and the one figure that is supposed to say
+  // "this month is not ready yet" said it about every month at once.
+  // booking_date is ISO TEXT, so the month comparison is a cheap prefix match.
+  const unmatched = (db.prepare(
+    `SELECT COUNT(*) n FROM zst_bank_transactions
+     WHERE reconciliation_status='UNMATCHED' AND booking_date IS NOT NULL
+       AND strftime('%Y-%m', booking_date) = ?`
+  ).get(period) as { n: number }).n
   db.prepare(
     `UPDATE zst_accounting_packages SET incoming_invoice_count=@in, outgoing_invoice_count=@out,
        missing_document_count=@miss, unmatched_transaction_count=@unm WHERE package_id=@id`
