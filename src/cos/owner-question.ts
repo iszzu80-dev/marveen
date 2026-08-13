@@ -206,6 +206,15 @@ export interface AskResult {
    *  the same reason as everything else here: a channel that went quiet because
    *  of a rule must not look like a system with nothing to say. */
   cooldown: number
+  /** §11 C-invariant: candidate cases the scan window (50) never looked at.
+   *
+   *  Every other count here explains a case the sweep SAW and declined. This one
+   *  covers the cases it did not see at all, which until now were invisible in
+   *  exactly the way the ordering fix above makes matter: once the order is by
+   *  deadline, the cases past the window are the least urgent ones — but only
+   *  a number can say whether the window is holding back three cases or three
+   *  hundred. */
+  windowExhausted: number
 }
 
 /** Has this exact question already been HANDLED — either still waiting for an
@@ -264,6 +273,86 @@ export const STALE_READING_GRACE_SEC = 120
  *  ANSWER clears it immediately, so a conversation the owner is actually having
  *  is never slowed down — only a case talking to itself is. */
 export const ASK_COOLDOWN_SEC = 6 * 3600
+
+/** How many candidate cases one sweep looks at. Everything past it is reported
+ *  as `windowExhausted`, never silently dropped. */
+export const QUESTION_SCAN_WINDOW = 50
+
+/** The candidate set: every case whose latest reading could still produce a
+ *  question. Written once and used by both the page and its count, because two
+ *  hand-kept copies of a clause this long describe different sets within a
+ *  release, and then the "how many are left" number is about a different
+ *  population than the list it accompanies. */
+const QUESTION_CANDIDATES_SQL = `
+  FROM case_evidence_packets p
+  JOIN (
+    SELECT case_id, MAX(created_at) AS created_at
+    FROM case_evidence_packets WHERE packet_json IS NOT NULL GROUP BY case_id
+  ) latest ON latest.case_id = p.case_id AND latest.created_at = p.created_at
+  LEFT JOIN personal_cases pc ON pc.case_id = p.case_id AND p.domain <> 'zst'
+  LEFT JOIN zst_cases      zc ON zc.case_id = p.case_id AND p.domain =  'zst'
+  WHERE p.packet_json IS NOT NULL AND p.plan_json IS NOT NULL
+    -- A finished case has no open question. Live 2026-08-11: a COMPLETED rental
+    -- case produced one anyway, because this query only ever looked at packets
+    -- and never at the case behind them.
+    --
+    -- Aliased away from the outer pc/zc on purpose: an inner alias that shadows
+    -- an outer one is legal and unreadable, and the next person to touch the
+    -- ORDER BY would be reading the wrong row.
+    AND NOT EXISTS (
+      SELECT 1 FROM personal_cases xp WHERE xp.case_id = p.case_id
+        AND (xp.status IN ('COMPLETED','CANCELLED','ARCHIVED') OR xp.archived_at IS NOT NULL))
+    AND NOT EXISTS (
+      SELECT 1 FROM zst_cases xz WHERE xz.case_id = p.case_id
+        AND (xz.status IN ('COMPLETED','CANCELLED','ARCHIVED') OR xz.archived_at IS NOT NULL))`
+
+/** A deadline this close is treated as hard: it lands inside the window in which
+ *  an answer can still change the outcome. Beyond it, a deadline is a date, and
+ *  what decides the order is materiality. */
+export const DEADLINE_IMMINENT_SEC = 72 * 3600
+
+/** Priority as a sort key. Anything unrecognised sorts last rather than
+ *  silently in the middle, so a typo in the column never gets promoted. */
+const PRIORITY_RANK_SQL = `CASE COALESCE(pc.priority, zc.priority)
+  WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 WHEN 'P3' THEN 3 ELSE 4 END`
+
+/**
+ * §11.2 E (card `0d2121a9`). The order in which cases get to ask.
+ *
+ * This query used to end `ORDER BY p.created_at DESC` — the created_at of the
+ * EVIDENCE PACKET, so the most recently read case asked first. That is the
+ * "pure latest read order" the spec names and rejects, and it is not a
+ * theoretical problem: the sweep bound (50) and the ask ceiling (5 outstanding)
+ * are both real, so whatever sorts first consumes them. A case whose deadline
+ * passed last week, read a week ago, sat behind every case read this morning —
+ * permanently, because a case that is not read again never moves up.
+ *
+ * The order now is deadline class, then materiality, then oldest waiting:
+ *
+ *  0. overdue          — the deadline is behind us; nothing outranks this
+ *  1. imminent         — inside DEADLINE_IMMINENT_SEC
+ *  2. has a deadline   — a date exists, it is not near
+ *  3. no deadline      — nothing to be late for
+ *
+ * Materiality breaks ties inside a class, and `due_at ASC` then `packet_at ASC`
+ * break the rest — oldest first, so the queue drains rather than churns. Sorting
+ * by the raw timestamp instead of by class would have made materiality dead
+ * weight: two deadlines are almost never equal to the second.
+ *
+ * The joins are domain-scoped. The exclusion subqueries below are deliberately
+ * not — an exclusion that matches across domains can only suppress a question,
+ * never invent one, and that is the safe direction to be loose in.
+ */
+const QUESTION_ORDER_SQL = `
+  CASE
+    WHEN COALESCE(pc.due_at, zc.due_at) IS NULL THEN 3
+    WHEN COALESCE(pc.due_at, zc.due_at) <= @now THEN 0
+    WHEN COALESCE(pc.due_at, zc.due_at) <= @now + ${DEADLINE_IMMINENT_SEC} THEN 1
+    ELSE 2
+  END,
+  ${PRIORITY_RANK_SQL},
+  COALESCE(pc.due_at, zc.due_at) ASC,
+  p.created_at ASC`
 
 /** Has this case already asked recently, with no answer since?
  *
@@ -337,6 +426,7 @@ export function askPendingOwnerQuestions(
   const now = opts.now ?? Math.floor(Date.now() / 1000)
   const result: AskResult = {
     asked: 0, alreadyAsked: 0, nothingToAsk: 0, heldBacklogFull: 0, staleReading: 0, cooldown: 0,
+    windowExhausted: 0,
   }
 
   // Questions that GREW the open pile this sweep. A superseding rewrite does
@@ -354,23 +444,16 @@ export function askPendingOwnerQuestions(
     rows = db.prepare(
       `SELECT p.case_id, p.domain, p.packet_json, p.plan_json, p.created_at AS packet_at,
               p.progression_run_id
-       FROM case_evidence_packets p
-       JOIN (
-         SELECT case_id, MAX(created_at) AS created_at
-         FROM case_evidence_packets WHERE packet_json IS NOT NULL GROUP BY case_id
-       ) latest ON latest.case_id = p.case_id AND latest.created_at = p.created_at
-       WHERE p.packet_json IS NOT NULL AND p.plan_json IS NOT NULL
-         -- A finished case has no open question. Live 2026-08-11: a COMPLETED
-         -- rental case produced one anyway, because this query only ever looked
-         -- at packets and never at the case behind them.
-         AND NOT EXISTS (
-           SELECT 1 FROM personal_cases pc WHERE pc.case_id = p.case_id
-             AND (pc.status IN ('COMPLETED','CANCELLED','ARCHIVED') OR pc.archived_at IS NOT NULL))
-         AND NOT EXISTS (
-           SELECT 1 FROM zst_cases zc WHERE zc.case_id = p.case_id
-             AND (zc.status IN ('COMPLETED','CANCELLED','ARCHIVED') OR zc.archived_at IS NOT NULL))
-       ORDER BY p.created_at DESC LIMIT 50`,
-    ).all() as never
+       ${QUESTION_CANDIDATES_SQL}
+       ORDER BY ${QUESTION_ORDER_SQL} LIMIT ${QUESTION_SCAN_WINDOW}`,
+    ).all({ now }) as never
+    // The window's overflow, counted rather than probed. A `LIMIT window + 1`
+    // trick would only ever answer "at least one more", and the number is the
+    // whole point: three cases past the window is a bound doing its job, three
+    // hundred is a queue nobody is draining. The count reuses the candidate
+    // clause verbatim so the two can never describe different sets.
+    const total = (db.prepare(`SELECT COUNT(*) AS n ${QUESTION_CANDIDATES_SQL}`).get({ now }) as { n: number }).n
+    result.windowExhausted = Math.max(0, total - rows.length)
   } catch {
     return result
   }

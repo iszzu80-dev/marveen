@@ -265,6 +265,41 @@ describe('COS daily reconcile', () => {
       expect(f?.severity).toBe('CRITICAL')
       expect(f?.action).toMatch(/adatveszt/i)
     })
+
+    // The three below are the same defect seen from three sides: both columns
+    // are TEXT and historyIds are decimal integers, so the check used to order
+    // them as strings. Digit-count is what decided the verdict, not position.
+    it('stays silent when the cursor is BEHIND the open batch but has fewer digits', () => {
+      const db = getDb()
+      // '999' >= '1000' is TRUE as text and FALSE as a number. The cursor has
+      // not reached the batch; a CRITICAL "data loss" here is invented.
+      openBatch(db, { batchId: 'b1', accountId: ACC, cursorBefore: '900', cursorAfter: '1000', messages: [{ messageId: 'm1' }] }, NOW - 2 * DAY)
+      db.prepare(`INSERT INTO email_source_checkpoints (gmail_account_id, history_cursor, updated_at) VALUES (?, '999', ?)`)
+        .run(ACC, NOW - DAY)
+      expect(ids(runDailyReconcile(db, NOW).findings)).not.toContain('cursor_past_open_batch')
+    })
+
+    it('complains when the cursor is PAST the open batch but has more digits', () => {
+      const db = getDb()
+      // '10000' >= '9999' is FALSE as text and TRUE as a number. This is real
+      // data loss, and text ordering reported nothing — the dangerous direction.
+      openBatch(db, { batchId: 'b1', accountId: ACC, cursorBefore: '9000', cursorAfter: '9999', messages: [{ messageId: 'm1' }] }, NOW - 2 * DAY)
+      db.prepare(`INSERT INTO email_source_checkpoints (gmail_account_id, history_cursor, updated_at) VALUES (?, '10000', ?)`)
+        .run(ACC, NOW - DAY)
+      const f = runDailyReconcile(db, NOW).findings.find((x) => x.id === 'cursor_past_open_batch')
+      expect(f?.severity).toBe('CRITICAL')
+    })
+
+    it('ignores a triage batch, which carries no history position at all', () => {
+      const db = getDb()
+      // CAST('triage-1755000000' AS INTEGER) is 0 in SQLite, so an unguarded
+      // numeric comparison would read every synthetic batch as position zero
+      // and report every account with any cursor as having passed it.
+      openBatch(db, { batchId: 'triage-1', accountId: ACC, cursorBefore: null, cursorAfter: 'triage-1755000000', messages: [{ messageId: 'm1' }] }, NOW - 2 * DAY)
+      db.prepare(`INSERT INTO email_source_checkpoints (gmail_account_id, history_cursor, updated_at) VALUES (?, '10000', ?)`)
+        .run(ACC, NOW - DAY)
+      expect(ids(runDailyReconcile(db, NOW).findings)).not.toContain('cursor_past_open_batch')
+    })
   })
 
   // The corporate surface. Added 2026-08-10 after the reconcile was found to

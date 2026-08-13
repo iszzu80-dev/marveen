@@ -41,6 +41,12 @@ console.log('Heartbeat:', JSON.stringify({
   skippedNoTrigger: heartbeat.skippedNoTrigger,
   skippedClaimed: heartbeat.skippedClaimed,
   cycleErrors: heartbeat.cycleErrors,
+  // §11 C-invariant. "personal: 50" is the same line whether fifty cases were
+  // due or four hundred were, and only the second one is a backlog. Printed
+  // always, not only when non-zero: a field that appears when things go wrong
+  // is a field nobody has a baseline for.
+  remainingDue: heartbeat.remainingDue,
+  truncated: heartbeat.truncated,
   errors: heartbeat.errors,
 }))
 

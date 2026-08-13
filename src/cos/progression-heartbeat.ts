@@ -20,7 +20,7 @@
 import type Database from 'better-sqlite3'
 import { randomUUID } from 'crypto'
 import {
-  findDueCases,
+  findDuePage,
   tryClaimProgression,
   releaseProgressionClaim,
   deferProgression,
@@ -59,6 +59,17 @@ export interface HeartbeatResult {
   skippedNoTrigger: number
   /** Cases that threw during the cycle. */
   cycleErrors: number
+  /** §11 C-invariant: due cases the per-domain bound left for the next sweep.
+   *
+   *  Zero is the normal state and the one this field exists to distinguish from.
+   *  Without it, "personal: 50" reads identically whether fifty cases were due
+   *  or four hundred were — and the second is a backlog the sweep interval will
+   *  not drain on its own, because every sweep takes the same fifty from the
+   *  front of the same queue. A bound that never says it was reached turns a
+   *  growing queue into a steady-looking report. */
+  remainingDue: { personal: number; zst: number }
+  /** True when either domain left work behind. */
+  truncated: boolean
   /** Set when the §22 master switch stopped the sweep before it started. */
   killSwitchEngaged?: string
 }
@@ -83,6 +94,8 @@ export function runProgressionHeartbeat(
     skippedClaimed: 0,
     skippedNoTrigger: 0,
     cycleErrors: 0,
+    remainingDue: { personal: 0, zst: 0 },
+    truncated: false,
   }
 
   // §22 MASTER SWITCH, CHECKED BEFORE THE FIRST CASE IS TOUCHED.
@@ -109,9 +122,13 @@ export function runProgressionHeartbeat(
   }
 
   for (const domain of ['personal', 'zst'] as const) {
-    const due = findDueCases(db, domain, now, maxPerDomain)
+    const page = findDuePage(db, domain, now, maxPerDomain)
+    // Recorded BEFORE the loop: this is what the bound left behind, which is a
+    // property of the read, not of how the sweep then went.
+    result.remainingDue[domain] = page.remaining
+    if (page.hasMore) result.truncated = true
 
-    for (const dc of due) {
+    for (const dc of page.cases) {
       // Skip cases already claimed by another runner
       if (dc.claimed_by_other) {
         result.skippedClaimed++

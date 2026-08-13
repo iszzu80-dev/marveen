@@ -134,10 +134,17 @@ export const markRecoveryRequired = (db: Database.Database, a: string, m: string
 export const quarantineMessage = (db: Database.Database, a: string, m: string, reason: string, now: number) => setMessageStatus(db, a, m, 'QUARANTINED', { quarantineReason: reason }, now)
 
 const TERMINAL_PLACEHOLDERS = [...TERMINAL_MESSAGE_STATUSES].map(() => '?').join(',')
-/** All-digits test for a TEXT column, so CAST(... AS INTEGER) is meaningful.
- *  SQLite's CAST silently yields 0 for 'triage-1755000000', which would make
- *  every synthetic batch compare as position zero. */
-const NUMERIC_CURSOR_SQL = `b.cursor_after GLOB '[0-9]*' AND b.cursor_after NOT GLOB '*[^0-9]*'`
+/** All-digits test for a TEXT cursor column, so CAST(... AS INTEGER) is
+ *  meaningful. SQLite's CAST silently yields 0 for 'triage-1755000000', which
+ *  would make every synthetic batch compare as position zero.
+ *
+ *  Exported because every place that orders two cursors needs exactly this
+ *  guard, and two copies of it drift: reconcile.ts compared the same columns as
+ *  TEXT for as long as this constant sat here privately. One definition of
+ *  "is this a comparable position" or none. */
+export const numericCursorSql = (expr: string) =>
+  `${expr} GLOB '[0-9]*' AND ${expr} NOT GLOB '*[^0-9]*'`
+const NUMERIC_CURSOR_SQL = numericCursorSql('b.cursor_after')
 
 /** Is every message in the batch terminal? (empty batch → true.) */
 export function isBatchTerminal(db: Database.Database, batchId: string): boolean {
@@ -212,9 +219,9 @@ export function isTriageBatch(batchId: string): boolean { return batchId.startsW
 /** A Gmail historyId as a comparable number, or null when the string is not one.
  *
  *  Cursors are stored as TEXT and historyIds are decimal integers, so ordering
- *  them as text is simply wrong: '999' > '1000' lexicographically. That is the
- *  same defect reconcile.ts has in its `cp.history_cursor >= b.cursor_after`
- *  CRITICAL check, which both false-positives and false-negatives on it. */
+ *  them as text is simply wrong: '999' > '1000' lexicographically. reconcile.ts
+ *  had that defect in its `cp.history_cursor >= b.cursor_after` CRITICAL check
+ *  and now shares numericCursorSql with this file instead. */
 export function cursorRank(cursor: string | null | undefined): number | null {
   if (cursor == null || !/^\d+$/.test(cursor)) return null
   const n = Number(cursor)

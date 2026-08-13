@@ -106,6 +106,52 @@ export function findDueCases(
   now: number,
   limit: number = 50,
 ): DueCase[] {
+  return findDuePage(db, domain, now, limit).cases
+}
+
+/** One page of due cases, and what the page LEFT BEHIND.
+ *
+ *  §11 C-invariant: a bounded read has to say the bound was reached. The plain
+ *  array cannot — a caller receiving 50 cases cannot tell "these are all of
+ *  them" from "these are the first 50 of 400", and the heartbeat's report has
+ *  said "processed 50" for both cases since it was written. Those two states
+ *  need different responses: one is a healthy sweep, the other is a backlog
+ *  that the sweep interval alone will never drain. */
+export interface DuePage {
+  cases: DueCase[]
+  /** Due cases in this domain, ignoring the bound. */
+  totalDue: number
+  /** True when the bound cut the list short. */
+  hasMore: boolean
+  /** Due cases this page did not return. Zero on a complete sweep. */
+  remaining: number
+}
+
+export function findDuePage(
+  db: Database.Database,
+  domain: 'personal' | 'zst',
+  now: number,
+  limit: number = 50,
+): DuePage {
+  const cases = queryDueCases(db, domain, now, limit)
+  // Counted rather than inferred from `cases.length === limit`: a page that is
+  // exactly full is the ambiguous case, and guessing there is how a backlog of
+  // one gets reported the same as a backlog of a thousand.
+  const totalDue = (db.prepare(
+    `SELECT COUNT(*) AS n FROM case_progression_state
+     WHERE domain = ? AND progression_enabled = 1
+       AND next_progression_at IS NOT NULL AND next_progression_at <= ?`,
+  ).get(domain, now) as { n: number }).n
+  const remaining = Math.max(0, totalDue - cases.length)
+  return { cases, totalDue, hasMore: remaining > 0, remaining }
+}
+
+function queryDueCases(
+  db: Database.Database,
+  domain: 'personal' | 'zst',
+  now: number,
+  limit: number,
+): DueCase[] {
   const rows = db.prepare(
     `SELECT case_id, next_progression_at, progression_claimed_by,
             progression_claim_expires_at
