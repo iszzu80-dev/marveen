@@ -1785,11 +1785,22 @@ export function initProgressionSchema(db: Database.Database): void {
   // place for existing dbs; the column defaults to NULL for pre-C rows.
   // Checkpoint D (card 6b7e7e5e): LLM-interpreted case summary (§10.2).
   // Checkpoint E.4 (card 25e06d97): DoD verification state (§10.4).
+  // §19 / §26(28): WAIT_SYSTEM. A case parked on a CAPABILITY, not on a person.
+  //
+  // Deliberately a column on the existing progression state and not a table of
+  // its own: this is one more thing the engine knows about a case it already
+  // tracks, and §3 spends its whole length forbidding the parallel subsystem
+  // that a `case_capability_waits` table would be the first brick of.
   ensureColumns(db, 'case_progression_state', {
     resolution_audit_json: 'TEXT',
     summary: 'TEXT',
     dod_verification_json: 'TEXT',
+    wait_system_json: 'TEXT',
   })
+  // Partial: almost every row is NULL here, and the query that reads it asks
+  // "which cases are waiting on the machine" — never "which are not".
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_cps_wait_system ON case_progression_state(domain, case_id)
+           WHERE wait_system_json IS NOT NULL`)
   // Migration: completed_plan_step added post-GATE-2 (card 52250c7f follow-up).
   // ALTER TABLE ADD COLUMN with NOT NULL needs an explicit DEFAULT in SQLite.
   try {
