@@ -12,11 +12,9 @@
     "marketWatch": true,
     "benchmarkRecommendations": true
   },
+  "_routing_doc": "One knob on purpose: automaticFallback. Provider trust is per-candidate (enabledForRouting in the capacity-routing config), and the fallback ceilings are hard code constants in src/capacity-routing.ts -- not config.",
   "routing": {
-    "automaticFallback": true,
-    "trustedProvidersOnly": true,
-    "maxFallbacksPerProfile": 2,
-    "maxAutomaticFallbacksPerDispatch": 1
+    "automaticFallback": true
   },
   "ui": {
     "defaultWindow": "30d",

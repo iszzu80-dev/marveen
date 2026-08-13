@@ -30,14 +30,19 @@ window.Optimization = window.Optimization || {}
     return labeledBadge(enabled ? 'ok' : 'unknown', t(enabled ? 'optimization.common.on' : 'optimization.common.off'))
   }
 
+  const KNOWN_PRESETS = ['off', 'observation', 'advisory', 'active', 'custom']
+
+  function presetLabel(preset) {
+    return t('optimization.controls.preset.' + (KNOWN_PRESETS.includes(preset) ? preset : 'unknown'))
+  }
+
   function presetBadge(preset) {
-    const known = ['off', 'observation', 'advisory', 'active', 'custom'].includes(preset)
     const variant = preset === 'active'
       ? 'ok'
       : preset === 'off'
         ? 'unknown'
         : 'warning'
-    return labeledBadge(variant, t('optimization.controls.preset.' + (known ? preset : 'unknown')))
+    return labeledBadge(variant, presetLabel(preset))
   }
 
   function responseError(response) {
@@ -173,12 +178,49 @@ window.Optimization = window.Optimization || {}
       masterToggle.addEventListener('change', () => {
         const desired = masterToggle.checked
         masterToggle.checked = config.masterEnabled
-        const nextConfig = Object.assign({}, config, { masterEnabled: desired })
+
+        // OPT-M4 (review 2026-08-12): the restore offer, finally built.
+        //
+        // The backend has captured `lastEnabledConfiguration` at every
+        // master-OFF transition since day one (optimization-config.ts), the
+        // GET /settings response has always carried it, and the spec (§9) and
+        // the as-built both promised the operator would be OFFERED it on the
+        // way back on -- but nothing ever read the field. Turning the system
+        // back on silently kept whatever module map the OFF period had left
+        // behind, which after a preset-off is not the map the operator was
+        // running before.
+        //
+        // The offer is a plain confirm because that is the vocabulary this
+        // panel already speaks (confirm_master_enable, confirm_emergency):
+        // OK restores the stored preset/modules/routing, Cancel turns the
+        // system on exactly as it stands now. Either branch then goes through
+        // previewConfirmWrite, so the stored configuration is validated by the
+        // server's validateModuleDependencies and the operator sees the module
+        // map that will ACTUALLY apply -- including any dependency correction
+        // -- before it is written. A stored map never bypasses that check.
+        const stored = desired ? config.lastEnabledConfiguration : null
+        const restore = stored !== null
+          && stored !== undefined
+          && window.confirm(
+            t('optimization.controls.confirm_restore_previous', { preset: presetLabel(stored.preset) })
+            + '\n\n' + moduleMapText(stored.modules))
+
+        const nextConfig = restore
+          ? Object.assign({}, config, {
+              masterEnabled: true,
+              preset: stored.preset,
+              modules: stored.modules,
+              routing: stored.routing,
+            })
+          : Object.assign({}, config, { masterEnabled: desired })
+
         previewConfirmWrite(
           nextConfig,
-          desired
-            ? 'optimization.controls.confirm_master_enable'
-            : 'optimization.controls.confirm_master_disable',
+          restore
+            ? 'optimization.controls.confirm_master_enable_restored'
+            : desired
+              ? 'optimization.controls.confirm_master_enable'
+              : 'optimization.controls.confirm_master_disable',
         )
       })
 

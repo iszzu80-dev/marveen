@@ -334,6 +334,8 @@ window._i18n.en = {
   'optimization.controls.invalid_config': 'Invalid configuration',
   'optimization.controls.dependency_corrections': 'The server applied the following corrections:',
   'optimization.controls.confirm_master_enable': 'Turn the optimization system on?',
+  'optimization.controls.confirm_restore_previous': 'A configuration was saved when the system was last turned off ({preset} preset). Restore it? OK = restore the previous settings, Cancel = turn on with the current settings.',
+  'optimization.controls.confirm_master_enable_restored': 'Turn the optimization system on and restore the previously saved configuration?',
   'optimization.controls.confirm_master_disable': 'Turn the optimization system off? Optional modules stop, no data is deleted.',
   'optimization.controls.confirm_module_change': 'Change this module setting?',
   'optimization.controls.confirm_emergency': 'Really stop runtime routing and automatic fallback immediately?',

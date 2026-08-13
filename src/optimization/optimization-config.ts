@@ -24,11 +24,34 @@ export interface OptimizationModules {
 
 export type OptimizationPreset = 'off' | 'observation' | 'advisory' | 'active' | 'custom'
 
+/**
+ * The routing block holds exactly ONE knob, and that is deliberate.
+ *
+ * OPT-H2 (review 2026-08-12, remainder closed 2026-08-13): three more fields
+ * used to live here -- `trustedProvidersOnly`, `maxFallbacksPerProfile` and
+ * `maxAutomaticFallbacksPerDispatch` -- and all three had zero readers in any
+ * decision path. They were deleted rather than wired, because each of them is
+ * already answered somewhere better:
+ *
+ *  - trust is enforced per-candidate by `enabledForRouting` in
+ *    capacity-routing-config, i.e. at the granularity where the operator can
+ *    actually say WHICH provider is trusted, not as one global boolean;
+ *  - `maxFallbacksPerProfile` had no enforcement point anywhere and no design
+ *    for one;
+ *  - the per-dispatch fallback limit is a HARD CEILING in code
+ *    (`MAX_AUTO_FALLBACKS_PER_PACKAGE = 1` and `MAX_FALLBACK_CANDIDATES = 2` in
+ *    capacity-routing.ts, documented there as "ceilings, not defaults to grow
+ *    later"). Making it configurable would let a dashboard edit RAISE a safety
+ *    ceiling, which is the opposite of what a ceiling is for.
+ *
+ * So: the ceilings stay code constants by design. Do not re-add config knobs
+ * for them. A field here that nothing reads is exactly the "a switch that
+ * reports success without acting" class this program keeps closing.
+ */
 export interface OptimizationRoutingConfig {
+  /** Wired: the capacity-routing sweep reads this each pass and refuses to set
+   *  new fallback overlays when it is false (capacity-routing-runner.ts). */
   automaticFallback: boolean
-  trustedProvidersOnly: boolean
-  maxFallbacksPerProfile: number
-  maxAutomaticFallbacksPerDispatch: number
 }
 
 export interface OptimizationUiConfig {
@@ -96,9 +119,6 @@ export const DEFAULT_OPTIMIZATION_CONFIG: OptimizationConfig = {
   modules: { ...PRESET_MODULES.off },
   routing: {
     automaticFallback: false,
-    trustedProvidersOnly: true,
-    maxFallbacksPerProfile: 2,
-    maxAutomaticFallbacksPerDispatch: 1,
   },
   ui: {
     defaultWindow: '30d',
@@ -142,22 +162,17 @@ function normalizeModules(raw: unknown): OptimizationModules {
   }
 }
 
+/**
+ * Whitelist normalizer: it builds the routing block field by field and never
+ * spreads the input, so an on-disk config still carrying the three deleted
+ * OPT-H2 knobs (or any other unknown field) loads cleanly -- the extras are
+ * simply dropped on the next write. No migration is needed for existing files.
+ */
 function normalizeRouting(raw: unknown): OptimizationRoutingConfig {
   const o = asObject(raw)
   const defaults = DEFAULT_OPTIMIZATION_CONFIG.routing
   return {
     automaticFallback: typeof o.automaticFallback === 'boolean' ? o.automaticFallback : defaults.automaticFallback,
-    trustedProvidersOnly: typeof o.trustedProvidersOnly === 'boolean' ? o.trustedProvidersOnly : defaults.trustedProvidersOnly,
-    maxFallbacksPerProfile: typeof o.maxFallbacksPerProfile === 'number'
-      && Number.isInteger(o.maxFallbacksPerProfile)
-      && o.maxFallbacksPerProfile >= 0
-      ? o.maxFallbacksPerProfile
-      : defaults.maxFallbacksPerProfile,
-    maxAutomaticFallbacksPerDispatch: typeof o.maxAutomaticFallbacksPerDispatch === 'number'
-      && Number.isInteger(o.maxAutomaticFallbacksPerDispatch)
-      && o.maxAutomaticFallbacksPerDispatch >= 0
-      ? o.maxAutomaticFallbacksPerDispatch
-      : defaults.maxAutomaticFallbacksPerDispatch,
   }
 }
 
@@ -388,7 +403,12 @@ export function writeOptimizationConfig(
     masterEnabled: next.masterEnabled,
     preset: presetForModules(modules),
     modules,
-    routing: next.routing,
+    // Normalized on the way in, not passed through: `next.routing` arrives
+    // from a PATCH body, and writing it verbatim would let a caller reintroduce
+    // the deleted OPT-H2 knobs into the on-disk file where a future reader
+    // could mistake them for live settings. The whitelist keeps the file
+    // honest about what actually controls anything.
+    routing: normalizeRouting(next.routing),
     ui: next.ui,
     lastEnabledConfiguration,
   }

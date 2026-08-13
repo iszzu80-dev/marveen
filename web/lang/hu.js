@@ -334,6 +334,8 @@ window._i18n.hu = {
   'optimization.controls.invalid_config': 'Érvénytelen konfiguráció',
   'optimization.controls.dependency_corrections': 'A szerver a következő korrekciókat alkalmazta:',
   'optimization.controls.confirm_master_enable': 'Bekapcsolod az optimalizálási rendszert?',
+  'optimization.controls.confirm_restore_previous': 'A legutóbbi kikapcsoláskor elmentett konfiguráció ({preset} preset). Visszaállítod? OK = előző konfiguráció visszaállítása, Mégse = bekapcsolás a mostani beállításokkal.',
+  'optimization.controls.confirm_master_enable_restored': 'Bekapcsolod az optimalizálási rendszert és visszaállítod az előzőleg elmentett konfigurációt?',
   'optimization.controls.confirm_master_disable': 'Kikapcsolod az optimalizálási rendszert? Az opcionális modulok leállnak, adat nem törlődik.',
   'optimization.controls.confirm_module_change': 'Módosítod ezt a modulbeállítást?',
   'optimization.controls.confirm_emergency': 'Biztosan azonnal leállítod a runtime routingot és az automatikus fallbacket?',

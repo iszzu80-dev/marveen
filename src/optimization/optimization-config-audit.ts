@@ -67,11 +67,13 @@ const MODULE_KEYS = [
   'benchmarkRecommendations',
 ] as const
 
+// One key, because the routing block has one knob. The other three
+// (trustedProvidersOnly, maxFallbacksPerProfile, maxAutomaticFallbacksPerDispatch)
+// were deleted with OPT-H2's remainder: nothing read them, and the per-dispatch
+// limit is a hard ceiling in capacity-routing.ts by design. See the comment on
+// OptimizationRoutingConfig before adding anything here.
 const ROUTING_KEYS = [
   'automaticFallback',
-  'trustedProvidersOnly',
-  'maxFallbacksPerProfile',
-  'maxAutomaticFallbacksPerDispatch',
 ] as const
 
 /**

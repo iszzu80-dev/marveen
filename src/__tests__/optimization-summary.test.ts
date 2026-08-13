@@ -112,12 +112,7 @@ function config(
     masterEnabled,
     preset: 'custom',
     modules: moduleValues,
-    routing: {
-      automaticFallback: false,
-      trustedProvidersOnly: true,
-      maxFallbacksPerProfile: 2,
-      maxAutomaticFallbacksPerDispatch: 1,
-    },
+    routing: { automaticFallback: false },
     ui: { defaultWindow: '30d', showAllocationCost: true },
     lastEnabledConfiguration: null,
   }

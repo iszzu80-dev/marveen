@@ -46,7 +46,7 @@ const ACTIVE = {
     measurement: true, contextEfficiency: true, capacityMonitoring: true, runtimeRouting: true,
     recommendations: true, marketWatch: true, benchmarkRecommendations: true,
   },
-  routing: { automaticFallback: true, trustedProvidersOnly: true, maxFallbacksPerProfile: 2, maxAutomaticFallbacksPerDispatch: 1 },
+  routing: { automaticFallback: true },
   ui: { defaultWindow: '30d' as const, showAllocationCost: true },
 }
 

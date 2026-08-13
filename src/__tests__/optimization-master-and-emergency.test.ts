@@ -21,10 +21,7 @@ const BASE = {
     runtimeRouting: true, recommendations: true, marketWatch: true,
     benchmarkRecommendations: true,
   },
-  routing: {
-    automaticFallback: true, trustedProvidersOnly: true,
-    maxFallbacksPerProfile: 1, maxAutomaticFallbacksPerDispatch: 1,
-  },
+  routing: { automaticFallback: true },
   ui: { defaultWindow: '30d' as const, showAllocationCost: true },
 }
 
