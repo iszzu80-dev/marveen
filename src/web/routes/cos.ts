@@ -23,6 +23,7 @@ import {
 } from '../../cos/zst-productlab.js'
 import { validateSkillMd, validateSkillPermissions } from '../../cos/skill-permission-validator.js'
 import { getMissionControlProgressionView, runProgressionCycle } from '../../cos/progression-pipeline.js'
+import { semanticQualityMetrics, qualityConcerns, QUALITY_THRESHOLDS } from '../../cos/progression-quality.js'
 import { storeDocument, documentsForCase, readDocumentBytes, resolveShareableAttachments } from '../../cos/cos-documents.js'
 import { engageKillSwitch, releaseKillSwitch, killSwitchState } from '../../cos/kill-switch.js'
 import { evaluateOutputFloors, breachedFloors } from '../../cos/output-floor.js'
@@ -617,6 +618,29 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     }
     const view = getMissionControlProgressionView(getDb(), domain)
     json(res, view)
+    return true
+  }
+
+  // §4.2 — the semantic-quality metrics.
+  //
+  // A SURFACE, NOT A LIBRARY. The live report that prompted §4.2 found 101 cases
+  // sharing 11 distinct next-best-action sentences, and every dashboard at the
+  // time said the fields were populated — because "is it filled?" was the only
+  // question anything asked. Metrics computed by a function nobody calls would
+  // answer that question exactly as badly, so they get a route on the same
+  // surface the progression view already uses.
+  //
+  // `concerns` travels with the numbers on purpose: a reader who does not know
+  // that 0.109 is catastrophic and 0.9 is fine learns nothing from the ratio
+  // alone, and a number nobody can interpret is not a measurement.
+  if (path === '/api/cos/progression/quality' && method === 'GET') {
+    const q = new URLSearchParams(req.url?.split('?')[1] ?? '')
+    const raw = q.get('domain')
+    if (raw && raw !== 'personal' && raw !== 'zst') {
+      json(res, { error: 'domain must be personal or zst' }, 400); return true
+    }
+    const metrics = semanticQualityMetrics(getDb(), (raw ?? undefined) as 'personal' | 'zst' | undefined)
+    json(res, { metrics, concerns: qualityConcerns(metrics), thresholds: QUALITY_THRESHOLDS })
     return true
   }
 

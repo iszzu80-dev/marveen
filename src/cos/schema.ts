@@ -195,12 +195,16 @@ function ensureColumns(db: Database.Database, table: string, defs: Record<string
 
 import { ensureLadderSchema } from './autonomy-ladder.js'
 import { ensureQuoteSchema } from './quote-campaign.js'
+import { ensureEnvelopeSchema } from './delegation-envelope.js'
 
 export function initCosSchema(db: Database.Database): void {
   // §22 fokozatos autonomia tablai
   ensureLadderSchema(db)
   // §13.1 ajanlatkero-kampany
   ensureQuoteSchema(db)
+  // §21 delegation envelope -- csak az allapot (visszavonva/visszakapcsolva);
+  // maga a jogosultsag kodkonstans, mert az tulajdonosi dontes es reviewalando.
+  ensureEnvelopeSchema(db)
 
   // ── personal_cases (P0.5 version; §6.1) ──────────────────────────────
   // version: optimistic concurrency. Every domain command reads the version it

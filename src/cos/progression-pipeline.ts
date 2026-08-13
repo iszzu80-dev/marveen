@@ -23,6 +23,7 @@
 import type Database from 'better-sqlite3'
 import { randomUUID } from 'crypto'
 import { HARD_SAFETY_ASSERTIONS, type SafetyViolation } from './progression-eval.js'
+import { recordProgressionEvents } from './progression-events.js'
 import { resolveContextDeep, CrossDomainReadError, domainGuard, type DeepResolvedContext } from './progression-resolver.js'
 import { interpretGoal, type LlmClient, type GoalInterpretation } from './progression-interpreter.js'
 import { initializeDoDVerification, canCompleteCase, type DoDProvenance } from './progression-completion.js'
@@ -167,8 +168,13 @@ export function resolveContext(
     `SELECT count(*) as c FROM ${eventsTable} WHERE case_id = ?`,
   ).get(caseId) as { c: number }).c
 
+  // Same exclusion as resolveContextDeep's copy of this query: the engine's own
+  // §8 events are written at the end of every run, so without the filter "the
+  // last thing that happened" is always the engine's note about itself.
   const lastEvent = db.prepare(
-    `SELECT event_type, reason FROM ${eventsTable} WHERE case_id = ? ORDER BY created_at DESC LIMIT 1`,
+    `SELECT event_type, reason FROM ${eventsTable}
+      WHERE case_id = ? AND (source_system IS NULL OR source_system != 'progression')
+      ORDER BY created_at DESC LIMIT 1`,
   ).get(caseId) as { event_type: string; reason: string | null } | undefined
 
   const childCount = (db.prepare(
@@ -737,7 +743,8 @@ export function runProgressionCycle(
   const existing = db.prepare(
     `SELECT case_version, plan_version, goal_version, goal, summary,
             completed_plan_step, no_progress_run_count,
-            next_best_action_json, rolling_plan_json
+            next_best_action_json, rolling_plan_json,
+            semantic_completion_status
      FROM case_progression_state WHERE domain = ? AND case_id = ?`,
   ).get(domain, caseId) as {
     case_version: number; plan_version: number; goal_version: number
@@ -746,6 +753,9 @@ export function runProgressionCycle(
     no_progress_run_count: number
     next_best_action_json: string | null
     rolling_plan_json: string | null
+    /** Read for §8: an event is written when this MOVES, not on every run
+     *  that finds the case where it already was. */
+    semantic_completion_status: string | null
   } | undefined
 
   const contract = deriveOutcomeContract(caseRow.title, caseRow.case_type, caseRow.status, caseRow.sensitivity)
@@ -948,14 +958,25 @@ export function runProgressionCycle(
     safety_violations: safetyViolations,
   }
 
+  // THE ASSERTIONS GET THE REAL STATE, not just the run-shaped object (§16,
+  // review 2026-08-12). `runResultForAssertions.error_code` is hard-coded null
+  // three lines up, so every assertion that tested it was being asked a question
+  // its input could never answer yes to. The external-action assertions now read
+  // this case's actual ledger and authorization rows.
+  const assertionCtx = { db, domain, caseId }
   for (const a of HARD_SAFETY_ASSERTIONS) {
-    const detail = a.check(runResultForAssertions)
+    const detail = a.check(runResultForAssertions, assertionCtx)
     if (detail) {
       safetyViolations.push({ assertion: a.name, case_id: caseId, domain, detail })
     }
   }
 
   const runStatus = safetyViolations.length > 0 ? 'FAILED' : 'COMPLETED'
+
+  // The decision is NOT final here. Two places below still change it — plan
+  // exhaustion can upgrade it to COMPLETE, and the §25 guard can downgrade it
+  // back. So the §8 event history is written at the END of the run (step 11),
+  // where `decision` is the value the run actually reports.
 
   // 9. Record the progression run — NO external_reference, NO action_ids
   const safetyJson = JSON.stringify(
@@ -1100,6 +1121,45 @@ export function runProgressionCycle(
     }
   }
 
+  // ── 10b. §25 — settle the SEMANTIC completion status ──────────────────────
+  //
+  // WHAT WAS WRONG. The column's own CHECK constraint names four values —
+  // NOT_STARTED, IN_PROGRESS, PROPOSED, VERIFIED — and the pipeline only ever
+  // wrote two of them: `currentStatus === 'COMPLETED' ? 'PROPOSED' : 'IN_PROGRESS'`,
+  // in both the UPDATE and the INSERT branch. VERIFIED had no writer anywhere in
+  // the codebase, so the distinction §25 exists to draw — "the case row says
+  // closed" versus "the outcome contract was actually proven" — collapsed: every
+  // closed case sat at PROPOSED forever, whether its DoD was met with evidence
+  // or not. The column recorded the case's STATUS a second time, not its meaning.
+  //
+  // WHERE THIS HAS TO SIT, AND WHY IT CANNOT SIT AT THE UPSERT. The gate below
+  // reads `dod_verification_json`, which `initializeDoDVerification` writes AFTER
+  // the upsert; and the completion block a few lines down sets
+  // `progression_enabled = 0`, after which `canCompleteCase` returns
+  // "Progression is disabled on this case" → allowed. Asking either side of that
+  // window gives an answer about the wrong moment — one before the evidence
+  // exists, one after the gate has been switched off. This is the only point
+  // where the decision is final, the verification row is present, and the case
+  // is still progression-controlled.
+  //
+  // A run that tripped a hard safety assertion settles nothing: a FAILED run may
+  // not promote a case to VERIFIED on its way out.
+  let semanticStatus: 'IN_PROGRESS' | 'PROPOSED' | 'VERIFIED' | null = null
+  if (runStatus === 'COMPLETED') {
+    if (decision === 'COMPLETE' || currentStatus === 'COMPLETED') {
+      // PROPOSED means "closed on paper, not proven". VERIFIED means the same
+      // gate that guards closure says the contract is satisfied with evidence.
+      semanticStatus = canCompleteCase(db, domain, caseId, 'ENGINE').allowed ? 'VERIFIED' : 'PROPOSED'
+    } else {
+      semanticStatus = 'IN_PROGRESS'
+    }
+    db.prepare(
+      `UPDATE case_progression_state
+         SET semantic_completion_status = ?, updated_at = ?
+       WHERE domain = ? AND case_id = ?`,
+    ).run(semanticStatus, now, domain, caseId)
+  }
+
   // When the pipeline decides COMPLETE (either via decide() for an
   // already-COMPLETED case, or via plan-exhaustion trigger above), actually
   // transition the case and remove it from the scheduler. This is the ONE
@@ -1119,6 +1179,42 @@ export function runProgressionCycle(
     db.prepare(
       `UPDATE case_progression_state SET progression_enabled = 0, updated_at = ? WHERE domain = ? AND case_id = ?`,
     ).run(now, domain, caseId)
+  }
+
+  // ── 11. §8 — write what happened INTO THE CASE'S OWN HISTORY ───────────────
+  //
+  // Sixteen of §8's seventeen event types had no producer, so a case's event
+  // history showed intake and owner actions and nothing the engine ever did.
+  // "What did the engine do?" was answerable from case_progression_runs;
+  // "what happened to this case?" was not, and §27's PROGRESSION HISTORY panel
+  // had nothing to render for the same reason.
+  //
+  // LAST, DELIBERATELY. `decision` was still provisional at step 8 — plan
+  // exhaustion upgrades it to COMPLETE and the §25 guard downgrades it back —
+  // so writing the history there would have recorded decisions the run never
+  // reported.
+  //
+  // Safe against the loop `recordOwnerAnswer`'s comment warns about ("the engine
+  // writes its own events during a run, so waking on EVERY event would make each
+  // run schedule the next one"): the trigger contract hashes `last_event_id`
+  // from the CASE ROW, and nothing here touches that column. An appended event
+  // is therefore invisible to the scheduler. A standing check enforces it.
+  if (runStatus === 'COMPLETED') {
+    const previousDecision = (db.prepare(
+      `SELECT decision FROM case_progression_runs
+        WHERE domain = ? AND case_id = ? AND progression_run_id != ?
+        ORDER BY started_at DESC LIMIT 1`,
+    ).get(domain, caseId, runId) as { decision: string | null } | undefined)?.decision ?? null
+
+    recordProgressionEvents(db, {
+      domain, caseId, caseVersion: caseVersion + 1, runId, now,
+      decision, previousDecision,
+      planVersion, previousPlanVersion: existing?.plan_version ?? null,
+      // The goal is "defined" on the run that first gives the case one.
+      goalDefined: !existing?.goal && Boolean(contract.goal),
+      semanticStatus,
+      previousSemanticStatus: existing?.semantic_completion_status ?? null,
+    })
   }
 
   return {
