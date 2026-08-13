@@ -143,11 +143,28 @@ function writeStatus(db: Database.Database, r: RecommendationRecord): void {
     .run(r.status, r.status_changed_at, r.status_changed_by, r.dedup_key)
 }
 
+// COS-CORE-M8: only an 'open' recommendation may take a human decision.
+// Every non-open state is a decision already made (a human's accept/dismiss,
+// or the reconciler's resolve/expire), and this domain guards every other
+// such transition with a 409 -- accept/dismiss were the two doors that could
+// still silently flip a dismissed/resolved/expired record and lose the
+// earlier decision.
+function requireOpen(existing: RecommendationRecord, verb: string): RecommendationDecisionResult | null {
+  if (existing.status === 'open') return null
+  return {
+    ok: false,
+    error: `recommendation '${existing.dedup_key}' is '${existing.status}' -- only an open recommendation can be ${verb} (the earlier decision stands; a re-detected condition surfaces as a fresh open record)`,
+    status: 409,
+  }
+}
+
 /** Human accepts a recommendation (intends to act on it outside this codebase) -- frozen from further re-detection thereafter (optimization.ts's reconcile). */
 export function acceptRecommendationByKey(db: Database.Database, dedupKey: string, actor: string, now: number): RecommendationDecisionResult {
   if (!actor || !actor.trim()) return { ok: false, error: 'actor is required to accept a recommendation', status: 400 }
   const existing = loadOne(db, dedupKey)
   if (!existing) return { ok: false, error: `no recommendation with dedup_key '${dedupKey}'`, status: 404 }
+  const refused = requireOpen(existing, 'accepted')
+  if (refused) return refused
   const updated = acceptRecommendation(existing, actor, now)
   writeStatus(db, updated)
   return { ok: true, recommendation: updated }
@@ -158,6 +175,8 @@ export function dismissRecommendationByKey(db: Database.Database, dedupKey: stri
   if (!actor || !actor.trim()) return { ok: false, error: 'actor is required to dismiss a recommendation', status: 400 }
   const existing = loadOne(db, dedupKey)
   if (!existing) return { ok: false, error: `no recommendation with dedup_key '${dedupKey}'`, status: 404 }
+  const refused = requireOpen(existing, 'dismissed')
+  if (refused) return refused
   const updated = dismissRecommendation(existing, actor, now)
   writeStatus(db, updated)
   return { ok: true, recommendation: updated }

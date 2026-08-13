@@ -195,13 +195,33 @@ export function resolveSourceWinners<T extends { confidence: string; data_freshn
 /** Sum a resolved-winners group into one line, carrying the shared confidence
  *  and the group's own metadata (from the first winner), with billed_cost
  *  summed across every distinct charge and data_freshness the freshest seen. */
-function sumWinners<T extends { billed_cost: number; data_freshness: number }>(winners: T[]): T {
+export function sumWinners<T extends { billed_cost: number; data_freshness: number }>(winners: T[]): T {
   if (winners.length === 1) return winners[0]
   return {
     ...winners[0],
     billed_cost: winners.reduce((s, l) => s + l.billed_cost, 0),
     data_freshness: winners.reduce((m, l) => Math.max(m, l.data_freshness), winners[0].data_freshness),
   }
+}
+
+/**
+ * COS-CORE-M1 (extends card dec9ae64): the ONE resolution-then-summing seam
+ * for "what is this source's number this month". The dec9ae64 fix landed in
+ * this file's two resolvers, but THREE sibling copies elsewhere
+ * (reconciliation.ts, forecast-capture.ts, export.ts) still hand-rolled a
+ * pick-one reduce -- so a month with two actual_invoice receipts summed here
+ * and picked-one everywhere else, and the surfaces disagreed again, one seam
+ * further out. Every caller resolving a source's per-month lines must go
+ * through this function (or resolveSourceWinners+sumWinners directly), never
+ * a local reduce. `lines` must be non-empty -- an empty month is the
+ * caller's no_data/null case, never a fabricated 0 from here.
+ */
+export function resolveSourceTotal<T extends { confidence: string; billed_cost: number; data_freshness: number; source_type?: string }>(
+  lines: T[],
+  now: number,
+  tierOf: (confidence: string) => number,
+): T {
+  return sumWinners(resolveSourceWinners(lines, now, tierOf))
 }
 
 /**

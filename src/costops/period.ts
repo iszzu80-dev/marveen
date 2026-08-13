@@ -34,11 +34,17 @@ function readMonth(db: Database.Database, win: MonthWindow, providerBySource: Ma
     WHERE charge_period_start < @end AND charge_period_end > @start AND voided_at IS NULL
   `).all({ start: win.start, end: win.end }) as LineRow[]
 
-  if (rows.length === 0) {
+  // COS-CORE-M6: no_data is decided AFTER the pending_permission filter --
+  // a month whose only rows are pending (a tracked provider whose cost can't
+  // be read) has no operational figure at all, and reporting it as
+  // no_data:false with operational_spend 0 would be exactly the fabricated
+  // zero this module's header rules out.
+  const opRows = rows.filter(l => !PENDING_CONF.has(l.confidence))
+  if (opRows.length === 0) {
     return { month: win.key, no_data: true, operational_spend: 0, operational_forecast_month_end: 0, provider_breakdown: [] }
   }
   const op = resolveOperational(
-    rows.filter(l => !PENDING_CONF.has(l.confidence)).map(l => ({
+    opRows.map(l => ({
       source_id: l.source_id, provider: providerBySource.get(l.source_id) || 'other',
       billed_cost: l.billed_cost, charge_category: l.charge_category, confidence: l.confidence, data_freshness: l.data_freshness,
     })),

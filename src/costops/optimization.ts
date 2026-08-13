@@ -455,6 +455,13 @@ export function reconcileRecommendations(
   return { toInsert, toTouch, toResolve, toExpire }
 }
 
+// COS-CORE-M8: these two are pure record transforms with no status guard of
+// their own -- the store layer (recommendations-store.ts's accept/dismiss
+// ByKey) enforces that only an 'open' record ever reaches them, so a
+// dismissed/resolved/expired record's earlier decision is never silently
+// flipped. Callers must go through the store, never call these on a loaded
+// row directly.
+
 /** Manual human decision: accept a recommendation (the human intends to act on it, outside this codebase -- this function never executes anything itself). */
 export function acceptRecommendation(r: RecommendationRecord, actor: string, now: number): RecommendationRecord {
   return { ...r, status: 'accepted', status_changed_at: now, status_changed_by: actor }

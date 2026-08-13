@@ -87,12 +87,18 @@ export function createManualCost(
        confidence, data_freshness, source_ref, dedup_key, created_at, actual_source,
        original_amount, original_currency, fx_rate, fx_date, fx_source, conversion_method)
     VALUES
-      (@source_id, @start, @end, 'invoice', @name,
+      (@source_id, @start, @end, @charge_category, @name,
        NULL, NULL, NULL, @amount, NULL, 'HUF',
        'manual', @now, NULL, @dedup_key, @now, 'manual_entry',
        @original_amount, @original_currency, @fx_rate, @fx_date, @fx_source, @conversion_method)
   `).run({
     source_id: input.source_id, start: win.start, end: win.end, name: input.name,
+    // COS-CORE-M4: was a hardcoded 'invoice' -- not a member of the
+    // ChargeCategory union at all. Derived from the entry's own source_type,
+    // same rule as email-ingest.ts: a metered 'usage' source is 'usage'
+    // (run-rate forecast), every recurring kind is 'subscription'
+    // (full-amount forecast).
+    charge_category: (input.source_type || 'subscription') === 'usage' ? 'usage' : 'subscription',
     amount: amountHuf, now: opts.now, dedup_key: dedup,
     original_amount: wasConverted ? Number(input.amount) : null,
     original_currency: wasConverted ? cur : null,

@@ -13,6 +13,7 @@ import { createHash } from 'node:crypto'
 import type Database from 'better-sqlite3'
 import { checkPeriodWritable } from './period-close.js'
 import { resolveFxRate, roundHuf } from './fx.js'
+import { isCostConfidence, COST_CONFIDENCE_VALUES } from './config.js'
 
 export interface EmailCostEntry {
   source_id: string          // stable id, e.g. 'anthropic-max' or 'aws'
@@ -89,13 +90,14 @@ export function ingestEmailCosts(
        original_amount, original_currency, fx_rate, fx_date, actual_source,
        fx_source, conversion_method)
     VALUES
-      (@source_id, @start, @end, 'invoice', @name,
+      (@source_id, @start, @end, @charge_category, @name,
        NULL, NULL, NULL, @amount, NULL, 'HUF',
        @confidence, @now, @ref_hash, @dedup_key, @now,
        @original_amount, @original_currency, @fx_rate, @fx_date, 'email_invoice',
        @fx_source, @conversion_method)
     ON CONFLICT(dedup_key) DO UPDATE SET
       billed_cost=excluded.billed_cost, confidence=excluded.confidence,
+      charge_category=excluded.charge_category,
       data_freshness=excluded.data_freshness, source_ref=excluded.source_ref,
       original_amount=excluded.original_amount, original_currency=excluded.original_currency,
       fx_rate=excluded.fx_rate, fx_date=excluded.fx_date, actual_source=excluded.actual_source,
@@ -111,6 +113,16 @@ export function ingestEmailCosts(
       // ON CONFLICT DO UPDATE for a late/re-sent invoice) -- use a correction instead.
       const writable = checkPeriodWritable(db, e.month)
       if (!writable.writable) { out.errors.push({ source_id: e.source_id, reason: writable.reason! }); continue }
+      // COS-CORE-M5: an arbitrary confidence string used to be stored verbatim
+      // -- a typo ('actual-invoice') lands at priority 0 in every resolver and
+      // silently demotes the real invoice below manual entries. Rejected as a
+      // per-entry error (same reporting as every other bad field here), never
+      // silently rewritten to a confidence the sender did not claim.
+      const confidence = e.confidence || 'actual_invoice'
+      if (!isCostConfidence(confidence)) {
+        out.errors.push({ source_id: e.source_id, reason: `invalid confidence '${e.confidence}' -- must be one of: ${COST_CONFIDENCE_VALUES.join(', ')}` })
+        continue
+      }
       const amountHuf = toHuf(Number(e.amount), e.currency, opts.fxUsdHuf, fxEurHuf)
       if (amountHuf === null || !isFinite(amountHuf)) { out.errors.push({ source_id: e.source_id, reason: `uncconvertible currency '${e.currency}'` }); continue }
       const refHash = createHash('sha256').update(salt).update('|').update(String(e.message_ref)).digest('hex').slice(0, 32)
@@ -123,10 +135,19 @@ export function ingestEmailCosts(
       // actually converted -- harmless while only USD existed, but wrong the moment a second
       // currency (EUR) does. fxRateFor() picks the rate that was actually applied above.
       const appliedFxRate = fxRateFor(cur, opts.fxUsdHuf, fxEurHuf)
-      upsertSource.run({ id: e.source_id, name: e.name || e.source_id, provider: e.provider || 'other', source_type: e.source_type || 'subscription', now: opts.now })
+      const sourceType = e.source_type || 'subscription'
+      upsertSource.run({ id: e.source_id, name: e.name || e.source_id, provider: e.provider || 'other', source_type: sourceType, now: opts.now })
       upsertLine.run({
         source_id: e.source_id, start: win.start, end: win.end, name: e.name || e.source_id,
-        amount: amountHuf, confidence: e.confidence || 'actual_invoice', now: opts.now,
+        // COS-CORE-M4: this door used to hardcode charge_category 'invoice',
+        // which is not in the ChargeCategory union at all ("this row came from
+        // an invoice" is what actual_source='email_invoice' already says --
+        // provenance, not a spend category). Derived from the entry's own
+        // source_type instead: a metered 'usage' source is 'usage' (run-rate
+        // forecast), every recurring kind (subscription/hosting/domain/saas)
+        // is 'subscription' (full-amount forecast).
+        charge_category: sourceType === 'usage' ? 'usage' : 'subscription',
+        amount: amountHuf, confidence, now: opts.now,
         ref_hash: refHash, dedup_key: dedup,
         original_amount: wasConverted ? Number(e.amount) : null,
         original_currency: wasConverted ? cur : null,

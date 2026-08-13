@@ -130,6 +130,81 @@ describe('recordInvoice -- first-time recording (no existing ledger line)', () =
   })
 })
 
+// COS-CORE-M4: the first-insert branch used to hardcode charge_category
+// 'usage', so a subscription invoice's ledger line got a run-rate forecast --
+// a month-start invoice extrapolated to ~30x the real fee. The category now
+// comes from the caller when given (validated), else from the source's own
+// cost_sources.source_type.
+describe('recordInvoice -- charge_category derivation (COS-CORE-M4)', () => {
+  beforeEach(() => setup())
+
+  function insertTypedSource(db: ReturnType<typeof getDb>, id: string, sourceType: string): void {
+    db.prepare(`INSERT INTO cost_sources (id, name, provider, source_type, currency, active, created_at, updated_at) VALUES (?, ?, 'render', ?, 'HUF', 1, ?, ?)`).run(id, id, sourceType, NOW, NOW)
+  }
+
+  it("a subscription source's invoice line is 'subscription' -- full-amount forecast, never run-rated", () => {
+    const db = getDb()
+    const win = monthWindow(NOW)
+    insertTypedSource(db, 'claude-max', 'subscription')
+    const r = recordInvoice(db, {
+      source_id: 'claude-max', provider: 'anthropic', invoice_ref: 'INV-SUB',
+      billing_period_start: win.start, billing_period_end: win.end, currency: 'HUF', gross_amount: 22000,
+    }, { now: NOW, salt: SALT })
+    expect(r.ok).toBe(true)
+    const line = db.prepare(`SELECT charge_category FROM cost_line_items WHERE id = ?`).get(r.ledgerLineId) as { charge_category: string }
+    expect(line.charge_category).toBe('subscription')
+    // The consequence that matters: NOW is mid-month (July 15), so a 'usage'
+    // line would be run-rated to ~2x -- a subscription invoice must forecast
+    // at its full (already-owed) amount instead.
+    const s = getCostSummary(db, { version: 1, currency: 'HUF', fixed_costs: [], budgets: [] } as CostOpsConfig, NOW)
+    const row = s.all_sources.find(x => x.source_id === 'claude-max')!
+    expect(row.forecast_basis).toBe('fixed_subscription')
+    expect(row.forecast_month_end).toBe(22000)
+  })
+
+  it("a metered 'usage' source's invoice line stays 'usage' (run-rate is right for it)", () => {
+    const db = getDb()
+    const win = monthWindow(NOW)
+    insertTypedSource(db, 'openai-api', 'usage')
+    const r = recordInvoice(db, {
+      source_id: 'openai-api', provider: 'openai', invoice_ref: 'INV-USE',
+      billing_period_start: win.start, billing_period_end: win.end, currency: 'HUF', gross_amount: 5000,
+    }, { now: NOW, salt: SALT })
+    expect(r.ok).toBe(true)
+    const line = db.prepare(`SELECT charge_category FROM cost_line_items WHERE id = ?`).get(r.ledgerLineId) as { charge_category: string }
+    expect(line.charge_category).toBe('usage')
+  })
+
+  it('an explicit charge_category from the caller wins over the derivation', () => {
+    const db = getDb()
+    const win = monthWindow(NOW)
+    insertTypedSource(db, 'one-off', 'subscription')
+    const r = recordInvoice(db, {
+      source_id: 'one-off', provider: 'render', invoice_ref: 'INV-PUR',
+      billing_period_start: win.start, billing_period_end: win.end, currency: 'HUF', gross_amount: 9000,
+      charge_category: 'purchase',
+    }, { now: NOW, salt: SALT })
+    expect(r.ok).toBe(true)
+    const line = db.prepare(`SELECT charge_category FROM cost_line_items WHERE id = ?`).get(r.ledgerLineId) as { charge_category: string }
+    expect(line.charge_category).toBe('purchase')
+  })
+
+  it("rejects a charge_category outside the union (400) -- 'invoice' is provenance, not a category", () => {
+    const db = getDb()
+    const win = monthWindow(NOW)
+    insertTypedSource(db, 'render-hosting', 'hosting')
+    const r = recordInvoice(db, {
+      source_id: 'render-hosting', provider: 'render', invoice_ref: 'INV-BAD',
+      billing_period_start: win.start, billing_period_end: win.end, currency: 'HUF', gross_amount: 100,
+      charge_category: 'invoice' as never,
+    }, { now: NOW, salt: SALT })
+    expect(r.ok).toBe(false)
+    expect(r.status).toBe(400)
+    expect(r.error).toContain("invalid charge_category 'invoice'")
+    expect((db.prepare(`SELECT COUNT(*) n FROM costops_invoices`).get() as { n: number }).n).toBe(0)
+  })
+})
+
 describe('recordInvoice -- an active ledger line already exists', () => {
   beforeEach(() => setup())
 

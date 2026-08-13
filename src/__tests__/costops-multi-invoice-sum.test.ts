@@ -21,6 +21,9 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import { getCostSummary, monthWindow, resolveOperational } from '../costops/ledger.js'
+import { buildReconciliation } from '../costops/reconciliation.js'
+import { captureForecastSnapshots } from '../costops/forecast-capture.js'
+import { exportCategorySummary } from '../costops/export.js'
 import type { CostOpsConfig } from '../costops/config.js'
 
 const NOW = Math.floor(Date.UTC(2026, 6, 30, 12, 0, 0) / 1000) // 2026-07-30, mid-month invoices already landed
@@ -118,5 +121,85 @@ describe('card dec9ae64: distinct invoices for one source+period are SUMMED, not
     // The load-bearing check: a real invoice is not presented as a manual guess.
     expect(s.render_plan!.manual_estimate_actual_source).toBe('email_invoice')
     expect(s.render_plan!.manual_estimate_confidence).toBe('actual_invoice')
+  })
+})
+
+// COS-CORE-M1: the dec9ae64 fix above landed in ledger.ts, but THREE sibling
+// copies of the resolution (reconciliation.ts, forecast-capture.ts, export.ts)
+// still hand-rolled a pick-one reduce -- so the same two-invoice month summed
+// on the dashboard and picked-one on every other surface. All three now reuse
+// ledger.ts's resolveSourceTotal seam; these tests assert cross-surface
+// AGREEMENT with getCostSummary, not just each surface's own number.
+//
+// RED-ABILITY: revert any one surface to its old pick-one reduce -> that
+// surface's test reports 26445.6 (or 4014) instead of 30459.6.
+describe('COS-CORE-M1: every sibling surface sums the same two-invoice month as the dashboard', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('buildReconciliation.operationally_selected_amount agrees with getCostSummary', () => {
+    const db = getDb()
+    seedRenderTwoInvoices(db)
+    const s = getCostSummary(db, cfg(), NOW)
+    const dashboardSpend = s.all_sources.find(x => x.source_id === 'render-hosting')!.spend
+    const rec = buildReconciliation(db, NOW).find(r => r.source_id === 'render-hosting')!
+    expect(rec.operationally_selected_amount).toBe(30459.6)
+    expect(rec.operationally_selected_amount).toBe(dashboardSpend)
+    // invoice_amount already summed by construction -- and now the selected
+    // amount agrees with it instead of undercutting it with a picked-one.
+    expect(rec.invoice_amount).toBe(30459.6)
+  })
+
+  it('a source with ONLY advisory/pending lines has NO operationally selected amount (null, not a plan figure the dashboard excludes)', () => {
+    const db = getDb()
+    const win = monthWindow(NOW)
+    db.prepare(`INSERT INTO cost_sources (id,name,provider,source_type,currency,active,created_at,updated_at)
+      VALUES ('aws','AWS','aws','usage','HUF',1,?,?)`).run(NOW, NOW)
+    db.prepare(`INSERT INTO cost_line_items
+        (source_id,charge_period_start,charge_period_end,charge_category,billed_cost,currency,confidence,data_freshness,dedup_key,created_at)
+      VALUES ('aws',?,?,'usage',0,'HUF','pending_permission',?,'aws|pending|2026-07',?)`)
+      .run(win.start, win.end, NOW, NOW)
+    const rec = buildReconciliation(db, NOW).find(r => r.source_id === 'aws')!
+    expect(rec.operationally_selected_amount).toBeNull()
+  })
+
+  it('the forecast basis (captureForecastSnapshots) starts from the SUM, not one picked receipt', () => {
+    const db = getDb()
+    seedRenderTwoInvoices(db)
+    const results = captureForecastSnapshots(db, NOW)
+    const hosting = results.find(r => r.source_id === 'render-hosting')!
+    // charge_category 'hosting' -> fixed_subscription method: the forecast IS
+    // the resolved MTD figure, so a pick-one bug shows up verbatim here.
+    expect(hosting.result.method).toBe('fixed_subscription')
+    expect(hosting.result.amount).toBe(30459.6)
+    const stored = db.prepare(`SELECT forecast_amount FROM forecast_snapshots WHERE source_id = 'render-hosting'`).get() as { forecast_amount: number }
+    expect(stored.forecast_amount).toBe(30459.6)
+  })
+
+  it('the category export agrees with the dashboard for the two-invoice month', () => {
+    const db = getDb()
+    seedRenderTwoInvoices(db)
+    const s = getCostSummary(db, cfg(), NOW)
+    const dashboardSpend = s.all_sources.find(x => x.source_id === 'render-hosting')!.spend
+    const categories = exportCategorySummary(db, NOW).categories
+    const hosting = categories.find(c => c.source_type === 'hosting')!
+    expect(hosting.spend).toBe(30459.6)
+    expect(hosting.spend).toBe(dashboardSpend)
+  })
+
+  it('estimate-vs-invoice supersession still holds on the sibling surfaces (sum only the WINNING class)', () => {
+    const db = getDb()
+    seedRenderTwoInvoices(db)
+    const win = monthWindow(NOW)
+    // a manual estimate next to the two invoices -- must be superseded, not summed in
+    db.prepare(`INSERT INTO cost_line_items
+        (source_id,charge_period_start,charge_period_end,charge_category,service_name,billed_cost,currency,confidence,data_freshness,dedup_key,created_at,actual_source)
+      VALUES ('render-hosting',?,?,'hosting','Render hosting',3000,'HUF','estimate',?,'render|manual-guess|2026-07',?,'manual_entry')`)
+      .run(win.start, win.end, NOW, NOW)
+    const rec = buildReconciliation(db, NOW).find(r => r.source_id === 'render-hosting')!
+    expect(rec.operationally_selected_amount).toBe(30459.6) // NOT 33459.6
+    const categories = exportCategorySummary(db, NOW).categories
+    expect(categories.find(c => c.source_type === 'hosting')!.spend).toBe(30459.6)
+    const forecast = captureForecastSnapshots(db, NOW).find(r => r.source_id === 'render-hosting')!
+    expect(forecast.result.amount).toBe(30459.6)
   })
 })

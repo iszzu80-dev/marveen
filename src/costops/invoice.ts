@@ -29,6 +29,7 @@ import { monthWindow, hashRef } from './ledger.js'
 import { checkPeriodWritable } from './period-close.js'
 import { createCorrection, type CorrectionFxProvenance } from './correction.js'
 import { convertToHufWithProvenance, convertCorrectionToHuf, resolveFxRate, type FxRateTable, type FxConversion } from './fx.js'
+import { isChargeCategory, CHARGE_CATEGORY_VALUES, type ChargeCategory } from './config.js'
 
 // ---- status + amounts -------------------------------------------------------------------
 
@@ -143,6 +144,13 @@ export interface RecordInvoiceInput {
   credit_amount?: number
   refund_amount?: number
   late_charge_amount?: number
+  // COS-CORE-M4: what KIND of spend the invoice's ledger line represents --
+  // this drives forecasting (ledger.ts run-rates 'usage', takes everything
+  // else at full amount). Optional: when absent it is DERIVED from the
+  // source's own cost_sources.source_type (see recordInvoice), never
+  // hardcoded to 'usage' as before, which gave a subscription invoice a
+  // run-rate forecast (a month-start invoice extrapolated to ~30x).
+  charge_category?: ChargeCategory
 }
 
 export interface RecordInvoiceResult {
@@ -177,6 +185,9 @@ export function recordInvoice(db: Database.Database, input: RecordInvoiceInput, 
   if (!Number.isFinite(input.gross_amount) || input.gross_amount < 0) return { ok: false, error: 'gross_amount must be a non-negative number', status: 400 }
   if (!Number.isFinite(input.billing_period_start) || !Number.isFinite(input.billing_period_end) || input.billing_period_end <= input.billing_period_start) {
     return { ok: false, error: 'billing_period_start/end must be a valid range', status: 400 }
+  }
+  if (input.charge_category !== undefined && !isChargeCategory(input.charge_category)) {
+    return { ok: false, error: `invalid charge_category '${input.charge_category}' -- must be one of: ${CHARGE_CATEGORY_VALUES.join(', ')}`, status: 400 }
   }
 
   const amounts: InvoiceAmounts = {
@@ -266,15 +277,29 @@ export function recordInvoice(db: Database.Database, input: RecordInvoiceInput, 
       if (!corr.ok) throw new EmbeddedCorrectionError(corr.error ?? 'correction failed', corr.status ?? 500)
       ledgerLineId = corr.newLineId ?? null
     } else {
+      // COS-CORE-M4: this branch used to hardcode charge_category 'usage',
+      // handing every first-insert invoice line a run-rate forecast -- a
+      // subscription invoice recorded at the start of the month was
+      // extrapolated to ~30x its real fee. The category is the CALLER's when
+      // explicitly given (validated against the union above); otherwise it is
+      // derived from the source's own registered cost_sources.source_type:
+      // a metered 'usage' source is 'usage' (run-rate is right for it), and
+      // every other kind (subscription/hosting/domain/saas/manual) defaults
+      // to 'subscription' -- a recurring bill owed at its full amount, the
+      // forecast that can never fabricate spend beyond what was invoiced.
+      const sourceRow = db.prepare(`SELECT source_type FROM cost_sources WHERE id = ?`).get(input.source_id) as { source_type: string } | undefined
+      const chargeCategory: ChargeCategory = input.charge_category
+        ?? (sourceRow?.source_type === 'usage' ? 'usage' : 'subscription')
       const lineDedup = `invoice|${input.source_id}|${periodKey}|${opts.now}`
       const lineInfo = db.prepare(`
         INSERT INTO cost_line_items
           (source_id, charge_period_start, charge_period_end, charge_category, billed_cost, currency, confidence, data_freshness, dedup_key, created_at, actual_source,
            original_amount, original_currency, fx_rate, fx_date, fx_source, conversion_method)
-        VALUES (@source_id, @start, @end, 'usage', @net, 'HUF', 'actual_invoice', @now, @dedup_key, @now, 'email_invoice',
+        VALUES (@source_id, @start, @end, @charge_category, @net, 'HUF', 'actual_invoice', @now, @dedup_key, @now, 'email_invoice',
                 @original_amount, @original_currency, @fx_rate, @fx_date, @fx_source, @conversion_method)
       `).run({
         source_id: input.source_id, start: input.billing_period_start, end: input.billing_period_end,
+        charge_category: chargeCategory,
         net: netHuf, dedup_key: lineDedup, now: opts.now,
         // Currency-retention (v0.7/GAP-09, same shape as email-ingest): only
         // a REAL conversion has an "original" distinct from billed_cost.

@@ -13,10 +13,11 @@
 // one file every USD/EUR conversion in CostOps should read from -- not a
 // second parallel source that can drift from it.
 
-import { readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { PROJECT_ROOT } from '../config.js'
 import { logger } from '../logger.js'
+import { atomicWriteFileSync } from '../web/atomic-write.js'
 import type { FxRateTable } from './fx.js'
 
 export const COSTOPS_FX_CONFIG_PATH = join(PROJECT_ROOT, 'store', 'costops-fx.json')
@@ -83,7 +84,10 @@ function migrateFromLegacyRenderPricingOnce(): void {
       version: 1,
       rates: seeded,
     }
-    writeFileSync(COSTOPS_FX_CONFIG_PATH, JSON.stringify(file, null, 2))
+    // COS-CORE-M7: atomic (tmp + rename) -- this is the single copy of the
+    // fx table; a crash mid-write must not leave a truncated file that reads
+    // back as "every rate unset".
+    atomicWriteFileSync(COSTOPS_FX_CONFIG_PATH, JSON.stringify(file, null, 2))
     logger.info({ rates: Object.keys(seeded) }, 'costops-fx: migrated rate(s) from legacy render-pricing config')
   } catch (err) {
     logger.warn({ err }, 'costops-fx: migration write failed (continuing with unset rates)')
