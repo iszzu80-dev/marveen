@@ -1,8 +1,15 @@
 import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { homedir } from 'node:os'
 import { PROJECT_ROOT } from '../config.js'
 import { atomicWriteFileSync } from '../web/atomic-write.js'
-import { setCapacityRoutingEnabled } from '../web/capacity-routing-store.js'
+import { setCapacityRoutingEnabled, clearAllRuntimeOverlays } from '../web/capacity-routing-store.js'
+import { getDb } from '../db.js'
+import { insertRoutingEvent } from '../costops/dispatch.js'
+import { resolveAuthProfile } from '../costops/dispatch-identity.js'
+import { deriveProvider } from '../costops/pricing.js'
+import { resolveAgentModelDetailed } from '../web/agent-config.js'
+import { resolveAgentConfigDir } from '../web/claude-plans.js'
 
 export interface OptimizationModules {
   measurement: boolean
@@ -283,10 +290,62 @@ export interface WriteOptimizationConfigResult {
    *  writes can land independently, and reporting one verdict for both is what
    *  made the emergency stop lie in the more dangerous direction. */
   routingFlagPropagated?: boolean | null
+  /** Did the OFF direction clear the surviving runtime-model overlays?
+   *
+   *  OPT-C1 (review 2026-08-12): stopping routing while an agent sits on a
+   *  fallback overlay left it pinned there FOREVER -- the sweep (the only
+   *  climb-back path) is exactly what the stop turns off, and every respawn
+   *  re-applied the overlay. Same true/false/null semantics as
+   *  `routingFlagPropagated`: `null` means there was nothing to do (routing
+   *  stays on, or a caller-supplied path means this is not the live config). */
+  overlaysCleared?: boolean | null
   /** Human-readable note when the config WAS written but the propagation was
    *  not. Not an `error`: the write happened, and calling it an error is the
    *  bug this field exists to prevent. */
   warning?: string | null
+}
+
+/**
+ * The live implementation behind writeOptimizationConfig's `clearOverlays`
+ * seam: wipe every runtime-model overlay and record one routing event per
+ * cleared agent -- the same bookkeeping the capacity-routing runner does when
+ * it clears a single overlay on climb-back (capacity-routing-runner.ts), so
+ * the routing_events trail shows WHY an agent went back to its primary.
+ * Returns how many overlays were cleared; recording failures do not undo the
+ * clear (the overlay wipe is the safety action, the event is the audit trail).
+ * `overlayPath` is test-injectable, mirroring the store's own functions; the
+ * live default is the real overlay file.
+ */
+export function clearRuntimeOverlaysForRoutingOff(overlayPath?: string): number {
+  const cleared = clearAllRuntimeOverlays(overlayPath)
+  if (cleared.length === 0) return 0
+  const db = getDb()
+  const nowSec = Math.floor(Date.now() / 1000)
+  for (const { agent, entry } of cleared) {
+    // Mirror the runner's clear-side event: the agent is back on its
+    // CONFIGURED identity, so the event carries the configured model/provider/
+    // profile with fallbackUsed: 0.
+    let configuredModel: string | null = null
+    let provider: string | null = null
+    let authProfile: string | null = null
+    try {
+      configuredModel = resolveAgentModelDetailed(agent).model
+      provider = deriveProvider(configuredModel)
+      authProfile = resolveAuthProfile(agent, { resolveConfigDir: resolveAgentConfigDir, homeDir: homedir() })
+    } catch { /* an unresolvable agent still gets its clear event, with nulls */ }
+    insertRoutingEvent(db, {
+      dispatchId: entry.dispatchId,
+      agent,
+      configuredModel,
+      runtimeModel: configuredModel,
+      provider,
+      authProfile,
+      capacityState: null,
+      reasonCode: 'routing_disabled_overlay_cleared',
+      fallbackUsed: 0,
+    }, nowSec)
+  }
+  return cleared.length
 }
 
 export function writeOptimizationConfig(
@@ -300,6 +359,10 @@ export function writeOptimizationConfig(
      *  Without this seam the failure branch was untestable, and an untested
      *  failure branch on an emergency stop is the branch that matters. */
     propagate?: (enabled: boolean) => void
+    /** The overlay-wipe half of the OFF direction (OPT-C1), injectable for the
+     *  same reason as `propagate` and defaulting the same way: the real
+     *  implementation only when the live path is in use. */
+    clearOverlays?: () => number
   } = {},
 ): WriteOptimizationConfigResult {
   const path = opts.path ?? OPTIMIZATION_CONFIG_PATH
@@ -358,28 +421,47 @@ export function writeOptimizationConfig(
     // field. "The switch was written, the flag was not" is a state the caller
     // can act on; `ok: false` with stale config is not.
     let routingFlagPropagated: boolean | null = null
-    let warning: string | null = null
+    let overlaysCleared: boolean | null = null
+    const warnings: string[] = []
     const propagate = opts.propagate ?? (opts.path ? null : setCapacityRoutingEnabled)
-    if (propagate) {
-      const shouldRun = config.masterEnabled && config.modules.runtimeRouting === true
-      if (!shouldRun) {
-        try {
-          propagate(false)
-          routingFlagPropagated = true
-        } catch (error) {
-          routingFlagPropagated = false
-          warning = 'az optimalizacio-config KIIRODOTT, de a capacity-routing kapcsolo NEM lett kikapcsolva: '
-            + (error instanceof Error ? error.message : String(error))
-        }
+    const clearOverlays = opts.clearOverlays ?? (opts.path ? null : clearRuntimeOverlaysForRoutingOff)
+    const shouldRun = config.masterEnabled && config.modules.runtimeRouting === true
+    if (propagate && !shouldRun) {
+      try {
+        propagate(false)
+        routingFlagPropagated = true
+      } catch (error) {
+        routingFlagPropagated = false
+        warnings.push('az optimalizacio-config KIIRODOTT, de a capacity-routing kapcsolo NEM lett kikapcsolva: '
+          + (error instanceof Error ? error.message : String(error)))
       }
     }
-    return { ok: true, config, error: null, routingFlagPropagated, warning }
+    // OPT-C1 (review 2026-08-12): the OFF direction has a THIRD half — the
+    // surviving runtime-model overlays. With the flag off the sweep never
+    // clears them, and every respawn used to re-apply them, so an agent on a
+    // fallback stayed there forever while the routing view showed its primary.
+    // Attempted even when the flag propagation itself failed: the two failures
+    // are independent, and each cleared overlay helps on its own. Each outcome
+    // travels in its own field, same as `routingFlagPropagated`.
+    if (clearOverlays && !shouldRun) {
+      try {
+        clearOverlays()
+        overlaysCleared = true
+      } catch (error) {
+        overlaysCleared = false
+        warnings.push('a runtime-model overlay-ek torlese NEM sikerult -- fallback modellen ragadt agent a kovetkezo respawnig ott is marad: '
+          + (error instanceof Error ? error.message : String(error)))
+      }
+    }
+    const warning = warnings.length > 0 ? warnings.join(' | ') : null
+    return { ok: true, config, error: null, routingFlagPropagated, overlaysCleared, warning }
   } catch (error) {
     return {
       ok: false,
       config: current,
       error: error instanceof Error ? error.message : String(error),
       routingFlagPropagated: null,
+      overlaysCleared: null,
       warning: null,
     }
   }

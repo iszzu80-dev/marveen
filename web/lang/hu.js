@@ -330,6 +330,7 @@ window._i18n.hu = {
   'optimization.controls.emergency_button': 'Routing azonnali leállítása',
   'optimization.controls.emergency_desc': 'Csak a runtime routingot és az automatikus fallbacket állítja le -- a mérés, a CostOps és az ajánlások tovább futnak.',
   'optimization.controls.emergency_success': 'Routing leállítva.',
+  'optimization.controls.emergency_partial': 'A routing csak RÉSZBEN állt le -- még aktív: {stillRunning}. {warning}',
   'optimization.controls.invalid_config': 'Érvénytelen konfiguráció',
   'optimization.controls.dependency_corrections': 'A szerver a következő korrekciókat alkalmazta:',
   'optimization.controls.confirm_master_enable': 'Bekapcsolod az optimalizálási rendszert?',

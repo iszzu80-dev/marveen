@@ -330,6 +330,7 @@ window._i18n.en = {
   'optimization.controls.emergency_button': 'Stop routing immediately',
   'optimization.controls.emergency_desc': 'Stops only runtime routing and automatic fallback -- measurement, CostOps and recommendations keep running.',
   'optimization.controls.emergency_success': 'Routing stopped.',
+  'optimization.controls.emergency_partial': 'Routing only PARTIALLY stopped -- still active: {stillRunning}. {warning}',
   'optimization.controls.invalid_config': 'Invalid configuration',
   'optimization.controls.dependency_corrections': 'The server applied the following corrections:',
   'optimization.controls.confirm_master_enable': 'Turn the optimization system on?',

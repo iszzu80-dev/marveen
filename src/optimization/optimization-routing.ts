@@ -47,7 +47,7 @@ function errorMessage(error: unknown): string {
 export function buildRoutingSnapshot(
   db: Database.Database,
   now: number,
-  opts: { runtimeRoutingEnabled: boolean } = { runtimeRoutingEnabled: true },
+  opts: { runtimeRoutingEnabled: boolean; overlayPath?: string } = { runtimeRoutingEnabled: true },
 ): AgentRoutingRow[] {
   return listAgentNames().map((agent): AgentRoutingRow => {
     let configuredPrimary = 'unknown'
@@ -57,21 +57,30 @@ export function buildRoutingSnapshot(
       provider = deriveProvider(configuredPrimary)
       const authProfile = authProfileFor(agent)
       const capacityState = capacityStateFor(db, provider, authProfile, now, false)
+      const overlay = opts.overlayPath === undefined
+        ? readRuntimeOverlay(agent)
+        : readRuntimeOverlay(agent, opts.overlayPath)
 
       if (!opts.runtimeRoutingEnabled) {
+        // OPT-C1 (review 2026-08-12): static_mode used to report
+        // runtime_model = configured_primary WITHOUT reading the overlay --
+        // exactly when routing is switched off is when a surviving overlay
+        // means an agent is still sitting on its fallback model, and this
+        // view was the instrument claiming otherwise. Report reality: the
+        // overlay model when one exists, with a fallback_reason marking that
+        // routing is off yet the agent has not returned to its primary.
         return {
           agent,
           configured_primary: configuredPrimary,
           provider,
-          runtime_model: configuredPrimary,
+          runtime_model: overlay?.model ?? configuredPrimary,
           capacity_state: capacityState,
           routing_state: 'static_mode',
-          fallback_reason: null,
-          last_decision_at: null,
+          fallback_reason: overlay ? `routing_disabled_overlay_active:${overlay.reasonCode}` : null,
+          last_decision_at: overlay ? Math.floor(overlay.setAtMs / 1000) : null,
         }
       }
 
-      const overlay = readRuntimeOverlay(agent)
       return {
         agent,
         configured_primary: configuredPrimary,

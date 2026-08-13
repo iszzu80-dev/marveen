@@ -102,6 +102,10 @@ export async function tryHandleOptimization(ctx: RouteContext): Promise<boolean>
     if (problematicOnly) {
       rows = rows.filter((row) =>
         row.routing_state === 'fallback'
+        // OPT-C1: an agent whose runtime model differs from its configured
+        // primary is a problem in ANY routing_state — in static_mode it is the
+        // pinned-on-fallback case the emergency stop is supposed to prevent.
+        || row.runtime_model !== row.configured_primary
         || row.capacity_state === 'limited'
         || row.capacity_state === 'blocked'
         || row.capacity_state === 'degraded')
@@ -326,16 +330,25 @@ export async function tryHandleOptimization(ctx: RouteContext): Promise<boolean>
     // capacity-routing flag — and they can land separately. Reporting a single
     // verdict for both is how an operator walks away from a half-stopped system.
     //
-    // The config write succeeded, so this is not a 500. But if the flag did not
-    // follow, the response says so in the same breath, because "stopped" and
-    // "stopped except for the part that keeps dispatching" are different states.
-    if (result.routingFlagPropagated === false) {
+    // OPT-C1 (review 2026-08-12): a THIRD half joined them — the surviving
+    // runtime-model overlays. Not clearing those left agents pinned on their
+    // fallback models with nothing (the sweep is now off) ever climbing them
+    // back. Each half reports independently, and any failed half makes the
+    // response partial.
+    //
+    // The config write succeeded, so this is not a 500. But if the flag or the
+    // overlay wipe did not follow, the response says so in the same breath,
+    // because "stopped" and "stopped except for the part that keeps
+    // dispatching" are different states.
+    if (result.routingFlagPropagated === false || result.overlaysCleared === false) {
       json(res, {
         ok: true,
         partial: true,
         config: result.config,
         warning: result.warning,
-        stillRunning: 'capacity-routing',
+        stillRunning: result.routingFlagPropagated === false
+          ? 'capacity-routing'
+          : 'runtime-model-overlays',
       })
       return true
     }

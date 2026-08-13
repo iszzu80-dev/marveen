@@ -82,6 +82,29 @@ export function clearRuntimeOverlay(agent: string, path: string = OVERLAY_PATH):
   atomicWriteFileSync(path, JSON.stringify(file, null, 2))
 }
 
+export interface ClearedOverlay {
+  agent: string
+  entry: RuntimeOverlayEntry
+}
+
+/**
+ * Clear EVERY agent's overlay entry in one write (OPT-C1, review 2026-08-12).
+ *
+ * This is the emergency-stop counterpart of clearRuntimeOverlay: turning
+ * routing off must not leave agents pinned on their fallback models, because
+ * with the runner's sweep gated off nothing would ever climb them back. The
+ * cleared entries are RETURNED so the caller can record a routing event per
+ * agent, the same bookkeeping the runner does when it clears one overlay.
+ * A no-op (nothing to clear) performs no write at all.
+ */
+export function clearAllRuntimeOverlays(path: string = OVERLAY_PATH): ClearedOverlay[] {
+  const file = readOverlayFile(path)
+  const cleared = Object.entries(file).map(([agent, entry]) => ({ agent, entry }))
+  if (cleared.length === 0) return cleared
+  atomicWriteFileSync(path, JSON.stringify({}, null, 2))
+  return cleared
+}
+
 export function listRuntimeOverlays(path: string = OVERLAY_PATH): OverlayFile {
   return readOverlayFile(path)
 }
@@ -202,7 +225,15 @@ export function isEnabledForRouting(provider: string, authProfile: string, confi
  *
  * Returns the overlay's model ONLY when:
  *   (a) an overlay entry exists for this agent, AND
- *   (b) that entry's (provider, authProfile) is STILL enabled_for_routing per
+ *   (b) routing is administratively ON (`config.enabled`) -- OPT-C1 (review
+ *       2026-08-12): with routing off the sweep never runs again, so a
+ *       surviving overlay applied at spawn would pin the agent on its
+ *       fallback FOREVER. An administrative stop must make the very next
+ *       respawn launch the configured primary, even if clearing the overlay
+ *       file itself failed. Note this gates overlay APPLICATION only -- the
+ *       kill switch still deliberately preserves candidate trust flags
+ *       (see setCapacityRoutingEnabled), AND
+ *   (c) that entry's (provider, authProfile) is STILL enabled_for_routing per
  *       the current config -- re-checked now, not trusted from write time, so
  *       revoking trust takes effect on the very next resolution even before
  *       any sweep clears the stale entry.
@@ -217,6 +248,7 @@ export function resolveRuntimeModel(
   const overlay = readRuntimeOverlay(agent, paths.overlayPath ?? OVERLAY_PATH)
   if (!overlay) return configuredModel
   const config = readCapacityRoutingConfig(paths.configPath ?? CONFIG_PATH)
+  if (!config.enabled) return configuredModel
   if (!isEnabledForRouting(overlay.provider, overlay.authProfile, config)) return configuredModel
   return overlay.model
 }

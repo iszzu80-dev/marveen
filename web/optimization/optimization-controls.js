@@ -205,7 +205,18 @@ window.Optimization = window.Optimization || {}
           const response = await window.Optimization.Api.emergencyDisable()
           if (sequence !== renderSequence || bodyEl.dataset.optimizationView !== 'controls') return
           if (!response.ok) throw new Error(responseError(response))
-          window.alert(t('optimization.controls.emergency_success'))
+          // OPT-H3: HTTP 200 is not "fully stopped" -- the backend reports a
+          // half-landed stop via `partial` + `warning` + `stillRunning`
+          // (routes/optimization.ts). Swallowing that and alerting success is
+          // how an operator walks away from a half-stopped system.
+          if (response.body?.partial) {
+            window.alert(t('optimization.controls.emergency_partial', {
+              stillRunning: response.body.stillRunning || '?',
+              warning: response.body.warning || '',
+            }))
+          } else {
+            window.alert(t('optimization.controls.emergency_success'))
+          }
           await render(bodyEl, {
             config: response.body.config,
             valid: true,

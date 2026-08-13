@@ -1,10 +1,12 @@
-import { beforeEach, describe, expect, it } from 'vitest'
-import { existsSync, readFileSync } from 'node:fs'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { initDatabase, getDb } from '../db.js'
 import { listAgentNames } from '../web/agent-config.js'
 import {
   listRuntimeOverlays,
+  writeRuntimeOverlay,
   OVERLAY_PATH,
 } from '../web/capacity-routing-store.js'
 import {
@@ -23,8 +25,15 @@ function overlayBytes(): { exists: boolean; content: Buffer | null } {
 }
 
 describe('buildRoutingSnapshot', () => {
+  let dir: string
+
   beforeEach(() => {
     initDatabase(':memory:')
+    dir = mkdtempSync(join(tmpdir(), 'opt-routing-'))
+  })
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
   })
 
   it('returns one correctly-shaped row per real configured agent', () => {
@@ -55,10 +64,50 @@ describe('buildRoutingSnapshot', () => {
   })
 
   it('reports every row as static_mode when runtime routing is administratively disabled', () => {
-    const rows = buildRoutingSnapshot(getDb(), NOW, { runtimeRoutingEnabled: false })
+    // A deterministic EMPTY overlay store: with no surviving overlay, static
+    // mode reports every agent on its configured primary.
+    const overlayPath = join(dir, 'runtime-model-overlay.json')
+    const rows = buildRoutingSnapshot(getDb(), NOW, { runtimeRoutingEnabled: false, overlayPath })
     expect(rows).toHaveLength(listAgentNames().length)
     expect(rows.every(row => row.routing_state === 'static_mode')).toBe(true)
     expect(rows.every(row => row.runtime_model === row.configured_primary)).toBe(true)
+    expect(rows.every(row => row.fallback_reason === null)).toBe(true)
+  })
+
+  it('OPT-C1: static_mode with a SURVIVING overlay reports the overlay model, not configured_primary', () => {
+    // The previous version of the test above pinned the misreport this test
+    // now forbids: routing switched off while an agent still sat on its
+    // fallback overlay was shown as running its configured primary -- the
+    // routing view lying about the exact state the emergency stop creates
+    // when the overlay wipe fails. Reality wins: the overlay model, plus a
+    // fallback_reason making clear routing is off but the agent has not
+    // climbed back.
+    const overlayPath = join(dir, 'runtime-model-overlay.json')
+    const agent = listAgentNames()[0]
+    expect(agent).toBeTruthy()
+    writeRuntimeOverlay(agent, {
+      model: 'stuck-fallback-model',
+      provider: 'deepseek',
+      authProfile: 'configdir:.claude-deepseek',
+      dispatchId: 'd-42',
+      fallbacksUsedThisPackage: 1,
+      setAtMs: (NOW - 60) * 1000,
+      reasonCode: 'primary_constrained_fallback_applied',
+    }, overlayPath)
+
+    const rows = buildRoutingSnapshot(getDb(), NOW, { runtimeRoutingEnabled: false, overlayPath })
+    const row = rows.find(r => r.agent === agent)
+    expect(row).toBeDefined()
+    expect(row!.routing_state).toBe('static_mode')
+    expect(row!.runtime_model).toBe('stuck-fallback-model')
+    expect(row!.runtime_model).not.toBe(row!.configured_primary)
+    expect(row!.fallback_reason).toBe('routing_disabled_overlay_active:primary_constrained_fallback_applied')
+    expect(row!.last_decision_at).toBe(NOW - 60)
+
+    // Agents WITHOUT an overlay are unaffected: still honest primaries.
+    const others = rows.filter(r => r.agent !== agent)
+    expect(others.every(r => r.runtime_model === r.configured_primary)).toBe(true)
+    expect(others.every(r => r.fallback_reason === null)).toBe(true)
   })
 })
 
