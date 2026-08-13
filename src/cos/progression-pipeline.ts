@@ -54,6 +54,9 @@ import { transitionZstCase } from './zst-case-store.js'
 import { scheduleNextProgression } from './progression-scheduler.js'
 import { canonicalTriggerType } from './progression-trigger.js'
 import { killSwitchRefusal } from './kill-switch.js'
+import {
+  preflight, enterWaitSystem, clearWaitSystem, type CapabilityPreflight,
+} from './capability-preflight.js'
 import { answerIntentOf, type AnswerIntent } from './answer-options.js'
 
 // ── Valid progression decisions (plan §13) ──────────────────────────────
@@ -69,6 +72,17 @@ export const VALID_DECISIONS = [
   'MANUAL_ACTION_REQUIRED',
   'RECOVERY_REQUIRED',
   'COMPLETE',
+  // §19. ENGINE-ONLY, and the difference from the list in `reader.ts` is the
+  // point rather than an oversight. This decision means "the machine cannot
+  // proceed", and that is a fact about the deployment which the capability
+  // preflight establishes deterministically — never something a model may
+  // propose from reading a case. A Reader that could offer WAIT_SYSTEM could
+  // excuse itself from a case by asserting a fault, and nothing downstream
+  // would check.
+  //
+  // `reader.ts`'s PROGRESSION_DECISIONS is therefore a strict subset of this
+  // list, and `cos-capability-preflight` asserts that it stays one.
+  'WAIT_SYSTEM',
 ] as const
 
 export type ProgressionDecision = (typeof VALID_DECISIONS)[number]
@@ -738,12 +752,78 @@ export interface PipelineOptions {
    *  protected is the default, and remembering to claim is not a thing a caller
    *  can forget any more. */
   claimedBy?: string
+  /** §19: the INTERNAL capabilities this run needs before it may reason about
+   *  the case. Names as `capability-preflight.ts` understands them.
+   *
+   *  Absent or empty means "declare nothing", and a run that declares nothing
+   *  behaves exactly as it did before the preflight existed — not a database
+   *  read, not a branch taken. That is what lets each caller adopt this
+   *  deliberately rather than the whole engine discovering it in production on
+   *  the same day. */
+  requiredCapabilities?: readonly string[]
 }
 
 /** Lease length for the claim the cycle takes for itself. Matches the
  *  heartbeat's, so a crashed run blocks the case for the same bounded time
  *  whichever path started it. */
 export const PROGRESSION_CLAIM_TTL_SEC = 300
+
+/**
+ * §19: record a run that stopped because the MACHINE could not proceed.
+ *
+ * `status: 'COMPLETED'`, and that is the whole argument of this function. The
+ * engine did exactly what it should: it checked, found a fault, parked the case
+ * and said which capability it is parked on. Writing FAILED here would put a
+ * system outage into the same bucket as an engine defect, and the daily
+ * reconcile's `cycleErrors` — which exists to find engine defects — would fill
+ * up with weather.
+ *
+ * `decision: 'WAIT_SYSTEM'` is what keeps it off the owner's board. Every other
+ * terminal decision in this vocabulary either advances the case or asks him
+ * something; this one does neither, on purpose.
+ */
+function recordWaitSystemRun(
+  db: Database.Database,
+  domain: 'personal' | 'zst',
+  caseId: string,
+  blocker: CapabilityPreflight,
+  opts: PipelineOptions,
+  now: number,
+): ProgressionRunResult {
+  const runId = randomUUID()
+  const reason = `A rendszer vár egy képességre: ${blocker.capability} — ${blocker.detail}`
+  try {
+    enterWaitSystem(db, domain, caseId, blocker, now)
+  } catch { /* no progression state row: the run is still recorded below */ }
+  try {
+    db.prepare(
+      `INSERT INTO case_progression_runs
+       (progression_run_id, domain, case_id, trigger_type, trigger_reference,
+        case_version_before, case_version_after, goal_version,
+        plan_version_before, plan_version_after, decision, reason,
+        progress_delta_json, action_ids_json, escalation_id,
+        status, error_code, error_summary, safety_assertions_json,
+        started_at, completed_at)
+       VALUES (?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 'WAIT_SYSTEM', ?, ?, NULL, NULL,
+        'COMPLETED', NULL, NULL, NULL, ?, ?)`,
+    ).run(
+      runId, domain, caseId,
+      canonicalTriggerType(opts.triggerType ?? 'MANUAL'), opts.triggerReference ?? 'preflight',
+      reason,
+      JSON.stringify({ waitSystem: blocker.capability, state: blocker.state, retryable: blocker.retryable }),
+      now, now,
+    )
+  } catch { /* a store without the runs table cannot be told; the wait stands */ }
+  return {
+    runId, domain, caseId,
+    decision: 'WAIT_SYSTEM',
+    reason,
+    status: 'COMPLETED',
+    errorCode: null,
+    errorSummary: null,
+    safetyViolations: [],
+  }
+}
 
 /** Record a FAILED progression run with CROSS_DOMAIN_LEAKAGE error code
  *  (shared helper — used from case lookup guard and resolver catch block). */
@@ -913,6 +993,22 @@ export function runProgressionCycle(
     return recordRefusedRun(db, randomUUID(), domain, caseId, 'KILL_SWITCH_ENGAGED',
       `A haladás-motor leállt: ${refusal}`, opts, now)
   }
+
+  // §19 CAPABILITY PREFLIGHT, before the case is read and before anything
+  // reasons about it.
+  //
+  // Here rather than inside the transaction because the answer is about the
+  // DEPLOYMENT, not about this case: fifty cases blocked on the same dead
+  // connector should each find out as cheaply as possible, and none of them
+  // should have opened a transaction to do it.
+  const pre = preflight(db, opts.requiredCapabilities, now)
+  if (!pre.ok && pre.blocker) {
+    return recordWaitSystemRun(db, domain, caseId, pre.blocker, opts, now)
+  }
+  // The capability is back. Clearing the wait BEFORE the run means the run
+  // itself is an ordinary one — the recovery is a fact about the case's history,
+  // recorded by the trigger type, not a special mode the cycle runs in.
+  clearWaitSystem(db, domain, caseId, now)
 
   const body = (): ProgressionRunResult => db.transaction(
     () => runProgressionCycleInner(db, domain, caseId, now, opts),
