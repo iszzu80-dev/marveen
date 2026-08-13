@@ -17,7 +17,7 @@
 //      own five-minute retry cadence on the list the owner reads as "what am I
 //      late for".
 import { describe, it, expect, beforeEach } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { initDatabase, getDb } from '../db.js'
 import { initProgressionSchema } from '../cos/schema.js'
@@ -31,13 +31,46 @@ import {
 const T0 = 1_700_000_000
 const DAY = 86400
 
+
+/** Every production file that declares a table. The invariant is about the
+ *  codebase, so the scan has to be too. */
+function declaringFiles(): string[] {
+  const REPO = process.cwd()
+  const out: string[] = []
+  const walk = (dir: string): void => {
+    if (!existsSync(join(REPO, dir))) return
+    for (const e of readdirSync(join(REPO, dir), { withFileTypes: true })) {
+      const rel = `${dir}/${e.name}`
+      if (e.isDirectory()) {
+        if (e.name === '__tests__' || e.name === 'node_modules') continue
+        walk(rel)
+      } else if (e.name.endsWith('.ts') && !e.name.endsWith('.test.ts')) {
+        if (/CREATE TABLE/i.test(readFileSync(join(REPO, rel), 'utf8'))) out.push(rel)
+      }
+    }
+  }
+  walk('src'); walk('scripts')
+  return out.sort()
+}
+
 describe('§10.3 the ontology itself', () => {
   it('HEADLINE: every deadline-shaped column in the schema has exactly one status', () => {
     // §10.3's first invariant: v1.4 may not create a fourth parallel deadline
     // semantic without justification. Enforced by making the inventory complete
     // and keeping it that way — a twelfth column added to the schema fails here
     // until somebody decides what it IS.
-    const schema = readFileSync(join(process.cwd(), 'src/cos/schema.ts'), 'utf8')
+    // EVERY file that declares a table, not just `schema.ts`.
+    //
+    // The first version read `schema.ts` alone, and the v1.4 proactive sweep
+    // walked straight past it: `proactive_sweep_state.next_review_at` is
+    // declared in `proactive/sweep.ts`, so the inventory reported itself
+    // complete while a twelfth deadline-shaped column existed one directory
+    // over. The check was guarding a file when the invariant is about the
+    // codebase — the same class of mistake as the scan that was one letter too
+    // narrow, found the same way: by adding the thing it was supposed to catch.
+    const schema = declaringFiles()
+      .map(f => readFileSync(join(process.cwd(), f), 'utf8'))
+      .join('\n')
     const found = new Set<string>()
     for (const line of schema.split('\n')) {
       // `expir`, not `expires`. The first version of this pattern said

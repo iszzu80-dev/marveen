@@ -45,6 +45,7 @@ export type DeadlineType =
   | 'DOCUMENT_DUE'
   | 'TERMINATION_DEADLINE'
   | 'CONTRACT_EXPIRY'
+  | 'INITIATIVE_DECISION_DUE'
   | 'ESCALATION_DUE'
 
 /** §10.3's documentation shape, as data rather than as a YAML file nobody
@@ -244,6 +245,85 @@ export const DEADLINE_ONTOLOGY: readonly DeadlineConcept[] = [
     storage: 'RELATIVE',
   },
   {
+    field: 'proactive_initiatives.decision_deadline',
+    semanticOwner: 'v1.4 Proactive Core',
+    sourceOfTruth: 'proactive_initiatives',
+    readers: ['deadline-index.ts', 'proactive/sweep.ts'],
+    writers: ['proactive/initiative-store.ts'],
+    normalizedType: 'INITIATIVE_DECISION_DUE',
+    precedenceIfConflict: 42,
+    status: 'ADAPTED_TO_INDEX',
+    rationale:
+      'A kvalifikalt Initiative dontesi hatarideje. Valodi hatarido: el lehet keses vele. Kicsit '
+      + 'gyengebb kotelem, mint az ugy sajat due_at-ja, mert az Initiative javaslat marad, amig '
+      + 'Case-hez nem kotodik.',
+    migrationOrAdapter: null,
+    storage: 'EPOCH',
+  },
+  {
+    field: 'proactive_signals.candidate_deadline',
+    semanticOwner: 'v1.4 Proactive Core',
+    sourceOfTruth: 'proactive_signals',
+    readers: ['proactive/qualification.ts'],
+    writers: ['proactive/signal-store.ts'],
+    normalizedType: null,
+    precedenceIfConflict: 0,
+    status: 'INTENTIONALLY_DISTINCT',
+    rationale:
+      'JELOLT hatarido, nem megallapitott. Egy eszlelt jel javaslata, amit a §6 kvalifikacio meg '
+      + 'elvethet. Az indexbe vonva minden gyanu ugy nezne ki a listan, mint egy tenyleges '
+      + 'kotelem -- es a jel letezese onmagaban a §4.1 szerint semmit nem valt ki.',
+    migrationOrAdapter: 'promocio utan a proactive_initiatives.decision_deadline viszi tovabb',
+    storage: 'EPOCH',
+  },
+  {
+    field: 'proactive_initiatives.internal_safe_deadline',
+    semanticOwner: 'v1.4 Proactive Core',
+    sourceOfTruth: 'szarmaztatott: decision_deadline - felkeszulesi ido',
+    readers: ['proactive/initiative-store.ts'],
+    writers: ['proactive/initiative-store.ts'],
+    normalizedType: null,
+    precedenceIfConflict: 0,
+    status: 'INTENTIONALLY_DISTINCT',
+    rationale:
+      'Nem hatarido, hanem BELSO onkorlatozas: ameddig az elokeszitesnek keszen kell lennie, hogy '
+      + 'a valodi hatarido meg tarthato legyen. Sosem a tulajdonos fele mutatott datum. Az index '
+      + 'ezt minden rekordra maga szamolja az INTERNAL_SAFE_LEAD_SEC-bol, tehat ket forrasa lenne.',
+    migrationOrAdapter: null,
+    storage: 'EPOCH',
+  },
+  {
+    field: 'proactive_sweep_state.next_review_at',
+    semanticOwner: 'v1.4 proaktiv sweep',
+    sourceOfTruth: 'proactive_sweep_state',
+    readers: ['proactive/sweep.ts'],
+    writers: ['proactive/sweep.ts'],
+    normalizedType: null,
+    precedenceIfConflict: 0,
+    status: 'INTENTIONALLY_DISTINCT',
+    rationale:
+      'A sweep sajat kadenciaja, ugyanaz a fajta, mint a next_progression_at: "mikor nezzem meg '
+      + 'legkozelebb". Senki nem kesik el vele. A §11.2 D pont miatt letezik -- egy lesoport '
+      + 'jelolt nem maradhat azonnal ujra esedekes -- es nem azert, mert barmi hatarideje volna.',
+    migrationOrAdapter: null,
+    storage: 'EPOCH',
+  },
+  {
+    field: 'proactive_sweep_state.claim_expires_at',
+    semanticOwner: 'v1.4 proaktiv sweep',
+    sourceOfTruth: 'proactive_sweep_state',
+    readers: ['proactive/sweep.ts'],
+    writers: ['proactive/sweep.ts'],
+    normalizedType: null,
+    precedenceIfConflict: 0,
+    status: 'INTENTIONALLY_DISTINCT',
+    rationale:
+      'Lease TTL a §11.2 F claim-idempotenciahoz. Kizarasi mechanizmus, nem kotelem: a lejarata '
+      + 'csak annyit jelent, hogy masik sweep is elviheti a jeloltet.',
+    migrationOrAdapter: null,
+    storage: 'EPOCH',
+  },
+  {
     field: 'case_progression_state.next_progression_at',
     semanticOwner: 'progression ütemező',
     sourceOfTruth: 'case_progression_state',
@@ -356,6 +436,7 @@ export const DEADLINE_ONTOLOGY: readonly DeadlineConcept[] = [
 export const INTERNAL_SAFE_LEAD_SEC: Record<DeadlineType, number> = {
   TERMINATION_DEADLINE: 7 * 86400,
   CONTRACT_EXPIRY: 14 * 86400,
+  INITIATIVE_DECISION_DUE: 86400,
   PAYMENT_DUE: 3 * 86400,
   DOCUMENT_DUE: 2 * 86400,
   ESCALATION_DUE: 86400,
@@ -443,6 +524,8 @@ const PROJECTIONS: readonly Projection[] = [
   { table: 'personal_invoices', column: 'due_date', type: 'PAYMENT_DUE', domain: 'personal', caseIdColumn: null, idColumn: 'rowid', labelColumn: 'rowid', parse: true },
   { table: 'case_documents', column: 'due_date', type: 'DOCUMENT_DUE', domain: 'personal', caseIdColumn: 'case_id', idColumn: 'rowid', labelColumn: 'rowid', parse: true },
   { table: 'zst_product_escalations', column: 'due_at', type: 'ESCALATION_DUE', domain: 'zst', caseIdColumn: null, idColumn: 'rowid', labelColumn: 'rowid', parse: false },
+  { table: 'proactive_initiatives', column: 'decision_deadline', type: 'INITIATIVE_DECISION_DUE', domain: 'personal', caseIdColumn: 'case_id', idColumn: 'initiative_id', labelColumn: 'current_gap', parse: false, where: `domain = 'personal' AND state NOT IN ('SUPPRESSED','RESOLVED')` },
+  { table: 'proactive_initiatives', column: 'decision_deadline', type: 'INITIATIVE_DECISION_DUE', domain: 'zst', caseIdColumn: 'case_id', idColumn: 'initiative_id', labelColumn: 'current_gap', parse: false, where: `domain = 'zst' AND state NOT IN ('SUPPRESSED','RESOLVED')` },
 ]
 
 export interface DeadlineIndexOptions {

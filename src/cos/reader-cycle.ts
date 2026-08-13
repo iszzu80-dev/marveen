@@ -92,33 +92,13 @@ export interface ReaderCandidate {
   policyDecision: string
 }
 
-/**
- * Take `limit` items, one domain at a time, in turn.
- *
- * The sweeps used to enumerate `personal` in full and then `zst`, then
- * `slice(0, limit)`. With a limit of three to five per cycle and any personal
- * backlog at all, the corporate half of the store was never reached — not
- * "later", never, because the backlog is refilled by the same sweeps. Order
- * WITHIN a domain is preserved (it carries the domain's own priority); only the
- * interleaving is added.
- */
-export function roundRobinByDomain<T extends { domain: string }>(items: T[], limit: number): T[] {
-  const queues = new Map<string, T[]>()
-  for (const i of items) {
-    const q = queues.get(i.domain)
-    if (q) q.push(i); else queues.set(i.domain, [i])
-  }
-  const out: T[] = []
-  const lists = [...queues.values()]
-  for (let round = 0; lists.some(l => round < l.length); round++) {
-    for (const l of lists) {
-      if (round >= l.length) continue
-      out.push(l[round])
-      if (limit > 0 && out.length >= limit) return out
-    }
-  }
-  return out
-}
+/** §11.2 A fairness. MOVED to `fair-interleave.ts` so the v1.4 proactive sweep
+ *  can use the same rule: this module imports the Reader, the Reader imports the
+ *  model client, and the model client is on the §15.3 forbidden list — so the
+ *  proactive module cannot import from here at all. Re-exported rather than
+ *  re-pointed, because the existing callers named this file. */
+export { roundRobinByDomain } from './fair-interleave.js'
+import { roundRobinByDomain } from './fair-interleave.js'
 
 /**
  * Cases that RAN since they were last read.
