@@ -29,7 +29,8 @@ const HEADERS = {
 }
 
 export interface DiscoverCarsOptions {
-  /** Max seconds to poll for the async offer aggregation. */
+  /** Max POLL ROUNDS for the async offer aggregation — not seconds. The wall
+   *  time is roughly pollAttempts × pollDelayMs. */
   pollAttempts?: number
   pollDelayMs?: number
   fetchImpl?: typeof fetch
@@ -59,6 +60,13 @@ export class DiscoverCarsAdapter implements RentalAdapter {
   }
 
   async search(params: RentalSearchParams): Promise<RentalOffer[]> {
+    // Sanity FIRST: the requested window must be a positive span. This used to
+    // run at the very END — after create-search and after up to 12 × 2.5s of
+    // polling — so a caller typo cost half a minute and a pointless remote
+    // search before being told the dates were nonsense.
+    if (rentalDayCount(params.pickupFrom, params.pickupTo) <= 0) {
+      throw new Error('rental dropoff is not after pickup')
+    }
     const pickTime = params.pickupFrom.split(' ')[1] ?? '10:00'
     const dropTime = params.pickupTo.split(' ')[1] ?? '10:00'
     const body = {
@@ -93,23 +101,25 @@ export class DiscoverCarsAdapter implements RentalAdapter {
       throw new Error(`DiscoverCars committed the wrong window (${dec.PickupDateTime}..${dec.DropOffDateTime} != ${wantP}..${wantD})`)
     }
 
-    // Offers aggregate asynchronously; poll until populated.
+    // Offers aggregate asynchronously; poll until the count STOPS GROWING.
+    //
+    // The old condition was `raw.length > 5`, which is not "aggregation
+    // finished" — it is "more than five". A location with 1-5 genuine offers
+    // never satisfied it, so every such search burned all 12 rounds (~30s) and
+    // returned the same list it already had after the first one. Two identical
+    // consecutive counts means the aggregator has settled, whatever the number.
     const attempts = this.opts.pollAttempts ?? 12
     const delay = this.opts.pollDelayMs ?? 2500
     let raw: any[] = []
+    let previousCount = -1
     for (let i = 0; i < attempts; i++) {
       const or = await this.fetch(`${BASE}/api/v2/search/${guid}?sq=${sq}`, { headers: HEADERS })
       const oj: any = await or.json()
       raw = oj?.data?.offers ?? []
-      if (raw.length > 5) break
+      if (raw.length > 0 && raw.length === previousCount) break
+      previousCount = raw.length
       await new Promise((res) => setTimeout(res, delay))
     }
-    const offers = parseApiOffers(raw)
-
-    // Sanity: the requested window is a positive span (guards a caller typo).
-    if (rentalDayCount(params.pickupFrom, params.pickupTo) <= 0) {
-      throw new Error('rental dropoff is not after pickup')
-    }
-    return offers
+    return parseApiOffers(raw)
   }
 }
