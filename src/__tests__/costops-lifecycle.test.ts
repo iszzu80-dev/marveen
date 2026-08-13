@@ -73,12 +73,26 @@ describe('deriveSourceLifecycle (CostOps Phase 0, GAP-03)', () => {
     expect(lifecycle).toBe('unsupported')
   })
 
-  it('every non-ok run status (partial/rate_limited/failed) maps to blocked, not just error', () => {
-    for (const status of ['error', 'failed', 'partial', 'rate_limited'] as const) {
+  it('every FAILURE run status (error/partial/rate_limited) maps to blocked, not just error', () => {
+    // 'failed' was removed from this list: it never existed in the ImportStatus
+    // vocabulary (COS-CORE-M2) -- the real failure set lives in
+    // collectors/types.ts's FAILURE_IMPORT_STATUSES.
+    for (const status of ['error', 'partial', 'rate_limited'] as const) {
       const lifecycle = deriveSourceLifecycle(baseInput({
         credentialRequired: true, credentialPresent: true, lastRunStatus: status, hasEverHadActivity: false,
       }))
       expect(lifecycle).toBe('blocked')
+    }
+  })
+
+  it('benign run statuses (skipped/locked/dry_run) NEVER map to blocked -- they are not failures (COS-CORE-M2)', () => {
+    for (const status of ['skipped', 'locked', 'dry_run'] as const) {
+      expect(deriveSourceLifecycle(baseInput({
+        credentialRequired: true, credentialPresent: true, lastRunStatus: status, hasEverHadActivity: true,
+      }))).toBe('active')
+      expect(deriveSourceLifecycle(baseInput({
+        credentialRequired: true, credentialPresent: true, lastRunStatus: status, hasEverHadActivity: false,
+      }))).toBe('inactive')
     }
   })
 

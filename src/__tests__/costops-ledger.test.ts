@@ -343,3 +343,68 @@ describe('syncFixedCostsToLedger into a closed month (COS-CORE-H1)', () => {
     expect(syncFixedCostsToLedger(db, c, NOW + 600)).toBe(2)
   })
 })
+
+describe('provider_sync status vocabulary (COS-OPS-H3 / COS-CORE-M2)', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  function insRun(provider: string, collector: string, startedAt: number, status: string, opts: { imported?: number; errorCode?: string | null } = {}) {
+    getDb().prepare(`INSERT INTO import_runs (provider, collector_name, started_at, finished_at, status, imported_count, error_code) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(provider, collector, startedAt, startedAt, status, opts.imported ?? 0, opts.errorCode ?? null)
+  }
+  const psFor = (provider: string) => getCostSummary(getDb(), cfg({ fixed_costs: [] }), NOW).provider_sync.find(p => p.provider === provider)
+
+  it('a benign latest run (skipped/locked/dry_run) is NOT failed; with a prior ok the provider stays ok', () => {
+    for (const [i, status] of (['skipped', 'locked', 'dry_run'] as const).entries()) {
+      const provider = `p${i}`
+      insRun(provider, `${provider}-costs`, NOW - 7200, 'ok', { imported: 2 })
+      insRun(provider, `${provider}-costs`, NOW - 60, status)
+      const ps = psFor(provider)!
+      expect(ps.status).toBe('ok')
+      // detail fields come from the health-bearing ok run, not the benign tick
+      expect(ps.imported_count).toBe(2)
+    }
+  })
+
+  it('a provider with ONLY benign history reports no_data -- neither failed nor a fabricated ok', () => {
+    insRun('anthropic', 'anthropic-usage-snapshot', NOW - 60, 'skipped')
+    const ps = psFor('anthropic')!
+    expect(ps.status).toBe('no_data')
+    expect(ps.last_failed).toBeNull() // the (formerly nonexistent-'failed'-filtering) lastFail lookup sees no failure
+  })
+
+  it('an error latest run is still failed (existing behavior preserved), and last_failed uses the REAL failure statuses', () => {
+    insRun('openai', 'openai-costs', NOW - 3600, 'error', { errorCode: 'ETIMEDOUT' })
+    const ps = psFor('openai')!
+    expect(ps.status).toBe('failed')
+    expect(ps.error_code).toBe('ETIMEDOUT')
+    expect(ps.last_failed).toBe(NOW - 3600)
+  })
+
+  it('error -> skipped stays failed: a benign tick must not mask an earlier real failure', () => {
+    insRun('openai', 'openai-costs', NOW - 3600, 'error', { errorCode: '401' })
+    insRun('openai', 'openai-costs', NOW - 60, 'skipped')
+    const ps = psFor('openai')!
+    expect(ps.status).toBe('failed')
+    expect(ps.error_code).toBe('401')
+  })
+
+  it('two collectors on one provider do not flap: daily ok cost report + hourly skipped snapshot -> stable ok', () => {
+    insRun('anthropic', 'anthropic-cost-report', NOW - 20 * 3600, 'ok', { imported: 3 })
+    for (let h = 19; h >= 1; h--) insRun('anthropic', 'anthropic-usage-snapshot', NOW - h * 3600, 'skipped')
+    const ps = psFor('anthropic')!
+    expect(ps.status).toBe('ok')
+    expect(ps.collector_name).toBe('anthropic-cost-report') // health row represents the provider, not the benign tick
+    expect(ps.imported_count).toBe(3)
+    // last_sync still reflects the newest ATTEMPT of any status (the loop is alive)
+    expect(ps.last_sync).toBe(NOW - 3600)
+  })
+
+  it('a sibling collector\'s later ok does not mask another collector\'s standing failure', () => {
+    insRun('anthropic', 'anthropic-cost-report', NOW - 7200, 'error', { errorCode: 'rate_limited' })
+    insRun('anthropic', 'anthropic-usage-snapshot', NOW - 60, 'ok', { imported: 1 })
+    const ps = psFor('anthropic')!
+    expect(ps.status).toBe('failed')
+    expect(ps.collector_name).toBe('anthropic-cost-report')
+    expect(ps.error_code).toBe('rate_limited')
+  })
+})

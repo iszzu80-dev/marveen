@@ -68,6 +68,47 @@ describe('buildSourceInventory (CostOps Phase 0, GAP-03/GAP-04)', () => {
     expect(openai.blocker).toBe('ETIMEDOUT')
   })
 
+  // COS-CORE-M2: benign import statuses (skipped/locked/dry_run) carry no
+  // sync-health evidence -- they must neither flip a source to 'blocked' nor
+  // mask an earlier real failure.
+
+  it('a benign latest run (skipped) does NOT flip the source to blocked', () => {
+    const db = getDb()
+    insertSource(db, 'openai-api', 'openai')
+    insertRun(db, 'openai', 'skipped', NOW - DAY)
+    const inv = buildSourceInventory(db, emptyConfig(), NOW, { credentialChecker: () => true })
+    const openai = inv.find(s => s.source_id === 'openai-api')!
+    expect(openai.lifecycle).toBe('inactive') // no health evidence + no activity, same as never-ran
+    expect(openai.blocker).toBeNull()
+  })
+
+  it('ok -> skipped stays not-blocked; error -> skipped stays blocked (benign tick masks nothing)', () => {
+    const db = getDb()
+    insertSource(db, 'openai-api', 'openai')
+    insertRun(db, 'openai', 'ok', NOW - 2 * DAY)
+    insertRun(db, 'openai', 'skipped', NOW - DAY)
+    let inv = buildSourceInventory(db, emptyConfig(), NOW, { credentialChecker: () => true })
+    expect(inv.find(s => s.source_id === 'openai-api')!.lifecycle).toBe('inactive')
+
+    insertRun(db, 'openai', 'error', NOW - 7200, 'ETIMEDOUT')
+    insertRun(db, 'openai', 'skipped', NOW - 60)
+    inv = buildSourceInventory(db, emptyConfig(), NOW, { credentialChecker: () => true })
+    const openai = inv.find(s => s.source_id === 'openai-api')!
+    expect(openai.lifecycle).toBe('blocked')
+    expect(openai.blocker).toBe('ETIMEDOUT')
+  })
+
+  it('two collectors on one provider: a sibling collector\'s later ok does not mask the failing one', () => {
+    const db = getDb()
+    insertSource(db, 'anthropic-api', 'anthropic')
+    db.prepare(`INSERT INTO import_runs (provider, collector_name, started_at, status, imported_count, error_code) VALUES ('anthropic','anthropic-cost-report',?, 'error', 0, '401')`).run(NOW - 7200)
+    db.prepare(`INSERT INTO import_runs (provider, collector_name, started_at, status, imported_count, error_code) VALUES ('anthropic','anthropic-usage-snapshot',?, 'ok', 1, NULL)`).run(NOW - 60)
+    const inv = buildSourceInventory(db, emptyConfig(), NOW, { credentialChecker: () => true })
+    const a = inv.find(s => s.source_id === 'anthropic-api')!
+    expect(a.lifecycle).toBe('blocked')
+    expect(a.blocker).toBe('401')
+  })
+
   it('a manual fixed-cost source with real spend is active, manual_actual, manual_fallback', () => {
     const db = getDb()
     insertSource(db, 'domain', 'other', 'domain')

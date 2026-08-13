@@ -21,10 +21,12 @@
 //   stored, rather than recomputing it a second time from
 //   provider_balance_snapshots.
 // - stale_collector/failed_sync/credential_permission_error: import_runs,
-//   same "latest run per provider" query ledger.ts's own (private)
-//   provider_sync block uses -- small enough to duplicate locally rather
-//   than export a helper from a file this feature doesn't own touching
-//   right now.
+//   same "latest health-bearing run per (provider, collector)" derivation
+//   ledger.ts's own (private) provider_sync block uses -- small enough to
+//   duplicate locally rather than export a helper from a file this feature
+//   doesn't own touching right now. The status vocabulary itself (which
+//   statuses are failures vs benign no-ops) is shared from
+//   collectors/types.ts, never re-derived here.
 // - reconciliation_mismatch: reconciliation.ts's buildReconciliation().
 // - manual_provider_variance: getCostSummary().operational -- WHOLE-
 //   DEPLOYMENT only; OperationalResult has no per-provider manual-vs-
@@ -54,6 +56,7 @@ import { loadSubscriptionsConfig, deriveLifecycle } from './subscriptions.js'
 import { fromSubscriptions } from './limits.js'
 import { getAllBudgetStatuses } from './budgets.js'
 import { inferExpectedInvoiceBy } from './invoice.js'
+import { isFailureStatus, SQL_HEALTH_STATUS_LIST } from './collectors/types.js'
 import {
   detectBudgetThresholdAlert,
   detectForecastBudgetBreachAlert,
@@ -177,24 +180,48 @@ export function classifyErrorCode(raw: string | null): 'credential_error' | 'per
   return null
 }
 
-interface RunRow { provider: string; status: string; started_at: number; error_code: string | null }
+interface RunRow { provider: string; collector_name: string; status: string; started_at: number; error_code: string | null }
 
 function gatherSyncAndCredentialCandidates(db: Database.Database, now: number): AlertCandidate[] {
-  const latestRows = db.prepare(`
-    SELECT provider, status, started_at, error_code
+  // COS-OPS-H3: sync health comes from the latest HEALTH-BEARING run (ok or a
+  // real failure) per (provider, collector_name) -- benign statuses
+  // (skipped/locked/dry_run, see collectors/types.ts) carry no evidence
+  // either way, so the default config's hourly 'skipped'
+  // anthropic-usage-snapshot tick neither fires a perpetual failed_sync alert
+  // nor masks/clears an earlier real failure (ok -> skipped stays ok,
+  // error -> skipped stays failed). Keying by collector_name keeps a
+  // two-cadence provider (anthropic: hourly snapshot + daily cost report)
+  // from flapping between its collectors' interleaved rows -- the provider is
+  // 'failed' while ANY collector's latest health-bearing run is a failure,
+  // stable until that same collector produces a newer ok. A provider with
+  // ONLY benign history has no health evidence at all: no signal is emitted
+  // for it (neither a failure nor an "all clear").
+  const healthRows = db.prepare(`
+    SELECT provider, collector_name, status, started_at, error_code
     FROM import_runs r
-    WHERE started_at = (SELECT MAX(started_at) FROM import_runs WHERE provider = r.provider)
-    GROUP BY provider
+    WHERE status IN (${SQL_HEALTH_STATUS_LIST})
+      AND started_at = (SELECT MAX(started_at) FROM import_runs
+                        WHERE provider = r.provider AND collector_name = r.collector_name
+                          AND status IN (${SQL_HEALTH_STATUS_LIST}))
+    GROUP BY provider, collector_name
   `).all() as RunRow[]
+  const healthByProvider = new Map<string, RunRow[]>()
+  for (const h of healthRows) {
+    const list = healthByProvider.get(h.provider)
+    if (list) list.push(h); else healthByProvider.set(h.provider, [h])
+  }
   const lastOkStmt = db.prepare(`SELECT MAX(started_at) t FROM import_runs WHERE provider = ? AND status = 'ok'`)
   const out: AlertCandidate[] = []
-  for (const r of latestRows) {
-    const lastOk = (lastOkStmt.get(r.provider) as { t: number | null }).t ?? null
-    const age = now - r.started_at
-    const stale = r.status === 'ok' && age > SYNC_STALE_SECS
-    const classified = classifyErrorCode(r.error_code)
-    const status: SyncSignal['status'] = r.status !== 'ok' ? 'failed' : (stale ? 'stale' : 'ok')
-    const signal: SyncSignal = { provider: r.provider, status, last_success: lastOk, data_age_secs: age, error_code: classified ?? r.error_code }
+  for (const [provider, rows] of healthByProvider) {
+    const health = rows.slice().sort((a, b) => b.started_at - a.started_at)
+    const failing = health.find(h => isFailureStatus(h.status)) ?? null
+    const latestHealth = health[0]
+    const lastOk = (lastOkStmt.get(provider) as { t: number | null }).t ?? null
+    const age = now - latestHealth.started_at
+    const stale = !failing && age > SYNC_STALE_SECS
+    const classified = classifyErrorCode(failing?.error_code ?? null)
+    const status: SyncSignal['status'] = failing ? 'failed' : (stale ? 'stale' : 'ok')
+    const signal: SyncSignal = { provider, status, last_success: lastOk, data_age_secs: age, error_code: classified ?? failing?.error_code ?? null }
 
     const staleAlert = detectStaleCollectorAlert(signal)
     if (staleAlert) out.push(staleAlert)
@@ -204,7 +231,7 @@ function gatherSyncAndCredentialCandidates(db: Database.Database, now: number): 
     // together from the same underlying event) -- provider used as source_id surrogate since
     // this codebase's credentials are provider-scoped, not per-source.
     if (status === 'failed' && classified) {
-      out.push(detectCredentialPermissionAlert({ source_id: r.provider, provider: r.provider, issue: classified }))
+      out.push(detectCredentialPermissionAlert({ source_id: provider, provider, issue: classified }))
     }
   }
   return out

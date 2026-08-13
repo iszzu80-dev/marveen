@@ -82,6 +82,32 @@ describe('checkCloseReadiness (CostOps Phase 2, GAP-13)', () => {
     expect(r.checks.estimates_present.estimate_only_sources).toContain('hosting')
     expect(r.ready).toBe(true) // estimate presence never blocks
   })
+
+  // COS-CORE-M2: benign import statuses (skipped/locked/dry_run) are not
+  // collector failures and must never block a month close.
+
+  it('a benign latest run (skipped/locked/dry_run) does not mark the provider failed and does not block close', () => {
+    const db = getDb()
+    const ins = db.prepare(`INSERT INTO import_runs (provider, collector_name, started_at, finished_at, status, imported_count, error_code) VALUES (@p,@c,@t,@t,@s,0,NULL)`)
+    ins.run({ p: 'anthropic', c: 'anthropic-usage-snapshot', t: NOW - 60, s: 'skipped' })
+    ins.run({ p: 'render', c: 'render-plan-report', t: NOW - 60, s: 'dry_run' })
+    ins.run({ p: 'openai', c: 'openai-costs', t: NOW - 60, s: 'locked' })
+    const r = checkCloseReadiness(db, cfg, NOW, MONTH)
+    expect(r.checks.collectors_fresh.failed_providers).toEqual([])
+    expect(r.checks.collectors_fresh.ok).toBe(true)
+    expect(r.ready).toBe(true)
+  })
+
+  it('error -> skipped still blocks close (the benign tick does not mask the real failure); a genuine failure blocks', () => {
+    const db = getDb()
+    const ins = db.prepare(`INSERT INTO import_runs (provider, collector_name, started_at, finished_at, status, imported_count, error_code) VALUES (@p,@c,@t,@t,@s,0,@e)`)
+    ins.run({ p: 'openai', c: 'openai-costs', t: NOW - 7200, s: 'error', e: 'ETIMEDOUT' })
+    ins.run({ p: 'openai', c: 'openai-costs', t: NOW - 60, s: 'skipped', e: null })
+    const r = checkCloseReadiness(db, cfg, NOW, MONTH)
+    expect(r.checks.collectors_fresh.failed_providers).toEqual(['openai'])
+    expect(r.checks.collectors_fresh.ok).toBe(false)
+    expect(r.ready).toBe(false)
+  })
 })
 
 describe('closePeriod / reopenPeriod (CostOps Phase 2, GAP-13)', () => {

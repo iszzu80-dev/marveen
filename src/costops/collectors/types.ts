@@ -64,6 +64,38 @@ export interface ProviderCollector {
 // documented hard blocker must not read as either a failure to fix or a success.
 export type ImportStatus = 'ok' | 'partial' | 'rate_limited' | 'error' | 'dry_run' | 'locked' | 'skipped'
 
+// The status vocabulary above, partitioned ONCE for every consumer (ledger.ts
+// provider_sync, alerts-capture.ts failed_sync, inventory.ts/lifecycle.ts
+// 'blocked', period-close.ts close-readiness via provider_sync). Re-deriving
+// "failure" locally as `status !== 'ok'` is exactly the drift that made a
+// benign hourly 'skipped' tick read as a permanently-failed provider
+// (COS-OPS-H3 / COS-CORE-M2): use these instead.
+//
+// FAILURE: something actually broke -- retry/attention may help.
+export const FAILURE_IMPORT_STATUSES: readonly ImportStatus[] = ['error', 'partial', 'rate_limited']
+// BENIGN: the run happened and deliberately did nothing ('skipped' documented
+// hard blocker, 'locked' concurrent-run no-op, 'dry_run' preview). A benign
+// run carries NO sync-health evidence either way: it must neither read as a
+// failure NOR as a success that masks/clears an earlier real failure.
+export const BENIGN_IMPORT_STATUSES: readonly ImportStatus[] = ['skipped', 'locked', 'dry_run']
+// HEALTH-BEARING: the statuses that DO carry sync-health evidence ('ok' plus
+// the failures). "Latest run" health derivations must look at the latest run
+// with one of THESE statuses, so an ok -> skipped sequence stays ok and an
+// error -> skipped sequence stays failed.
+export const HEALTH_IMPORT_STATUSES: readonly ImportStatus[] = ['ok', ...FAILURE_IMPORT_STATUSES]
+
+export function isFailureStatus(status: string): boolean {
+  return (FAILURE_IMPORT_STATUSES as readonly string[]).includes(status)
+}
+export function isBenignImportStatus(status: string): boolean {
+  return (BENIGN_IMPORT_STATUSES as readonly string[]).includes(status)
+}
+
+// Ready-made `'a', 'b', ...` fragments for SQL `status IN (...)` filters. The
+// values are this module's own literals above -- never user input.
+export const SQL_FAILURE_STATUS_LIST = FAILURE_IMPORT_STATUSES.map(s => `'${s}'`).join(', ')
+export const SQL_HEALTH_STATUS_LIST = HEALTH_IMPORT_STATUSES.map(s => `'${s}'`).join(', ')
+
 // A sanitized description of a value's STRUCTURE -- types, object keys, and
 // array lengths ONLY. It carries NO scalar values, so no secret, account id,
 // invoice ref, or raw provider datum can travel in it.
