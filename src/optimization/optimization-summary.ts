@@ -392,6 +392,11 @@ export function buildOptimizationSummary(
     on(config.modules.runtimeRouting)
     && (!config.routing.automaticFallback || !runtimeRoutingConfig.enabled)
   ) {
+    // No longer aspirational (OPT-H2, review 2026-08-12): the capacity-routing
+    // sweep now reads routing.automaticFallback each pass and, when false,
+    // refuses to SET new fallback overlays while still clearing/climbing back
+    // existing ones (capacity-routing-runner.ts). 'observation' therefore
+    // describes actual runner behaviour, not just this config field's value.
     systemState = 'observation'
   } else {
     systemState = 'ok'
