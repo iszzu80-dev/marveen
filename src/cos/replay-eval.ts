@@ -151,6 +151,192 @@ export function buildSessionFromRuns(
   }
 }
 
+// ── Eligible observations (§1.4.1), labelled INDEPENDENTLY ──────────────
+//
+// MARVEEN'S DEFINITION, 2026-08-13, and the sentence that makes it usable:
+//
+//     "It must be decidable SOLELY from a snapshot of the store, by somebody who
+//      has not seen the detector output. If a observation's eligibility can only
+//      be judged knowing that the detector fired, it is not an observation — it
+//      is a confirmation."
+//
+// THE BUG THAT SENTENCE FOUND. Until it was written, this file computed
+// `eligibleObservationCount` as `comparison.proactiveCases` — the number of
+// cases the PROACTIVE ARM touched. That is the circularity in its purest form:
+// the denominator of "how much value did the detector add" was the detector's
+// own output, so a detector that noticed less would have looked equally good by
+// noticing less of a smaller world.
+//
+// Eligibility is therefore a SEPARATE, EARLIER labelling pass, and the ordering
+// is enforced the same way §1.4.6's control ordering is: labelling recorded
+// after the proactive run sealed does not count.
+
+/** Marveen's three shapes, as a closed vocabulary so the label is checkable
+ *  rather than an essay. */
+export type EligibleObservationShape =
+  /** A deadline derivable from stored evidence that passed or approached
+   *  without the owner knowing. */
+  | 'DEADLINE_PASSED_UNSEEN'
+  /** The ball was with the other party and the agreed follow-up time elapsed
+   *  with no movement. */
+  | 'FOLLOW_UP_ELAPSED_WITHOUT_MOVEMENT'
+  /** A state change that invalidated an earlier owner decision. */
+  | 'STATE_CHANGE_INVALIDATED_DECISION'
+
+export interface EligibleObservation {
+  corpusFingerprint: string
+  domain: string
+  caseId: string
+  shape: EligibleObservationShape
+  /** Who decided. A label with no author cannot be shown to have been blind. */
+  labelledBy: string
+  labelledAt: number
+  rationale: string
+}
+
+export function ensureEligibilitySchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS eligible_observations (
+      corpus_fingerprint TEXT NOT NULL,
+      domain             TEXT NOT NULL,
+      case_id            TEXT NOT NULL,
+      shape              TEXT NOT NULL,
+      labelled_by        TEXT NOT NULL,
+      labelled_at        INTEGER NOT NULL,
+      rationale          TEXT NOT NULL,
+      PRIMARY KEY (corpus_fingerprint, domain, case_id),
+      CHECK (shape IN ('DEADLINE_PASSED_UNSEEN','FOLLOW_UP_ELAPSED_WITHOUT_MOVEMENT',
+        'STATE_CHANGE_INVALIDATED_DECISION'))
+    )
+  `)
+  // A label, once given, is evidence about a snapshot. Editing it later is
+  // editing the denominator after seeing the numerator.
+  // The labelling PASS itself, recorded separately from the labels.
+  //
+  // Without this, "nobody looked" and "somebody looked and found none" are the
+  // same row count — zero — and they support opposite conclusions. The count
+  // below returns null until a pass exists, so an unassessed corpus cannot be
+  // read as an empty one.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS eligibility_passes (
+      corpus_fingerprint TEXT PRIMARY KEY,
+      labelled_by        TEXT NOT NULL,
+      completed_at       INTEGER NOT NULL,
+      note               TEXT NOT NULL DEFAULT ''
+    )
+  `)
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_eligibility_pass_no_update
+    BEFORE UPDATE ON eligibility_passes
+    BEGIN SELECT RAISE(ABORT, 'an eligibility pass is final'); END
+  `)
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_eligible_no_update
+    BEFORE UPDATE ON eligible_observations
+    BEGIN SELECT RAISE(ABORT, 'an eligibility label is final'); END
+  `)
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_eligible_no_delete
+    BEFORE DELETE ON eligible_observations
+    BEGIN SELECT RAISE(ABORT, 'an eligibility label is final'); END
+  `)
+}
+
+export type LabelResult = { ok: true } | { ok: false; reason: string }
+
+/**
+ * Record one eligibility label.
+ *
+ * Refuses once ANY proactive run over this corpus has sealed. That is the whole
+ * enforcement: after the detector's output exists, a person labelling the corpus
+ * can no longer be shown not to have seen it — and "can no longer be shown" is
+ * the standard §1.4.3 applies to blinding, not "probably did not".
+ */
+export function labelEligibleObservation(
+  ledger: Database.Database, obs: EligibleObservation,
+): LabelResult {
+  const sealed = ledger.prepare(
+    `SELECT run_id FROM replay_runs
+      WHERE corpus_fingerprint = ? AND arm IN ('PROACTIVE_SHADOW','CALIBRATION')
+        AND sealed_at IS NOT NULL LIMIT 1`,
+  ).get(obs.corpusFingerprint) as { run_id: string } | undefined
+  if (sealed) {
+    return {
+      ok: false,
+      reason:
+        `ezen a korpuszon már lezárult egy proaktív futás (${sealed.run_id}) — utána a jogosultsági `
+        + 'címkézésről nem mutatható ki, hogy vak volt',
+    }
+  }
+  try {
+    ledger.prepare(
+      `INSERT INTO eligible_observations
+         (corpus_fingerprint, domain, case_id, shape, labelled_by, labelled_at, rationale)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(obs.corpusFingerprint, obs.domain, obs.caseId, obs.shape,
+      obs.labelledBy, obs.labelledAt, obs.rationale)
+  } catch {
+    return { ok: false, reason: 'erre az ügyre már van címke — a címke végleges' }
+  }
+  return { ok: true }
+}
+
+/**
+ * Declare the labelling pass over this corpus finished.
+ *
+ * Separate from the labels because the ABSENCE of labels is only informative
+ * once somebody has looked. Subject to the same ordering rule: a pass declared
+ * after a proactive run sealed cannot be shown to have been blind.
+ */
+export function completeEligibilityPass(
+  ledger: Database.Database,
+  pass: { corpusFingerprint: string; labelledBy: string; completedAt: number; note?: string },
+): LabelResult {
+  const sealed = ledger.prepare(
+    `SELECT run_id FROM replay_runs
+      WHERE corpus_fingerprint = ? AND arm IN ('PROACTIVE_SHADOW','CALIBRATION')
+        AND sealed_at IS NOT NULL LIMIT 1`,
+  ).get(pass.corpusFingerprint) as { run_id: string } | undefined
+  if (sealed) {
+    return {
+      ok: false,
+      reason: `ezen a korpuszon mar lezarult egy proaktiv futas (${sealed.run_id}) — `
+        + 'utana a jogosultsagi atnezesrol nem mutathato ki, hogy vak volt',
+    }
+  }
+  try {
+    ledger.prepare(
+      `INSERT INTO eligibility_passes (corpus_fingerprint, labelled_by, completed_at, note)
+       VALUES (?, ?, ?, ?)`,
+    ).run(pass.corpusFingerprint, pass.labelledBy, pass.completedAt, pass.note ?? '')
+  } catch {
+    return { ok: false, reason: 'ezen a korpuszon mar volt atnezes — az atnezes vegleges' }
+  }
+  return { ok: true }
+}
+
+/**
+ * How many eligible observations were labelled for this corpus, or NULL when
+ * NOBODY HAS LOOKED.
+ *
+ * The null is the point. "Nothing was eligible" and "nobody looked" produce the
+ * same count and opposite conclusions, and a gate that cannot tell them apart
+ * will read an unassessed corpus as a clean one.
+ */
+export function eligibleObservationCount(
+  ledger: Database.Database, corpusFingerprint: string,
+): number | null {
+  try {
+    const pass = ledger.prepare(
+      `SELECT corpus_fingerprint FROM eligibility_passes WHERE corpus_fingerprint = ?`,
+    ).get(corpusFingerprint)
+    if (!pass) return null
+    return (ledger.prepare(
+      `SELECT COUNT(*) AS n FROM eligible_observations WHERE corpus_fingerprint = ?`,
+    ).get(corpusFingerprint) as { n: number }).n
+  } catch { return null }
+}
+
 // ── §24.2 value-gate metrics ────────────────────────────────────────────
 
 export type ValueHypothesisResult =
@@ -182,7 +368,10 @@ export interface ValueGateResult {
   incrementalMaterialCatchCount: number
   incrementalMaterialCatchRate: number
   missedByReactiveBaselineCount: number
-  eligibleObservationCount: number
+  /** Null when nobody labelled the corpus. Null and 0 are different facts:
+   *  "nothing was eligible" and "nobody looked" produce the same number and
+   *  opposite conclusions. */
+  eligibleObservationCount: number | null
   blindAdjudicationCoverageRate: number
   /** Null — not 1 — when there are too few control runs to measure it. A
    *  reproducibility rate of "1.0 out of one run" is a fabricated green. */
@@ -255,9 +444,15 @@ export function evaluateValueGate(
   }
   const incrementalMaterialCatchCount = catchKeys.size
 
-  const eligibleObservationCount = comparison.proactiveCases
-  const incrementalMaterialCatchRate = eligibleObservationCount
-    ? incrementalMaterialCatchCount / eligibleObservationCount
+  // INDEPENDENTLY LABELLED, never derived from the arm's own output. See the
+  // eligibility section above for the bug this replaced.
+  const corpusFingerprint = session
+    ? (readRun(ledger, session.proactive_run_id)?.corpusFingerprint ?? '')
+    : ''
+  const labelled = eligibleObservationCount(ledger, corpusFingerprint)
+  const eligible = labelled ?? 0
+  const incrementalMaterialCatchRate = eligible
+    ? incrementalMaterialCatchCount / eligible
     : 0
   const blindAdjudicationCoverageRate = totalPackets ? judged / totalPackets : 0
   const reactiveControlReproducibilityRate = session
@@ -268,7 +463,7 @@ export function evaluateValueGate(
     incrementalMaterialCatchCount,
     incrementalMaterialCatchRate,
     missedByReactiveBaselineCount: comparison.proactiveOnly.length,
-    eligibleObservationCount,
+    eligibleObservationCount: labelled,
     blindAdjudicationCoverageRate,
     reactiveControlReproducibilityRate,
     blinding,
@@ -284,12 +479,25 @@ export function evaluateValueGate(
       detail: `a vakítás státusza ${blinding.verdict} — a value gate csak VALID mellett minősíthető PASS-nak (§24.2)`,
     }
   }
-  // 2. Then whether the window could answer the question at all.
-  if (eligibleObservationCount < registration.minEligibleObservations) {
+  // 2a. Was eligibility ever established independently?
+  //
+  // Before this check the count came from the proactive arm itself, so the gate
+  // could return PASS on a corpus nobody had ever assessed. "Nothing was
+  // eligible" and "nobody looked" are the same number and opposite conclusions,
+  // and only one of them is a result.
+  if (labelled === null) {
+    return {
+      ...base,
+      result: 'EVALUATION_WINDOW_DEGRADED',
+      detail: 'a korpuszon senki nem jelölte meg az elfogadható megfigyeléseket — a value gate nevezője hiányzik',
+    }
+  }
+  // 2b. Then whether the window could answer the question at all.
+  if (labelled < registration.minEligibleObservations) {
     return {
       ...base,
       result: 'NO_EVIDENCE_DUE_TO_LOW_VOLUME',
-      detail: `${eligibleObservationCount} megfigyelés a regisztrált ${registration.minEligibleObservations} helyett`,
+      detail: `${labelled} megfigyelés a regisztrált ${registration.minEligibleObservations} helyett`,
     }
   }
   // 3. Only now the hypothesis itself.
