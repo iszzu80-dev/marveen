@@ -112,4 +112,35 @@ describe('syncCodexRateLimit + fromCodexRateLimit', () => {
     expect(r.error).toBe('parse_error')
     expect(db.prepare(`SELECT COUNT(*) AS c FROM provider_ratelimit_snapshots`).get()).toMatchObject({ c: 0 })
   })
+
+  // COS-OPS-M4: the sync body runs under the shared per-provider import lock
+  // (import-durability.ts) -- a manual sync racing the scheduled one
+  // short-circuits with 'locked' and performs NO read and NO write.
+  it('a concurrent second sync gets status locked and performs no writes (COS-OPS-M4)', async () => {
+    initDatabase(':memory:')
+    const db = getDb()
+    const now = Math.floor(Date.UTC(2026, 6, 15) / 1000)
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let reads = 0
+    const slowReader = async () => { reads++; await gate; return REAL }
+    const first = syncCodexRateLimit(db, now, { reader: slowReader })
+    // wait until the first sync provably holds the lock (it is mid-read), then race a second one
+    while (reads === 0) await new Promise(resolve => setTimeout(resolve, 1))
+    const second = await syncCodexRateLimit(db, now + 1, { reader: slowReader })
+    expect(second.ok).toBe(false)
+    expect(second.status).toBe('locked')
+    expect(reads).toBe(1) // the locked sync never invoked the reader
+    expect(db.prepare(`SELECT COUNT(*) AS c FROM provider_ratelimit_snapshots`).get()).toMatchObject({ c: 0 })
+    const lockedRun = db.prepare("SELECT status FROM import_runs WHERE provider='codex' ORDER BY id DESC LIMIT 1").get() as { status: string }
+    expect(lockedRun.status).toBe('locked')
+
+    release()
+    const r1 = await first
+    expect(r1.ok).toBe(true)
+    expect(db.prepare(`SELECT COUNT(*) AS c FROM provider_ratelimit_snapshots`).get()).toMatchObject({ c: 1 })
+    // lock released -- a later sync proceeds normally
+    const r3 = await syncCodexRateLimit(db, now + 3600, { reader: async () => REAL })
+    expect(r3.ok).toBe(true)
+  })
 })

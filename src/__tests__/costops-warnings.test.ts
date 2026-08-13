@@ -178,4 +178,38 @@ describe('costops warnings', () => {
     expect(info!.confidence).toBe('manual')
     expect(info!.current_value).toBe(50)
   })
+
+  // COS-OPS-M1: the info gauge's "% of last top-up" must divide by the peak since
+  // the LAST observed top-up (rise), not the all-time max -- $4 after a $5 top-up
+  // is 80% remaining, not 8% of a long-spent $50 high.
+  it('DeepSeek balance info: % is measured against the peak since the last top-up, not the all-time max (COS-OPS-M1)', () => {
+    const db = getDb()
+    const c = cfg({ budgets: [] })
+    syncFixedCostsToLedger(db, c, NOW)
+    const ins = db.prepare(`INSERT INTO provider_balance_snapshots (provider, currency, balance, captured_at) VALUES ('deepseek','USD',?,?)`)
+    const balances = [50, 30, 10, 1, 5, 4] // 1 -> 5 is the top-up; peak since then is 5
+    balances.forEach((b, i) => ins.run(b, NOW - (balances.length - i) * 3600))
+    const summary = getCostSummary(db, c, NOW)
+    const info = getWarnings(db, c, NOW, summary, []).find(x => x.code === 'deepseek_balance_info')
+    expect(info).toBeDefined()
+    expect((info!.detail as { peak_balance: number }).peak_balance).toBe(5)
+    expect(info!.message).toContain('80%') // 4/5 remaining -- not 8% of the $50 high
+  })
+
+  // COS-OPS-M2: a stale snapshot arrives from limits.ts with usage_pct null --
+  // the tiered rule must skip it silently (no alert fabricated off history).
+  it('limit_usage_high: a stale limit row (usage_pct null, status unknown) never fires the tiered rule (COS-OPS-M2)', () => {
+    const db = getDb()
+    const c = cfg({ budgets: [] })
+    syncFixedCostsToLedger(db, c, NOW)
+    const summary = getCostSummary(db, c, NOW)
+    const limits: LimitStatus[] = [{
+      provider: 'anthropic', limit_type: 'weekly_usage_pct', current_usage: null, limit_value: null,
+      usage_pct: null, reset_date: 'Tue 08:59', paid_until: null, expiry_date: null,
+      status: 'unknown', source: 'config', sub_id: 'anthropic-max', unit: null,
+      stale: true, snapshot_age_seconds: 21 * 24 * 3600,
+    }]
+    const warnings = getWarnings(db, c, NOW, summary, [], limits)
+    expect(warnings.find(x => x.code === 'limit_usage_high')).toBeUndefined()
+  })
 })

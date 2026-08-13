@@ -86,7 +86,10 @@ export function buildCollectorPlan(deps: ScheduledCollectorDeps = {}): Collector
       run: async (db, now) => {
         const { syncCodexRateLimit } = await import('./codex.js')
         const r = await syncCodexRateLimit(db, now)
-        return outcome('codex', 'codex-ratelimit', r.ok ? 'ok' : 'error', r.imported_count, r.ok ? null : (r.error ?? 'codex rate-limit read failed'))
+        // COS-OPS-M4: the sync itself now runs under the per-provider import lock and
+        // can legitimately report 'locked' (benign no-op) -- pass its real status
+        // through instead of flattening every non-ok into 'error'.
+        return outcome('codex', 'codex-ratelimit', r.status as ImportStatus, r.imported_count, r.ok ? null : (r.error ?? 'codex rate-limit read failed'))
       },
     },
     {
@@ -94,7 +97,8 @@ export function buildCollectorPlan(deps: ScheduledCollectorDeps = {}): Collector
       run: async (db, now) => {
         const { syncDeepSeekBalance } = await import('./deepseek.js')
         const r = await syncDeepSeekBalance(db, now)
-        return outcome('deepseek', 'deepseek-balance', r.ok ? 'ok' : 'error', r.imported_count, r.ok ? null : (r.error ?? 'deepseek balance read failed'))
+        // COS-OPS-M4: same as codex -- 'locked' is a benign concurrent-run no-op, not an error.
+        return outcome('deepseek', 'deepseek-balance', r.status as ImportStatus, r.imported_count, r.ok ? null : (r.error ?? 'deepseek balance read failed'))
       },
     },
     {

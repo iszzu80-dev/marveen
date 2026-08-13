@@ -254,17 +254,28 @@ export async function syncRenderCollector(
   const w = monthWindow(now)
   const collector = makeRenderCollector(pricing)
   const opts = { periodStart: w.start, periodEnd: w.end, secret: apiKey, fxUsdHuf: pricing.fx_usd_huf, idSalt: 'render-salt', httpGetJson, now }
-  // pre-compute the sanitized breakdown for the run detail (no raw IDs)
-  let detail: RenderBreakdown | null = null
-  try {
-    const { raw } = await collector.collectRaw!(opts)
-    detail = mapRenderPlanCost(raw, { periodStart: w.start, periodEnd: w.end, pricing, idSalt: 'render-salt', now }).breakdown
-  } catch { /* runCollector will re-run + record the sanitized error */ }
-  const res = await runCollector({ db, collector, opts, now, detailJson: detail ? JSON.stringify(detail) : undefined })
+  // COS-OPS-M8: ONE provider fetch per sync. The old flow called collectRaw once
+  // just to pre-compute the sanitized breakdown detail, then runCollector's
+  // collect() fetched the exact same endpoints a second time -- doubling the
+  // Render API load and letting detail_json and the imported line drift apart
+  // if the fleet changed between the two calls. The collect override below runs
+  // INSIDE runCollector's per-provider lock: a single fetch feeds both the
+  // imported lines and the detail (mapRenderPlanCost is pure/deterministic, so
+  // re-mapping the same raw for the breakdown cannot diverge from the lines),
+  // and a 'locked' concurrent sync performs no fetch at all.
+  const detailRef: { current: RenderBreakdown | null } = { current: null }
+  const res = await runCollector({
+    db, collector, opts, now,
+    collect: async (o) => {
+      const { raw, lines } = await collector.collectRaw!(o)
+      detailRef.current = mapRenderPlanCost(raw, { periodStart: w.start, periodEnd: w.end, pricing, idSalt: 'render-salt', now }).breakdown
+      return { lines, detailJson: JSON.stringify(detailRef.current) }
+    },
+  })
   return {
     ok: res.status === 'ok', provider: 'render', status: res.status, imported_count: res.importedCount,
     error: res.errorMessageSanitized || undefined,
-    service_count: detail?.service_count, total_huf: detail?.total_huf, period: w.key,
+    service_count: detailRef.current?.service_count, total_huf: detailRef.current?.total_huf, period: w.key,
   }
 }
 

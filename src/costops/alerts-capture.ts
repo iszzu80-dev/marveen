@@ -71,15 +71,10 @@ import {
   detectNewUnknownSourceAlert,
   detectLongEstimateOnlySourceAlert,
   detectSubscriptionUtilizationAlert,
-  reconcileAlerts,
-  serializeEvidence,
-  deserializeEvidence,
   type AlertCandidate,
-  type AlertRecord,
-  type AlertType,
-  type AlertSeverity,
   type SyncSignal,
 } from './alerts.js'
+import { reconcileAndPersist } from './alerts-store.js'
 
 // ---- thresholds -- reused from the codebase's own existing conventions, not invented ----
 
@@ -318,7 +313,10 @@ function gatherNewSourceAndEstimateOnlyCandidates(db: Database.Database, now: nu
 function gatherUtilizationCandidates(now: number): AlertCandidate[] {
   const { config } = loadSubscriptionsConfig()
   const subs = deriveLifecycle(config, now)
-  const limitStatuses = fromSubscriptions(subs)
+  // COS-OPS-M2: pass the clock so a stale (>10-day-old) manual weekly-% snapshot
+  // comes back with usage_pct null and is skipped below -- no utilization alert
+  // is ever raised off a reading whose weekly window has long since reset.
+  const limitStatuses = fromSubscriptions(subs, now)
   const out: AlertCandidate[] = []
   for (const ls of limitStatuses) {
     if (ls.usage_pct == null || ls.sub_id == null) continue
@@ -376,37 +374,13 @@ export function gatherAlertCandidates(db: Database.Database, config: CostOpsConf
 }
 
 // ---- persistence (costops_alerts) --------------------------------------------------------
-
-interface AlertRow {
-  dedup_key: string
-  type: string
-  severity: string
-  evidence_json: string
-  first_seen: number
-  last_seen: number
-  acknowledged_at: number | null
-  acknowledged_by: string | null
-  resolved_at: number | null
-  recurrence_count: number
-  owner: string | null
-  cooldown_until: number | null
-}
-
-function rowToRecord(r: AlertRow): AlertRecord {
-  return {
-    dedup_key: r.dedup_key, type: r.type as AlertType, severity: r.severity as AlertSeverity,
-    evidence: deserializeEvidence(r.evidence_json),
-    first_seen: r.first_seen, last_seen: r.last_seen,
-    acknowledged_at: r.acknowledged_at, acknowledged_by: r.acknowledged_by,
-    resolved_at: r.resolved_at, recurrence_count: r.recurrence_count,
-    owner: r.owner, cooldown_until: r.cooldown_until,
-  }
-}
-
-function loadExistingAlerts(db: Database.Database): AlertRecord[] {
-  const rows = db.prepare(`SELECT * FROM costops_alerts`).all() as AlertRow[]
-  return rows.map(rowToRecord)
-}
+//
+// COS-OPS-M3: persistence is alerts-store.ts's job (reconcileAndPersist ->
+// applyAlertReconciliation, ONE db.transaction). This file used to carry its
+// own copies of AlertRow/rowToRecord/loadExistingAlerts plus a re-implemented,
+// NON-transactional insert/touch/resolve loop, and a second, differently-shaped
+// exported listAlerts. The store's listAlerts (the one every real read path --
+// GET /api/costs/alerts, export.ts -- already uses) is the single read API now.
 
 export interface AlertCaptureSummary {
   candidates: number
@@ -418,68 +392,13 @@ export interface AlertCaptureSummary {
 /**
  * Gather this round's candidates, reconcile against `costops_alerts`, and
  * persist the result (insert new rows, touch active/reopened ones, resolve
- * ones whose condition disappeared). Requires `initAlertsSchema` to have
+ * ones whose condition disappeared) -- atomically, via alerts-store.ts's
+ * reconcileAndPersist (COS-OPS-M3). Requires `initAlertsSchema` to have
  * already run (Mason's seam call) -- not invoked here (this file is
  * capture-orchestration, not schema setup).
  */
 export function captureAlerts(db: Database.Database, config: CostOpsConfig, now: number, opts: { cooldownSeconds?: number } = {}): AlertCaptureSummary {
-  const existing = loadExistingAlerts(db)
   const candidates = gatherAlertCandidates(db, config, now)
-  const result = reconcileAlerts(existing, candidates, now, opts.cooldownSeconds)
-
-  const insertStmt = db.prepare(`
-    INSERT INTO costops_alerts (type, severity, evidence_json, dedup_key, first_seen, last_seen, acknowledged_at, acknowledged_by, resolved_at, recurrence_count, owner, cooldown_until, created_at)
-    VALUES (@type, @severity, @evidence_json, @dedup_key, @first_seen, @last_seen, NULL, NULL, NULL, 0, NULL, @cooldown_until, @now)
-  `)
-  for (const a of result.toInsert) {
-    insertStmt.run({ type: a.type, severity: a.severity, evidence_json: serializeEvidence(a.evidence), dedup_key: a.dedup_key, first_seen: a.first_seen, last_seen: a.last_seen, cooldown_until: a.cooldown_until, now })
-  }
-
-  const touchStmt = db.prepare(`
-    UPDATE costops_alerts SET last_seen=@last_seen, severity=@severity, evidence_json=@evidence_json, resolved_at=@resolved_at, recurrence_count=@recurrence_count, cooldown_until=@cooldown_until
-    WHERE dedup_key=@dedup_key
-  `)
-  for (const t of result.toTouch) {
-    touchStmt.run({
-      dedup_key: t.dedup_key, last_seen: t.patch.last_seen, severity: t.patch.severity,
-      evidence_json: serializeEvidence(t.patch.evidence), resolved_at: t.patch.resolved_at,
-      recurrence_count: t.patch.recurrence_count, cooldown_until: t.patch.cooldown_until,
-    })
-  }
-
-  const resolveStmt = db.prepare(`UPDATE costops_alerts SET resolved_at=@resolved_at WHERE dedup_key=@dedup_key`)
-  for (const r of result.toResolve) {
-    resolveStmt.run({ dedup_key: r.dedup_key, resolved_at: r.resolved_at })
-  }
-
+  const result = reconcileAndPersist(db, candidates, now, opts.cooldownSeconds)
   return { candidates: candidates.length, inserted: result.toInsert.length, touched: result.toTouch.length, resolved: result.toResolve.length }
-}
-
-export interface AlertListRow {
-  dedup_key: string
-  type: string
-  severity: string
-  evidence: Record<string, unknown>
-  first_seen: number
-  last_seen: number
-  acknowledged_at: number | null
-  acknowledged_by: string | null
-  resolved_at: number | null
-  recurrence_count: number
-  owner: string | null
-}
-
-/** Read back stored alerts, most recent first. Unresolved-only by default (the GET route's likely default view). */
-export function listAlerts(db: Database.Database, opts: { includeResolved?: boolean; limit?: number } = {}): AlertListRow[] {
-  const limit = opts.limit ?? 200
-  const rows = (
-    opts.includeResolved
-      ? db.prepare(`SELECT * FROM costops_alerts ORDER BY last_seen DESC LIMIT ?`).all(limit)
-      : db.prepare(`SELECT * FROM costops_alerts WHERE resolved_at IS NULL ORDER BY last_seen DESC LIMIT ?`).all(limit)
-  ) as AlertRow[]
-  return rows.map(r => ({
-    dedup_key: r.dedup_key, type: r.type, severity: r.severity, evidence: deserializeEvidence(r.evidence_json),
-    first_seen: r.first_seen, last_seen: r.last_seen, acknowledged_at: r.acknowledged_at, acknowledged_by: r.acknowledged_by,
-    resolved_at: r.resolved_at, recurrence_count: r.recurrence_count, owner: r.owner,
-  }))
 }

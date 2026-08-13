@@ -7,8 +7,11 @@ import {
   classifyErrorCode,
   gatherAlertCandidates,
   captureAlerts,
-  listAlerts,
 } from '../costops/alerts-capture.js'
+// COS-OPS-M3: alerts-capture.ts no longer carries its own listAlerts copy --
+// alerts-store.ts's is the single read API (the one the GET route and export.ts
+// already used).
+import { listAlerts } from '../costops/alerts-store.js'
 import type { CostOpsConfig } from '../costops/config.js'
 
 const NOW = Math.floor(Date.UTC(2026, 6, 15, 12, 0, 0) / 1000) // 2026-07-15
@@ -371,6 +374,18 @@ describe('gatherAlertCandidates -- missing invoice (GAP-14 wiring)', () => {
 describe('captureAlerts persistence round-trip', () => {
   beforeEach(() => { initDb(); initAlertsSchema(getDb()) })
 
+  // COS-OPS-M3: persistence goes through alerts-store.ts's transactional
+  // reconcileAndPersist -- this file must not grow back its own ad-hoc,
+  // non-transactional SQL copy (the drift that motivated the finding).
+  it('persists via alerts-store reconcileAndPersist, with no local costops_alerts SQL (COS-OPS-M3, source pin)', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const src = readFileSync(join(__dirname, '..', 'costops', 'alerts-capture.ts'), 'utf-8')
+    expect(src).toMatch(/reconcileAndPersist\(db, candidates, now/)
+    expect(src).not.toMatch(/INSERT INTO costops_alerts/)
+    expect(src).not.toMatch(/UPDATE costops_alerts/)
+  })
+
   it('inserts a new alert on first capture', () => {
     const db = getDb()
     const win = monthWindow(NOW)
@@ -407,7 +422,7 @@ describe('captureAlerts persistence round-trip', () => {
     expect(summary.resolved).toBeGreaterThanOrEqual(1)
     const unresolved = listAlerts(db)
     expect(unresolved.find(a => a.type === 'budget_threshold')).toBeUndefined()
-    const all = listAlerts(db, { includeResolved: true })
+    const all = listAlerts(db, { status: 'all' })
     const resolvedRow = all.find(a => a.type === 'budget_threshold')
     expect(resolvedRow?.resolved_at).not.toBeNull()
   })

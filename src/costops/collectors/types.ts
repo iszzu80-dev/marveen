@@ -21,6 +21,15 @@ export interface NormalizedCostLine {
   data_freshness_at: number       // provider "as of" time (epoch sec)
   raw_ref_hash?: string | null    // sha256(salt, raw id) -- NEVER a raw account/invoice id
   dedup_key: string               // idempotent upsert key
+  // COS-OPS-M4 (fold of deepseek.ts's hand-rolled upsertLine into the shared
+  // runner writer): optional fx provenance for a line whose `amount` was
+  // converted from a native currency (card a1552362 -- same columns
+  // email-ingest.ts retains). Omitted/null for lines already native in
+  // `currency` -- never fabricated.
+  original_amount?: number | null
+  original_currency?: string | null
+  fx_rate?: number | null
+  fx_date?: number | null
 }
 
 // Injected HTTP GET returning parsed JSON. Tests pass a stub that returns a

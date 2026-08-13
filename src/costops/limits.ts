@@ -14,7 +14,20 @@ import type { SubscriptionLifecycle } from './subscriptions.js'
 import { getActiveWorkspaceAlerts } from './workspace-alerts.js'
 import { checkRenderBuildMinutes } from './render-live-checks.js'
 import { loadDomainsConfig, checkSslExpiry, checkDomainExpiry, EXPIRY_THRESHOLDS } from './expiry-checks.js'
+import { peakSinceLastTopUp } from './collectors/deepseek.js'
 import type { CostWarning } from './warnings.js'
+
+// COS-OPS-M2: how old a point-in-time usage snapshot (the manual Claude weekly-%
+// reading, the codex weekly rate-limit read) may be before its percentage stops
+// being reported as a LIVE figure. Both snapshots describe a rolling WEEKLY
+// window, so anything captured more than one full window + a grace period ago is
+// about a window that has since reset -- alerting (or all-clearing) off it would
+// be fabricating current state from history. 10 days = 7-day window + 3 days
+// grace, mirroring capacity.ts's CAPACITY_STALE_AFTER_SECONDS convention (26h =
+// daily cadence + grace) scaled to the weekly cadence of these sources.
+// (capacity.ts is a separate consumer with its own constant -- deliberately not
+// imported here so the two modules' cadences can be tuned independently.)
+export const LIMIT_SNAPSHOT_STALE_AFTER_SECONDS = 10 * 24 * 3600
 
 export type LimitStatusTier = 'ok' | 'warning' | 'critical' | 'blocked' | 'unknown'
 
@@ -41,6 +54,13 @@ export interface LimitStatus {
   // native USD prepaid balance) hit it and printed "3,17 HUF" for a ~$3.17 USD balance. null means
   // "not a monetary value, or currency genuinely unknown" -- never assume HUF by omission.
   unit: string | null
+  // COS-OPS-M2 (optional, snapshot-based rows only): true when the underlying
+  // point-in-time snapshot is older than LIMIT_SNAPSHOT_STALE_AFTER_SECONDS --
+  // usage_pct is then null and status 'unknown' (the stale % is NOT a live
+  // figure), and this flag + age say WHY, so the UI can ask for a fresh reading
+  // instead of showing a silent gap.
+  stale?: boolean
+  snapshot_age_seconds?: number | null
 }
 
 function tierForPct(pct: number | null): LimitStatusTier {
@@ -61,7 +81,12 @@ function tierForDays(days: number | null): LimitStatusTier {
 
 // ---- 1. Subscription lifecycle (renewal/cancellation dates -- date-based, not %-based unless
 // an optional weekly_limit_tokens/five_hour_limit_tokens ceiling is present, see SubscriptionEntry) ---
-export function fromSubscriptions(subs: SubscriptionLifecycle[]): LimitStatus[] {
+// COS-OPS-M2: `now` is optional so existing callers keep compiling; when supplied,
+// a usage_snapshot older than LIMIT_SNAPSHOT_STALE_AFTER_SECONDS degrades to
+// usage_pct null / status 'unknown' (+ stale flag) instead of alerting off a
+// weekly-% reading whose window has long since reset. Omitted -> no staleness
+// judgement (the caller has no clock to judge with; nothing is fabricated).
+export function fromSubscriptions(subs: SubscriptionLifecycle[], now?: number): LimitStatus[] {
   const out: LimitStatus[] = []
   for (const s of subs) {
     const targetDate = s.status === 'canceled' ? s.paid_until : s.next_renewal
@@ -98,12 +123,20 @@ export function fromSubscriptions(subs: SubscriptionLifecycle[]): LimitStatus[] 
     // are informational-only (surfaced via the subscription object itself, not alerted on,
     // since only weekly usage was asked to trigger the alert).
     if (s.usage_snapshot) {
-      const pct = s.usage_snapshot.weekly_pct / 100
+      // COS-OPS-M2: a manual reading is a point-in-time snapshot with no auto-refresh;
+      // past the staleness horizon its % is history, not current usage -- report the
+      // gap (unknown + stale) rather than a live-looking figure that pins an alert
+      // (or hides a real 100%) for weeks.
+      const capturedAt = Math.floor(Date.parse(s.usage_snapshot.as_of) / 1000)
+      const age = now !== undefined && isFinite(capturedAt) ? Math.max(0, now - capturedAt) : null
+      const stale = age !== null && age > LIMIT_SNAPSHOT_STALE_AFTER_SECONDS
+      const pct = stale ? null : s.usage_snapshot.weekly_pct / 100
       out.push({
         provider: s.provider, limit_type: 'weekly_usage_pct',
         current_usage: null, limit_value: null, usage_pct: pct,
         reset_date: s.usage_snapshot.weekly_reset_label, paid_until: null, expiry_date: null,
         status: tierForPct(pct), source: 'config', sub_id: s.id, unit: null,
+        stale, snapshot_age_seconds: age,
       })
     }
   }
@@ -123,7 +156,13 @@ export function fromDeepSeekBalance(db: Database.Database): LimitStatus[] {
     }]
   }
   const latest = rows[0].balance
-  const peak = Math.max(...rows.map(r => r.balance))
+  // COS-OPS-M1: "peak" is the peak since the LAST OBSERVED TOP-UP (a rise between
+  // consecutive snapshots -- deriveMtdSpend's drop/rise discipline), not the
+  // all-time max. Against the all-time max, cruising at $4 after a $5 top-up on
+  // an account that once held $50 read as 92% consumed -> pinned 'critical'
+  // forever; vs the $5 top-up it is the real 20%.
+  const asc = rows.slice().reverse()
+  const peak = peakSinceLastTopUp(asc.map(r => ({ balance: r.balance, captured_at: r.captured_at }))) ?? latest
   const hadObservedDrop = peak > latest
   // usage_pct here means fraction of the peak (last top-up) already SPENT -- consistent with
   // every other limit_type's "fraction consumed" convention (inverse of warnings.ts's own
@@ -142,7 +181,10 @@ export function fromDeepSeekBalance(db: Database.Database): LimitStatus[] {
 // Latest usedPercent snapshot from provider_ratelimit_snapshots (written by the codex collector
 // via the app-server metadata read -- zero quota). No snapshot yet -> 'unknown' (never a guess),
 // same honest-gap rule as the no-numeric-ceiling subscription limits.
-export function fromCodexRateLimit(db: Database.Database): LimitStatus[] {
+// COS-OPS-M2: `now` optional (existing callers keep compiling); when supplied, a
+// snapshot past LIMIT_SNAPSHOT_STALE_AFTER_SECONDS degrades to usage_pct null /
+// 'unknown' + stale flag -- a weeks-old weekly-% is not a live figure to alert on.
+export function fromCodexRateLimit(db: Database.Database, now?: number): LimitStatus[] {
   const rows = db.prepare(
     `SELECT used_percent, resets_at, captured_at FROM provider_ratelimit_snapshots WHERE provider = 'codex' ORDER BY captured_at DESC LIMIT 1`,
   ).all() as Array<{ used_percent: number; resets_at: number | null; captured_at: number }>
@@ -154,13 +196,17 @@ export function fromCodexRateLimit(db: Database.Database): LimitStatus[] {
     }]
   }
   const latest = rows[0]
-  const pct = latest.used_percent / 100
+  const age = now !== undefined ? Math.max(0, now - latest.captured_at) : null
+  const stale = age !== null && age > LIMIT_SNAPSHOT_STALE_AFTER_SECONDS
+  const pct = stale ? null : latest.used_percent / 100
   return [{
-    provider: 'codex', limit_type: 'weekly_usage_pct', current_usage: latest.used_percent, limit_value: 100,
+    provider: 'codex', limit_type: 'weekly_usage_pct',
+    current_usage: stale ? null : latest.used_percent, limit_value: 100,
     usage_pct: pct,
     reset_date: latest.resets_at !== null ? new Date(latest.resets_at * 1000).toISOString() : null,
     paid_until: null, expiry_date: null,
     status: tierForPct(pct), source: 'ledger', sub_id: null, unit: '%',
+    stale, snapshot_age_seconds: age,
   }]
 }
 
@@ -265,9 +311,9 @@ export async function getLimitStatus(
     fromLiveChecks(now, domainsConfig.ssl_hosts, domainsConfig.domains),
   ])
   return [
-    ...fromSubscriptions(subscriptions),
+    ...fromSubscriptions(subscriptions, now),
     ...fromDeepSeekBalance(db),
-    ...fromCodexRateLimit(db),
+    ...fromCodexRateLimit(db, now),
     ...fromWorkspaceAlerts(db, now),
     ...live,
   ]

@@ -30,6 +30,32 @@ export function deriveMtdSpend(snapshotsAsc: BalanceSnapshot[]): number {
   return Math.round(spend * 10000) / 10000
 }
 
+/**
+ * PURE (COS-OPS-M1): the peak balance observed SINCE the last top-up, from
+ * ascending-by-time snapshots. A RISE between consecutive snapshots marks a
+ * top-up (the same drop/rise discipline deriveMtdSpend uses); the peak is the
+ * highest balance at-or-after the last such rise. With no rise ever observed
+ * the whole history belongs to one funding period, so the all-time max IS the
+ * last top-up's level. Null for an empty history (never a fabricated number).
+ *
+ * This is what "usage % of the last top-up" must divide by: the old all-time
+ * MAX pinned usage_pct near-critical forever once the account cruised low
+ * after a small top-up ($50 history + $5 top-up + $4 current read as 92%
+ * consumed instead of the real 20%).
+ */
+export function peakSinceLastTopUp(snapshotsAsc: BalanceSnapshot[]): number | null {
+  if (snapshotsAsc.length === 0) return null
+  let lastRiseIdx = 0
+  for (let i = 1; i < snapshotsAsc.length; i++) {
+    if (snapshotsAsc[i].balance > snapshotsAsc[i - 1].balance) lastRiseIdx = i
+  }
+  let peak = snapshotsAsc[lastRiseIdx].balance
+  for (let i = lastRiseIdx + 1; i < snapshotsAsc.length; i++) {
+    if (snapshotsAsc[i].balance > peak) peak = snapshotsAsc[i].balance
+  }
+  return peak
+}
+
 // Card ef6c6a2c (spec section 5, "will the quota fill?" -- inverted here to "will the
 // prepaid balance run OUT?"): extrapolates a daily burn rate from ALL historical snapshots
 // (not just this month -- a longer window gives a steadier rate than a fresh month with only
@@ -85,10 +111,27 @@ export function parseDeepSeekBalanceUsd(raw: unknown): number | null {
 
 export const DEEPSEEK_VAULT_SECRET_ID = 'DEEPSEEK_API_KEY'
 
+export interface DeepSeekSyncResult {
+  ok: boolean
+  provider: string
+  status: string
+  imported_count: number
+  balance_usd?: number
+  mtd_spend_usd?: number
+  error?: string
+  period?: string
+}
+
 /**
  * LIVE read-only sync: read the prepaid balance, record a snapshot, derive MTD
  * spend from this month's balance drops, and upsert a provider line +
  * import_runs row. Injected deps let tests stub the key, fetcher, fx and clock.
+ *
+ * COS-OPS-M4: the whole sync body runs under the same per-provider import lock
+ * runCollector gives every other collector (import-durability.ts) -- a manual
+ * "sync now" racing the scheduled tick short-circuits with status 'locked' and
+ * performs NO fetch and NO write. The line/run writes go through the shared
+ * runner helpers (upsertProviderLines/recordImportRun) instead of local copies.
  */
 export async function syncDeepSeekBalance(
   db: import('better-sqlite3').Database,
@@ -98,75 +141,95 @@ export async function syncDeepSeekBalance(
     apiKey?: string | null
     fxUsdHuf?: number
   } = {},
-): Promise<{ ok: boolean; provider: string; status: string; imported_count: number; balance_usd?: number; mtd_spend_usd?: number; error?: string; period?: string }> {
+): Promise<DeepSeekSyncResult> {
   const { monthWindow } = await import('../ledger.js')
-  const { sanitizeError } = await import('./runner.js')
-  let apiKey = deps.apiKey
-  if (apiKey === undefined) {
-    try { const { getSecret } = await import('../../web/vault.js'); apiKey = getSecret(DEEPSEEK_VAULT_SECRET_ID) } catch { apiKey = null }
-  }
+  const { sanitizeError, recordImportRun, upsertProviderLines } = await import('./runner.js')
+  const { withImportLock, buildDbImportLockContext } = await import('./import-durability.js')
   const w = monthWindow(now)
-  if (!apiKey) {
-    recordRun(db, 'error', 0, w, now, 'no DeepSeek key in vault')
-    return { ok: false, provider: 'deepseek', status: 'error', imported_count: 0, error: `no DeepSeek key in vault (${DEEPSEEK_VAULT_SECRET_ID})`, period: w.key }
-  }
-  let fxUsdHuf = deps.fxUsdHuf
-  if (fxUsdHuf === undefined) {
-    try { const { loadRenderPricing } = await import('./render.js'); fxUsdHuf = loadRenderPricing().pricing.fx_usd_huf || 0 } catch { fxUsdHuf = 0 }
-  }
-  const httpGetJson = deps.httpGetJson || (async (url: string, headers: Record<string, string>) => {
-    const r = await fetch(url, { method: 'GET', headers }); if (!r.ok) throw new Error(`deepseek api ${r.status}`); return r.json()
+  const record = (status: string, count: number, errMsg: string | null): void => recordImportRun(db, {
+    provider: 'deepseek', collectorName: 'deepseek-balance',
+    status: status as import('./types.js').ImportStatus, now, importedCount: count,
+    periodStart: w.start, periodEnd: w.end,
+    errorCode: status === 'error' ? 'balance_error' : null, errorMessage: errMsg,
+    freshness: status === 'locked' ? null : now,
   })
-  let balanceUsd: number | null
-  try {
-    const raw = await httpGetJson(DEEPSEEK_BALANCE_URL, { authorization: `Bearer ${apiKey}` })
-    balanceUsd = parseDeepSeekBalanceUsd(raw)
-  } catch (err) {
-    const s = sanitizeError(err)
-    recordRun(db, 'error', 0, w, now, s.message)
-    return { ok: false, provider: 'deepseek', status: 'error', imported_count: 0, error: s.code, period: w.key }
-  }
-  // COS-OPS-H2: a 200 whose body isn't a recognizable, available balance is an
-  // ERROR run, not a $0 snapshot -- writing a fabricated 0 here would book the
-  // whole remaining balance as MTD spend (deriveMtdSpend counts the drop) and
-  // ignore the next good reading as a "top-up". No snapshot, no line, no
-  // entitlement touch; last good data stays.
-  if (balanceUsd == null) {
-    recordRun(db, 'error', 0, w, now, 'unrecognizable /user/balance response (or is_available=false) -- balance unknown, no snapshot recorded')
-    return { ok: false, provider: 'deepseek', status: 'error', imported_count: 0, error: 'unrecognizable balance response', period: w.key }
-  }
-  // record the snapshot, then derive MTD spend from this-month snapshots (asc)
-  db.prepare(`INSERT INTO provider_balance_snapshots (provider, currency, balance, captured_at) VALUES ('deepseek','USD',?,?)`).run(balanceUsd, now)
-  const rows = db.prepare(
-    `SELECT balance, captured_at FROM provider_balance_snapshots WHERE provider='deepseek' AND captured_at >= ? AND captured_at < ? ORDER BY captured_at ASC`,
-  ).all(w.start, w.end) as Array<{ balance: number; captured_at: number }>
-  const mtdSpendUsd = deriveMtdSpend(rows.map(r => ({ balance: r.balance, captured_at: r.captured_at })))
-  const amountHuf = Math.round(mtdSpendUsd * (fxUsdHuf || 0) * 100) / 100
 
-  // upsert the provider line (usage actual, derived) for deepseek-api
-  // Card a1552362: this is a real USD->HUF conversion (mtdSpendUsd * fxUsdHuf) but the line
-  // never retained original_amount/original_currency/fx_rate -- unlike email-ingest.ts's
-  // equivalent conversion, which does. Only set when a rate was actually available (fxUsdHuf >
-  // 0); a 0 rate means amountHuf is already 0 and there's nothing real to retain.
-  upsertLine(db, {
-    source: DEEPSEEK_API_SOURCE, provider: 'deepseek', start: w.start, end: w.end,
-    amount: amountHuf, confidence: 'provider_api', freshness: now,
-    dedup_key: `provider|deepseek|${DEEPSEEK_API_SOURCE}|${w.key}|provider_api`, now,
-    original_amount: fxUsdHuf ? mtdSpendUsd : null,
-    original_currency: fxUsdHuf ? 'USD' : null,
-    fx_rate: fxUsdHuf ? fxUsdHuf : null,
-    fx_date: fxUsdHuf ? now : null,
+  const lockResult = await withImportLock(buildDbImportLockContext(db), 'deepseek', now, async (): Promise<DeepSeekSyncResult> => {
+    let apiKey = deps.apiKey
+    if (apiKey === undefined) {
+      try { const { getSecret } = await import('../../web/vault.js'); apiKey = getSecret(DEEPSEEK_VAULT_SECRET_ID) } catch { apiKey = null }
+    }
+    if (!apiKey) {
+      record('error', 0, 'no DeepSeek key in vault')
+      return { ok: false, provider: 'deepseek', status: 'error', imported_count: 0, error: `no DeepSeek key in vault (${DEEPSEEK_VAULT_SECRET_ID})`, period: w.key }
+    }
+    let fxUsdHuf = deps.fxUsdHuf
+    if (fxUsdHuf === undefined) {
+      try { const { loadRenderPricing } = await import('./render.js'); fxUsdHuf = loadRenderPricing().pricing.fx_usd_huf || 0 } catch { fxUsdHuf = 0 }
+    }
+    const httpGetJson = deps.httpGetJson || (async (url: string, headers: Record<string, string>) => {
+      const r = await fetch(url, { method: 'GET', headers }); if (!r.ok) throw new Error(`deepseek api ${r.status}`); return r.json()
+    })
+    let balanceUsd: number | null
+    try {
+      const raw = await httpGetJson(DEEPSEEK_BALANCE_URL, { authorization: `Bearer ${apiKey}` })
+      balanceUsd = parseDeepSeekBalanceUsd(raw)
+    } catch (err) {
+      const s = sanitizeError(err)
+      record('error', 0, s.message)
+      return { ok: false, provider: 'deepseek', status: 'error', imported_count: 0, error: s.code, period: w.key }
+    }
+    // COS-OPS-H2: a 200 whose body isn't a recognizable, available balance is an
+    // ERROR run, not a $0 snapshot -- writing a fabricated 0 here would book the
+    // whole remaining balance as MTD spend (deriveMtdSpend counts the drop) and
+    // ignore the next good reading as a "top-up". No snapshot, no line, no
+    // entitlement touch; last good data stays.
+    if (balanceUsd == null) {
+      record('error', 0, 'unrecognizable /user/balance response (or is_available=false) -- balance unknown, no snapshot recorded')
+      return { ok: false, provider: 'deepseek', status: 'error', imported_count: 0, error: 'unrecognizable balance response', period: w.key }
+    }
+    // record the snapshot, then derive MTD spend from this-month snapshots (asc)
+    db.prepare(`INSERT INTO provider_balance_snapshots (provider, currency, balance, captured_at) VALUES ('deepseek','USD',?,?)`).run(balanceUsd, now)
+    const rows = db.prepare(
+      `SELECT balance, captured_at FROM provider_balance_snapshots WHERE provider='deepseek' AND captured_at >= ? AND captured_at < ? ORDER BY captured_at ASC`,
+    ).all(w.start, w.end) as Array<{ balance: number; captured_at: number }>
+    const mtdSpendUsd = deriveMtdSpend(rows.map(r => ({ balance: r.balance, captured_at: r.captured_at })))
+    const amountHuf = Math.round(mtdSpendUsd * (fxUsdHuf || 0) * 100) / 100
+
+    // upsert the provider line (usage actual, derived) for deepseek-api, through the
+    // shared runner writer (COS-OPS-M4 -- was a hand-rolled local copy).
+    // Card a1552362: this is a real USD->HUF conversion (mtdSpendUsd * fxUsdHuf) but the line
+    // never retained original_amount/original_currency/fx_rate -- unlike email-ingest.ts's
+    // equivalent conversion, which does. Only set when a rate was actually available (fxUsdHuf >
+    // 0); a 0 rate means amountHuf is already 0 and there's nothing real to retain.
+    upsertProviderLines(db, [{
+      provider: 'deepseek', service: DEEPSEEK_API_SOURCE,
+      billing_period_start: w.start, billing_period_end: w.end,
+      amount: amountHuf, currency: 'HUF', confidence: 'provider_api',
+      data_freshness_at: now,
+      dedup_key: `provider|deepseek|${DEEPSEEK_API_SOURCE}|${w.key}|provider_api`,
+      original_amount: fxUsdHuf ? mtdSpendUsd : null,
+      original_currency: fxUsdHuf ? 'USD' : null,
+      fx_rate: fxUsdHuf ? fxUsdHuf : null,
+      fx_date: fxUsdHuf ? now : null,
+    }], now)
+    record('ok', 1, null)
+    // Forecast uses ALL-time snapshots (not the this-month-only window above) -- a steadier
+    // burn-rate base, especially right after a month boundary when the MTD window has only 1-2
+    // points of its own.
+    const allRows = db.prepare(
+      `SELECT balance, captured_at FROM provider_balance_snapshots WHERE provider='deepseek' ORDER BY captured_at ASC`,
+    ).all() as Array<{ balance: number; captured_at: number }>
+    const exhaustionAt = forecastDeepSeekExhaustion(allRows, now)
+    upsertDeepSeekEntitlement(db, balanceUsd, exhaustionAt, now)
+    return { ok: true, provider: 'deepseek', status: 'ok', imported_count: 1, balance_usd: balanceUsd, mtd_spend_usd: mtdSpendUsd, period: w.key }
   })
-  recordRun(db, 'ok', 1, w, now, null)
-  // Forecast uses ALL-time snapshots (not the this-month-only window above) -- a steadier
-  // burn-rate base, especially right after a month boundary when the MTD window has only 1-2
-  // points of its own.
-  const allRows = db.prepare(
-    `SELECT balance, captured_at FROM provider_balance_snapshots WHERE provider='deepseek' ORDER BY captured_at ASC`,
-  ).all() as Array<{ balance: number; captured_at: number }>
-  const exhaustionAt = forecastDeepSeekExhaustion(allRows, now)
-  upsertDeepSeekEntitlement(db, balanceUsd, exhaustionAt, now)
-  return { ok: true, provider: 'deepseek', status: 'ok', imported_count: 1, balance_usd: balanceUsd, mtd_spend_usd: mtdSpendUsd, period: w.key }
+
+  if (!lockResult.ok) {
+    record('locked', 0, 'a concurrent sync for this provider was already running')
+    return { ok: false, provider: 'deepseek', status: 'locked', imported_count: 0, error: 'a concurrent sync for this provider was already running', period: w.key }
+  }
+  return lockResult.result
 }
 
 // Card ef6c6a2c (spec section 4): DeepSeek prepaid balance is one of the named
@@ -202,35 +265,8 @@ function upsertDeepSeekEntitlement(db: import('better-sqlite3').Database, balanc
   `).run({ remaining: balanceUsd, status: statusForDeepSeekBalance(balanceUsd), forecastExhaustionAt, now })
 }
 
-function upsertLine(db: import('better-sqlite3').Database, a: {
-  source: string; provider: string; start: number; end: number; amount: number; confidence: string
-  freshness: number; dedup_key: string; now: number
-  original_amount?: number | null; original_currency?: string | null; fx_rate?: number | null; fx_date?: number | null
-}): void {
-  db.prepare(`INSERT INTO cost_sources (id, name, provider, source_type, currency, active, created_at, updated_at)
-    VALUES (@id,@id,@provider,'usage','HUF',1,@now,@now)
-    ON CONFLICT(id) DO UPDATE SET provider=excluded.provider, updated_at=excluded.updated_at`).run({ id: a.source, provider: a.provider, now: a.now })
-  // Card 7d086cd3 (F1, Muse WS-C design-fidelity): actual_source is a separate column from
-  // confidence, added in v0.8 (ledger.ts) for the shared collector runner (runner.ts hardcodes
-  // 'provider_api' the same way) -- this hand-rolled upsert predates/bypasses that runner and
-  // never got the same treatment, so it silently stayed NULL. getCostSummary()'s
-  // `resolved.actual_source || 'no_data'` fallback then mislabeled a genuinely real,
-  // provider-API-observed balance-drain spend as "Nincs adat" in the dashboard, even though
-  // confidence was correctly 'provider_api' the whole time.
-  db.prepare(`INSERT INTO cost_line_items
-      (source_id, charge_period_start, charge_period_end, charge_category, service_name, usage_type, consumed_quantity, consumed_unit, billed_cost, effective_cost, currency, confidence, data_freshness, source_ref, dedup_key, created_at, actual_source, original_amount, original_currency, fx_rate, fx_date)
-    VALUES (@source,@start,@end,'usage',@source,NULL,NULL,NULL,@amount,NULL,'HUF',@confidence,@freshness,NULL,@dedup_key,@now,'provider_api',@original_amount,@original_currency,@fx_rate,@fx_date)
-    ON CONFLICT(dedup_key) DO UPDATE SET billed_cost=excluded.billed_cost, confidence=excluded.confidence, data_freshness=excluded.data_freshness, actual_source=excluded.actual_source,
-      original_amount=excluded.original_amount, original_currency=excluded.original_currency, fx_rate=excluded.fx_rate, fx_date=excluded.fx_date`).run({
-    ...a,
-    original_amount: a.original_amount ?? null, original_currency: a.original_currency ?? null,
-    fx_rate: a.fx_rate ?? null, fx_date: a.fx_date ?? null,
-  })
-}
-
-function recordRun(db: import('better-sqlite3').Database, status: string, count: number, w: { start: number; end: number }, now: number, errMsg: string | null): void {
-  db.prepare(`INSERT INTO import_runs (provider, collector_name, started_at, finished_at, status, period_start, period_end, imported_count, error_code, error_message_sanitized, data_freshness_at)
-    VALUES ('deepseek','deepseek-balance',@now,@now,@status,@ps,@pe,@count,@ec,@em,@now)`).run({
-    now, status, ps: w.start, pe: w.end, count, ec: status === 'error' ? 'balance_error' : null, em: errMsg,
-  })
-}
+// COS-OPS-M4: the former hand-rolled upsertLine()/recordRun() copies were folded
+// into the shared runner helpers (runner.ts upsertProviderLines/recordImportRun)
+// -- one guarded writer for every collector, so fixes like the actual_source
+// stamping (card 7d086cd3 F1) and fx provenance (card a1552362) can never drift
+// per-collector again.
