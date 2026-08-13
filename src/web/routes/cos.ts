@@ -63,6 +63,56 @@ export function endOfTodaySec(now: Date): number {
 // Deep-compare two JSON strings by parsing and re-serializing — normalizes
 // whitespace / key ordering so drift in serialization doesn't look like a
 // changed question.
+/** Personal sensitivity vocabulary → ZST vocabulary. The two are different
+ *  vocabularies (schema.ts CASE_SENSITIVITIES vs zst-sensitivity ZST_SENSITIVITIES),
+ *  and the Scope Gate can route a message posted from the private mailbox into
+ *  the ZST store — at which point the personal value reaching coerceZstSensitivity
+ *  matched nothing and fail-closed to ZST_HIGHLY_SENSITIVE. Safe, but it meant
+ *  EVERY gate-routed case landed premium-only, which is how a fail-closed default
+ *  turns into a reason to stop using the store. An unmapped value still returns
+ *  undefined, which fail-closes exactly as before; content can only escalate. */
+const PERSONAL_TO_ZST_SENSITIVITY: Record<string, string> = {
+  PUBLIC: 'PUBLIC',
+  PERSONAL: 'ZST_INTERNAL',
+  SENSITIVE_PERSONAL: 'ZST_PERSONAL_DATA',
+  HIGHLY_SENSITIVE: 'ZST_HIGHLY_SENSITIVE',
+}
+
+/** Personal case types carry no meaning in the ZST store, and passing one
+ *  through (an 'EMAIL' where §8.2 expects INVOICE_INCOMING / CONTRACT / …) does
+ *  not just mislabel the case — it silently skips the extractor triggers, so a
+ *  supplier invoice routed here never reaches the invoice extractor at all.
+ *  Anything without a ZST equivalent is dropped so zst-intake applies its own
+ *  documented default (GENERAL_OPERATION) instead of inheriting a foreign one. */
+const PERSONAL_TO_ZST_CASE_TYPE: Record<string, string> = {
+  INVOICE: 'INVOICE_INCOMING',
+  CONTRACT: 'CONTRACT',
+}
+
+/** Explicit boundary mapping for a Scope-Gate-routed message. This used to be
+ *  `input as unknown as ZstTriagedEmail` — a double cast, which is the compiler
+ *  being told to stop checking precisely where two vocabularies meet. */
+export function toZstTriagedEmail(input: TriagedEmail): ZstTriagedEmail {
+  return {
+    accountId: input.accountId,
+    messageId: input.messageId,
+    threadId: input.threadId,
+    subject: input.subject,
+    from: input.from,
+    to: input.to,
+    snippet: input.snippet,
+    direction: input.direction,
+    actionable: input.actionable,
+    title: input.title,
+    followUpAt: input.followUpAt,
+    headers: input.headers,
+    caseType: input.caseType ? PERSONAL_TO_ZST_CASE_TYPE[input.caseType] : undefined,
+    declaredSensitivity: input.declaredSensitivity
+      ? PERSONAL_TO_ZST_SENSITIVITY[input.declaredSensitivity]
+      : undefined,
+  }
+}
+
 function deepJsonEqual(a: string | null | undefined, b: string | null | undefined): boolean {
   if (a === b) return true
   if (a == null || b == null) return false
@@ -94,8 +144,14 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     return true
   }
   if (path === '/api/cos/kill-switch' && method === 'POST') {
-    const body = JSON.parse((await readBody(req)).toString()) as
-      { engaged?: boolean; reason?: string; actor?: string }
+    // Malformed JSON is a caller error, not a server error. This parse used to
+    // sit outside a try, so a truncated body reached the global handler in
+    // web.ts and came back as a 500 — the one endpoint whose whole job is to be
+    // reachable in a panic reported "the server is broken" instead of "your
+    // request was". Every other POST on this router already parses this way.
+    let body: { engaged?: boolean; reason?: string; actor?: string }
+    try { body = JSON.parse((await readBody(req)).toString()) }
+    catch { json(res, { error: 'invalid JSON' }, 400); return true }
     const now = Math.floor(Date.now() / 1000)
     const actor = body.actor || 'dashboard'
     if (body.engaged === true) {
@@ -145,7 +201,7 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     }
     const zstTarget = scope.target === 'zst'
     const routed = zstTarget
-      ? ingestTriagedZstEmail(getDb(), input as unknown as ZstTriagedEmail, now)
+      ? ingestTriagedZstEmail(getDb(), toZstTriagedEmail(input), now)
       : ingestTriagedEmail(getDb(), input, now)
     // F-13: the gate's VERDICT goes in the scope column, and the reason for a
     // review goes in scope_review_reason.
@@ -679,7 +735,14 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     // being asked (next_best_action_json). If both are unchanged, the answer
     // is current no matter how many heartbeats fired. 409 only when the case
     // genuinely moved on: a different decision, or a different step.
-    const QUESTION_DECISIONS = ['REQUEST_DECISION', 'ASK_INFORMATION', 'RECOVERY_REQUIRED', 'WAIT_EXTERNAL']
+    // REQUEST_APPROVAL belongs here too. It was omitted, so a case sitting in
+    // AWAITING_APPROVAL had no "active question" as far as this route was
+    // concerned and every owner-action POST answered 404 — approvals were
+    // answerable ONLY over Telegram. That left the strict surface unable to
+    // answer and the loose one over-answering, which is the worst pairing.
+    const QUESTION_DECISIONS = [
+      'REQUEST_DECISION', 'REQUEST_APPROVAL', 'ASK_INFORMATION', 'RECOVERY_REQUIRED', 'WAIT_EXTERNAL',
+    ]
     const latestQuestionRun = db.prepare(
       `SELECT r.progression_run_id, r.decision, s.next_best_action_json
        FROM case_progression_runs r
@@ -729,6 +792,12 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
 
     // Run ONE progression cycle for instant feedback.
     let progressionResult: { newDecision: string | null; newNextBestAction: string | null }
+    // The response used to hardcode progressionRan:true even when the cycle
+    // threw — so a caller that saw "ran, no new decision" could not tell a
+    // quiet cycle from a crashed one, which is the same class of blindness as
+    // the cycle reporting itself clean while per-item steps failed (83717a6).
+    let progressionRan = true
+    let progressionError: string | null = null
     try {
       const pr = runProgressionCycle(db, domain, caseId, now, {
         triggerType: 'MANUAL',
@@ -749,12 +818,15 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
       // Engine failure doesn't roll back the event — the event is already
       // committed; the next scheduled cycle will process it.
       progressionResult = { newDecision: null, newNextBestAction: null }
+      progressionRan = false
+      progressionError = String((e as Error)?.message ?? e)
     }
 
     json(res, {
       ok: true,
       eventId: Number(insertResult.lastInsertRowid),
-      progressionRan: true,
+      progressionRan,
+      ...(progressionError ? { progressionError } : {}),
       ...progressionResult,
     })
     return true
@@ -1095,9 +1167,17 @@ export async function approveAndDispatchZst(
     return { sent: false, reasons: ['a jóváhagyott szöveg azóta megváltozott — a jóváhagyás nem erre a levélre vonatkozik'] }
   }
 
-  const recipients = allowedRecipients?.length ? allowedRecipients : [email.to]
-  if (!recipients.includes(email.to)) {
-    return { sent: false, reasons: [`a címzett (${email.to}) nincs a jóváhagyott listán`] }
+  // An approval authorises the people the owner SAW — and what he saw is the
+  // draft. This used to record whatever list the caller supplied (requiring
+  // only that it contain the draft's recipient), so the caller could WIDEN the
+  // allowlist written onto the envelope, and every later authorizeSend in the
+  // campaign would honour the widened list. The draft is the only recipient
+  // fact the owner actually approved, so the envelope is derived from it; a
+  // caller trying to add anyone else is refused rather than quietly obeyed.
+  const recipients = [email.to]
+  const widened = (allowedRecipients ?? []).filter(r => r !== email.to)
+  if (widened.length) {
+    return { sent: false, reasons: [`a kérés a jóváhagyott címzetti listát bővítené (${widened.join(', ')}) — csak a megjelenített címzett hagyható jóvá`] }
   }
 
   approveZstSend(db, {
@@ -1119,9 +1199,28 @@ export async function approveAndDispatchZst(
 
   return {
     sent: r.sent, status: r.action?.status, externalRef: r.action?.externalRef ?? undefined,
-    reasons: r.decision.allowed ? undefined : r.decision.reasons,
+    reasons: dispatchReasons(r),
     sensitivityTier: r.decision.sensitivityTier,
   }
+}
+
+/** Why did this dispatch not send?
+ *
+ *  `reasons` used to be populated only when the GATE refused. But the gate can
+ *  allow and the executor's admission step still refuse — claim held, campaign
+ *  ceiling reached, quota exhausted, kill switch engaged, ticket unconsumable —
+ *  and that refusal lands only in the row's last_error. The caller then saw a
+ *  bare `sent:false` with nothing to explain it, which reads as "it silently
+ *  didn't work". Both refusal layers are surfaced here. */
+export function dispatchReasons(r: {
+  sent: boolean
+  decision: { allowed: boolean; reasons: string[] }
+  action?: { lastError?: string | null }
+}): string[] | undefined {
+  if (!r.decision.allowed) return r.decision.reasons
+  if (r.sent) return undefined
+  const admissionRefusal = r.action?.lastError
+  return admissionRefusal ? [admissionRefusal] : ['a küldés nem történt meg, ok nélkül — nézd meg a sor állapotát']
 }
 
 export async function dispatchApproved(
@@ -1161,7 +1260,7 @@ export async function dispatchApproved(
   }, now)
   return {
     sent: r.sent, status: r.action?.status, externalRef: r.action?.externalRef ?? undefined,
-    reasons: r.decision.allowed ? undefined : r.decision.reasons,
+    reasons: dispatchReasons(r),
     // Surfaced so the tier the gate actually decided on is observable from
     // outside — the ZST door already returns it. An unobservable tier is how a
     // hardcoded one survived this long.

@@ -205,6 +205,23 @@
         '<input type="text" class="cos-owner-text" placeholder="' + esc(nbaDesc || 'Válasz...') + '">' +
         '<button class="cos-owner-btn">Küldés</button>' +
         '</div>'
+    } else if (dec === 'REQUEST_APPROVAL') {
+      // A jovahagyas gombjai NEM a kerdes szovegebol szarmaznak: maga a dontes
+      // tipusa mondja ki, hogy ez ket-kimenetelu. A motor csak az explicit
+      // IGEN-t fogadja el jovahagyaskent, ezert itt kimondott Igen/Nem all --
+      // szabad szoveg ONMAGABAN nem jovahagyas, es a felulet ezt meg is mondja.
+      html = '<div class="cos-owner-ctrl" data-owner-ctrl-decision="' + esc(dec) +
+        '" data-source-ref="' + runId + '" data-case-version="' + caseVersion +
+        '" data-owner-ctrl-nba="' + esc(prog.nbaDescription || '') + '">' +
+        '<div class="cos-owner-radio-group">' +
+        '<label class="cos-owner-radio"><input type="radio" name="owner-dec-' + runId +
+        '" value="YES"> Jóváhagyom</label>' +
+        '<label class="cos-owner-radio"><input type="radio" name="owner-dec-' + runId +
+        '" value="NO"> Nem hagyom jóvá</label>' +
+        '</div>' +
+        '<textarea class="cos-owner-text" placeholder="Megjegyzés (opcionális)" rows="2"></textarea>' +
+        '<button class="cos-owner-btn">Küldés</button>' +
+        '</div>'
     } else if (dec === 'RECOVERY_REQUIRED') {
       html = '<div class="cos-owner-ctrl" data-owner-ctrl-decision="' + esc(dec) +
         '" data-source-ref="' + runId + '" data-case-version="' + caseVersion +
@@ -1006,6 +1023,7 @@
         // Map decision → eventType.
         var decisionEventMap = {
           REQUEST_DECISION: 'OWNER_DECISION',
+          REQUEST_APPROVAL: 'OWNER_DECISION',
           ASK_INFORMATION: 'OWNER_INFORMATION',
           RECOVERY_REQUIRED: 'OWNER_CONFIRMATION',
           WAIT_EXTERNAL: 'OWNER_INFORMATION',
@@ -1021,8 +1039,10 @@
         var textEl = ctrl.querySelector('.cos-owner-text')
         if (textEl) text = textEl.value.trim() || null
 
-        // Validate: REQUEST_DECISION requires a choice.
-        if (decision === 'REQUEST_DECISION' && !choice) {
+        // Validate: REQUEST_DECISION and REQUEST_APPROVAL require a choice.
+        // Approval especially: the engine grants nothing on a bare comment, so
+        // submitting one without a button would look answered and do nothing.
+        if ((decision === 'REQUEST_DECISION' || decision === 'REQUEST_APPROVAL') && !choice) {
           var radios = ctrl.querySelectorAll('input[type="radio"]')
           if (radios.length) { radios[0].focus(); return } // don't submit without choice
         }
