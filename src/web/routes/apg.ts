@@ -35,6 +35,12 @@ import type { RouteContext } from './types.js'
 
 const APG_MODES: readonly ApgMode[] = ['off', 'observe', 'assisted', 'enforced']
 
+/** How much authority each mode carries, least to most. Used to clamp a `?mode=`
+ *  preview so it can never ask for MORE than the configuration grants (F-13). */
+const APG_MODE_RANK: Record<ApgMode, number> = {
+  off: 0, observe: 1, assisted: 2, enforced: 3,
+}
+
 // Idempotency replay store for POST /api/apg/approvals/:id/decision (spec
 // 7.4: "same idempotency key gives the same result"). Resolving an approval
 // is a one-shot state transition (db.ts's resolveApproval only succeeds from
@@ -94,19 +100,38 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
-function requestedMode(
+/** Exported for the F-13 test: the clamp is the security-relevant behaviour on
+ *  this file, and asserting it through an endpoint that does not echo the mode
+ *  would only ever test the endpoint. */
+export function requestedMode(
   url: URL,
   project: string | null,
   kanbanCardId: string | null,
 ): { mode: ApgMode; source: ApgModeSource } | { error: string } {
+  const resolved = resolveEffectiveApgMode(project, kanbanCardId)
   const explicitMode = url.searchParams.get('mode')
   if (explicitMode !== null) {
     if (!APG_MODES.includes(explicitMode as ApgMode)) {
       return { error: 'mode must be off, observe, assisted, or enforced' }
     }
-    return { mode: explicitMode as ApgMode, source: 'global' }
+    // F-13 (review 2026-08-10, fixed 2026-08-12): `?mode=` is a PREVIEW, and a
+    // preview may look at less than the configuration allows, never at more.
+    //
+    // It used to win outright, so `?mode=enforced` re-enabled the whole feature
+    // on a deployment where the owner had switched APG off — a kill switch with
+    // a documented bypass in the query string is not a kill switch. It also
+    // claimed `source: 'global'` while being neither global nor a resolved
+    // scope, which is the same lie F-7 was about.
+    //
+    // So the request is CLAMPED to the resolved mode: asking for less than the
+    // configuration is honoured, asking for more returns what is actually in
+    // force, and the source says which one you got.
+    if (APG_MODE_RANK[explicitMode as ApgMode] <= APG_MODE_RANK[resolved.mode]) {
+      return { mode: explicitMode as ApgMode, source: 'request' }
+    }
+    return resolved
   }
-  return resolveEffectiveApgMode(project, kanbanCardId)
+  return resolved
 }
 
 function detailError(
@@ -207,6 +232,7 @@ export async function tryHandleApg(ctx: RouteContext): Promise<boolean> {
     const offset = Math.max(0, parsedOffset)
     const attentionRaw = url.searchParams.get('attention')
     const result = buildApgWorkItemSummaries(modeResult.mode, {
+      modeSource: modeResult.source,
       project: project ?? undefined,
       state: state ?? undefined,
       attention: attentionRaw === '1' || attentionRaw === 'true',
@@ -237,7 +263,7 @@ export async function tryHandleApg(ctx: RouteContext): Promise<boolean> {
       json(res, { error: modeResult.error }, 400)
       return true
     }
-    const detail = buildApgWorkItemDetail(modeResult.mode, workItemId)
+    const detail = buildApgWorkItemDetail(modeResult.mode, workItemId, modeResult.source)
     if ('error' in detail) {
       detailError(res, detail)
       return true
@@ -261,7 +287,7 @@ export async function tryHandleApg(ctx: RouteContext): Promise<boolean> {
       json(res, { error: modeResult.error }, 400)
       return true
     }
-    const detail = buildApgWorkItemDetail(modeResult.mode, workItemId)
+    const detail = buildApgWorkItemDetail(modeResult.mode, workItemId, modeResult.source)
     if ('error' in detail) {
       detailError(res, detail)
       return true
@@ -285,7 +311,7 @@ export async function tryHandleApg(ctx: RouteContext): Promise<boolean> {
       json(res, { error: modeResult.error }, 400)
       return true
     }
-    const detail = buildApgWorkItemDetail(modeResult.mode, workItemId)
+    const detail = buildApgWorkItemDetail(modeResult.mode, workItemId, modeResult.source)
     if ('error' in detail) {
       detailError(res, detail)
       return true
@@ -309,7 +335,7 @@ export async function tryHandleApg(ctx: RouteContext): Promise<boolean> {
       json(res, { error: modeResult.error }, 400)
       return true
     }
-    const detail = buildApgWorkItemDetail(modeResult.mode, workItemId)
+    const detail = buildApgWorkItemDetail(modeResult.mode, workItemId, modeResult.source)
     if ('error' in detail) {
       detailError(res, detail)
       return true

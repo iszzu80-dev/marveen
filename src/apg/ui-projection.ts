@@ -12,6 +12,7 @@ import type {
   ApgDisplayState,
   ApgEvent,
   ApgMode,
+  ApgModeSource,
   ApgUiSummary,
   ApgUiWorkItemSummary,
   ApgWorkItemDetail,
@@ -594,10 +595,34 @@ function nextActionFor(state: ApgDisplayState): string {
   }
 }
 
-function acceptanceStatusFor(state: ApgDisplayState): ApgAcceptanceStatus {
+/**
+ * Acceptance status (F-2, review 2026-08-10, fixed 2026-08-12).
+ *
+ * TWO CLAIMS USED TO BE MADE HERE THAT NOTHING SUPPORTED.
+ *
+ * 1. `accepted` came from a PASSING GATE. A green `release_ready` means the
+ *    checks ran and agreed; it does not mean a person or an agent accepted the
+ *    work. `accepter_agent` was structurally null, so the Kanban wrote
+ *    "Independently accepted" over an item nobody had accepted. Spec §9.2:
+ *    "NEVER show acceptance from the done status alone."
+ * 2. `returned` came from WAITING. An item needing evidence or clarification had
+ *    not been returned to anyone — nobody sent it back, there is no return
+ *    event, and the word describes an action that did not occur.
+ *
+ * So acceptance now requires an accepter, and waiting is called waiting. The
+ * `accepter` argument is what the sidecar recorded; while the kernel records no
+ * accepter identity (WP3 of the 1.8 gap map), it is null and this correctly
+ * never returns `accepted` — the state is `gates_passed`, which is true and is
+ * also the honest input to the decision about building the missing half.
+ */
+function acceptanceStatusFor(
+  state: ApgDisplayState, accepter: string | null,
+): ApgAcceptanceStatus {
   switch (state) {
     case 'accepted':
-      return 'accepted'
+      // The gate passed. Whether that is ACCEPTANCE depends on there being
+      // somebody who accepted, and only the sidecar can answer that.
+      return accepter ? 'accepted' : 'gates_passed'
     case 'blocked':
       return 'blocked'
     case 'verifying':
@@ -605,7 +630,7 @@ function acceptanceStatusFor(state: ApgDisplayState): ApgAcceptanceStatus {
     case 'evidence_needed':
     case 'decision_needed':
     case 'clarification':
-      return 'returned'
+      return 'needs_input'
     case 'executing':
       return 'produced'
     case 'off':
@@ -613,19 +638,41 @@ function acceptanceStatusFor(state: ApgDisplayState): ApgAcceptanceStatus {
   }
 }
 
+/** The gates that say something about RUNTIME. A PASS on anything else says the
+ *  documents were in order, which is a different claim. */
+const RUNTIME_GATES: ReadonlySet<string> = new Set(['runtime_acceptance', 'release_ready'])
+
+/**
+ * Claim status (F-1, review 2026-08-10, fixed 2026-08-12).
+ *
+ * WHAT WAS WRONG. `VERIFIED_CURRENT` renders as "citable as a current, verified
+ * fact" — the strongest thing this screen says. It was granted when the evidence
+ * row was PRESENT and ANY checkpoint in the same replay run had passed. A PASS
+ * on `spec_ready` means the specification was ready; it says nothing about
+ * whether the thing runs. §11.1 lists six ways to produce a false green, and two
+ * of them — "no runtime verification" and "the file merely exists" — came out of
+ * this branch directly.
+ *
+ * WHAT IT TAKES NOW: a runtime gate that passed IN THE SAME RUN, and a receipt
+ * whose own `runtime_status` is OBSERVED. Both, because they answer different
+ * halves — the gate says the check ran and agreed, the receipt says the thing
+ * was actually seen running. Everything else that has real evidence behind it
+ * keeps the honest label that already existed for exactly this case:
+ * SUPPORTED_BUT_NOT_RUNTIME_VERIFIED.
+ */
 function claimStatus(row: EvidenceRow, candidate: CandidateProjection): ApgClaimStatus {
   if (row.status === 'MISSING') return 'BLOCKED_FROM_USE'
   if (row.status !== 'PRESENT') return 'UNKNOWN'
   const receipt = candidate.receipts.find((candidateReceipt) =>
     candidateReceipt.id === row.receipt_id)
-  if (
-    receipt
-    && candidate.checkpoints.some((checkpoint) =>
-      checkpoint.replay_run_id === receipt.replay_run_id
-      && checkpoint.result === 'PASS')
-  ) {
-    return 'VERIFIED_CURRENT'
-  }
+  if (!receipt) return 'SUPPORTED_BUT_NOT_RUNTIME_VERIFIED'
+  const runtimeGatePassed = candidate.checkpoints.some((checkpoint) =>
+    checkpoint.replay_run_id === receipt.replay_run_id
+    && checkpoint.result === 'PASS'
+    && RUNTIME_GATES.has(checkpoint.checkpoint))
+  // 'OBSERVED' is the kernel's word for "seen running" (migration 0001:
+  // OBSERVED | UNKNOWN | MISSING). Anything else is not a runtime observation.
+  if (runtimeGatePassed && receipt.runtime_status === 'OBSERVED') return 'VERIFIED_CURRENT'
   return 'SUPPORTED_BUT_NOT_RUNTIME_VERIFIED'
 }
 
@@ -672,6 +719,12 @@ function summaryFor(
   candidate: CandidateProjection,
   mode: ApgMode,
   claims: ApgClaim[] = claimsFor(candidate),
+  // F-7 (review 2026-08-10, fixed 2026-08-12). This was the literal 'global' on
+  // every work item ever projected. The resolver already returns which scope
+  // decided the mode -- global, project or card -- and the caller already had
+  // it; only this field was not told. So a card-level override was invisible on
+  // the screen that exists to show whether the override took effect.
+  modeSource: ApgModeSource = 'global',
 ): ApgUiWorkItemSummary {
   const displayState = mode === 'off' ? 'off' : candidate.displayState
   const checkpointByName = new Map<string, CheckpointRow>()
@@ -696,13 +749,18 @@ function summaryFor(
     project: null,
     title: candidate.id,
     effective_mode: mode,
-    mode_source: 'global',
+    mode_source: modeSource,
     display_state: displayState,
     internal_state: displayState,
     risk: 'unknown',
     attention_reason: attentionReason({ ...candidate, displayState }),
     next_action: nextActionFor(displayState),
     producer_agent: null,
+    // NULL BECAUSE THE SIDECAR RECORDS NO ACCEPTER, and that is a fact worth
+    // showing rather than papering over (F-2). The 1.8 gap map calls this WP3:
+    // producer/verifier identity separation does not exist yet, so nothing can
+    // truthfully be named here. `acceptanceStatusFor` reads this field, so an
+    // item with no accepter can never display as accepted.
     accepter_agent: null,
     gate_progress: {
       passed: latestGates.filter((checkpoint) => checkpoint.result === 'PASS').length,
@@ -721,7 +779,7 @@ function summaryFor(
       unknown: claims.filter((claim) => claim.status === 'UNKNOWN').length,
       blocked: claims.filter((claim) => claim.status === 'BLOCKED_FROM_USE').length,
     },
-    acceptance_status: acceptanceStatusFor(displayState),
+    acceptance_status: acceptanceStatusFor(displayState, null),
     updated_at: toIso(candidate.updatedAt),
   }
 }
@@ -842,6 +900,9 @@ export function buildApgUiSummary(nowIso: string, mode: ApgMode): ApgUiSummary {
 export function buildApgWorkItemSummaries(
   mode: ApgMode,
   filters: {
+    /** Which scope decided `mode` (F-7). Passed through to every row so a card
+     *  or project override is visible on the screen that exists to show it. */
+    modeSource?: ApgModeSource
     project?: string
     state?: string
     attention?: boolean
@@ -861,7 +922,7 @@ export function buildApgWorkItemSummaries(
     // list (and buildApgWorkItemDetail's lookup below) reports as not found.
     let items = candidateIds(data, true)
       .map((id) => buildCandidateProjection(data, id))
-      .map((candidate) => summaryFor(candidate, mode))
+      .map((candidate) => summaryFor(candidate, mode, undefined, filters.modeSource ?? 'global'))
 
     // Project is deliberately always null until the sidecar owns a project field.
     if (filters.project !== undefined) items = []
@@ -896,6 +957,7 @@ export function buildApgWorkItemSummaries(
 export function buildApgWorkItemDetail(
   mode: ApgMode,
   workItemId: string,
+  modeSource: ApgModeSource = 'global',
 ): ApgWorkItemDetail | { error: string; notFound?: boolean } {
   const db = openApgKernelReadonly()
   if (!db) return { error: 'sidecar_unavailable' }
@@ -907,7 +969,7 @@ export function buildApgWorkItemDetail(
 
     const candidate = buildCandidateProjection(data, workItemId)
     const claims = claimsFor(candidate)
-    const summary = summaryFor(candidate, mode, claims)
+    const summary = summaryFor(candidate, mode, claims, modeSource)
     const transitions = data.transitions.filter(
       (row) => row.change_logical_id === workItemId,
     )
