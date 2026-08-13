@@ -34,6 +34,7 @@ import {
   buildSession, evaluateBlinding, canonicalise,
   type AdjudicationPacket, type BlindingResult, type OriginLabel,
 } from './adjudication.js'
+import { assertCalibrationStillValid } from './calibration-window.js'
 
 // ── Arm comparison ──────────────────────────────────────────────────────
 
@@ -422,6 +423,16 @@ export type ValueHypothesisResult =
   | 'FAIL'
   | 'NO_EVIDENCE_DUE_TO_LOW_VOLUME'
   | 'EVALUATION_WINDOW_DEGRADED'
+  /**
+   * A kalibrált küszöb lejárt, mert a fagyasztott készülék megváltozott.
+   *
+   * SAJÁT kimenet, nem `EVALUATION_WINDOW_DEGRADED`. Marveen pontosan azért
+   * kérte előre kimondani, mert ez az a fajta elavulás, amitől semmi nem
+   * hibázik: a küszöb tovább él, mint a rendszer, amire mérték, és senki nem
+   * veszi észre. Egy általános „degraded" címke alá söpörve pont ez a
+   * észrevehetetlenség maradna meg.
+   */
+  | 'CALIBRATION_EXPIRED'
 
 /** §1.4 / V4-F14. Frozen before the shadow window opens. */
 export interface ValueGateRegistration {
@@ -488,6 +499,10 @@ export function evaluateValueGate(
   ledger: Database.Database,
   sessionId: string,
   registration: ValueGateRegistration = DEFAULT_VALUE_GATE_REGISTRATION,
+  /** A FUTÁSKORI konfiguráció. Elhagyva nincs lejárat-ellenőrzés — ugyanaz az
+   *  elv, mint az `assertFrozenConfig`-nál: egy kapu, ami az első futást
+   *  lehetetlenné teszi, nem kapu. */
+  currentConfig?: { detectorConfigFingerprint: string; intakeSurfaceFingerprint: string },
 ): ValueGateResult {
   const blinding = evaluateBlinding(ledger, sessionId)
   const session = ledger.prepare(
@@ -572,6 +587,18 @@ export function evaluateValueGate(
         ? 'EVALUATION_WINDOW_DEGRADED'
         : 'FAIL',
       detail: `a vakítás státusza ${blinding.verdict} — a value gate csak VALID mellett minősíthető PASS-nak (§24.2)`,
+    }
+  }
+  // 1b. Is the calibration the thresholds rest on still valid?
+  //
+  // BEFORE the volume questions, deliberately. `minEligibleObservations` was
+  // sized for a particular frozen appliance; comparing a count against it after
+  // the appliance changed is not a weaker answer, it is an answer to a question
+  // nobody asked. Marveen's expiry condition, as a verdict rather than a note.
+  if (currentConfig) {
+    const validity = assertCalibrationStillValid(ledger, currentConfig)
+    if (!validity.ok) {
+      return { ...base, result: 'CALIBRATION_EXPIRED', detail: validity.reason }
     }
   }
   // 2a. Was eligibility ever established independently?
