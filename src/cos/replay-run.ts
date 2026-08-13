@@ -32,8 +32,22 @@
 import { createHash } from 'node:crypto'
 import type Database from 'better-sqlite3'
 
-/** §1.4.6: the two sides of the comparison. */
-export type ReplayArm = 'REACTIVE_CONTROL' | 'PROACTIVE_SHADOW'
+/**
+ * §1.4.6: the two sides of the comparison — plus a third that is not a side.
+ *
+ * CALIBRATION exists because of a measurement Marveen took on 2026-08-13: the
+ * 90-day corpus §26/3 asks for does not exist anywhere. The live Case layer is
+ * eight days deep on the personal side and six on the corporate one. So the
+ * eligible-observation VOLUME — the thing the 90 days was a proxy for — has to
+ * be measured forward rather than backward.
+ *
+ * A calibration run measures volume and NOTHING ELSE. Its outputs never enter an
+ * adjudication session, which is what keeps V4-F14's named FAIL out of reach:
+ * choosing a threshold after seeing RESULTS is manufacturing a PASS, and results
+ * are what adjudication produces. Volume is not a result. The firewall between
+ * them is enforced below rather than remembered.
+ */
+export type ReplayArm = 'REACTIVE_CONTROL' | 'PROACTIVE_SHADOW' | 'CALIBRATION'
 
 export interface ReplayRun {
   runId: string
@@ -75,7 +89,7 @@ export function ensureReplaySchema(db: Database.Database): void {
       sealed_at          INTEGER,
       output_digest      TEXT,
       output_count       INTEGER NOT NULL DEFAULT 0,
-      CHECK (arm IN ('REACTIVE_CONTROL','PROACTIVE_SHADOW'))
+      CHECK (arm IN ('REACTIVE_CONTROL','PROACTIVE_SHADOW','CALIBRATION'))
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_replay_corpus ON replay_runs(corpus_fingerprint, arm)`)
@@ -203,18 +217,23 @@ export function beginRun(
   if (existing) return { ok: false, reason: `ez a run azonosító már létezik: ${input.runId}` }
 
   if (input.arm === 'REACTIVE_CONTROL') {
+    // A CALIBRATION run counts here exactly as a shadow run does, and that is
+    // deliberate. It produces proactive output — unadjudicated, but seen — and
+    // a control built afterwards was built by someone who had seen it. The
+    // consequence falls out as a property worth having: calibration and
+    // measurement cannot share a corpus.
     const proactive = ledger.prepare(
-      `SELECT run_id FROM replay_runs
-        WHERE corpus_fingerprint = ? AND arm = 'PROACTIVE_SHADOW'
+      `SELECT run_id, arm FROM replay_runs
+        WHERE corpus_fingerprint = ? AND arm IN ('PROACTIVE_SHADOW','CALIBRATION')
         ORDER BY started_at LIMIT 1`,
-    ).get(input.corpusFingerprint) as { run_id: string } | undefined
+    ).get(input.corpusFingerprint) as { run_id: string; arm: string } | undefined
     if (proactive) {
       return {
         ok: false,
         reason:
-          `ezen a korpuszon már futott proaktív ág (${proactive.run_id}), ezért a reaktív kontroll `
-          + 'most már nem hozható létre: a §1.4.6 szerint a proaktív kimenet ismeretében '
-          + 'előállított baseline nem elfogadható kontroll',
+          `ezen a korpuszon már futott proaktív ág (${proactive.run_id}, ${proactive.arm}), ezért a `
+          + 'reaktív kontroll most már nem hozható létre: a §1.4.6 szerint a proaktív kimenet '
+          + 'ismeretében előállított baseline nem elfogadható kontroll',
       }
     }
   }
@@ -322,6 +341,15 @@ export function assertComparable(
   if (!control) reasons.push(`nincs ilyen kontroll-futás: ${controlRunId}`)
   if (!proactive) reasons.push(`nincs ilyen proaktív futás: ${proactiveRunId}`)
   if (control && proactive) {
+    // The calibration firewall, stated where it bites. A calibration run exists
+    // to size the window; letting one into an adjudication session would put the
+    // very observations that CHOSE the threshold inside the sample the threshold
+    // is applied to.
+    for (const r of [control, proactive]) {
+      if (r.arm === 'CALIBRATION') {
+        reasons.push(`a(z) ${r.runId} kalibrációs futás — kalibrációs kimenet nem kerülhet adjudikációba`)
+      }
+    }
     if (control.arm !== 'REACTIVE_CONTROL') reasons.push('a kontrollnak jelölt futás nem REACTIVE_CONTROL ágon van')
     if (proactive.arm !== 'PROACTIVE_SHADOW') reasons.push('a proaktívnak jelölt futás nem PROACTIVE_SHADOW ágon van')
     if (control.corpusFingerprint !== proactive.corpusFingerprint) {
