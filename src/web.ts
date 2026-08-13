@@ -31,6 +31,7 @@ import { startCapacityRoutingRunner } from './web/capacity-routing-runner.js'
 import { startContextGuardRunner } from './web/context-guard-runner.js'
 import { collectTokenUsage } from './web/token-usage.js'
 import { startCostOpsBackgroundTasks } from './costops/reliability-observation.js'  // LOCAL-FORK: costops seam (keep on rebase)
+import { startApgLiveFeed } from './apg/live-feed.js'  // LOCAL-FORK: apg seam (keep on rebase)
 import { startCosBackgroundTasks } from './cos/runtime.js'  // LOCAL-FORK: cos seam (keep on rebase)
 import { logger } from './logger.js'
 import { tryHandleAuth } from './web/routes/auth.js'
@@ -465,6 +466,17 @@ export function startWebServer(port = 3420): http.Server {
   const costOpsBackgroundIntervals = webOnly ? [] : startCostOpsBackgroundTasks()
   if (!webOnly) logger.info('CostOps background tasks started (reliability-snapshot: 24h poll + startup; collector sync: 15min due-check + startup)')
 
+  // LOCAL-FORK: apg seam (keep on rebase). APG 1.9 §35's Stage 1 PRECONDITION.
+  // This is the ONLY in-process caller of the APG kernel's live ingest; without
+  // it `a1_pilot.poll_and_ingest` is tested code with no caller, observe mode
+  // measures nothing, and the promotion window can never accumulate -- which is
+  // exactly the state the 1.8 conformance audit found. See
+  // src/apg/live-feed.ts, and note that the cycle is spawned ASYNCHRONOUSLY
+  // (the child calls this dashboard's own API; a synchronous spawn deadlocks the
+  // event loop that would have to serve it).
+  const apgFeedIntervals = webOnly ? [] : startApgLiveFeed()
+  if (!webOnly) logger.info('APG live feed started (15min due-check + startup; kernel cadence 1h, honestly inert when no kernel is installed)')
+
   // LOCAL-FORK: cos seam (keep on rebase). The autonomous COS loop (cosTick every
   // 6h). safeCosDeps() wires ONLY the rental adapter — radar price checks — and
   // NO outbound adapter, so nothing sends/buys autonomously until a real Gmail
@@ -586,6 +598,7 @@ export function startWebServer(port = 3420): http.Server {
     if (capabilityRunnerInterval) clearInterval(capabilityRunnerInterval)
     clearInterval(tokenCollectInterval)
     costOpsBackgroundIntervals.forEach(clearInterval)
+    apgFeedIntervals.forEach(clearInterval)
     return origClose(cb)
   }
 

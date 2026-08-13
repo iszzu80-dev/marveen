@@ -15,6 +15,16 @@ import {
   APG_CHECKPOINT_RESULTS,
   APG_KERNEL_VERIFICATION_STATUSES,
 } from '../apg/ui-projection.js'
+import { EXCLUDED_CLAIM_AUTHORITIES } from '../apg/completion-claim.js'
+import {
+  APG_FEED_STALL_AFTER_SECONDS, REQUIRED_OBSERVATION_DAYS, REQUIRED_ELIGIBLE_WORK_ITEMS,
+} from '../apg/feed-health.js'
+import { deriveExecutionId } from '../apg/execution-binding.js'
+
+/** The WP6 §15.3-d golden vectors, pinned identically in the kernel's own
+ *  tests/test_wp6_kanban_dispatch.py. See the contract block at the end. */
+const VECTOR_WITH_CONTEXT = 'ex-b7848fb7906a827ea7322381e6c37f89'
+const VECTOR_ALL_UNKNOWN = 'ex-a939ce43ca4c30f717c6eec6c4c398c0'
 
 /**
  * Where the kernel repo is on THIS machine, or null.
@@ -182,4 +192,89 @@ describe('F-10: the enforced archive gate holds when the sidecar is down', () =>
     expect(catchBlock).toMatch(/if \(state\.mode !== 'enforced'\) return/)
     expect(catchBlock.indexOf("state.mode !== 'enforced'")).toBeLessThan(catchBlock.indexOf('event.preventDefault()'))
   })
+})
+
+// ---------------------------------------------------------------------------
+// WP6 (§15.2, §15.3-e, §35). Three more places where the two repositories hold
+// the same value and only one of them can be edited at a time.
+// ---------------------------------------------------------------------------
+
+describe('WP6: the excluded-claim-authority set is one contract, not two', () => {
+  it.skipIf(KERNEL_SRC === null && !KERNEL_REQUIRED)(
+    `HEADLINE: Marveen's EXCLUDED_CLAIM_AUTHORITIES matches the kernel's CLAIM_LINK_POLICY [${KERNEL_SRC ?? NO_KERNEL_REASON}]`,
+    () => {
+      // §15.3-e's whole force is that a self-asserted `done` cannot become
+      // acceptance evidence. That rule is expressed twice -- as
+      // `CLAIM_LINK_POLICY` in the kernel and as `EXCLUDED_CLAIM_AUTHORITIES`
+      // here -- and a word present in one list and not the other would make a
+      // claim count as evidence on one side of the boundary and not the other.
+      const src = readFileSync(join(KERNEL_SRC as string, 'completion_verification.py'), 'utf8')
+      const start = src.indexOf('CLAIM_LINK_POLICY = {')
+      expect(start, 'CLAIM_LINK_POLICY not found in the kernel').toBeGreaterThanOrEqual(0)
+      const policy = src.slice(start, src.indexOf('\n}', start))
+
+      // The kernel writes (qualifying, excluded, wired). The FIRST frozenset is
+      // qualifying and must be EMPTY: no authority makes a completion claim
+      // into acceptance evidence, not even an operator's.
+      expect(policy).toMatch(/frozenset\(\),\s*\n\s*frozenset\(\{/)
+
+      const excluded = policy.slice(policy.indexOf('frozenset({'))
+      for (const authority of EXCLUDED_CLAIM_AUTHORITIES) {
+        expect(excluded, `${authority} is excluded here but not in the kernel`).toContain(authority)
+      }
+      // ...and nothing the kernel excludes is missing from this side.
+      for (const token of [...excluded.matchAll(/\b([A-Z][A-Z_]{4,})\b/g)].map(m => m[1])) {
+        if (token === 'PRESENT' || token === 'MISSING' || token === 'UNKNOWN') continue
+        expect(EXCLUDED_CLAIM_AUTHORITIES as readonly string[]).toContain(token)
+      }
+    },
+  )
+})
+
+describe('WP6: §35\'s three thresholds are one contract, not two', () => {
+  it.skipIf(KERNEL_SRC === null && !KERNEL_REQUIRED)(
+    `HEADLINE: the feed-health thresholds match the kernel's live_ingest constants [${KERNEL_SRC ?? NO_KERNEL_REASON}]`,
+    () => {
+      // feed-health.ts derives FRESH/STALLED and the promotion counts on the
+      // read side, so it needs the same numbers the kernel writes them against.
+      // A kernel that lengthened its stall window while this file did not would
+      // have the dashboard report STALLED about a feed the kernel calls fresh.
+      const src = readFileSync(join(KERNEL_SRC as string, 'live_ingest.py'), 'utf8')
+      const constant = (name: string): string => {
+        const match = src.match(new RegExp(`^${name} = (.+)$`, 'm'))
+        expect(match, `${name} not found in the kernel's live_ingest.py`).not.toBeNull()
+        return (match as RegExpMatchArray)[1].trim()
+      }
+      expect(constant('DEFAULT_CADENCE_SECONDS')).toBe('60 * 60')
+      expect(constant('DEFAULT_STALL_AFTER_SECONDS')).toBe('3 * DEFAULT_CADENCE_SECONDS')
+      expect(APG_FEED_STALL_AFTER_SECONDS).toBe(3 * 60 * 60)
+      expect(constant('REQUIRED_OBSERVATION_DAYS')).toBe(String(REQUIRED_OBSERVATION_DAYS))
+      expect(constant('REQUIRED_ELIGIBLE_WORK_ITEMS')).toBe(String(REQUIRED_ELIGIBLE_WORK_ITEMS))
+    },
+  )
+})
+
+describe('WP6: the execution_id derivation is one contract, not two', () => {
+  it.skipIf(KERNEL_SRC === null && !KERNEL_REQUIRED)(
+    `HEADLINE: both repositories pin the same golden execution ids [${KERNEL_SRC ?? NO_KERNEL_REASON}]`,
+    () => {
+      // §15.3-d's join works because both sides compute the id from the same
+      // seven facts. Neither implementation can import the other, so the
+      // contract is two golden vectors pinned in both test suites -- asserted
+      // here to be literally the same strings, so a "fix" on one side that
+      // quietly re-baselined its own vector is caught.
+      const kernelTest = readFileSync(
+        join(KERNEL_SRC as string, '..', 'tests', 'test_wp6_kanban_dispatch.py'), 'utf8')
+      expect(kernelTest).toContain(VECTOR_WITH_CONTEXT)
+      expect(kernelTest).toContain(VECTOR_ALL_UNKNOWN)
+      // The Marveen half computes them rather than quoting them.
+      expect(deriveExecutionId({
+        workItemId: 'card-9f2a', agentId: 'dex', role: 'producer',
+        createdAt: 1784281157, sessionId: 'sess-7', contextPacketHash: 'b'.repeat(64),
+      })).toBe(VECTOR_WITH_CONTEXT)
+      expect(deriveExecutionId({
+        workItemId: 'card-9f2a', agentId: 'dex', role: 'producer', createdAt: 1784281157,
+      })).toBe(VECTOR_ALL_UNKNOWN)
+    },
+  )
 })

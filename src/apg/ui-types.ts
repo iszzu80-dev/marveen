@@ -170,6 +170,24 @@ export interface ApgUiSummary {
     done_not_accepted: number
   }
   attention_items: ApgAttentionItem[]
+  /**
+   * APG 1.9 §35 (WP6): the live feed's own liveness signal, and the rollout
+   * stage that follows from it.
+   *
+   * §35's second Stage 1 requirement is that the signal be VISIBLE and its
+   * stall DETECTABLE, so it rides on the same summary the overview already
+   * renders rather than living behind a separate endpoint nobody opens. The
+   * field is optional only for the `mode: 'off'` early return, where no kernel
+   * is read at all; every other path fills it, including the error paths --
+   * "we could not read the feed" is itself a §35 answer (NOT_STARTED /
+   * OBSERVE_NOT_FED) and must not be an absent key.
+   *
+   * WHY IT SITS BESIDE `counts` RATHER THAN IN IT. `counts` is about work
+   * items. This is about whether anything is watching them at all, and a zero
+   * in `counts` means opposite things depending on it: with a FRESH feed it is
+   * "all clear", with a STALLED one it is "not looking".
+   */
+  feed?: import('./feed-health.js').ApgFeedHealth
   projection_error?: string
 }
 

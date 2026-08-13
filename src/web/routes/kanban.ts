@@ -19,9 +19,12 @@ import { listAgentNames, readAgentDisplayName, readAgentRemoteHost } from '../ag
 import { resolveCurrentSessionId } from '../transcript-sources.js'
 import { isAgentRunning } from '../agent-process.js'
 import { resolveKanbanDispatchTarget } from '../../kanban-dispatch.js'
-import { createDispatchSafe, recordAcceptedOutcomeForCard } from '../../costops/dispatch.js'
+import { createDispatchSafe, recordProducerCompletedOutcomeForCard } from '../../costops/dispatch.js'
 import { resolveDispatchIdentitySafe } from '../../costops/dispatch-identity.js'
 import { recordPacketMetadataSafe } from '../../costops/packet-metadata.js'
+import { deriveExecutionId } from '../../apg/execution-binding.js'
+import { recordCompletionClaimSafe, resolveClaimAuthority } from '../../apg/completion-claim.js'
+import { resolveApgPrincipal } from '../apg-principal.js'
 import {
   buildContextPacket, derivePacketMetadata, renderContextPacket, validateContextPacket,
   truncateExcerpt, MAX_SECTION_CHARS, type ContextPacket,
@@ -252,11 +255,43 @@ function fireKanbanDispatch(id: string): void {
     // its own role, which is the whole point of §11.1. §12.1-e stamps the SAME
     // word on the packet above, from the same origin knowledge, so the two can
     // never disagree about what this execution was dispatched as.
+    //
+    // APG 1.9 §15.3-d / §28.17 (WP6): the dispatch is BOUND to a runner
+    // execution identity, not merely measured. The id is DERIVED here, from
+    // this dispatch's own seven facts, using the same content digest the
+    // kernel's `execution_identity.execution_id_for` uses -- so the kernel can
+    // mint the identical identity later and REFUSE a value that disagrees. See
+    // src/apg/execution-binding.ts for why the derivation lives on both sides.
+    //
+    // Three things have to line up for the two derivations to agree, and all
+    // three are pinned here rather than left to coincidence:
+    //   * `dispatchedAtSec` is computed ONCE and both stamped on the row (via
+    //     createDispatchSafe's `now`) and hashed into the id. Reading the clock
+    //     twice would produce an id for a dispatch that does not exist.
+    //   * `sessionId` is the SAME expression the row stores, evaluated once.
+    //   * the packet metadata is derived BEFORE the dispatch row, because its
+    //     hash is one of the seven facts. It used to be derived after.
+    const dispatchedAtMs = Date.now()
+    const dispatchedAtSec = Math.floor(dispatchedAtMs / 1000)
+    const sessionId = readAgentRemoteHost(target) ? null : resolveCurrentSessionId(target)
+    const packetMetadata = derivePacketMetadata(packet, new Date(dispatchedAtMs).toISOString())
+    const executionId = deriveExecutionId({
+      workItemId: id,
+      agentId: target,
+      role: 'producer',
+      createdAt: dispatchedAtSec,
+      sessionId,
+      // WP7 owns the immutable delivery target; until it exists the kernel's
+      // reserved TARGET_REF_UNKNOWN is hashed, which is what the kernel does too.
+      targetRef: null,
+      contextPacketHash: packetMetadata.packetHash,
+    })
     const dispatchId = createDispatchSafe(getDb(), {
       source: 'kanban', role: 'producer', agent: target, cardId: id, project: card.project ?? null,
-      sessionId: readAgentRemoteHost(target) ? null : resolveCurrentSessionId(target),
+      sessionId,
+      executionId,
       ...resolveDispatchIdentitySafe(target),
-    })
+    }, dispatchedAtMs)
     // P2-B: record the packet metadata for this dispatch. Paths/hashes/sizes
     // only -- the packet BODY is never persisted. Best-effort by construction
     // (recordPacketMetadataSafe), so a metadata failure never blocks the send.
@@ -266,7 +301,7 @@ function fireKanbanDispatch(id: string): void {
     // for; `generatedAt` is stamped here, at the origin, because this module
     // may read a clock and context-packet.ts may not.
     recordPacketMetadataSafe(getDb(), dispatchId, {
-      ...derivePacketMetadata(packet, new Date().toISOString()),
+      ...packetMetadata,
       taskSizeSource: admission.taskSizeSource,
     })
     // WHAT THE AGENT NOW RECEIVES: the rendered packet, followed by the
@@ -457,13 +492,39 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
     if (moveKanbanCard(id, status, sort_order ?? 0, actor)) {
       // Wake the assigned agent once when the card enters in_progress.
       if (status === 'in_progress') fireKanbanDispatch(id)
-      // P2-A: kanban status->done is the agent-asserted acceptance signal. Mark
-      // every EXISTING dispatch for this card accepted; a card that was never
-      // instrumented (no dispatch row) gets no outcome -- old rows stay unknown,
-      // never backfilled. Best-effort so it can never block the card move.
+      // APG 1.9 §15.2 / §15.3-e (WP6): kanban status->done is a PRODUCER CLAIM.
+      //
+      // WHAT THIS USED TO DO: `recordAcceptedOutcomeForCard(getDb(), id)`,
+      // which wrote `outcome='accepted', evidence='kanban:done'` for every
+      // dispatch on the card -- and `cost_per_accepted_task` and
+      // `first_pass_acceptance` were computed off those rows. So "accepted"
+      // meant "a producer curled its own card to done", which is §28.16's RED
+      // condition in production.
+      //
+      // WHAT IT DOES NOW, in the order it does it:
+      //   1. Resolve WHO claimed, server-side (`resolveApgPrincipal`), never
+      //      from the request body's `actor`. §11.4 names the body-field
+      //      pattern as the thing to refuse and the 1.8 audit found it live.
+      //   2. Record the CLAIM with that authority, so the kernel can verify it
+      //      on its next feed cycle (§15.3-f). A dispatched agent's own move is
+      //      classified PRODUCER_SELF_ASSERTED and is EXCLUDED as evidence, the
+      //      same rule `receipt_chain` applies to an author-asserted test
+      //      result.
+      //   3. Record `producer_completed` -- NOT `accepted` -- for every
+      //      existing dispatch. There is no longer any path from a card move to
+      //      an `accepted` row; the only writer of that word requires a kernel
+      //      verification reference.
+      //
+      // Both writes are best-effort and neither can block the card move, which
+      // is unchanged. Also unchanged: a card that was never instrumented gets
+      // no outcome, and history is never backfilled.
       if (status === 'done') {
-        try { recordAcceptedOutcomeForCard(getDb(), id) } catch (err) {
-          logger.warn({ err, id }, 'P2-A: recordAcceptedOutcomeForCard failed (card move still succeeded)')
+        const resolved = resolveClaimAuthority(getDb(), id, resolveApgPrincipal(ctx.auth))
+        recordCompletionClaimSafe(getDb(), { cardId: id, source: 'kanban_done_move', resolved })
+        try {
+          recordProducerCompletedOutcomeForCard(getDb(), id, resolved.authority)
+        } catch (err) {
+          logger.warn({ err, id }, 'WP6: recordProducerCompletedOutcomeForCard failed (card move still succeeded)')
         }
       }
       json(res, { ok: true })

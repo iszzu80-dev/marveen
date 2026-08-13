@@ -36,8 +36,60 @@ export type DispatchSource =
 export type BillingMode =
   | 'subscription_included' | 'subscription_credit' | 'api_payg' | 'local_compute' | 'unknown'
 
+/**
+ * A dispatch's outcome. SIX words since WP6, and the sixth is the whole of
+ * §15.2.
+ *
+ * WHAT `accepted` USED TO MEAN, and why that had to end. The kanban done handler
+ * called `recordAcceptedOutcomeForCard`, which wrote `outcome='accepted',
+ * evidence='kanban:done'` for every dispatch on the card. `cost_per_accepted_task`
+ * and `first_pass_acceptance` were computed off those rows. So "accepted" -- in
+ * the only namespace with numbers attached to it -- meant "a producer curled its
+ * own card to done". §15.2 says in three lines that these are two different
+ * fields, and §28.16's RED condition is that sentence read backwards: "`done`
+ * automatikusan `accepted`-et jelent verification nélkül".
+ *
+ * SO THE TWO WORDS ARE NOW TWO WORDS:
+ *
+ *   'producer_completed'  a producer said it was done. Terminal for cost
+ *                         attribution -- the work package really did end, and
+ *                         the tokens really were spent -- and it is what the
+ *                         CostOps delivery KPIs count. It asserts NOTHING about
+ *                         verification.
+ *   'accepted'            APG acceptance: §15.2's "verification + acceptance
+ *                         contract satisfied". Written by exactly one caller,
+ *                         `recordApgAcceptedOutcomeForCard`, which requires a
+ *                         kernel verification reference and refuses without one.
+ *
+ * WHY RENAME RATHER THAN ADD A PARALLEL COLUMN. A parallel `apg_accepted` column
+ * beside an `accepted` that still meant "done" would have left the misleading
+ * word in place, still populated, still the default thing a new query joins on.
+ * The rename makes the old claim UNWRITABLE from the old path: there is no
+ * function that turns a kanban move into `accepted` any more, and
+ * `apg-done-not-accepted.test.ts` asserts that as an attack, not as a feature.
+ *
+ * THE COST OF THE RENAME, stated plainly: until the acceptance chain has a live
+ * writer on this deployment, `accepted` is zero and every APG-acceptance KPI
+ * reads unknown. That is not a regression in measurement -- it is the same
+ * measurement, finally labelled with what it measures. The delivery figures
+ * carry on under `producer_completed` without a gap.
+ */
 export type OutcomeKind =
-  | 'accepted' | 'retry' | 'failed' | 'cancelled' | 'unknown'
+  | 'accepted' | 'producer_completed' | 'retry' | 'failed' | 'cancelled' | 'unknown'
+
+/**
+ * The outcomes that mean "this work package reached its end", whoever said so.
+ * The CostOps delivery denominator: cost per unit of work DELIVERED, which is
+ * the question the cost ledger has always actually been answering.
+ */
+export const DELIVERY_COMPLETED_OUTCOMES: readonly OutcomeKind[] = ['accepted', 'producer_completed']
+
+/**
+ * The outcome that means §15.2 acceptance, alone. Kept as a named constant so a
+ * reader of a query can see WHICH of the two denominators it uses without
+ * having to know that 'accepted' stopped being the general one.
+ */
+export const APG_ACCEPTED_OUTCOMES: readonly OutcomeKind[] = ['accepted']
 
 /**
  * APG 1.9 §11.2 execution-principal ROLE, carried on the dispatch row.
@@ -112,7 +164,17 @@ export function initDispatchSchema(db: Database.Database): void {
   // costops/schema.ts). A pre-migration row keeps role NULL, which honestly
   // means "this dispatch predates role attribution", never a guessed 'producer'.
   try { db.exec('ALTER TABLE dispatches ADD COLUMN role TEXT') } catch { /* already exists */ }
+  // APG 1.9 §15.3-d / §28.17: the runner execution this dispatch IS. Derived
+  // here from the dispatch's own content (src/apg/execution-binding.ts) so the
+  // kernel can mint the same id from the same facts and refuse a disagreement;
+  // see that module's header for why the derivation lives on both sides. NULL
+  // means "this dispatch is not runner-bound", which for a pre-WP6 row is the
+  // truth and for a new one is a defect §28.17 names.
+  try { db.exec('ALTER TABLE dispatches ADD COLUMN execution_id TEXT') } catch { /* already exists */ }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_dispatches_agent ON dispatches(agent, created_at)`)
+  // "Which dispatches ran under this execution principal" -- §28.17's join, and
+  // the read behind `listUnboundDispatches`.
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_dispatches_execution ON dispatches(execution_id)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_dispatches_card_role ON dispatches(card_id, role, created_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_dispatches_session ON dispatches(agent, session_id, created_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_dispatches_card ON dispatches(card_id)`)
@@ -174,6 +236,13 @@ export interface DispatchInput {
    * dispatch-identity.ts applies to the model columns.
    */
   role?: DispatchRole | null
+  /**
+   * §15.3-d. The execution_id derived by `apg/execution-binding.deriveExecutionId`
+   * from THIS dispatch's facts. Optional so an origin that cannot derive one
+   * (no role, no card) stores NULL rather than a fabricated id -- an id derived
+   * from an incomplete identity would be stable, plausible and join to nothing.
+   */
+  executionId?: string | null
   cardId?: string | null
   project?: string | null
   sessionId?: string | null
@@ -197,15 +266,16 @@ export function createDispatch(db: Database.Database, input: DispatchInput, now:
   const createdAt = Math.floor(now / 1000)
   db.prepare(`
     INSERT INTO dispatches
-      (dispatch_id, created_at, source, role, card_id, agent, project, session_id, task_type,
+      (dispatch_id, created_at, source, role, execution_id, card_id, agent, project, session_id, task_type,
        model_profile, configured_model, runtime_model, provider, auth_profile, billing_mode)
     VALUES
-      (@dispatch_id, @created_at, @source, @role, @card_id, @agent, @project, @session_id, @task_type,
+      (@dispatch_id, @created_at, @source, @role, @execution_id, @card_id, @agent, @project, @session_id, @task_type,
        @model_profile, @configured_model, @runtime_model, @provider, @auth_profile, @billing_mode)
   `).run({
     dispatch_id: id,
     created_at: createdAt,
     source: input.source,
+    execution_id: input.executionId ?? null,
     // An unrecognised role is stored as NULL, not passed through: the column is
     // an enum in intent, and a typo'd value would read downstream as a role
     // that does not exist rather than as the absence of one.
@@ -359,22 +429,123 @@ export function recordOutcomeSafe(
 }
 
 /**
- * Wire `accepted` from kanban status->done: mark every EXISTING dispatch for
- * this card accepted (evidence 'kanban:done'). It only acts on dispatches that
- * already exist -- it NEVER creates a dispatch or backfills an outcome for a
- * card that was never instrumented (old rows stay unknown). Idempotent: a card
- * that already has an accepted outcome is skipped. Returns rows written.
+ * §15.2's FIRST field, wired from kanban status->done: mark every EXISTING
+ * dispatch for this card `producer_completed`.
+ *
+ * THIS FUNCTION REPLACES `recordAcceptedOutcomeForCard`, which wrote
+ * `outcome='accepted', evidence='kanban:done'` from this exact call site. The
+ * old name is deliberately NOT kept as an alias: an alias is precisely how the
+ * old claim would have survived the rename, still writing the word "accepted"
+ * from a producer's own curl. There is now no path from a kanban move to an
+ * `accepted` row -- see `recordApgAcceptedOutcomeForCard` for the only writer of
+ * that word, and `apg-done-not-accepted.test.ts` for the attack test that keeps
+ * it that way.
+ *
+ * `claimAuthority` names WHO the server resolved as the claimant (§15.3-e), so
+ * the evidence string distinguishes "an operator moved this card" from "the
+ * agent that was dispatched to it moved it". It is a classification, never a
+ * person: `apg/completion-claim.ts` resolves it and the kernel stores only the
+ * class plus a digest.
+ *
+ * Unchanged from the old function in every other respect: it only acts on
+ * dispatches that already exist, it NEVER creates one or backfills an outcome
+ * for a card that was never instrumented, and it is idempotent per card.
  */
-export function recordAcceptedOutcomeForCard(db: Database.Database, cardId: string, now: number = Date.now()): number {
+export function recordProducerCompletedOutcomeForCard(
+  db: Database.Database,
+  cardId: string,
+  claimAuthority: string,
+  now: number = Date.now(),
+): number {
   const rows = db.prepare('SELECT dispatch_id FROM dispatches WHERE card_id = ?').all(cardId) as { dispatch_id: string }[]
   let written = 0
   for (const r of rows) {
-    const already = db.prepare("SELECT 1 FROM dispatch_outcomes WHERE dispatch_id = ? AND outcome = 'accepted' LIMIT 1").get(r.dispatch_id)
+    const already = db.prepare(
+      "SELECT 1 FROM dispatch_outcomes WHERE dispatch_id = ? AND outcome = 'producer_completed' LIMIT 1",
+    ).get(r.dispatch_id)
     if (already) continue
-    recordOutcome(db, { dispatchId: r.dispatch_id, outcome: 'accepted', evidence: 'kanban:done' }, now)
+    recordOutcome(
+      db,
+      { dispatchId: r.dispatch_id, outcome: 'producer_completed', evidence: `kanban:done:${claimAuthority}` },
+      now,
+    )
     written++
   }
   return written
+}
+
+/**
+ * §15.2's SECOND field: APG acceptance. THE ONLY WRITER of `outcome='accepted'`.
+ *
+ * IT REFUSES WITHOUT A VERIFICATION REFERENCE, and that refusal is the whole
+ * function. The kernel's acceptance chain -- `change_runner`'s §13.1-g duty,
+ * which asks `execution_identity.approve` for a decision between two distinct
+ * principals -- is the only thing entitled to conclude acceptance, and it
+ * records that conclusion in `completion_verifications`. This writer copies
+ * that conclusion into the cost namespace so the two agree; it does not have an
+ * acceptance rule of its own, because a second rule would immediately become
+ * the easier one to satisfy.
+ *
+ * `verificationRef` is `<claim_id>|<runner_run_id>` -- the kernel verification
+ * row's own primary key, so any `accepted` row in this database can be traced
+ * back to the advance that granted it. A caller with no reference has nothing
+ * to copy and gets 0 rows written, never a courtesy acceptance.
+ *
+ * Today, on this deployment, this function writes nothing: the acceptance chain
+ * blocks on §18's unbuilt risk resolver and WP7's unbuilt delivery substrate, so
+ * no verification ever reaches ACCEPTED. That is the honest state, it is visible
+ * as `done_not_accepted`, and it is not worked around here.
+ */
+export function recordApgAcceptedOutcomeForCard(
+  db: Database.Database,
+  cardId: string,
+  verificationRef: string,
+  now: number = Date.now(),
+): number {
+  if (!verificationRef || !verificationRef.trim()) {
+    logger.warn(
+      { cardId },
+      'recordApgAcceptedOutcomeForCard refused: §15.2 acceptance needs a kernel verification reference, and a claim is not one',
+    )
+    return 0
+  }
+  const rows = db.prepare('SELECT dispatch_id FROM dispatches WHERE card_id = ?').all(cardId) as { dispatch_id: string }[]
+  let written = 0
+  for (const r of rows) {
+    const already = db.prepare(
+      "SELECT 1 FROM dispatch_outcomes WHERE dispatch_id = ? AND outcome = 'accepted' LIMIT 1",
+    ).get(r.dispatch_id)
+    if (already) continue
+    recordOutcome(
+      db,
+      { dispatchId: r.dispatch_id, outcome: 'accepted', evidence: `apg:verification:${verificationRef.trim()}` },
+      now,
+    )
+    written++
+  }
+  return written
+}
+
+/**
+ * §28.17's read: dispatches that started without a runner-minted execution.
+ *
+ * A count and a list rather than a boolean, because the interesting answer is
+ * "which ones" -- a pre-WP6 row is honestly unbound and a new one is a defect,
+ * and only the created_at tells them apart.
+ */
+export function listUnboundDispatches(
+  db: Database.Database,
+  opts: { since?: number; limit?: number } = {},
+): Array<{ dispatch_id: string; card_id: string | null; agent: string; created_at: number }> {
+  const conds = ['execution_id IS NULL']
+  const params: unknown[] = []
+  if (opts.since !== undefined) { conds.push('created_at >= ?'); params.push(opts.since) }
+  let sql = `SELECT dispatch_id, card_id, agent, created_at FROM dispatches
+             WHERE ${conds.join(' AND ')} ORDER BY created_at DESC`
+  if (opts.limit !== undefined) { sql += ' LIMIT ?'; params.push(opts.limit) }
+  return db.prepare(sql).all(...params) as Array<{
+    dispatch_id: string; card_id: string | null; agent: string; created_at: number
+  }>
 }
 
 // ---- §11.2 role reads ------------------------------------------------------
@@ -447,8 +618,19 @@ export function resolveOutcome(db: Database.Database, dispatchId: string): Outco
  * Outcomes that CLOSE a dispatch's attribution window. 'retry' and 'unknown'
  * are deliberately NOT terminal: a retried dispatch is still consuming tokens
  * for the same work package, and 'unknown' is merely the absence of a verdict.
+ *
+ * WP6 adds `producer_completed` HERE and not merely to the KPI denominators,
+ * and the reason is worth stating: this list is about TOKEN ATTRIBUTION, not
+ * about verification. A card the producer finished has stopped consuming tokens
+ * for that work package whether or not the acceptance chain later agrees, and
+ * leaving it open would have re-opened every attribution window the old
+ * `accepted` row used to close -- silently inflating cost per task by absorbing
+ * hours of later, unrelated session activity. Cost windows close on delivery;
+ * only the KPI's meaning depends on who accepted.
  */
-export const TERMINAL_OUTCOMES: readonly OutcomeKind[] = ['accepted', 'failed', 'cancelled']
+export const TERMINAL_OUTCOMES: readonly OutcomeKind[] = [
+  'accepted', 'producer_completed', 'failed', 'cancelled',
+]
 
 /**
  * Default hard cap on how long after its created_at a dispatch may still absorb
@@ -654,7 +836,20 @@ export function loadBillingMap(path: string = BILLING_MAP_PATH): BillingMap | nu
 
 // ---- cost_per_accepted_task ------------------------------------------------
 
+/**
+ * WHICH population the per-task figure was divided by (§15.2).
+ *
+ * Carried on every returned group rather than left to the reader, because the
+ * two denominators answer different questions and the numbers will diverge the
+ * moment the acceptance chain has a live writer: 'delivery_completed' is cost
+ * per unit of work a producer finished, 'apg_acceptance' is cost per unit of
+ * work the acceptance contract accepted.
+ */
+export type AcceptanceBasis = 'delivery_completed' | 'apg_acceptance'
+
 export interface CostPerAcceptedGroup {
+  /** WHICH denominator produced `acceptedTasks`. See `AcceptanceBasis`. */
+  acceptanceBasis: AcceptanceBasis
   agent: string | null
   modelProfile: string | null
   model: string | null
@@ -698,25 +893,62 @@ function periodOf(createdAtSec: number): string {
 }
 
 /**
- * cost_per_accepted_task: join accepted dispatches -> their token_usage (via
+ * Cost per COMPLETED task: join completed dispatches -> their token_usage (via
  * dispatch_id) -> pricing (costops/pricing.ts). Returns MARGINAL (actual token
- * $) and ALLOCATED (prorated subscription monthly / accepted tasks) as SEPARATE
+ * $) and ALLOCATED (prorated subscription monthly / completed tasks) as SEPARATE
  * values, never mixed. Grouped by agent, modelProfile, model, provider,
- * task_type, project, billingMode, period. Mirrors getTokenCostByAgent's
- * read-function shape; no new endpoint required for P2-A but it is a callable.
+ * task_type, project, billingMode, period.
+ *
+ * WHICH DENOMINATOR, and why the default is the one it is. `outcomes` defaults
+ * to `DELIVERY_COMPLETED_OUTCOMES` -- APG-accepted work AND producer-completed
+ * work -- because that is the population this figure has always actually been
+ * computed over. Before WP6 the kanban done handler wrote `accepted` for every
+ * finished card, so "accepted tasks" meant "delivered tasks" and the dollars
+ * per unit were dollars per unit DELIVERED. Renaming the outcome without
+ * widening the default here would have silently dropped the cost ledger to zero
+ * and made it look like a measurement failure rather than a vocabulary fix.
+ *
+ * Pass `APG_ACCEPTED_OUTCOMES` for the §15.2 reading -- cost per task the
+ * acceptance chain actually accepted. On this deployment that is currently an
+ * empty set, which is the honest answer and is reported as unknown rather than
+ * as zero cost.
+ *
+ * The exported name keeps `Accepted` for one reason only: it is the name the
+ * upstream-facing KPI contract, the benchmark pack and three tests already use,
+ * and churning it would have obscured the change that matters. `acceptanceBasis`
+ * on every returned group says which population produced the number, so no
+ * reader has to infer it from the function's name.
  */
 export function costPerAcceptedTask(
   db: Database.Database,
-  opts: { pricing?: PricingConfig | null; from?: number; to?: number } = {},
+  opts: {
+    pricing?: PricingConfig | null
+    from?: number
+    to?: number
+    outcomes?: readonly OutcomeKind[]
+  } = {},
 ): CostPerAcceptedGroup[] {
   const pricing = opts.pricing ?? loadPricingConfig().pricing
+  const outcomes = opts.outcomes ?? DELIVERY_COMPLETED_OUTCOMES
+  const acceptanceBasis: AcceptanceBasis =
+    outcomes.length === 1 && outcomes[0] === 'accepted' ? 'apg_acceptance' : 'delivery_completed'
 
-  const conds: string[] = ["o.outcome = 'accepted'"]
-  const params: unknown[] = []
+  const outcomePlaceholders = outcomes.map(() => '?').join(', ')
+  const conds: string[] = []
+  const params: unknown[] = [...outcomes]
   if (opts.from) { conds.push('d.created_at >= ?'); params.push(opts.from) }
   if (opts.to) { conds.push('d.created_at < ?'); params.push(opts.to) }
+  const where = conds.length ? `WHERE ${conds.join(' AND ')}` : ''
 
-  // LEFT JOIN token_usage: an accepted dispatch counts even when no token_usage
+  // The outcome join is a DISTINCT SUBQUERY, not a plain JOIN on the outcome
+  // rows. With two qualifying outcomes a dispatch carrying both would otherwise
+  // match twice and every one of its token rows would be summed twice --
+  // doubling marginal cost for exactly the dispatches that completed AND were
+  // accepted, which is the population this figure most needs to get right.
+  // `SELECT DISTINCT` over the whole row would not do: two genuinely identical
+  // token_usage rows for one dispatch are two real turns and must stay two.
+  //
+  // LEFT JOIN token_usage: a completed dispatch counts even when no token_usage
   // is attributed yet (marginal stays null; acceptedTasks still counts it).
   const rows = db.prepare(`
     SELECT d.dispatch_id, d.agent, d.model_profile, d.runtime_model, d.provider,
@@ -724,9 +956,12 @@ export function costPerAcceptedTask(
            tu.model AS tu_model, tu.input_tokens, tu.output_tokens,
            tu.cache_read_tokens, tu.cache_creation_tokens
     FROM dispatches d
-    JOIN dispatch_outcomes o ON o.dispatch_id = d.dispatch_id AND o.outcome = 'accepted'
+    JOIN (
+      SELECT DISTINCT dispatch_id FROM dispatch_outcomes
+      WHERE outcome IN (${outcomePlaceholders})
+    ) o ON o.dispatch_id = d.dispatch_id
     LEFT JOIN token_usage tu ON tu.dispatch_id = d.dispatch_id
-    WHERE ${conds.join(' AND ')}
+    ${where}
   `).all(...params) as AcceptedTokenRow[]
 
   // Group accumulator. Marginal is summed per token_usage row; acceptedTasks is
@@ -753,6 +988,7 @@ export function costPerAcceptedTask(
       acc = {
         key,
         g: {
+          acceptanceBasis,
           agent: r.agent, modelProfile: r.model_profile, model, provider: r.provider,
           taskType: r.task_type, project: r.project, billingMode: r.billing_mode, period,
         },

@@ -19,6 +19,10 @@ import { initInvoiceSchema } from './invoice.js'
 import { initDispatchSchema } from './dispatch.js'
 import { initPacketMetadataSchema } from './packet-metadata.js'
 import { initSaturationEventsSchema } from './saturation-events.js'
+// APG 1.9 WP6 (§15.2/§15.3-e). Mounted on THIS seam and not a new one: the
+// claim table joins `dispatches` by card_id and shares its lifecycle, and
+// docs/fork-upstream-policy.md §2a allows db.ts exactly one local-fork call.
+import { initCompletionClaimSchema } from '../apg/completion-claim.js'
 
 export function initCostOpsSchema(db: Database.Database): void {
   // CostOps v0.2: model/provider enrichment on the CORE token_usage table
@@ -331,4 +335,10 @@ export function initCostOpsSchema(db: Database.Database): void {
   // and, crucially, may NOT (an admission REFUSAL creates no dispatch at all,
   // which is exactly the case that was previously invisible to every read path).
   initSaturationEventsSchema(db)
+  // APG 1.9 WP6 (§15.2/§15.3-e): the producer's completion CLAIM, which the
+  // kanban done handler now writes instead of an `accepted` outcome. After
+  // initDispatchSchema because `resolveClaimAuthority` classifies a claim by
+  // reading `dispatches.role` -- a claim recorded against a table that does not
+  // exist yet would degrade to FLEET_TOKEN_UNATTRIBUTED for every card.
+  initCompletionClaimSchema(db)
 }

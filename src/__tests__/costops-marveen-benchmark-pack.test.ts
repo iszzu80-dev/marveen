@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { initDatabase, getDb } from '../db.js'
-import { createDispatch, recordAcceptedOutcomeForCard } from '../costops/dispatch.js'
+import { createDispatch, recordProducerCompletedOutcomeForCard } from '../costops/dispatch.js'
 import { buildMarveenBenchmarkPack, MARVEEN_BENCHMARK_CAVEATS } from '../costops/marveen-benchmark-pack.js'
 import type { PricingConfig } from '../costops/pricing.js'
 
@@ -39,11 +39,11 @@ describe('buildMarveenBenchmarkPack', () => {
   it('includes only agent === marveen groups, excludes other agents entirely', () => {
     const db = getDb()
     const mDispatch = createDispatch(db, { source: 'kanban', agent: 'marveen', cardId: 'm1', provider: 'anthropic', runtimeModel: 'claude-opus-4-8' }, ms(T0_SEC))
-    recordAcceptedOutcomeForCard(db, 'm1', ms(T0_SEC))
+    recordProducerCompletedOutcomeForCard(db, 'm1', 'OPERATOR_ATTESTED', ms(T0_SEC))
     insertTokenUsage({ agent: 'marveen', session_id: 's1', timestamp: T0_SEC + 1, input: 1_000_000, output: 0, model: 'claude-opus-4-8', dispatch_id: mDispatch })
 
     const bDispatch = createDispatch(db, { source: 'kanban', agent: 'buildfejleszto', cardId: 'b1', provider: 'anthropic', runtimeModel: 'claude-opus-4-8' }, ms(T0_SEC))
-    recordAcceptedOutcomeForCard(db, 'b1', ms(T0_SEC))
+    recordProducerCompletedOutcomeForCard(db, 'b1', 'OPERATOR_ATTESTED', ms(T0_SEC))
     insertTokenUsage({ agent: 'buildfejleszto', session_id: 's2', timestamp: T0_SEC + 1, input: 1_000_000, output: 0, model: 'claude-opus-4-8', dispatch_id: bDispatch })
 
     const pack = buildMarveenBenchmarkPack(db, T0_SEC, { pricing })
@@ -55,11 +55,11 @@ describe('buildMarveenBenchmarkPack', () => {
   it('marginal_cost sums only groups with a KNOWN marginal cost, and reports how many that covers', () => {
     const db = getDb()
     const d1 = createDispatch(db, { source: 'kanban', agent: 'marveen', cardId: 'm1', provider: 'anthropic', runtimeModel: 'claude-opus-4-8', taskType: 'a' }, ms(T0_SEC))
-    recordAcceptedOutcomeForCard(db, 'm1', ms(T0_SEC))
+    recordProducerCompletedOutcomeForCard(db, 'm1', 'OPERATOR_ATTESTED', ms(T0_SEC))
     insertTokenUsage({ agent: 'marveen', session_id: 's1', timestamp: T0_SEC + 1, input: 1_000_000, output: 0, model: 'claude-opus-4-8', dispatch_id: d1 })
 
     const d2 = createDispatch(db, { source: 'kanban', agent: 'marveen', cardId: 'm2', provider: 'anthropic', runtimeModel: 'unlisted-model', taskType: 'b' }, ms(T0_SEC))
-    recordAcceptedOutcomeForCard(db, 'm2', ms(T0_SEC))
+    recordProducerCompletedOutcomeForCard(db, 'm2', 'OPERATOR_ATTESTED', ms(T0_SEC))
     insertTokenUsage({ agent: 'marveen', session_id: 's2', timestamp: T0_SEC + 1, input: 500_000, output: 0, model: 'unlisted-model', dispatch_id: d2 })
 
     const pack = buildMarveenBenchmarkPack(db, T0_SEC, { pricing })
@@ -92,7 +92,7 @@ describe('buildMarveenBenchmarkPack', () => {
   it('deterministic: identical db state + inputs produce identical output on repeat calls', () => {
     const db = getDb()
     const d = createDispatch(db, { source: 'kanban', agent: 'marveen', cardId: 'm1', provider: 'anthropic', runtimeModel: 'claude-opus-4-8' }, ms(T0_SEC))
-    recordAcceptedOutcomeForCard(db, 'm1', ms(T0_SEC))
+    recordProducerCompletedOutcomeForCard(db, 'm1', 'OPERATOR_ATTESTED', ms(T0_SEC))
     insertTokenUsage({ agent: 'marveen', session_id: 's1', timestamp: T0_SEC + 1, input: 1_000_000, output: 0, model: 'claude-opus-4-8', dispatch_id: d })
     const a = buildMarveenBenchmarkPack(db, T0_SEC, { pricing })
     const b = buildMarveenBenchmarkPack(db, T0_SEC, { pricing })

@@ -78,28 +78,28 @@ describe('P2-C KPI surface: empty states are UNKNOWN, never 0', () => {
     makeDispatch()
     const row = kpis().rows[0]
     expect(row.dispatches).toBe(2)
-    expect(row.accepted_tasks).toBe(0)
+    expect(row.completed_tasks).toBe(0)
 
-    for (const k of ['first_pass_acceptance', 'retry_rate', 'failure_rate'] as const) {
+    for (const k of ['first_pass_completion', 'retry_rate', 'failure_rate'] as const) {
       expect(row[k].value).toBeNull()
       expect(row[k].state).toBe('unknown')
       expect(row[k].sample_size).toBe(0)
       expect(row[k].blocker).toBeTruthy()
     }
     // The specific trap: an absent outcome row is not a rejection.
-    expect(row.first_pass_acceptance.blocker).toMatch(/not a rejection/)
+    expect(row.first_pass_completion.blocker).toMatch(/not a rejection/)
   })
 
   it('3. accepted but no attributed tokens: marginal cost and tokens-per-task are unknown, not 0', () => {
     const d = makeDispatch()
     recordOutcome(getDb(), { dispatchId: d, outcome: 'accepted' }, NOW * 1000)
     const row = kpis().rows[0]
-    expect(row.accepted_tasks).toBe(1)
-    expect(row.cost_per_accepted_task.marginal.value).toBeNull()
-    expect(row.cost_per_accepted_task.marginal.state).toBe('unknown')
-    expect(row.cost_per_accepted_task.marginal.blocker).toMatch(/no priced token_usage/)
-    expect(row.tokens_per_accepted_task.value).toBeNull()
-    expect(row.tokens_per_accepted_task.blocker).toMatch(/no token_usage row/)
+    expect(row.completed_tasks).toBe(1)
+    expect(row.cost_per_completed_task.marginal.value).toBeNull()
+    expect(row.cost_per_completed_task.marginal.state).toBe('unknown')
+    expect(row.cost_per_completed_task.marginal.blocker).toMatch(/no priced token_usage/)
+    expect(row.tokens_per_completed_task.value).toBeNull()
+    expect(row.tokens_per_completed_task.blocker).toMatch(/no token_usage row/)
   })
 
   it('3b. an UNPRICED model leaves marginal cost unknown even though tokens exist', () => {
@@ -108,18 +108,18 @@ describe('P2-C KPI surface: empty states are UNKNOWN, never 0', () => {
     addTokenRow(d, 1_000_000, 100_000)
     const row = kpis().rows[0]
     // Tokens ARE measured; the money is not, and the two do not contaminate each other.
-    expect(row.tokens_per_accepted_task.value).toBe(1_100_000)
-    expect(row.cost_per_accepted_task.marginal.value).toBeNull()
-    expect(row.cost_per_accepted_task.marginal.state).toBe('unknown')
+    expect(row.tokens_per_completed_task.value).toBe(1_100_000)
+    expect(row.cost_per_completed_task.marginal.value).toBeNull()
+    expect(row.cost_per_completed_task.marginal.state).toBe('unknown')
   })
 
   it('4. no subscription cost line: ALLOCATED is unknown, not 0', () => {
     const d = makeDispatch()
     recordOutcome(getDb(), { dispatchId: d, outcome: 'accepted' }, NOW * 1000)
     const row = kpis().rows[0]
-    expect(row.cost_per_accepted_task.allocated.value).toBeNull()
-    expect(row.cost_per_accepted_task.allocated.state).toBe('unknown')
-    expect(row.cost_per_accepted_task.allocated.blocker).toMatch(/nothing can be allocated/)
+    expect(row.cost_per_completed_task.allocated.value).toBeNull()
+    expect(row.cost_per_completed_task.allocated.state).toBe('unknown')
+    expect(row.cost_per_completed_task.allocated.blocker).toMatch(/nothing can be allocated/)
   })
 
   it('5. no packet metadata: context_packet_fresh_tokens is unknown, not 0', () => {
@@ -158,8 +158,8 @@ describe('P2-C KPI surface: empty states are UNKNOWN, never 0', () => {
       VALUES ('anthropic-sub',?,?,'subscription','Sub',9000,'HUF','manual',?,'sub|2026-07',?)`).run(FROM, TO, NOW, NOW)
 
     const row = kpis().rows[0]
-    const marginal = row.cost_per_accepted_task.marginal
-    const allocated = row.cost_per_accepted_task.allocated
+    const marginal = row.cost_per_completed_task.marginal
+    const allocated = row.cost_per_completed_task.allocated
     expect(marginal.value).not.toBeNull()
     expect(allocated.value).not.toBeNull()
     expect(marginal.state).toBe('measured')
@@ -183,13 +183,13 @@ describe('P2-C KPI surface: empty states are UNKNOWN, never 0', () => {
 
     const row = kpis().rows[0]
     expect(row.dispatches).toBe(3)
-    expect(row.accepted_tasks).toBe(2)
+    expect(row.completed_tasks).toBe(2)
     // a was accepted with no retry; b was accepted but retried => not first pass.
-    expect(row.first_pass_acceptance.state).toBe('measured')
-    expect(row.first_pass_acceptance.value).toBeCloseTo(1 / 3, 4)
+    expect(row.first_pass_completion.state).toBe('measured')
+    expect(row.first_pass_completion.value).toBeCloseTo(1 / 3, 4)
     expect(row.retry_rate.value).toBeCloseTo(1 / 3, 4)
     expect(row.failure_rate.value).toBeCloseTo(1 / 3, 4)
-    expect(row.first_pass_acceptance.sample_size).toBe(3)
+    expect(row.first_pass_completion.sample_size).toBe(3)
   })
 
   it('7. fallback_rate: a measured 0 when routing events exist, unknown when none do', () => {
@@ -253,8 +253,8 @@ describe('P2-C KPI surface: empty states are UNKNOWN, never 0', () => {
     const rows = kpis().rows
     expect(rows).toHaveLength(2)
     const byAgent = new Map(rows.map(r => [r.agent, r]))
-    expect(byAgent.get('agent-a')!.first_pass_acceptance.value).toBe(1)
-    expect(byAgent.get('agent-b')!.first_pass_acceptance.value).toBe(0)
+    expect(byAgent.get('agent-a')!.first_pass_completion.value).toBe(1)
+    expect(byAgent.get('agent-b')!.first_pass_completion.value).toBe(0)
     expect(byAgent.get('agent-b')!.failure_rate.value).toBe(1)
     expect(byAgent.get('agent-a')!.model).toBe('test-model')
     expect(byAgent.get('agent-b')!.model).toBe('other-model')
@@ -267,10 +267,10 @@ describe('P2-C KPI surface: empty states are UNKNOWN, never 0', () => {
     addTokenRow(d, 500_000, 50_000)
     addTokenRow(d, 500_000, 50_000, NOW + 10)
     const row = kpis().rows[0]
-    expect(row.accepted_tasks).toBe(1)
+    expect(row.completed_tasks).toBe(1)
     expect(row.dispatches).toBe(1)
     // Tokens are summed, the denominator is not inflated.
-    expect(row.tokens_per_accepted_task.value).toBe(1_100_000)
+    expect(row.tokens_per_completed_task.value).toBe(1_100_000)
   })
 
   it('11. missing P2-A tables => an honest empty surface, not a crash', () => {

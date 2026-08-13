@@ -4,6 +4,10 @@ import Database from 'better-sqlite3'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+// APG 1.9 §35 (WP6): the live feed's liveness signal and §15.2's count, read
+// back from the kernel tables migration 0021 added. Both degrade to a null /
+// UNAVAILABLE answer on a kernel that predates them -- see feed-health.ts.
+import { buildApgFeedHealth, readDoneNotAcceptedCount } from './feed-health.js'
 import type {
   ApgAcceptanceStatus,
   ApgAttentionItem,
@@ -1082,7 +1086,17 @@ export function buildApgUiSummary(nowIso: string, mode: ApgMode): ApgUiSummary {
       accepted_today: candidates.filter((candidate) =>
         candidate.displayState === 'accepted'
         && toIso(candidate.updatedAt).slice(0, 10) === nowIso.slice(0, 10)).length,
-      done_not_accepted: candidates.filter((candidate) =>
+      // §15.2 (WP6): prefer the WRITER, fall back to the shape.
+      //
+      // Until WP6 nothing recorded a completion claim and nothing recorded an
+      // acceptance verdict, so this count could only be inferred from the shape
+      // of the transition log -- "the latest transition targeted `done` and the
+      // display state is not `accepted`". Both records now exist, and
+      // readDoneNotAcceptedCount reads them. It returns null on a kernel that
+      // predates migration 0021, and the old inference is kept for exactly that
+      // case: a false 0 would report perfect acceptance on the one deployment
+      // shape that cannot measure it.
+      done_not_accepted: readDoneNotAcceptedCount(db) ?? candidates.filter((candidate) =>
         candidate.transition?.to_state === 'done'
         && candidate.displayState !== 'accepted').length,
     }
@@ -1122,6 +1136,10 @@ export function buildApgUiSummary(nowIso: string, mode: ApgMode): ApgUiSummary {
       projection_version: 1,
       counts,
       attention_items: attentionItems,
+      // §35: rendered on every successful summary, because a `counts` block
+      // with a stalled feed behind it means the opposite of the same block with
+      // a live one -- "all clear" versus "not looking".
+      feed: buildApgFeedHealth(db, Math.floor((Date.parse(nowIso) || Date.now()) / 1000)),
       ...(readErrors.length > 0
         ? { projection_error: `partial projection: ${readErrors.length} table(s) unreadable — ${readErrors[0]}` }
         : {}),

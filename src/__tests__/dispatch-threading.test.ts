@@ -40,9 +40,24 @@ describe('P2-A origin (a) kanban', () => {
     // dispatchId is passed as the 6th arg of createAgentMessage (after traceCtx).
     expect(KANBAN).toMatch(/createAgentMessage\(MAIN_AGENT_ID, target, content, null, null, dispatchId\)/)
   })
-  it('records the accepted outcome on kanban status->done', () => {
+  // APG 1.9 §15.2 (WP6). This assertion USED to require
+  // `recordAcceptedOutcomeForCard(getDb(), id)` on the done branch -- i.e. it
+  // pinned the very claim §28.16 names as a RED condition. It now pins the
+  // opposite: the done branch writes a producer CLAIM and a
+  // `producer_completed` outcome, and the word `accepted` does not appear on
+  // this path at all. The runtime attack test is apg-done-not-accepted.test.ts.
+  it('records a producer COMPLETION claim on kanban status->done, never an acceptance', () => {
     expect(KANBAN).toMatch(/if \(status === 'done'\)/)
-    expect(KANBAN).toMatch(/recordAcceptedOutcomeForCard\(getDb\(\), id\)/)
+    expect(KANBAN).toMatch(/recordCompletionClaimSafe\(getDb\(\), \{ cardId: id, source: 'kanban_done_move', resolved \}\)/)
+    expect(KANBAN).toMatch(/recordProducerCompletedOutcomeForCard\(getDb\(\), id, resolved\.authority\)/)
+    // The claimant is resolved SERVER-side from the credential, never from the
+    // request body's `actor` field (§11.4).
+    expect(KANBAN).toMatch(/resolveClaimAuthority\(getDb\(\), id, resolveApgPrincipal\(ctx\.auth\)\)/)
+    // The old writer is not IMPORTED here any more. Matched on the import list
+    // rather than on the whole file, because the handler keeps a comment naming
+    // the function it replaced -- the history is the most useful line in that
+    // block and a blunter assertion would have deleted it.
+    expect(KANBAN).not.toMatch(/import \{[^}]*recordAcceptedOutcomeForCard/)
   })
 })
 
@@ -102,7 +117,12 @@ describe('P2-A db wiring', () => {
 describe('P2-A follow-on: every origin populates session_id', () => {
   it('kanban resolves the target agent session, NULL for a remote agent', () => {
     expect(KANBAN).toMatch(/import \{ resolveCurrentSessionId \} from '\.\.\/transcript-sources\.js'/)
-    expect(KANBAN).toMatch(/sessionId: readAgentRemoteHost\(target\) \? null : resolveCurrentSessionId\(target\)/)
+    // WP6 hoisted this out of the createDispatchSafe literal into a `const`,
+    // because the §15.3-d execution-id derivation has to hash the SAME value the
+    // row stores -- evaluating the resolver twice would derive an id for a
+    // dispatch that does not exist. The expression itself is unchanged.
+    expect(KANBAN).toMatch(/const sessionId = readAgentRemoteHost\(target\) \? null : resolveCurrentSessionId\(target\)/)
+    expect(KANBAN).toMatch(/createDispatchSafe\(getDb\(\), \{[\s\S]*?\n\s*sessionId,/)
   })
 
   it('the router resolves the target agent session, NULL for a remote host', () => {
