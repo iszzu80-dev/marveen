@@ -1,6 +1,6 @@
-# A 08-12-es teljes review remediációja — három hullám, két repó
+# A 08-12-es teljes review remediációja — négy hullám, két repó
 
-**Dátum:** 2026-08-13 · **Ág:** `claude/costops-agp-lean-review-mksxlj`
+**Dátum:** 2026-08-13 (négy hullám) · **Ág:** `claude/costops-agp-lean-review-mksxlj`
 **Előzmény:** `audits/costops-lean-optimization-full-review-2026-08-12.md` és `marveen-apg-kernel/audits/apg-1.8-wp1-review-2026-08-12.md` (a review maga)
 **Kérte:** Istvan — „állj neki a javításoknak", majd „fuss meg egy javító kört, dokumentald és pushold fel"
 
@@ -8,13 +8,14 @@
 
 ## 0. Mi zárult le
 
-A review **mind az 5 kritikus, mind a 17 HIGH és 21 MEDIUM/LOW** találata javítva van, ~230 új regressziós teszttel, három hullámban:
+A review **mind az 5 kritikus, mind a 17 HIGH és 21 MEDIUM/LOW** találata javítva van, és a félretett **hat tulajdonosi döntés is megszületett és végrehajtásra került** — összesen ~270 új regressziós teszttel, négy hullámban:
 
 | Hullám | Commitok | Tartalom |
 |---|---|---|
 | 1. (kritikus+high, mag) | `a2bd11c`, `3c7fe1b`, `b762478` (private) · `9737adb` (kernel) | számla-folyamat, collectors, vészleállító, kernel ERROR+pack-root |
 | 2. (high, élesítés) | `b0064d3`, `1ec9b85` (private) | routing-sweep élesítés, státusz-szótár |
-| 3. (medium sweep) | e dokumentum commitjai (private) · `befef8c` (kernel) | 21 medium/low négy csomagban |
+| 3. (medium sweep) | `19533c1`, `e005cce`, `0df1f69` (private) · `befef8c` (kernel) | 21 medium/low négy csomagban |
+| 4. (tulajdonosi döntések) | e dokumentum commitjai (private) · `3157dd8` (kernel) | budget-bázis, fx-migráció, knob-törlés, restore, P2-B határ, evidencia-címkék |
 
 Tesztbázis a sweep végén: **marveen-private** 6100+ teszt zöld (a 3 ismert root-sandbox műtermék mellett — chmod/ERR-trap root alatt, a review 0. szakasza dokumentálja), `tsc --noEmit` tiszta. **Kernel** 485 teszt, a 124+9 környezet-csatolt bukás halmaza bájtra azonos a review-előtti baseline-nal; a determinisztikus mag most már 44+ hermetikus teszttel fut bármely gépen.
 
@@ -24,7 +25,7 @@ A review megfigyelése az volt, hogy a hibák a modulok közötti **varratokon**
 
 - **egy fogalom — egy definíció:** az import-státusz partíciót a szótár gazdája (`collectors/types.ts`) definiálja, mind az öt fogyasztó onnan olvassa; az egyenlő-confidence összegzést a `ledger.ts` egyetlen exportált seam-je (`resolveSourceTotal`) adja mind a négy felületnek; a peak-since-top-up logika egy helyen él.
 - **a guard oda kerül, ahol az összes út átmegy:** a lezárt-hónap védelem a sync-be, az overlay-kapuzás a `resolveRuntimeModel`-be, a lock a collector-sync törzsébe.
-- **a kapcsoló vagy kapcsol, vagy nincs:** `automaticFallback` és `limitedThreshold` bekötve; a halott example-scaffoldok törölve; a maradék három routing-knob sorsa tulajdonosi döntésként dokumentálva.
+- **a kapcsoló vagy kapcsol, vagy nincs:** `automaticFallback` és `limitedThreshold` bekötve; a halott example-scaffoldok és — a negyedik hullámban — a három olvasó nélküli routing-knob törölve, a plafonok kód-konstansként maradnak.
 
 ## 2. Harmadik hullám (medium sweep) — mi változott
 
@@ -65,15 +66,32 @@ A review megfigyelése az volt, hogy a hibák a modulok közötti **varratokon**
 - **M9** — receipt-kiválasztás `created_at DESC, rowid DESC` tiebreakkel (a `transitions.current_state` mintája).
 - **L2** — a `STATUS_VALUES` végre tartalmazza az `AMBIGUOUS`-t, amit a modul maga emittál.
 
-## 3. Tudatosan nyitva hagyva (tulajdonosi döntést igényel)
+## 3. A hat tulajdonosi döntés — meghozva és végrehajtva (negyedik hullám)
 
-| Találat | Miért vár döntésre |
+A harmadik hullám hat tételt tett félre, mert nem korrektségi, hanem szándék-kérdések voltak. Istvan mind a hatra rábólintott a javasolt irányban; a végrehajtásuk ebben a hullámban zárult le.
+
+**1. Budget-bázis (COS-CORE-M3) — a headline a kanonikus, minden hatókörre.**
+A keret-figyelmeztetést az operátor a headline költés-szám mellett olvassa ugyanazon a képernyőn, tehát azzal kell egyeznie; és a „részek összege = egész" invariánsnak állnia kell. A `global` hatókör mostantól ugyanazokat az `all_sources` sorokat összegzi, mint a provider/kategória/forrás; a `BudgetStatus` új `spend_basis` mezője megnevezi a bázist, a `product`/`agent` pedig őszintén `not_resolved`. Ellenőrizve, hogy a két bázis **ma sem** egyenértékű (eltérő feloldó; a manual források kiesnek, ha a providernek van provider-derived forrása; a plan-estimate sorok kezelése is eltér) — a példa-fixtúrán a globális 18 000-ről 40 000-re javult, és a provider-részek pontosan kiadják.
+
+**2. Fx-forrás (COS-OPS-M6) — nem volt nyitott kérdés, csak befejezetlen migráció.**
+A `fx-config.ts` már migrál: ha nincs `costops-fx.json`, az örökölt render-pricing értékeiből veti el. A kanonikus otthon tehát ki volt jelölve — az Anthropic, GitHub és DeepSeek collector viszont még a render-pricingből olvasott. Mindhárom átállt a `loadFxRates()`-re, a guard-üzenetek a valódi forrást nevezik meg, a render-pricing fx-mezői pedig „legacy migration seed only" jelölést kaptak. Ezzel a Render-config kitakarítása nem nullázhatja többé három collector árfolyamát.
+
+**3. A három halott routing-kapcsoló (OPT-H2 maradéka) — törölve.**
+`trustedProvidersOnly`, `maxFallbacksPerProfile`, `maxAutomaticFallbacksPerDispatch` eltűnt a típusból, a defaultokból, a normalizálóból, az audit-kulcslistából és a committolt example-ből; a plafonok kód-konstansok maradnak (`MAX_AUTO_FALLBACKS_PER_PACKAGE = 1`, `MAX_FALLBACK_CANDIDATES = 2`), és egy komment rögzíti, hogy ez szándékos — ne kerüljenek vissza configként. A normalizáló mezőnkénti whitelist, így a lemezen maradt régi kulcsok migráció nélkül lekopnak; a `writeOptimizationConfig` mostantól normalizálva írja a routing blokkot, hogy egy PATCH ne csempészhesse vissza őket. Az eltérés a spec „javasolt sémájától" az as-buildben dokumentálva (a követelmény-dokumentumot nem írtuk át).
+
+**4. `lastEnabledConfiguration` restore (OPT-M4) — megépítve.**
+A master visszakapcsolásakor, ha van tárolt konfiguráció, a panel felajánlja a visszaállítást (preset + modulok + routing), a meglévő confirm-vokabuláriummal, mindkét nyelven. A tárolt konfiguráció **nem kerüli meg** a függőség-validációt: a beolvasáskor normalizálódik (a preset-címke is újraszámolódik), a meglévő preview-úton az operátor látja a korrigált modul-térképet, majd az írás harmadszor is validál.
+
+**5. P2-B origó-határ (OPT-M6) — megerősítve szándékos, dokumentálva.**
+A phase-2 as-build új szakasza megnevezi, hol van bekötve az admission gate és a packet-metaadat, miért nincs a másik három origón (nincs explicit méret-jel, és a spec tiltja a becslést — a kapuzás ott viselkedés-semleges lenne, ráadásul feltételezést írna megfigyelésként), és mi kellene a bekötésükhöz.
+
+**6. A kernel drive-szkriptje (KERNEL-M6) — őszinte címkék + at-rest audit.**
+A szkript megmarad, de szótáron belüli, vállalható értékeket ír: `commit_chain_status`/`runtime_status`/`verdict` → `UNKNOWN` (ebben a kernelben a CONSISTENT két függetlenül megfigyelt locator egyezését jelenti; a szkriptnek egy átmásolt sha-ja van és semmit sem próbál — az UNKNOWN itt a *kiszámolt* válasz, nem kitérés), `receipt_type` → `POST_OBSERVATION_RECEIPT`, és a `GATED` lista `CITED`-re át, mert a régi név gate-futást állított. A `store.check_integrity` új `column_vocabularies` ellenőrzést kapott, amely a legális halmazokat a gazdamoduljaikból olvassa (nem mint egy második, driftelő másolat), és az `a1_pilot` receipt-típusai mostantól a store halmazának aliasai. Egy AST-szken teszt bukik, ha a kitalált literálok — vagy egy legális, de ki nem érdemelt `OBSERVED`/`PASS`/`CONSISTENT` — visszatérnének.
+
+## 4. Ami ezután is nyitva marad
+
+| Tétel | Mit igényel |
 |---|---|
-| COS-CORE-M3 (budget-scope bázis) | El kell dönteni, melyik bázis kanonikus: `operational_spend` vs. headline `all_sources` — a kettő szándékosan különbözik |
-| COS-OPS-M6 (fx-forrás egységesítés) | A Render plan-pricing `fx_usd_huf` vs. `costops-fx.json`: melyik az fx-tény kanonikus otthona; érinti a collector-configok migrációját |
-| OPT-M4 (`lastEnabledConfiguration` restore) | UI/termék-döntés: visszakapcsoláskor felajánlott restore a spec §8.1/§9 szerint — a mező írása kész, olvasója erre vár |
-| OPT-M6 (P2-B a többi origón) | Megerősítve szándékos: a méret-jel csak kanban-címkéből jön (phase2-p2b spec, „unmarked ⇒ default, do not guess large") — a többi origó kapuzása jel nélkül viselkedés-semleges lenne |
-| OPT-H2 maradéka (3 halott routing-knob) | `maxAutomaticFallbacksPerDispatch` bekötése a phase-3 „ceilings, not defaults" hard-limitjét tenné configból emelhetővé; `trustedProvidersOnly`/`maxFallbacksPerProfile` enforcement-pont nélkül — törlés vagy bekötés tulajdonosi döntés |
-| KERNEL-M6 (`drive_marveen_work.py` szótáron kívüli evidencia) | A szkript producer-asserted „VERIFIED/PASS" sorai tartalmi kérdés: mit szabad a kernelbe táplálnia — a review rögzíti, a döntés a tulajdonosé |
-
-A review LOW-találatai közül a sweepekben mellékesen több lezárult (pl. a ledger `lastFailStmt` fantom-státusza, a receipt-chain státuszlista); a maradék LOW-k a két review-dokumentumban élnek tovább, prioritásukkal együtt.
+| A kernel hét már beírt, fabrikált sora | Append-only store: a javított szkript újrafuttatása no-op rájuk. Tulajdonosi döntés kell: őszinte újra-ingest új run-címke alatt, vagy dokumentált erratum |
+| `execution_receipts` proveniencia-oszlop | Nincs a `claims.source_type`-nak megfelelő mező, így a „producer-asserted" csak a `receipt_type`-ból következtethető; és ma semmilyen kódút nem visz tárolt receiptet a `claim_verification` authority-szabályai elé — sémabővítés kérdése |
+| A review maradék LOW-találatai | Több mellékesen lezárult a sweepekben (pl. a ledger `lastFailStmt` fantom-státusza, a receipt-chain státuszlista); a többi a két review-dokumentumban él tovább, prioritással |
