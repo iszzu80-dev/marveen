@@ -38,6 +38,33 @@ export type BillingMode =
 export type OutcomeKind =
   | 'accepted' | 'retry' | 'failed' | 'cancelled' | 'unknown'
 
+/**
+ * APG 1.9 §11.2 execution-principal ROLE, carried on the dispatch row.
+ *
+ * §11.2 requires an execution identity whose `role` is one of producer /
+ * verifier / executor / owner, and §9.3's dual-sided acceptance plus §26's
+ * first invariant ("an agent may not accept its own final output") are
+ * un-expressible without it: before this column every dispatch looked the same,
+ * so nothing in the store could say which agent AUTHORED a work package and
+ * which one merely ran something on its behalf.
+ *
+ * This is the Marveen half only. It is not a cryptographic identity and does
+ * not pretend to be: §11.1 is explicit that a shared bearer token proves
+ * nothing. What it IS: the role is decided SERVER-side at the origin, from the
+ * origin's own knowledge (which agent the card was dispatched to, which agent
+ * the router is delivering to), never from a self-declared request field -- so
+ * it cannot be spoofed by the agent it describes, which is exactly the property
+ * §11.1 says `from_agent` lacks.
+ *
+ * 'verifier' and 'owner' are declared and unused today: no verification or
+ * owner-decision dispatch exists yet. That absence is deliberate and visible --
+ * ui-projection.ts's verifier/accepter fields resolve to null BECAUSE no such
+ * dispatch row exists, not because the value is hardcoded.
+ */
+export type DispatchRole = 'producer' | 'verifier' | 'executor' | 'owner'
+
+export const DISPATCH_ROLES: readonly DispatchRole[] = ['producer', 'verifier', 'executor', 'owner']
+
 // ---- schema (idempotent boot DDL; invoked via the CostOps seam) ------------
 
 /**
@@ -70,7 +97,13 @@ export function initDispatchSchema(db: Database.Database): void {
       billing_mode     TEXT
     )
   `)
+  // APG 1.9 §11.2 execution-principal role. Additive, nullable, forward-only --
+  // the same idempotent-ALTER convention every other CostOps column uses (see
+  // costops/schema.ts). A pre-migration row keeps role NULL, which honestly
+  // means "this dispatch predates role attribution", never a guessed 'producer'.
+  try { db.exec('ALTER TABLE dispatches ADD COLUMN role TEXT') } catch { /* already exists */ }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_dispatches_agent ON dispatches(agent, created_at)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_dispatches_card_role ON dispatches(card_id, role, created_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_dispatches_session ON dispatches(agent, session_id, created_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_dispatches_card ON dispatches(card_id)`)
 
@@ -124,6 +157,13 @@ export function initDispatchSchema(db: Database.Database): void {
 export interface DispatchInput {
   source: DispatchSource
   agent: string
+  /**
+   * §11.2 execution role. Optional so an un-migrated / un-role-aware caller
+   * stores NULL rather than a fabricated default -- "we do not know what this
+   * agent was acting as" has exactly one spelling, the same discipline
+   * dispatch-identity.ts applies to the model columns.
+   */
+  role?: DispatchRole | null
   cardId?: string | null
   project?: string | null
   sessionId?: string | null
@@ -147,15 +187,19 @@ export function createDispatch(db: Database.Database, input: DispatchInput, now:
   const createdAt = Math.floor(now / 1000)
   db.prepare(`
     INSERT INTO dispatches
-      (dispatch_id, created_at, source, card_id, agent, project, session_id, task_type,
+      (dispatch_id, created_at, source, role, card_id, agent, project, session_id, task_type,
        model_profile, configured_model, runtime_model, provider, auth_profile, billing_mode)
     VALUES
-      (@dispatch_id, @created_at, @source, @card_id, @agent, @project, @session_id, @task_type,
+      (@dispatch_id, @created_at, @source, @role, @card_id, @agent, @project, @session_id, @task_type,
        @model_profile, @configured_model, @runtime_model, @provider, @auth_profile, @billing_mode)
   `).run({
     dispatch_id: id,
     created_at: createdAt,
     source: input.source,
+    // An unrecognised role is stored as NULL, not passed through: the column is
+    // an enum in intent, and a typo'd value would read downstream as a role
+    // that does not exist rather than as the absence of one.
+    role: input.role && DISPATCH_ROLES.includes(input.role) ? input.role : null,
     card_id: input.cardId ?? null,
     agent: input.agent,
     project: input.project ?? null,
@@ -321,6 +365,62 @@ export function recordAcceptedOutcomeForCard(db: Database.Database, cardId: stri
     written++
   }
   return written
+}
+
+// ---- §11.2 role reads ------------------------------------------------------
+
+/**
+ * The agents that acted in each §11.2 role on one kanban card, newest dispatch
+ * wins. A role with no dispatch row resolves to null -- which is the honest
+ * answer and the reason ui-projection.ts can stop hardcoding one: today only
+ * 'producer' is ever written (the kanban origin), so verifier/owner come back
+ * null BECAUSE no verification or owner-decision dispatch exists, not because
+ * the projection decided to print null.
+ *
+ * Read-only and defensive: called from a projection path and from the
+ * scope-override authority check, neither of which may throw on a DB that
+ * predates the `role` column.
+ */
+export interface CardRoleAgents {
+  producer: string | null
+  verifier: string | null
+  owner: string | null
+}
+
+export function resolveCardRoleAgents(db: Database.Database, cardId: string): CardRoleAgents {
+  const out: CardRoleAgents = { producer: null, verifier: null, owner: null }
+  const rows = db.prepare(
+    `SELECT role, agent FROM dispatches
+     WHERE card_id = ? AND role IS NOT NULL
+     ORDER BY created_at DESC, rowid DESC`
+  ).all(cardId) as { role: string; agent: string }[]
+  for (const r of rows) {
+    if (r.role === 'producer' && out.producer === null) out.producer = r.agent
+    if (r.role === 'verifier' && out.verifier === null) out.verifier = r.agent
+    if (r.role === 'owner' && out.owner === null) out.owner = r.agent
+  }
+  return out
+}
+
+/**
+ * EVERY agent that has ever produced against this card (not just the newest).
+ * §24.0.5's prohibition is on the producer/worker/chain downgrading its own
+ * scope, and a card handed between two agents has two producers -- taking only
+ * the latest would let the earlier one downgrade the card it authored.
+ */
+export function listCardProducerAgents(db: Database.Database, cardId: string): string[] {
+  const rows = db.prepare(
+    `SELECT DISTINCT agent FROM dispatches WHERE card_id = ? AND role = 'producer'`
+  ).all(cardId) as { agent: string }[]
+  return rows.map((r) => r.agent)
+}
+
+/** The project-scope counterpart. `dispatches.project` is stamped by the kanban origin. */
+export function listProjectProducerAgents(db: Database.Database, project: string): string[] {
+  const rows = db.prepare(
+    `SELECT DISTINCT agent FROM dispatches WHERE project = ? AND role = 'producer'`
+  ).all(project) as { agent: string }[]
+  return rows.map((r) => r.agent)
 }
 
 /** Resolve the current outcome for a dispatch. No outcome row => 'unknown'. */

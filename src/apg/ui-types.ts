@@ -305,6 +305,21 @@ export interface ApgScopeOverride {
   scope_id: string
   mode: 'inherit' | ApgMode
   updated_at: string
+  /**
+   * SERVER-STAMPED principal attribution (`session:<user>`, `device:<name>`,
+   * `fleet_token:shared`, ...). Before APG 1.9 WP3 this was whatever the
+   * request body's `actor` field said -- see apg-principal.ts for why that
+   * distinction is the whole point of §11.
+   */
   updated_by: string
   reason: string
+  /** The caller's self-declared actor name, kept only as a labelled claim. */
+  claimed_actor?: string
+  /** 'operator' | 'fleet' | 'peer' | 'anonymous' -- see apg-principal.ts. */
+  principal_class?: string
+  /**
+   * §24.0.5's time bound. Present ONLY on a downgrade; once it passes, the
+   * scope resolves back to the stricter parent mode with no revoke step.
+   */
+  expires_at?: string
 }

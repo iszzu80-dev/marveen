@@ -24,6 +24,7 @@ import { resolveDispatchIdentitySafe } from '../../costops/dispatch-identity.js'
 import { recordPacketMetadataSafe } from '../../costops/packet-metadata.js'
 import { buildContextPacket, derivePacketMetadata } from '../../context-packet.js'
 import { evaluateDispatchAdmissionSafe } from '../dispatch-admission.js'
+import { evaluateArchiveGate } from '../apg-archive-gate.js'
 import { recordSaturationEventSafe } from '../../costops/saturation-events.js'
 import { generateBreakdown } from '../llm-breakdown.js'
 import { logger } from '../../logger.js'
@@ -157,8 +158,12 @@ function fireKanbanDispatch(id: string): void {
     // but no origin populated them, so cost_per_accepted_task could only group by
     // agent. Best-effort by construction (resolveDispatchIdentitySafe): a
     // resolver fault stamps un-attributed instead of blocking the dispatch.
+    // §11.2 role: the agent a card is dispatched TO is the one that authors the
+    // work package, so its execution role is `producer`. The value is decided
+    // here, from resolveKanbanDispatchTarget's output -- the agent never names
+    // its own role, which is the whole point of §11.1.
     const dispatchId = createDispatchSafe(getDb(), {
-      source: 'kanban', agent: target, cardId: id, project: card.project ?? null,
+      source: 'kanban', role: 'producer', agent: target, cardId: id, project: card.project ?? null,
       sessionId: readAgentRemoteHost(target) ? null : resolveCurrentSessionId(target),
       ...resolveDispatchIdentitySafe(target),
     })
@@ -374,8 +379,21 @@ export async function tryHandleKanban(ctx: RouteContext): Promise<boolean> {
   const kanbanArchiveMatch = path.match(/^\/api\/kanban\/([^/]+)\/archive$/)
   if (kanbanArchiveMatch && method === 'POST') {
     const id = decodeURIComponent(kanbanArchiveMatch[1])
+    // APG 1.9 §25 (1.8 audit finding 3.1): until now the ONLY thing standing
+    // between a `curl` with the shared fleet token and the archiving of
+    // unaccepted work was web/apg.js. The gate is server-side from here; the
+    // client keeps its copy purely as UX. The evaluation runs BEFORE
+    // revertIdeaFromKanban, because that call already mutates state.
+    const archiveCard = getKanbanCard(id)
+    const gate = evaluateArchiveGate({ cardId: id, project: archiveCard?.project ?? null })
+    if (!gate.allow) {
+      logger.warn({ id, mode: gate.report.mode, reason: gate.report.reason },
+        'APG enforced: archive refused server-side')
+      json(res, { error: gate.error, apg: gate.report }, gate.status)
+      return true
+    }
     revertIdeaFromKanban(id)
-    if (archiveKanbanCard(id)) { json(res, { ok: true }); return true }
+    if (archiveKanbanCard(id)) { json(res, { ok: true, apg: gate.report }); return true }
     json(res, { error: 'Kártya nem található' }, 404)
     return true
   }

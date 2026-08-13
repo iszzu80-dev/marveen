@@ -929,10 +929,28 @@ function claimsFor(candidate: CandidateProjection, kernelClaims: KernelClaimInde
   })
 }
 
+/**
+ * APG 1.9 §11.2 role agents for one kanban card, supplied by the CALLER.
+ *
+ * This module is read-only against the APG kernel sidecar and must stay that
+ * way (see the file header) -- the dispatch store it would need is Marveen's
+ * own DB, on the other side of that boundary. So the lookup is injected: the
+ * route hands in a reader backed by costops/dispatch.ts's resolveCardRoleAgents,
+ * and every other caller (tests, the summary path) gets the honest null.
+ */
+export interface ProjectionRoleDeps {
+  roleAgentsFor?: (kanbanCardId: string) => {
+    producer: string | null
+    verifier: string | null
+    owner: string | null
+  }
+}
+
 function summaryFor(
   candidate: CandidateProjection,
   mode: ApgMode,
   claims: ApgClaim[],
+  roleDeps: ProjectionRoleDeps = {},
 ): ApgUiWorkItemSummary {
   const displayState = mode === 'off' ? 'off' : candidate.displayState
   const checkpointByName = new Map<string, CheckpointRow>()
@@ -947,12 +965,23 @@ function summaryFor(
     .filter((checkpoint) => checkpoint.result === 'FAIL')
     .sort((a, b) => b.created_at - a.created_at)[0]?.checkpoint ?? null
 
+  const kanbanCardId = extractKanbanCardId(
+    candidate.canonical?.source_ref,
+    candidate.recommendation?.candidate_id,
+  )
+  // §11.2: these were literal `null`s. They are now RESOLVED values that happen
+  // to be null when no dispatch carried the role -- which today means: producer
+  // is real (the kanban origin stamps role='producer' on every card dispatch),
+  // and accepter is still null because no owner-role dispatch exists yet.
+  // The difference matters: a hardcoded null cannot ever become non-null, and
+  // an operator reading "producer: —" cannot tell which kind of null it is.
+  const roleAgents = kanbanCardId !== null && roleDeps.roleAgentsFor
+    ? roleDeps.roleAgentsFor(kanbanCardId)
+    : null
+
   return {
     id: candidate.id,
-    kanban_card_id: extractKanbanCardId(
-      candidate.canonical?.source_ref,
-      candidate.recommendation?.candidate_id,
-    ),
+    kanban_card_id: kanbanCardId,
     // The sidecar schema has no reliable project field in this stage.
     project: null,
     title: candidate.id,
@@ -963,8 +992,14 @@ function summaryFor(
     risk: 'unknown',
     attention_reason: attentionReason({ ...candidate, displayState }),
     next_action: nextActionFor(displayState),
-    producer_agent: null,
-    accepter_agent: null,
+    producer_agent: roleAgents?.producer ?? null,
+    // §9.3's dual-sided acceptance needs an accepter that is NOT self-declared.
+    // The only acceptance signal Marveen has today is the `actor` field on the
+    // kanban move request -- a request-body string, i.e. precisely what §11.4
+    // and §26.3 refuse to treat as attribution. So this stays null until an
+    // owner-role dispatch exists to name, rather than being filled with the
+    // most convenient available lie.
+    accepter_agent: roleAgents?.owner ?? null,
     gate_progress: {
       passed: latestGates.filter((checkpoint) => checkpoint.result === 'PASS').length,
       // F-8: EXCLUDED gates are not applicable to this profile, so counting
@@ -1112,6 +1147,7 @@ export function buildApgWorkItemSummaries(
     limit: number
     offset: number
   },
+  roleDeps: ProjectionRoleDeps = {},
 ): { items: ApgUiWorkItemSummary[]; total: number } | { error: string } {
   const db = openApgKernelReadonly()
   if (!db) return { error: 'sidecar_unavailable' }
@@ -1125,7 +1161,7 @@ export function buildApgWorkItemSummaries(
     const kernelClaims = indexKernelClaims(data.claims)
     let items = candidateIds(data, true)
       .map((id) => buildCandidateProjection(data, id))
-      .map((candidate) => summaryFor(candidate, mode, claimsFor(candidate, kernelClaims)))
+      .map((candidate) => summaryFor(candidate, mode, claimsFor(candidate, kernelClaims), roleDeps))
 
     // Project is deliberately always null until the sidecar owns a project field.
     if (filters.project !== undefined) items = []
@@ -1160,6 +1196,7 @@ export function buildApgWorkItemSummaries(
 export function buildApgWorkItemDetail(
   mode: ApgMode,
   workItemId: string,
+  roleDeps: ProjectionRoleDeps = {},
 ): ApgWorkItemDetail | { error: string; notFound?: boolean } {
   const db = openApgKernelReadonly()
   if (!db) return { error: 'sidecar_unavailable' }
@@ -1171,7 +1208,7 @@ export function buildApgWorkItemDetail(
 
     const candidate = buildCandidateProjection(data, workItemId)
     const claims = claimsFor(candidate, indexKernelClaims(data.claims))
-    const summary = summaryFor(candidate, mode, claims)
+    const summary = summaryFor(candidate, mode, claims, roleDeps)
     const transitions = data.transitions.filter(
       (row) => row.change_logical_id === workItemId,
     )

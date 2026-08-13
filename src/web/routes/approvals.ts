@@ -9,6 +9,12 @@ import {
 } from '../../db.js'
 import { logger } from '../../logger.js'
 import { readBody, json } from '../http-helpers.js'
+import { resolveApgPrincipal } from '../apg-principal.js'
+import {
+  checkHumanApprovalAuthority,
+  recordApprovalAttribution,
+} from '../apg-human-approval.js'
+import { resolveEffectiveApgMode } from '../apg-scope-overrides.js'
 import type { RouteContext } from './types.js'
 
 const AUTONOMY_CONFIG_PATH = join(PROJECT_ROOT, 'store', 'autonomy-config.json')
@@ -137,7 +143,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
 
   // PATCH /api/approvals/:id -- resolve (approve/reject/timeout)
   if (idMatch && method === 'PATCH') {
-    let body: { status?: unknown; resolved_by?: unknown; telegram_message_id?: unknown }
+    let body: { status?: unknown; resolved_by?: unknown; claimed_by?: unknown; telegram_message_id?: unknown }
     try {
       body = JSON.parse((await readBody(req)).toString())
     } catch {
@@ -145,29 +151,64 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
       return true
     }
 
-    const { status, resolved_by, telegram_message_id } = body
+    const { status, resolved_by, claimed_by, telegram_message_id } = body
     if (status !== 'approved' && status !== 'rejected' && status !== 'timeout') {
       json(res, { error: 'status must be approved, rejected, or timeout' }, 400)
       return true
     }
-    if (typeof resolved_by !== 'string' || !resolved_by.trim()) {
-      json(res, { error: 'resolved_by is required' }, 400)
-      return true
-    }
+    // APG 1.9 §11.4 (1.8 audit finding 3.3): `resolved_by` in the request body
+    // was stored verbatim as the approver -- the anti-pattern §11.4 names
+    // outright ("Nem elég: resolved_by: 'owner' a request bodyban"). It is now
+    // SERVER-STAMPED from the credential that authenticated this request, and
+    // the body field is renamed to what it always actually was: a claim.
+    //
+    // The body's `resolved_by` is still ACCEPTED, as `claimed_by`'s fallback,
+    // for one narrow reason: every fleet agent's scaffolded curl and the
+    // Telegram approval flow send it, and silently dropping it would break the
+    // self-approval guard below (which needs to know who the caller SAYS it
+    // is). It no longer reaches the stored attribution.
+    const claimedBy = (
+      typeof claimed_by === 'string' && claimed_by.trim() ? claimed_by.trim()
+      : typeof resolved_by === 'string' && resolved_by.trim() ? resolved_by.trim()
+      : null
+    )
     const msgId = typeof telegram_message_id === 'number' ? telegram_message_id : null
 
-    // Self-approval guard: the requesting agent cannot approve its own request.
-    // This is a best-effort check on the self-declared resolved_by value (all fleet
-    // agents share the same bearer token, so server-side identity is not enforceable).
-    // It catches naive/accidental self-approvals; the real control lives on the
-    // main-agent side (approval-request-handling skill).
     const target = getApproval(idMatch[1])
-    if (target && resolved_by.trim() === target.agent_id) {
+    const principal = resolveApgPrincipal(ctx.auth)
+    // §11.4 human_required: an approval in that category is an owner-decision
+    // class and cannot be resolved by an agent principal (§26.2). The mode is
+    // the global one -- a generic approval is not scoped to a card or project,
+    // so there is no narrower scope to resolve against.
+    const mode = resolveEffectiveApgMode(null, null).mode
+    const verdict = checkHumanApprovalAuthority(principal, target?.category ?? null, mode)
+    if (!verdict.allowed) {
+      recordApprovalAttribution({
+        approval_id: idMatch[1],
+        category: target?.category ?? null,
+        status: `refused:${status}`,
+        principal,
+        claimed_by: claimedBy,
+        mode,
+        verdict,
+        surface: 'approvals_patch',
+      })
+      json(res, { error: verdict.error }, verdict.status ?? 403)
+      return true
+    }
+
+    // Self-approval guard: the requesting agent cannot approve its own request.
+    // Unchanged in strength and unchanged in honesty -- it tests the CLAIMED
+    // name, so a lying client still walks past it (all fleet agents share one
+    // bearer token). It catches naive/accidental self-approvals; the real
+    // control lives on the main-agent side (approval-request-handling skill).
+    // What DID change: this claim can no longer become the stored attribution.
+    if (target && claimedBy !== null && claimedBy === target.agent_id) {
       json(res, { error: 'The requesting agent cannot approve its own request' }, 403)
       return true
     }
 
-    const updated = resolveApproval(idMatch[1], status, resolved_by.trim(), msgId)
+    const updated = resolveApproval(idMatch[1], status, principal.attribution, msgId)
     if (!updated) {
       // Either not found or already resolved
       const existing = getApproval(idMatch[1])
@@ -180,8 +221,28 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     }
 
     const approval = getApproval(idMatch[1])
-    logger.info({ id: idMatch[1], status, resolved_by }, 'Approval resolved')
-    json(res, approval)
+    recordApprovalAttribution({
+      approval_id: idMatch[1],
+      category: target?.category ?? null,
+      status,
+      principal,
+      claimed_by: claimedBy,
+      mode,
+      verdict,
+      surface: 'approvals_patch',
+    })
+    logger.info(
+      { id: idMatch[1], status, resolvedBy: principal.attribution, claimedBy },
+      'Approval resolved',
+    )
+    json(res, {
+      ...approval,
+      // §25 (assisted must not show a false PASS): the response never lets a
+      // human_required decision read as owner-authenticated when no human
+      // principal could be named.
+      human_principal_proven: verdict.humanPrincipalProven,
+      human_attestation: principal.humanAttestation,
+    })
     return true
   }
 

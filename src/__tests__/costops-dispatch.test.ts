@@ -70,9 +70,12 @@ describe('P2-A schema (installed via the CostOps seam)', () => {
   it('the dispatches table carries NO prompt/PII/secret column', () => {
     const cols = getDb().prepare("SELECT name FROM pragma_table_info('dispatches')").all().map((r: any) => r.name)
     // Only opaque metadata columns; nothing that could hold prompt text.
+    // `role` (APG 1.9 §11.2) joins the list: an enum of four fixed words
+    // decided server-side at the origin. It carries no free text by
+    // construction, which is why it belongs on this side of the boundary.
     expect(cols.sort()).toEqual([
       'agent', 'auth_profile', 'billing_mode', 'card_id', 'configured_model', 'created_at',
-      'dispatch_id', 'model_profile', 'project', 'provider', 'runtime_model', 'session_id', 'source', 'task_type',
+      'dispatch_id', 'model_profile', 'project', 'provider', 'role', 'runtime_model', 'session_id', 'source', 'task_type',
     ])
     for (const forbidden of ['prompt', 'content', 'text', 'message', 'body', 'secret', 'token']) {
       expect(cols).not.toContain(forbidden)

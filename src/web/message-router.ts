@@ -701,8 +701,13 @@ export async function runMessageRouterTick(): Promise<void> {
           // P2-C: stamp the identity columns from the TARGET agent's config
           // (it is the agent that will burn the tokens). Best-effort: a resolver
           // fault stamps un-attributed rather than blocking the delivery.
+          // §11.2 role: a bare inter-agent message with no upstream dispatch is
+          // one agent asking another to make something, so the RECEIVER is the
+          // producer of whatever comes back. §11.3 is the reason this is not a
+          // weaker role: delegated output is CREATOR_CLAIMED -- the delegate
+          // still authored it, delegation merely fails to confer authority.
           dispatchId = createDispatchSafe(getDb(), {
-            source: 'message', agent: msg.to_agent,
+            source: 'message', agent: msg.to_agent, role: 'producer',
             sessionId: host ? null : resolveCurrentSessionId(msg.to_agent),
             ...resolveDispatchIdentitySafe(msg.to_agent),
           })

@@ -13,7 +13,11 @@ import type { RouteContext } from '../web/routes/types.js'
 // writes, without booting the actual HTTP server/process (this repo's
 // dashboard must never be live-booted in a sandbox: a known fleet-wide
 // binary-pattern bug can SIGTERM the real production instance).
-function fakeCtx(path: string, method = 'GET'): { ctx: RouteContext; out: { status: number; body: any } } {
+function fakeCtx(
+  path: string,
+  method = 'GET',
+  auth?: RouteContext['auth'],
+): { ctx: RouteContext; out: { status: number; body: any } } {
   const out: { status: number; body: any } = { status: 0, body: null }
   const res: any = {
     writeHead(status: number) { out.status = status; return res },
@@ -22,12 +26,20 @@ function fakeCtx(path: string, method = 'GET'): { ctx: RouteContext; out: { stat
     },
   }
   const url = new URL(`http://localhost:3420${path}`)
-  const ctx = { req: {} as any, res, path: url.pathname, method, url } as RouteContext
+  const ctx = { req: {} as any, res, path: url.pathname, method, url, auth } as RouteContext
   return { ctx, out }
 }
 
-function fakeCtxWithBody(path: string, method: string, body: unknown): { ctx: RouteContext; out: { status: number; body: any } } {
-  const { ctx, out } = fakeCtx(path, method)
+/** The operator credential no dispatched agent can hold (see apg-principal.ts). */
+const OPERATOR: RouteContext['auth'] = { kind: 'session', user: 'istvan' }
+
+function fakeCtxWithBody(
+  path: string,
+  method: string,
+  body: unknown,
+  auth?: RouteContext['auth'],
+): { ctx: RouteContext; out: { status: number; body: any } } {
+  const { ctx, out } = fakeCtx(path, method, auth)
   ctx.req.on = ((event: string, cb: (...args: any[]) => void) => {
     if (event === 'data') cb(Buffer.from(JSON.stringify(body)))
     if (event === 'end') cb()
@@ -73,7 +85,7 @@ describe('APG UI API (route smoke)', () => {
   it('a global-off scope override cannot be raised by a card override (absolute master off)', async () => {
     const { ctx: putCtx } = fakeCtxWithBody('/api/apg/scope-overrides', 'PUT', {
       scope_type: 'kanban_card', scope_id: '0f75d35d', mode: 'enforced', actor: 'test', reason: 'probe',
-    })
+    }, OPERATOR)
     expect(await tryHandleApg(putCtx)).toBe(true)
 
     const { ctx, out } = fakeCtx('/api/apg/summary?kanban_card_id=0f75d35d')
@@ -86,7 +98,7 @@ describe('APG UI API (route smoke)', () => {
     setOverride('APG_MODE', 'observe')
     const { ctx: putCtx, out: putOut } = fakeCtxWithBody('/api/apg/scope-overrides', 'PUT', {
       scope_type: 'kanban_card', scope_id: '0f75d35d', mode: 'enforced', actor: 'test', reason: 'probe',
-    })
+    }, OPERATOR)
     expect(await tryHandleApg(putCtx)).toBe(true)
     expect(putOut.status).toBe(200)
 
@@ -105,7 +117,7 @@ describe('APG UI API (route smoke)', () => {
     setOverride('APG_MODE', 'enforced')
     const { ctx, out } = fakeCtxWithBody('/api/apg/scope-overrides', 'PUT', {
       scope_type: 'project', scope_id: 'lumaseat', mode: 'observe', actor: 'test', reason: '',
-    })
+    }, OPERATOR)
     expect(await tryHandleApg(ctx)).toBe(true)
     expect(out.status).toBe(400)
     expect(out.body.error).toMatch(/reason/i)
@@ -135,18 +147,22 @@ describe('APG UI API (route smoke)', () => {
 
     const first = fakeCtxWithBody(`/api/apg/approvals/${approval.id}/decision`, 'POST', {
       action: 'accept', idempotency_key: 'k1',
-    })
+    }, OPERATOR)
     expect(await tryHandleApg(first.ctx)).toBe(true)
     expect(first.out.status).toBe(200)
     expect(first.out.body.status).toBe('approved')
-    expect(first.out.body.resolved_by).toBe('dashboard')
+    // §11.4: was the literal 'dashboard' -- a SURFACE, not a person. The
+    // attribution now names the principal the credential resolved to, and it
+    // still refuses to claim the human was proven.
+    expect(first.out.body.resolved_by).toBe('session:istvan')
+    expect(first.out.body.human_principal_proven).toBe(false)
 
     // Same idempotency_key replayed -- spec 7.4: must return the SAME result,
     // not the generic "already resolved" 409 (that 409 is for a genuinely
     // conflicting SECOND decision, not a retry of the first one).
     const replay = fakeCtxWithBody(`/api/apg/approvals/${approval.id}/decision`, 'POST', {
       action: 'accept', idempotency_key: 'k1',
-    })
+    }, OPERATOR)
     expect(await tryHandleApg(replay.ctx)).toBe(true)
     expect(replay.out.status).toBe(200)
     expect(replay.out.body).toEqual(first.out.body)
@@ -155,7 +171,7 @@ describe('APG UI API (route smoke)', () => {
     // genuine conflict -> 409, distinguishable from the replay case above.
     const conflict = fakeCtxWithBody(`/api/apg/approvals/${approval.id}/decision`, 'POST', {
       action: 'block', idempotency_key: 'k2',
-    })
+    }, OPERATOR)
     expect(await tryHandleApg(conflict.ctx)).toBe(true)
     expect(conflict.out.status).toBe(409)
     expect(conflict.out.body.status).toBe('approved')

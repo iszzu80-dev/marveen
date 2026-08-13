@@ -129,6 +129,15 @@ window.Apg = window.Apg || {}
         // F-6: which toggles actually enforce. A switch that is ON but not
         // wired must not read as a constraint in force.
         wired: summary.apg_enforcement_wired || {},
+        // APG 1.9 WP3: WHERE each wired control refuses. The archive gate below
+        // used to be the whole control; it is now the server's, and this map is
+        // how the client knows its own check is UX rather than the boundary.
+        // Carried here rather than left published-but-unread, which is the same
+        // defect one layer along (see apg-enforcement-honesty.test.ts).
+        enforced_by: summary.apg_enforcement_enforced_by || {},
+        // §11.4: false on every current deployment. A UI must not render an
+        // approval as owner-signed while no human principal can be named.
+        human_principal_available: summary.apg_human_principal_available === true,
       }
     } catch { /* keep last-known state on fetch failure */ }
   }
@@ -1071,6 +1080,12 @@ window.Apg = window.Apg || {}
     // app.js dispatches a cancelable CustomEvent before every archive attempt;
     // we preventDefault() when the gate blocks (enforced) or the user cancels
     // the warning (assisted).
+    // APG 1.9 WP3 (§25, 1.8 audit finding 3.1): everything below is now UX.
+    // The refusal happens on POST /api/kanban/:id/archive
+    // (src/web/apg-archive-gate.ts); this handler exists so an operator gets an
+    // explanation in a dialog instead of a failed request, and so assisted mode
+    // can offer its confirm. Deleting this block weakens the experience and
+    // nothing else -- which is the property a control is supposed to have.
     document.addEventListener('marveen:kanban-archive-attempt', async (event) => {
       const cardId = event.detail?.cardId
       if (!cardId) return
