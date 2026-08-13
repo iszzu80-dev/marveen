@@ -9,7 +9,8 @@
 //
 // Scope discipline (program constraints):
 //  - MEASUREMENT / FORMAT ONLY. No model is ever invoked from this module: it
-//    imports nothing but node:crypto. Packet sizing and validation are
+//    imports nothing but node:crypto and the zero-dependency execution-role
+//    vocabulary leaf (WP4 -- see below). Packet sizing and validation are
 //    deterministic string/rule operations. There is no LLM, no network, no fs.
 //  - The ~3000-token figure is a TARGET, not a cap. A complex task MAY exceed it
 //    when it says why (`complexityJustification`). There is deliberately NO
@@ -25,11 +26,23 @@
 // runs a deterministic credential-shape scan and REJECTS a packet that looks
 // like it carries a secret; it is a backstop, not a licence to paste secrets.
 //
-// Upstream-friendliness: this module is dependency-free apart from node:crypto,
-// so the packet shape is an upstream candidate. Concrete thresholds live in
-// deployment-local config (see src/web/session-efficiency-store.ts).
+// Upstream-friendliness: this module is dependency-free apart from node:crypto
+// and src/execution-role.ts (which itself imports nothing), so the packet shape
+// is still an upstream candidate. Concrete thresholds live in deployment-local
+// config (see src/web/session-efficiency-store.ts).
+
+// APG 1.9 WP4 (§12.1) added three things to this module and nothing else:
+//  - `executionRole` on the packet (§12.1-e), from the ONE role vocabulary
+//    (src/execution-role.ts, shared with the dispatch row's §11.2 role);
+//  - packet IDENTITY -- packetHash + packetId -- derived from the RENDERED
+//    packet by the same hashContent() a reference already uses for artifacts;
+//  - `generatedAt` as an argument of the identity, never a packet field.
+// The last two are one decision seen from both sides; see packetIdentity().
 
 import { createHash } from 'node:crypto'
+import { asExecutionRole, type ExecutionRole } from './execution-role.js'
+
+export type { ExecutionRole }
 
 // ---- limits (format rules, NOT a context cap) ------------------------------
 
@@ -102,6 +115,26 @@ export interface ArtifactRef {
 export interface ContextPacketInput {
   /** Packet format version. Defaults to CONTEXT_PACKET_VERSION. */
   packetVersion?: string
+  /**
+   * §12.1-e: WHICH ROLE the receiving execution is being dispatched in.
+   *
+   * The 1.8 conformance audit called this "the single field that would make
+   * §12.2/§12.3 expressible", and the reason is that both sections are rules
+   * about what a packet may carry: a producer packet MAY hold implementation
+   * history and design context (§12.2), a verifier packet may NOT hold the
+   * producer's session history (§12.3). Without the role on the packet there
+   * is nothing to apply either rule to -- the two packets are the same object
+   * and no reader can tell which set of rules it is under.
+   *
+   * Same closed vocabulary as the dispatch row's §11.2 role (one definition,
+   * src/execution-role.ts), and decided by the ORIGIN like that one is: the
+   * packet is built server-side, so a receiving agent cannot promote itself
+   * from producer to verifier by rewriting a field it was handed.
+   *
+   * Optional, and absent means absent: a packet built by an origin that has no
+   * role model stores null rather than a guessed 'producer'.
+   */
+  executionRole?: ExecutionRole | null
   /** What the receiving agent must achieve. Required, short. */
   goal: string
   /** Large material, by reference only. */
@@ -126,6 +159,7 @@ export interface ContextPacketInput {
 
 export interface ContextPacket extends ContextPacketInput {
   packetVersion: string
+  executionRole: ExecutionRole | null
   references: ArtifactRef[]
   constraints: string[]
   dataSensitivityNotes: string[]
@@ -146,6 +180,11 @@ export function buildContextPacket(input: ContextPacketInput): ContextPacket {
   return {
     ...input,
     packetVersion: (input.packetVersion ?? CONTEXT_PACKET_VERSION).trim(),
+    // Narrowed, never passed through: an unrecognised role becomes null, the
+    // same discipline createDispatch() applies to the role column. A packet
+    // rendering `executionRole: verifer` would be read by a human as a
+    // verifier packet and by every rule as nothing.
+    executionRole: asExecutionRole(input.executionRole),
     goal: String(input.goal ?? '').trim(),
     references: (input.references ?? []).map(normalizeRef),
     constraints: bullets(input.constraints),
@@ -220,6 +259,12 @@ export function renderContextPacket(p: ContextPacket): string {
   out.push(`# Context Packet${p.cardId ? ` -- card ${p.cardId}` : ''}`)
   out.push('')
   const head: string[] = [`packetVersion: ${p.packetVersion}`]
+  // §12.1-e. Rendered rather than kept as out-of-band metadata: the receiving
+  // agent has to be able to READ which role it was dispatched in -- a verifier
+  // that believes it is the producer will helpfully fix what it was asked to
+  // judge -- and being in the rendered body is also what puts the role inside
+  // packetHash(), so a re-labelled packet is a different packet.
+  if (p.executionRole) head.push(`executionRole: ${p.executionRole}`)
   if (p.taskSize) head.push(`taskSize: ${p.taskSize}`)
   if (p.contextBudgetClass) head.push(`contextBudgetClass: ${p.contextBudgetClass}`)
   out.push(`> ${head.join(' | ')}`)
@@ -270,6 +315,78 @@ export function renderContextPacket(p: ContextPacket): string {
 function shortHash(h: string): string {
   const hex = h.replace(/^sha256:/i, '')
   return hex.slice(0, 12)
+}
+
+// ---- packet identity (§12.1: packet_id, packet_hash, generated_at) ---------
+
+/** Prefix of a derived packet id, so an id is recognisable on sight and can
+ *  never be confused with a dispatch uuid or a bare sha256. */
+export const PACKET_ID_PREFIX = 'pkt-'
+
+/** Length of the hash prefix a packet id carries. Same 32 hex chars the
+ *  kernel's execution_id_for() keeps, for the same reason: long enough that a
+ *  collision is not a thing anyone has to reason about, short enough to appear
+ *  in a log line and a card comment. */
+export const PACKET_ID_HASH_CHARS = 32
+
+/**
+ * §12.1's three identity fields for one packet.
+ *
+ * `generatedAt` is here rather than on the packet itself, and it is the caller's
+ * string (this module has no clock, by the same rule the whole file follows).
+ */
+export interface PacketIdentity {
+  packetId: string
+  /** sha256 hex of the RENDERED packet. No 'sha256:' prefix, lowercase. */
+  packetHash: string
+  /** Caller-supplied ISO timestamp, or null when the origin recorded none. */
+  generatedAt: string | null
+}
+
+/**
+ * sha256 of the rendered packet -- §12.1's `packet_hash`.
+ *
+ * WHY THE RENDERED FORM AND NOT THE OBJECT. The rendered packet is what the
+ * agent actually receives; hashing a JSON serialisation would hash a shape
+ * nobody is ever handed, and would change when a field was reordered without
+ * the delivered context changing at all. renderContextPacket() is already
+ * asserted deterministic (byte-identical output for identical input), which is
+ * the only property a content hash needs.
+ *
+ * This is the function that unblocks the kernel's `context_packet_hash`: WP3's
+ * execution_identity.py stores CONTEXT_PACKET_HASH_UNKNOWN for every identity
+ * it mints, with the recorded reason "the context packet is WP4, and today only
+ * its metadata is stored; no packet body is hashed". This hashes the body.
+ */
+export function hashPacket(p: ContextPacket): string {
+  return hashContent(renderContextPacket(p))
+}
+
+/**
+ * The packet's identity: a content-derived id, the hash, and the caller's
+ * generation timestamp.
+ *
+ * THE ONE DESIGN DECISION WORTH READING. `generatedAt` is deliberately NOT part
+ * of the hash and NOT part of the id, so two dispatches of byte-identical
+ * context share a packet_id. The alternative -- stirring a clock into the
+ * digest -- would make packet_hash useless as the thing it exists to be: the
+ * join key by which an execution identity, a receipt and a re-dispatch can be
+ * shown to have run against THE SAME context. It would also make the hash
+ * untestable for the only property that matters (stable for identical content,
+ * different for different content) and would quietly make every replay of a
+ * recorded dispatch look like new context.
+ *
+ * The id is derived, not chosen: like the kernel's execution_id, there is no
+ * parameter through which a caller can pick one, so a packet's identity is a
+ * fact about its content rather than a label someone attached to it.
+ */
+export function packetIdentity(p: ContextPacket, generatedAt?: string | null): PacketIdentity {
+  const packetHash = hashPacket(p)
+  return {
+    packetId: `${PACKET_ID_PREFIX}${packetHash.slice(0, PACKET_ID_HASH_CHARS)}`,
+    packetHash,
+    generatedAt: (generatedAt ?? null) || null,
+  }
 }
 
 // ---- fresh-token estimate (ESTIMATE, never 'measured') ---------------------
@@ -464,6 +581,16 @@ export function validateContextPacket(p: ContextPacket): PacketValidation {
  */
 export interface PacketMetadata {
   packetVersion: string
+  /** §12.1 packet_id -- content-derived (see packetIdentity). */
+  packetId: string
+  /** §12.1 packet_hash -- sha256 hex of the rendered packet. */
+  packetHash: string
+  /** §12.1 generated_at -- the ORIGIN's ISO timestamp, or null. Null means
+   *  "this origin recorded no generation time", never "now". */
+  generatedAt: string | null
+  /** §12.1-e execution_role, carried alongside the hash so a stored packet
+   *  record can be compared with the dispatch row's §11.2 role. */
+  executionRole: ExecutionRole | null
   /** `path@ref` per referenced artifact, index-aligned with contentHashes. */
   referencedArtifacts: string[]
   /** sha256 hex per referenced artifact, index-aligned with referencedArtifacts. */
@@ -488,10 +615,15 @@ export interface PacketMetadata {
  * number by construction -- there is no way to build PacketMetadata carrying a
  * bare unmarked token count.
  */
-export function derivePacketMetadata(p: ContextPacket): PacketMetadata {
+export function derivePacketMetadata(p: ContextPacket, generatedAt?: string | null): PacketMetadata {
   const estimate = estimatePacketFreshTokens(p)
+  const identity = packetIdentity(p, generatedAt)
   return {
     packetVersion: p.packetVersion,
+    packetId: identity.packetId,
+    packetHash: identity.packetHash,
+    generatedAt: identity.generatedAt,
+    executionRole: p.executionRole ?? null,
     referencedArtifacts: p.references.map(r => `${r.path}@${r.ref}`),
     contentHashes: p.references.map(r => r.contentHash.replace(/^sha256:/i, '').toLowerCase()),
     estimatedFreshTokens: estimate.tokens,

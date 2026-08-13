@@ -22,7 +22,10 @@ import { resolveKanbanDispatchTarget } from '../../kanban-dispatch.js'
 import { createDispatchSafe, recordAcceptedOutcomeForCard } from '../../costops/dispatch.js'
 import { resolveDispatchIdentitySafe } from '../../costops/dispatch-identity.js'
 import { recordPacketMetadataSafe } from '../../costops/packet-metadata.js'
-import { buildContextPacket, derivePacketMetadata } from '../../context-packet.js'
+import {
+  buildContextPacket, derivePacketMetadata, renderContextPacket, validateContextPacket,
+  truncateExcerpt, MAX_SECTION_CHARS, type ContextPacket,
+} from '../../context-packet.js'
 import { evaluateDispatchAdmissionSafe } from '../dispatch-admission.js'
 import { evaluateArchiveGate } from '../apg-archive-gate.js'
 import { recordSaturationEventSafe } from '../../costops/saturation-events.js'
@@ -85,6 +88,62 @@ export function kanbanMoveInstructions(id: string, target: string): string {
   ].join('\n')
 }
 
+/** Headroom left below MAX_SECTION_CHARS for the title, the separator and the
+ *  truncation notice, so a long description can never push the Goal section
+ *  over the format limit and refuse its own dispatch. */
+const GOAL_DESCRIPTION_HEADROOM = 400
+
+/**
+ * APG 1.9 §12.1: the PRODUCER context packet for one kanban card.
+ *
+ * WHAT IT CARRIES, and where each field comes from -- all of it decided
+ * server-side from the card, never from anything an agent said:
+ *
+ *   execution_role      'producer' (§12.1-e). Same value the dispatch row
+ *                       already stamps under §11.2, from the same origin
+ *                       knowledge, so packet and row cannot disagree.
+ *   objective           the card title + its description.
+ *   constraints         priority / project / labels: the standing facts the
+ *                       agent would otherwise have to go and look up.
+ *   acceptance_criteria the done/result-comment protocol, unchanged.
+ *
+ * THE DESCRIPTION IS TRUNCATED, NOT REFUSED. A card description longer than
+ * the format's section limit is, strictly, a pasted document -- but refusing
+ * to dispatch such a card would be a regression against work that dispatches
+ * fine today. So the head of it rides in the Goal, marked as cut by
+ * truncateExcerpt(), and a constraint bullet points at the card as the
+ * canonical full text. That is the packet's own discipline applied honestly:
+ * large material by reference, with the reference being the card it came from.
+ */
+export function buildKanbanProducerPacket(
+  card: { title: string; description?: string | null; priority?: string | null; project?: string | null },
+  cardId: string,
+  labels: string[],
+  taskSize: 'small' | 'normal' | 'large' | null,
+): ContextPacket {
+  const desc = (card.description ?? '').trim()
+  const descLimit = MAX_SECTION_CHARS - GOAL_DESCRIPTION_HEADROOM
+  const shown = desc.length > descLimit ? truncateExcerpt(desc, descLimit) : desc
+  const constraints = [
+    ...(card.priority ? [`Prioritás: ${card.priority}`] : []),
+    ...(card.project ? [`Projekt: ${card.project}`] : []),
+    ...(labels.length ? [`Címkék: ${labels.join(', ')}`] : []),
+    ...(shown.length < desc.length
+      ? [`A kártya leírása itt le van vágva (${desc.length} karakter, formátum-limit ${descLimit}). ` +
+         `A teljes szöveg a #${cardId} kártyán van -- olvasd onnan, ne találgass a levágott részről.`]
+      : []),
+  ]
+  return buildContextPacket({
+    executionRole: 'producer',
+    cardId,
+    goal: `[Kanban feladat #${cardId}]: ${card.title}${shown ? ' — ' + shown : ''}`,
+    constraints,
+    taskSize,
+    dataSensitivity: 'internal',
+    doneWhen: [`Card #${cardId} moved to done with a result comment`],
+  })
+}
+
 // Option D: kanban -> agent dispatch. When a card moves to in_progress, wake the
 // assigned agent once via the inter-agent message router (createAgentMessage),
 // which gives retry / dedup / trust-wrapping / busy-receiver handling for free.
@@ -101,8 +160,6 @@ function fireKanbanDispatch(id: string): void {
       isRunning: isAgentRunning,
     })
     if (!target) return
-    const desc = (card.description ?? '').trim()
-    const content = `[Kanban feladat #${id}]: ${card.title}${desc ? ' — ' + desc : ''}\n\n${kanbanMoveInstructions(id, target)}`
     // P2-A: mint the dispatch_id here (the kanban origin) with the card's known
     // metadata, then carry it on the queued message so the router threads it to
     // the funnel. Best-effort: a measurement failure never blocks the dispatch.
@@ -153,6 +210,37 @@ function fireKanbanDispatch(id: string): void {
       }
       return
     }
+    // APG 1.9 §12.1 (WP4): the packet is BUILT, VALIDATED and then actually
+    // SENT. Until now this origin built a packet, kept `derivePacketMetadata()`
+    // and threw the rendered body away -- the agent received a hand-assembled
+    // string instead, which is the 1.8 audit's WP4 finding in one line ("a
+    // packet valódi, de a törzse sosem jut el az ügynökhöz"). The packet is
+    // built BEFORE the dispatch row is minted, because a packet that fails
+    // validation must not leave a dispatch id behind for a send that never
+    // happened.
+    const packet = buildKanbanProducerPacket(card, id, cardLabels, admission.taskSize)
+    // validateContextPacket() had no production caller at all before this. It
+    // is the format's own fail-closed edge: a packet carrying a credential
+    // shape, an inlined document or a missing required section is not sent.
+    const validation = validateContextPacket(packet)
+    if (!validation.ok) {
+      // Same shape as the admission refusal above: NOT dispatched, NOT marked
+      // dispatched (so a fixed card re-fires on the next move), and never
+      // silent. The message names the codes, never the offending text -- a
+      // refusal that echoed a suspected credential into a card comment would
+      // be the leak it just prevented.
+      const codes = validation.errors.map(e => `${e.code}@${e.at}`).join(', ')
+      logger.warn({ id, target, codes }, 'Kanban dispatch refused: context packet failed validation (§12.1)')
+      try {
+        addKanbanComment(id, MAIN_AGENT_ID,
+          `[CONTEXT-PACKET/§12.1] Dispatch to ${target} refused: the context packet is not valid (${codes}). ` +
+          `The card stays undispatched -- fix the card (usually: a document pasted into the description ` +
+          `instead of referenced by path, or something credential-shaped in it) and move it to in_progress again.`)
+      } catch (err) {
+        logger.warn({ err, id }, 'Kanban packet-refusal comment failed')
+      }
+      return
+    }
     // P2-C: stamp the identity columns (model_profile / configured_model /
     // runtime_model / provider / auth_profile / billing_mode). P2-A created them
     // but no origin populated them, so cost_per_accepted_task could only group by
@@ -161,7 +249,9 @@ function fireKanbanDispatch(id: string): void {
     // §11.2 role: the agent a card is dispatched TO is the one that authors the
     // work package, so its execution role is `producer`. The value is decided
     // here, from resolveKanbanDispatchTarget's output -- the agent never names
-    // its own role, which is the whole point of §11.1.
+    // its own role, which is the whole point of §11.1. §12.1-e stamps the SAME
+    // word on the packet above, from the same origin knowledge, so the two can
+    // never disagree about what this execution was dispatched as.
     const dispatchId = createDispatchSafe(getDb(), {
       source: 'kanban', role: 'producer', agent: target, cardId: id, project: card.project ?? null,
       sessionId: readAgentRemoteHost(target) ? null : resolveCurrentSessionId(target),
@@ -170,17 +260,24 @@ function fireKanbanDispatch(id: string): void {
     // P2-B: record the packet metadata for this dispatch. Paths/hashes/sizes
     // only -- the packet BODY is never persisted. Best-effort by construction
     // (recordPacketMetadataSafe), so a metadata failure never blocks the send.
-    const packet = buildContextPacket({
-      goal: card.title,
-      cardId: id,
-      taskSize: admission.taskSize,
-      dataSensitivity: 'internal',
-      doneWhen: [`Card #${id} moved to done with a result comment`],
-    })
+    // §12.1 (WP4): the record now also carries the packet IDENTITY -- packet_id,
+    // packet_hash, generated_at, execution_role. That hash is the source the
+    // kernel's execution identity has been storing CONTEXT_PACKET_HASH_UNKNOWN
+    // for; `generatedAt` is stamped here, at the origin, because this module
+    // may read a clock and context-packet.ts may not.
     recordPacketMetadataSafe(getDb(), dispatchId, {
-      ...derivePacketMetadata(packet),
+      ...derivePacketMetadata(packet, new Date().toISOString()),
       taskSizeSource: admission.taskSizeSource,
     })
+    // WHAT THE AGENT NOW RECEIVES: the rendered packet, followed by the
+    // unchanged done/escalation protocol. The protocol is appended rather than
+    // folded into a packet section on purpose -- it is 2116 characters of
+    // transport instructions, over the format's MAX_SECTION_CHARS, and that
+    // limit is exactly the rule that says "this is not context". Everything
+    // the old hand-built string carried is still here: the card id and title
+    // are the packet's header and Goal, the description follows them, and the
+    // curl block is byte-identical.
+    const content = `${renderContextPacket(packet)}\n${kanbanMoveInstructions(id, target)}`
     createAgentMessage(MAIN_AGENT_ID, target, content, null, null, dispatchId)
     markKanbanCardDispatched(id)
     logger.info({ id, target, assignee: card.assignee }, 'Kanban in_progress dispatch fired')

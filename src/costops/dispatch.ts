@@ -26,6 +26,7 @@ import { join } from 'node:path'
 import { PROJECT_ROOT } from '../config.js'
 import { logger } from '../logger.js'
 import { loadPricingConfig, estimateModelCost, type PricingConfig } from './pricing.js'
+import { EXECUTION_ROLES, type ExecutionRole } from '../execution-role.js'
 
 // ---- domain types ----------------------------------------------------------
 
@@ -56,14 +57,23 @@ export type OutcomeKind =
  * it cannot be spoofed by the agent it describes, which is exactly the property
  * §11.1 says `from_agent` lacks.
  *
- * 'verifier' and 'owner' are declared and unused today: no verification or
- * owner-decision dispatch exists yet. That absence is deliberate and visible --
- * ui-projection.ts's verifier/accepter fields resolve to null BECAUSE no such
- * dispatch row exists, not because the value is hardcoded.
+ * 'owner' is declared and unwritten today: no owner-decision dispatch exists
+ * yet. That absence is deliberate and visible -- ui-projection.ts's accepter
+ * field resolves to null BECAUSE no such dispatch row exists, not because the
+ * value is hardcoded. 'verifier' stopped being decorative in WP4: the fresh
+ * verifier (§12.3, web/fresh-verifier.ts) mints a verifier-role dispatch for
+ * an agent that is provably not the producer.
+ *
+ * WP4 MOVED THE FOUR WORDS one level down, to src/execution-role.ts, and
+ * re-exports them here under their original names. The reason is §12.1-e: the
+ * context packet must carry the same `execution_role`, and context-packet.ts is
+ * dependency-free by contract, so it cannot import this module. A second
+ * spelling of a closed vocabulary is the failure that file exists to prevent;
+ * nothing about this module's API changed.
  */
-export type DispatchRole = 'producer' | 'verifier' | 'executor' | 'owner'
+export type DispatchRole = ExecutionRole
 
-export const DISPATCH_ROLES: readonly DispatchRole[] = ['producer', 'verifier', 'executor', 'owner']
+export const DISPATCH_ROLES: readonly DispatchRole[] = EXECUTION_ROLES
 
 // ---- schema (idempotent boot DDL; invoked via the CostOps seam) ------------
 
