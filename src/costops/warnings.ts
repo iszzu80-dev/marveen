@@ -11,6 +11,7 @@ import type { CostSummary } from './ledger.js'
 import { monthWindow } from './ledger.js'
 import type { SubscriptionLifecycle } from './subscriptions.js'
 import type { LimitStatus } from './limits.js'
+import { peakSinceLastTopUp } from './collectors/deepseek.js'
 
 // v0.8 (card 6f4d1332 §6): widened from 'low'|'medium'|'high' to add 'critical'|'blocked' for
 // the new generic tiered limit rule (§4 of the requirements is explicit that an 80%+ limit MUST
@@ -271,7 +272,12 @@ export function getWarnings(
   } else {
     const latest = dsRows[0].balance
     const currency = dsRows[0].currency
-    const peak = Math.max(...dsRows.map(r => r.balance))
+    // COS-OPS-M1: peak since the LAST OBSERVED TOP-UP (a rise between consecutive
+    // snapshots -- same drop/rise discipline as deriveMtdSpend), not the all-time
+    // max: against an old $50 high, a $4 balance after a $5 top-up would read as
+    // 8% remaining forever instead of the real 80%. Shared helper with limits.ts's
+    // fromDeepSeekBalance so the two consumers can never drift apart again.
+    const peak = peakSinceLastTopUp(dsRows.slice().reverse().map(r => ({ balance: r.balance, captured_at: r.captured_at }))) ?? latest
     const hadObservedDrop = peak > latest // a real drop was seen -- % vs peak is meaningful
     const pct = hadObservedDrop ? Math.round((latest / peak) * 10000) / 100 : null
     // v0.8 (card 6f4d1332 §6.1): the ad-hoc, inverted-logic (%-remaining) severity escalation

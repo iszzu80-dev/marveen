@@ -7,8 +7,11 @@ import {
   classifyErrorCode,
   gatherAlertCandidates,
   captureAlerts,
-  listAlerts,
 } from '../costops/alerts-capture.js'
+// COS-OPS-M3: alerts-capture.ts no longer carries its own listAlerts copy --
+// alerts-store.ts's is the single read API (the one the GET route and export.ts
+// already used).
+import { listAlerts } from '../costops/alerts-store.js'
 import type { CostOpsConfig } from '../costops/config.js'
 
 const NOW = Math.floor(Date.UTC(2026, 6, 15, 12, 0, 0) / 1000) // 2026-07-15
@@ -142,6 +145,73 @@ describe('gatherAlertCandidates -- sync/credential (import_runs)', () => {
     db.prepare(`INSERT INTO import_runs (provider, collector_name, started_at, finished_at, status, imported_count, error_code) VALUES ('github','github-billing',@now,@now,'ok',1,NULL)`).run({ now: NOW })
     const candidates = gatherAlertCandidates(db, cfg({ budgets: [] }), NOW)
     expect(candidates.find(c => c.type === 'stale_collector' || c.type === 'failed_sync')).toBeUndefined()
+  })
+
+  // COS-OPS-H3: benign statuses (skipped/locked/dry_run) are NOT failures --
+  // types.ts says so explicitly ("must not read as either a failure to fix or
+  // a success"). They must neither fire failed_sync nor mask a real failure.
+
+  it('a benign latest run (skipped/locked/dry_run) never fires failed_sync', () => {
+    for (const [i, status] of (['skipped', 'locked', 'dry_run'] as const).entries()) {
+      const provider = `p${i}`
+      const db = getDb()
+      db.prepare(`INSERT INTO import_runs (provider, collector_name, started_at, finished_at, status, imported_count, error_code) VALUES (@p,@c,@now,@now,@status,0,NULL)`)
+        .run({ p: provider, c: `${provider}-collector`, now: NOW, status })
+      const candidates = gatherAlertCandidates(db, cfg({ budgets: [] }), NOW)
+      expect(candidates.find(c => c.type === 'failed_sync' && c.evidence.provider === provider)).toBeUndefined()
+      expect(candidates.find(c => c.type === 'stale_collector' && c.evidence.provider === provider)).toBeUndefined()
+    }
+  })
+
+  it('ok -> skipped stays ok (benign tick does not overwrite the earlier real ok)', () => {
+    const db = getDb()
+    db.prepare(`INSERT INTO import_runs (provider, collector_name, started_at, finished_at, status, imported_count, error_code) VALUES ('anthropic','anthropic-cost-report',@t1,@t1,'ok',2,NULL)`).run({ t1: NOW - 3600 })
+    db.prepare(`INSERT INTO import_runs (provider, collector_name, started_at, finished_at, status, imported_count, error_code) VALUES ('anthropic','anthropic-cost-report',@t2,@t2,'skipped',0,NULL)`).run({ t2: NOW - 60 })
+    const candidates = gatherAlertCandidates(db, cfg({ budgets: [] }), NOW)
+    expect(candidates.find(c => c.type === 'failed_sync')).toBeUndefined()
+    expect(candidates.find(c => c.type === 'stale_collector')).toBeUndefined()
+  })
+
+  it('error -> skipped stays failed (benign tick does not mask/clear the earlier real failure)', () => {
+    const db = getDb()
+    db.prepare(`INSERT INTO import_runs (provider, collector_name, started_at, finished_at, status, imported_count, error_code) VALUES ('openai','openai-costs',@t1,@t1,'error',0,'ETIMEDOUT')`).run({ t1: NOW - 3600 })
+    db.prepare(`INSERT INTO import_runs (provider, collector_name, started_at, finished_at, status, imported_count, error_code) VALUES ('openai','openai-costs',@t2,@t2,'skipped',0,NULL)`).run({ t2: NOW - 60 })
+    const candidates = gatherAlertCandidates(db, cfg({ budgets: [] }), NOW)
+    const failed = candidates.find(c => c.type === 'failed_sync')
+    expect(failed?.evidence.provider).toBe('openai')
+    expect(failed?.evidence.error_code).toBe('ETIMEDOUT')
+  })
+
+  it('an error latest run still fires failed_sync (existing behavior preserved)', () => {
+    const db = getDb()
+    db.prepare(`INSERT INTO import_runs (provider, collector_name, started_at, finished_at, status, imported_count, error_code) VALUES ('deepseek','deepseek-balance',@now,@now,'error',0,'balance_error')`).run({ now: NOW })
+    const candidates = gatherAlertCandidates(db, cfg({ budgets: [] }), NOW)
+    expect(candidates.find(c => c.type === 'failed_sync')?.severity).toBe('warning')
+  })
+
+  it('two collectors on one provider with alternating rows do not flap: hourly skipped snapshot + daily ok cost report -> stable ok, no alert', () => {
+    const db = getDb()
+    const ins = db.prepare(`INSERT INTO import_runs (provider, collector_name, started_at, finished_at, status, imported_count, error_code) VALUES ('anthropic',@c,@t,@t,@status,@n,NULL)`)
+    // daily cost report succeeded yesterday-ish; hourly usage snapshot has
+    // been ticking 'skipped' ever since (the default-config reality that
+    // produced the perpetual/flapping failed_sync|anthropic alert).
+    ins.run({ c: 'anthropic-cost-report', t: NOW - 20 * 3600, status: 'ok', n: 3 })
+    for (let h = 19; h >= 1; h--) ins.run({ c: 'anthropic-usage-snapshot', t: NOW - h * 3600, status: 'skipped', n: 0 })
+    // no matter which collector wrote the latest row, the provider stays quiet
+    const candidates = gatherAlertCandidates(db, cfg({ budgets: [] }), NOW)
+    expect(candidates.find(c => c.type === 'failed_sync')).toBeUndefined()
+    expect(candidates.find(c => c.type === 'stale_collector')).toBeUndefined()
+  })
+
+  it('a sibling collector\'s later ok does not mask another collector\'s standing failure', () => {
+    const db = getDb()
+    const ins = db.prepare(`INSERT INTO import_runs (provider, collector_name, started_at, finished_at, status, imported_count, error_code) VALUES ('anthropic',@c,@t,@t,@status,0,@e)`)
+    ins.run({ c: 'anthropic-cost-report', t: NOW - 7200, status: 'error', e: '401' })
+    ins.run({ c: 'anthropic-usage-snapshot', t: NOW - 60, status: 'ok', e: null })
+    const candidates = gatherAlertCandidates(db, cfg({ budgets: [] }), NOW)
+    const failed = candidates.find(c => c.type === 'failed_sync')
+    expect(failed?.severity).toBe('critical') // 401 -> credential_error
+    expect(candidates.find(c => c.type === 'credential_permission_error')).toBeDefined()
   })
 })
 
@@ -304,6 +374,18 @@ describe('gatherAlertCandidates -- missing invoice (GAP-14 wiring)', () => {
 describe('captureAlerts persistence round-trip', () => {
   beforeEach(() => { initDb(); initAlertsSchema(getDb()) })
 
+  // COS-OPS-M3: persistence goes through alerts-store.ts's transactional
+  // reconcileAndPersist -- this file must not grow back its own ad-hoc,
+  // non-transactional SQL copy (the drift that motivated the finding).
+  it('persists via alerts-store reconcileAndPersist, with no local costops_alerts SQL (COS-OPS-M3, source pin)', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    const src = readFileSync(join(__dirname, '..', 'costops', 'alerts-capture.ts'), 'utf-8')
+    expect(src).toMatch(/reconcileAndPersist\(db, candidates, now/)
+    expect(src).not.toMatch(/INSERT INTO costops_alerts/)
+    expect(src).not.toMatch(/UPDATE costops_alerts/)
+  })
+
   it('inserts a new alert on first capture', () => {
     const db = getDb()
     const win = monthWindow(NOW)
@@ -340,7 +422,7 @@ describe('captureAlerts persistence round-trip', () => {
     expect(summary.resolved).toBeGreaterThanOrEqual(1)
     const unresolved = listAlerts(db)
     expect(unresolved.find(a => a.type === 'budget_threshold')).toBeUndefined()
-    const all = listAlerts(db, { includeResolved: true })
+    const all = listAlerts(db, { status: 'all' })
     const resolvedRow = all.find(a => a.type === 'budget_threshold')
     expect(resolvedRow?.resolved_at).not.toBeNull()
   })

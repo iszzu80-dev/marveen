@@ -131,3 +131,71 @@ describe('getCorrectionChain', () => {
     }
   })
 })
+
+// 2026-08-12 review, COS-CORE-H3/C2: a correction inherits the original's
+// confidence/actual_source/fx provenance by DEFAULT (same measurement
+// channel, better number), but a caller whose replacement figure comes from
+// a different channel -- the invoice door -- can override each explicitly.
+describe('createCorrection -- provenance overrides (COS-CORE-H3/C2)', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('applies confidence/actualSource overrides when the replacement comes from a different channel', () => {
+    const db = getDb()
+    const originalId = insertLine(db, 'render-hosting', 10000) // manual / manual_entry
+    const r = createCorrection(db, {
+      originalLineId: originalId, newAmount: 11500, reason: 'invoice arrived',
+      confidence: 'actual_invoice', actualSource: 'email_invoice',
+    }, { now: NOW + 100 })
+    expect(r.ok).toBe(true)
+    const corrected = db.prepare(`SELECT confidence, actual_source FROM cost_line_items WHERE id = ?`).get(r.newLineId) as any
+    expect(corrected.confidence).toBe('actual_invoice')
+    expect(corrected.actual_source).toBe('email_invoice')
+    // the voided original keeps ITS provenance untouched -- audit trail intact
+    const original = db.prepare(`SELECT confidence, actual_source FROM cost_line_items WHERE id = ?`).get(originalId) as any
+    expect(original.confidence).toBe('manual')
+    expect(original.actual_source).toBe('manual_entry')
+  })
+
+  it('an fx override is taken wholesale -- explicit nulls wipe the original conversion rather than inheriting it', () => {
+    const db = getDb()
+    const win = monthWindow(NOW)
+    db.prepare(`INSERT OR IGNORE INTO cost_sources (id, name, provider, source_type, currency, active, created_at, updated_at) VALUES ('openai-api', 'openai-api', 'openai', 'usage', 'HUF', 1, ?, ?)`).run(NOW, NOW)
+    const info = db.prepare(`
+      INSERT INTO cost_line_items (source_id, charge_period_start, charge_period_end, charge_category, billed_cost, currency, confidence, data_freshness, created_at, dedup_key,
+        original_amount, original_currency, fx_rate, fx_date, fx_source, conversion_method)
+      VALUES ('openai-api', ?, ?, 'usage', 3600, 'HUF', 'actual_invoice', ?, ?, 'usd-line',
+        10, 'USD', 360, ?, 'manual', 'invoice_date_rate')
+    `).run(win.start, win.end, NOW, NOW, NOW)
+    const originalId = info.lastInsertRowid as number
+
+    const r = createCorrection(db, {
+      originalLineId: originalId, newAmount: 3500, reason: 'HUF re-statement',
+      fx: { original_amount: null, original_currency: null, fx_rate: null, fx_date: null, fx_source: null, conversion_method: null },
+    }, { now: NOW + 100 })
+    const corrected = db.prepare(`SELECT original_amount, original_currency, fx_rate, fx_source, conversion_method FROM cost_line_items WHERE id = ?`).get(r.newLineId) as any
+    expect(corrected.original_amount).toBeNull() // NOT the stale 10 USD @ 360
+    expect(corrected.original_currency).toBeNull()
+    expect(corrected.fx_rate).toBeNull()
+    expect(corrected.fx_source).toBeNull()
+    expect(corrected.conversion_method).toBeNull()
+  })
+
+  it('without an fx override the original conversion is carried forward whole, fx_source/conversion_method included', () => {
+    const db = getDb()
+    const win = monthWindow(NOW)
+    db.prepare(`INSERT OR IGNORE INTO cost_sources (id, name, provider, source_type, currency, active, created_at, updated_at) VALUES ('openai-api', 'openai-api', 'openai', 'usage', 'HUF', 1, ?, ?)`).run(NOW, NOW)
+    const info = db.prepare(`
+      INSERT INTO cost_line_items (source_id, charge_period_start, charge_period_end, charge_category, billed_cost, currency, confidence, data_freshness, created_at, dedup_key,
+        original_amount, original_currency, fx_rate, fx_date, fx_source, conversion_method)
+      VALUES ('openai-api', ?, ?, 'usage', 3600, 'HUF', 'actual_invoice', ?, ?, 'usd-line-2',
+        10, 'USD', 360, ?, 'manual', 'invoice_date_rate')
+    `).run(win.start, win.end, NOW, NOW, NOW)
+    const r = createCorrection(db, { originalLineId: info.lastInsertRowid as number, newAmount: 3610, reason: 'typo in the converted amount' }, { now: NOW + 100 })
+    const corrected = db.prepare(`SELECT original_amount, original_currency, fx_rate, fx_source, conversion_method FROM cost_line_items WHERE id = ?`).get(r.newLineId) as any
+    expect(corrected.original_amount).toBe(10)
+    expect(corrected.original_currency).toBe('USD')
+    expect(corrected.fx_rate).toBe(360)
+    expect(corrected.fx_source).toBe('manual')
+    expect(corrected.conversion_method).toBe('invoice_date_rate')
+  })
+})

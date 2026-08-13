@@ -21,10 +21,12 @@
 //   stored, rather than recomputing it a second time from
 //   provider_balance_snapshots.
 // - stale_collector/failed_sync/credential_permission_error: import_runs,
-//   same "latest run per provider" query ledger.ts's own (private)
-//   provider_sync block uses -- small enough to duplicate locally rather
-//   than export a helper from a file this feature doesn't own touching
-//   right now.
+//   same "latest health-bearing run per (provider, collector)" derivation
+//   ledger.ts's own (private) provider_sync block uses -- small enough to
+//   duplicate locally rather than export a helper from a file this feature
+//   doesn't own touching right now. The status vocabulary itself (which
+//   statuses are failures vs benign no-ops) is shared from
+//   collectors/types.ts, never re-derived here.
 // - reconciliation_mismatch: reconciliation.ts's buildReconciliation().
 // - manual_provider_variance: getCostSummary().operational -- WHOLE-
 //   DEPLOYMENT only; OperationalResult has no per-provider manual-vs-
@@ -54,6 +56,7 @@ import { loadSubscriptionsConfig, deriveLifecycle } from './subscriptions.js'
 import { fromSubscriptions } from './limits.js'
 import { getAllBudgetStatuses } from './budgets.js'
 import { inferExpectedInvoiceBy } from './invoice.js'
+import { isFailureStatus, SQL_HEALTH_STATUS_LIST } from './collectors/types.js'
 import {
   detectBudgetThresholdAlert,
   detectForecastBudgetBreachAlert,
@@ -68,15 +71,10 @@ import {
   detectNewUnknownSourceAlert,
   detectLongEstimateOnlySourceAlert,
   detectSubscriptionUtilizationAlert,
-  reconcileAlerts,
-  serializeEvidence,
-  deserializeEvidence,
   type AlertCandidate,
-  type AlertRecord,
-  type AlertType,
-  type AlertSeverity,
   type SyncSignal,
 } from './alerts.js'
+import { reconcileAndPersist } from './alerts-store.js'
 
 // ---- thresholds -- reused from the codebase's own existing conventions, not invented ----
 
@@ -177,24 +175,48 @@ export function classifyErrorCode(raw: string | null): 'credential_error' | 'per
   return null
 }
 
-interface RunRow { provider: string; status: string; started_at: number; error_code: string | null }
+interface RunRow { provider: string; collector_name: string; status: string; started_at: number; error_code: string | null }
 
 function gatherSyncAndCredentialCandidates(db: Database.Database, now: number): AlertCandidate[] {
-  const latestRows = db.prepare(`
-    SELECT provider, status, started_at, error_code
+  // COS-OPS-H3: sync health comes from the latest HEALTH-BEARING run (ok or a
+  // real failure) per (provider, collector_name) -- benign statuses
+  // (skipped/locked/dry_run, see collectors/types.ts) carry no evidence
+  // either way, so the default config's hourly 'skipped'
+  // anthropic-usage-snapshot tick neither fires a perpetual failed_sync alert
+  // nor masks/clears an earlier real failure (ok -> skipped stays ok,
+  // error -> skipped stays failed). Keying by collector_name keeps a
+  // two-cadence provider (anthropic: hourly snapshot + daily cost report)
+  // from flapping between its collectors' interleaved rows -- the provider is
+  // 'failed' while ANY collector's latest health-bearing run is a failure,
+  // stable until that same collector produces a newer ok. A provider with
+  // ONLY benign history has no health evidence at all: no signal is emitted
+  // for it (neither a failure nor an "all clear").
+  const healthRows = db.prepare(`
+    SELECT provider, collector_name, status, started_at, error_code
     FROM import_runs r
-    WHERE started_at = (SELECT MAX(started_at) FROM import_runs WHERE provider = r.provider)
-    GROUP BY provider
+    WHERE status IN (${SQL_HEALTH_STATUS_LIST})
+      AND started_at = (SELECT MAX(started_at) FROM import_runs
+                        WHERE provider = r.provider AND collector_name = r.collector_name
+                          AND status IN (${SQL_HEALTH_STATUS_LIST}))
+    GROUP BY provider, collector_name
   `).all() as RunRow[]
+  const healthByProvider = new Map<string, RunRow[]>()
+  for (const h of healthRows) {
+    const list = healthByProvider.get(h.provider)
+    if (list) list.push(h); else healthByProvider.set(h.provider, [h])
+  }
   const lastOkStmt = db.prepare(`SELECT MAX(started_at) t FROM import_runs WHERE provider = ? AND status = 'ok'`)
   const out: AlertCandidate[] = []
-  for (const r of latestRows) {
-    const lastOk = (lastOkStmt.get(r.provider) as { t: number | null }).t ?? null
-    const age = now - r.started_at
-    const stale = r.status === 'ok' && age > SYNC_STALE_SECS
-    const classified = classifyErrorCode(r.error_code)
-    const status: SyncSignal['status'] = r.status !== 'ok' ? 'failed' : (stale ? 'stale' : 'ok')
-    const signal: SyncSignal = { provider: r.provider, status, last_success: lastOk, data_age_secs: age, error_code: classified ?? r.error_code }
+  for (const [provider, rows] of healthByProvider) {
+    const health = rows.slice().sort((a, b) => b.started_at - a.started_at)
+    const failing = health.find(h => isFailureStatus(h.status)) ?? null
+    const latestHealth = health[0]
+    const lastOk = (lastOkStmt.get(provider) as { t: number | null }).t ?? null
+    const age = now - latestHealth.started_at
+    const stale = !failing && age > SYNC_STALE_SECS
+    const classified = classifyErrorCode(failing?.error_code ?? null)
+    const status: SyncSignal['status'] = failing ? 'failed' : (stale ? 'stale' : 'ok')
+    const signal: SyncSignal = { provider, status, last_success: lastOk, data_age_secs: age, error_code: classified ?? failing?.error_code ?? null }
 
     const staleAlert = detectStaleCollectorAlert(signal)
     if (staleAlert) out.push(staleAlert)
@@ -204,7 +226,7 @@ function gatherSyncAndCredentialCandidates(db: Database.Database, now: number): 
     // together from the same underlying event) -- provider used as source_id surrogate since
     // this codebase's credentials are provider-scoped, not per-source.
     if (status === 'failed' && classified) {
-      out.push(detectCredentialPermissionAlert({ source_id: r.provider, provider: r.provider, issue: classified }))
+      out.push(detectCredentialPermissionAlert({ source_id: provider, provider, issue: classified }))
     }
   }
   return out
@@ -291,7 +313,10 @@ function gatherNewSourceAndEstimateOnlyCandidates(db: Database.Database, now: nu
 function gatherUtilizationCandidates(now: number): AlertCandidate[] {
   const { config } = loadSubscriptionsConfig()
   const subs = deriveLifecycle(config, now)
-  const limitStatuses = fromSubscriptions(subs)
+  // COS-OPS-M2: pass the clock so a stale (>10-day-old) manual weekly-% snapshot
+  // comes back with usage_pct null and is skipped below -- no utilization alert
+  // is ever raised off a reading whose weekly window has long since reset.
+  const limitStatuses = fromSubscriptions(subs, now)
   const out: AlertCandidate[] = []
   for (const ls of limitStatuses) {
     if (ls.usage_pct == null || ls.sub_id == null) continue
@@ -349,37 +374,13 @@ export function gatherAlertCandidates(db: Database.Database, config: CostOpsConf
 }
 
 // ---- persistence (costops_alerts) --------------------------------------------------------
-
-interface AlertRow {
-  dedup_key: string
-  type: string
-  severity: string
-  evidence_json: string
-  first_seen: number
-  last_seen: number
-  acknowledged_at: number | null
-  acknowledged_by: string | null
-  resolved_at: number | null
-  recurrence_count: number
-  owner: string | null
-  cooldown_until: number | null
-}
-
-function rowToRecord(r: AlertRow): AlertRecord {
-  return {
-    dedup_key: r.dedup_key, type: r.type as AlertType, severity: r.severity as AlertSeverity,
-    evidence: deserializeEvidence(r.evidence_json),
-    first_seen: r.first_seen, last_seen: r.last_seen,
-    acknowledged_at: r.acknowledged_at, acknowledged_by: r.acknowledged_by,
-    resolved_at: r.resolved_at, recurrence_count: r.recurrence_count,
-    owner: r.owner, cooldown_until: r.cooldown_until,
-  }
-}
-
-function loadExistingAlerts(db: Database.Database): AlertRecord[] {
-  const rows = db.prepare(`SELECT * FROM costops_alerts`).all() as AlertRow[]
-  return rows.map(rowToRecord)
-}
+//
+// COS-OPS-M3: persistence is alerts-store.ts's job (reconcileAndPersist ->
+// applyAlertReconciliation, ONE db.transaction). This file used to carry its
+// own copies of AlertRow/rowToRecord/loadExistingAlerts plus a re-implemented,
+// NON-transactional insert/touch/resolve loop, and a second, differently-shaped
+// exported listAlerts. The store's listAlerts (the one every real read path --
+// GET /api/costs/alerts, export.ts -- already uses) is the single read API now.
 
 export interface AlertCaptureSummary {
   candidates: number
@@ -391,68 +392,13 @@ export interface AlertCaptureSummary {
 /**
  * Gather this round's candidates, reconcile against `costops_alerts`, and
  * persist the result (insert new rows, touch active/reopened ones, resolve
- * ones whose condition disappeared). Requires `initAlertsSchema` to have
+ * ones whose condition disappeared) -- atomically, via alerts-store.ts's
+ * reconcileAndPersist (COS-OPS-M3). Requires `initAlertsSchema` to have
  * already run (Mason's seam call) -- not invoked here (this file is
  * capture-orchestration, not schema setup).
  */
 export function captureAlerts(db: Database.Database, config: CostOpsConfig, now: number, opts: { cooldownSeconds?: number } = {}): AlertCaptureSummary {
-  const existing = loadExistingAlerts(db)
   const candidates = gatherAlertCandidates(db, config, now)
-  const result = reconcileAlerts(existing, candidates, now, opts.cooldownSeconds)
-
-  const insertStmt = db.prepare(`
-    INSERT INTO costops_alerts (type, severity, evidence_json, dedup_key, first_seen, last_seen, acknowledged_at, acknowledged_by, resolved_at, recurrence_count, owner, cooldown_until, created_at)
-    VALUES (@type, @severity, @evidence_json, @dedup_key, @first_seen, @last_seen, NULL, NULL, NULL, 0, NULL, @cooldown_until, @now)
-  `)
-  for (const a of result.toInsert) {
-    insertStmt.run({ type: a.type, severity: a.severity, evidence_json: serializeEvidence(a.evidence), dedup_key: a.dedup_key, first_seen: a.first_seen, last_seen: a.last_seen, cooldown_until: a.cooldown_until, now })
-  }
-
-  const touchStmt = db.prepare(`
-    UPDATE costops_alerts SET last_seen=@last_seen, severity=@severity, evidence_json=@evidence_json, resolved_at=@resolved_at, recurrence_count=@recurrence_count, cooldown_until=@cooldown_until
-    WHERE dedup_key=@dedup_key
-  `)
-  for (const t of result.toTouch) {
-    touchStmt.run({
-      dedup_key: t.dedup_key, last_seen: t.patch.last_seen, severity: t.patch.severity,
-      evidence_json: serializeEvidence(t.patch.evidence), resolved_at: t.patch.resolved_at,
-      recurrence_count: t.patch.recurrence_count, cooldown_until: t.patch.cooldown_until,
-    })
-  }
-
-  const resolveStmt = db.prepare(`UPDATE costops_alerts SET resolved_at=@resolved_at WHERE dedup_key=@dedup_key`)
-  for (const r of result.toResolve) {
-    resolveStmt.run({ dedup_key: r.dedup_key, resolved_at: r.resolved_at })
-  }
-
+  const result = reconcileAndPersist(db, candidates, now, opts.cooldownSeconds)
   return { candidates: candidates.length, inserted: result.toInsert.length, touched: result.toTouch.length, resolved: result.toResolve.length }
-}
-
-export interface AlertListRow {
-  dedup_key: string
-  type: string
-  severity: string
-  evidence: Record<string, unknown>
-  first_seen: number
-  last_seen: number
-  acknowledged_at: number | null
-  acknowledged_by: string | null
-  resolved_at: number | null
-  recurrence_count: number
-  owner: string | null
-}
-
-/** Read back stored alerts, most recent first. Unresolved-only by default (the GET route's likely default view). */
-export function listAlerts(db: Database.Database, opts: { includeResolved?: boolean; limit?: number } = {}): AlertListRow[] {
-  const limit = opts.limit ?? 200
-  const rows = (
-    opts.includeResolved
-      ? db.prepare(`SELECT * FROM costops_alerts ORDER BY last_seen DESC LIMIT ?`).all(limit)
-      : db.prepare(`SELECT * FROM costops_alerts WHERE resolved_at IS NULL ORDER BY last_seen DESC LIMIT ?`).all(limit)
-  ) as AlertRow[]
-  return rows.map(r => ({
-    dedup_key: r.dedup_key, type: r.type, severity: r.severity, evidence: deserializeEvidence(r.evidence_json),
-    first_seen: r.first_seen, last_seen: r.last_seen, acknowledged_at: r.acknowledged_at, acknowledged_by: r.acknowledged_by,
-    resolved_at: r.resolved_at, recurrence_count: r.recurrence_count, owner: r.owner,
-  }))
 }

@@ -3,12 +3,17 @@
 // callers (inventory.ts) gather the input facts from the DB/Vault and pass
 // them in here as plain booleans/strings.
 //
+// (Type + status-vocabulary predicates come from collectors/types.ts -- a
+// pure type/const import, so this module stays derivation-only.)
+//
 // The headline example this fixes: the OpenAI API source has a WORKING
 // credential and a WORKING collector, but currently ~$0 of actual usage --
 // that is 'inactive', not a credential/auth problem. Lifecycle answers "is
 // this source usable and in what state"; provenance answers "where did THIS
 // number come from". Mixing them (e.g. treating "no data yet" as an error
 // state) is exactly the GAP-03 bug this module exists to prevent.
+
+import { isFailureStatus, type ImportStatus } from './collectors/types.js'
 
 export type SourceLifecycle =
   | 'active'
@@ -41,10 +46,14 @@ export interface LifecycleInput {
   /** Whether the required credential is currently present. Ignored when
    * credentialRequired is false. */
   credentialPresent: boolean
-  /** The most recent import_runs status recorded for this source's
-   * provider, or null if no collection attempt has ever been recorded
-   * (distinct from an attempt that ran and failed). */
-  lastRunStatus: 'ok' | 'error' | 'failed' | 'partial' | 'rate_limited' | null
+  /** The most recent HEALTH-BEARING import_runs status recorded for this
+   * source's provider ('ok' or a real failure -- see collectors/types.ts),
+   * or null if no health-bearing run has ever been recorded. Benign statuses
+   * ('skipped'/'locked'/'dry_run') carry no evidence either way -- callers
+   * (inventory.ts) must not pass them as if they were the latest outcome:
+   * an error -> skipped sequence is still blocked, an ok -> skipped
+   * sequence is still fine, and a benign-only history is null. */
+  lastRunStatus: ImportStatus | null
   /** Whether this source has EVER produced a real (non-pending) cost line --
    * i.e. genuine activity/spend was observed at some point, even if the
    * current month is zero. A source with a working collector and simply no
@@ -61,7 +70,9 @@ export function deriveSourceLifecycle(input: LifecycleInput): SourceLifecycle {
   if (input.explicitlyUnsupported) return 'unsupported'
   if (input.explicitlyDeprecated) return 'deprecated'
   if (input.credentialRequired && !input.credentialPresent) return 'not_configured'
-  if (input.lastRunStatus != null && input.lastRunStatus !== 'ok') return 'blocked'
+  // Only a REAL failure blocks (COS-CORE-M2): a benign skipped/locked/dry_run
+  // status, even if passed in directly, is not a collector failure.
+  if (input.lastRunStatus != null && isFailureStatus(input.lastRunStatus)) return 'blocked'
   if (!input.hasEverHadActivity) return 'inactive'
   return 'active'
 }

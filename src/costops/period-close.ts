@@ -101,6 +101,12 @@ export function checkCloseReadiness(db: Database.Database, config: CostOpsConfig
   const subscriptions = deriveLifecycle(subsConfig, now)
   const missing = subscriptions.filter(s => s.past_due).map(s => s.id)
 
+  // 'failed' here means a REAL collector failure (error/partial/rate_limited)
+  // per ledger.ts's provider_sync derivation -- benign import statuses
+  // (skipped/locked/dry_run, see collectors/types.ts) never appear as
+  // 'failed', so a dry-run preview or a documented 'skipped' tick cannot
+  // block a month close (COS-CORE-M2). 'no_data' (benign-only history) is
+  // likewise neither failed nor stale and does not block.
   const failed_providers = summary.provider_sync.filter(p => p.status === 'failed').map(p => p.provider)
   const stale_providers = summary.provider_sync.filter(p => p.status === 'stale').map(p => p.provider)
 

@@ -140,6 +140,27 @@ describe('P2-C capacity view', () => {
     expect(s.unused_capacity.confidence).not.toBe('unknown')
   })
 
+  it('3b. OPT-M1: the persisted provider-stated resets_at surfaces on the usage figure (the column was write-only before)', () => {
+    const db = getDb()
+    const resetsAt = NOW + 3 * 24 * 3600
+    writeRateLimitSnapshot(db, {
+      provider: 'codex', usedPercent: 100, source: 'provider_metadata_api', confidence: 'measured',
+      resetsAt, dedupKey: 'codex|reset', capturedAt: NOW - 60,
+    })
+    const s = report().subscriptions.find(x => x.id === 'plan-with-measured-usage')!
+    expect(s.usage.resets_at).toBe(resetsAt)
+  })
+
+  it('3c. OPT-M1: a snapshot with no provider-stated reset surfaces resets_at as null, never fabricated', () => {
+    const db = getDb()
+    writeRateLimitSnapshot(db, {
+      provider: 'anthropic', usedPercent: 50, source: 'operator_manual_snapshot', confidence: 'manual',
+      resetLabel: 'Tue 08:59', dedupKey: 'anthropic|noreset', capturedAt: NOW - 60,
+    })
+    const s = report().subscriptions.find(x => x.id === 'plan-with-manual-usage')!
+    expect(s.usage.resets_at).toBeNull()
+  })
+
   it('4b. overflow is only positive when usage genuinely exceeds the window', () => {
     const db = getDb()
     writeRateLimitSnapshot(db, {

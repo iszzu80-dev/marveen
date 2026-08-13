@@ -390,7 +390,12 @@ export interface RecommendationReconcileResult {
  *
  * - Candidate with no existing row, OR matching a row that's already
  *   'expired' -> brand new recommendation, status 'open' (an expired one
- *   resurfacing gets a fresh record, not a silent un-expire).
+ *   resurfacing gets a fresh record, not a silent un-expire). NOTE for
+ *   persistence layers: dedup_key is UNIQUE (initOptimizationSchema below),
+ *   so "fresh record" for an expired key must be realized as a full-field
+ *   reset of the existing row (see captureRecommendations' ON CONFLICT
+ *   upsert), never a second physical row -- a plain INSERT here is the
+ *   COS-OPS-C1 pipeline-killer.
  * - Candidate matching an 'open' existing row -> touch: refresh cost/saving/
  *   risk/confidence/evidence numbers (the underlying data may have moved)
  *   without touching status.
@@ -449,6 +454,13 @@ export function reconcileRecommendations(
 
   return { toInsert, toTouch, toResolve, toExpire }
 }
+
+// COS-CORE-M8: these two are pure record transforms with no status guard of
+// their own -- the store layer (recommendations-store.ts's accept/dismiss
+// ByKey) enforces that only an 'open' record ever reaches them, so a
+// dismissed/resolved/expired record's earlier decision is never silently
+// flipped. Callers must go through the store, never call these on a loaded
+// row directly.
 
 /** Manual human decision: accept a recommendation (the human intends to act on it, outside this codebase -- this function never executes anything itself). */
 export function acceptRecommendation(r: RecommendationRecord, actor: string, now: number): RecommendationRecord {

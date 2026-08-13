@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
-import { deriveMtdSpend, parseDeepSeekBalanceUsd, syncDeepSeekBalance, forecastDeepSeekExhaustion } from '../costops/collectors/deepseek.js'
+import { deriveMtdSpend, parseDeepSeekBalanceUsd, syncDeepSeekBalance, forecastDeepSeekExhaustion, peakSinceLastTopUp } from '../costops/collectors/deepseek.js'
 
 describe('deriveMtdSpend (pure)', () => {
   it('sums balance drops, ignoring top-ups (rises)', () => {
@@ -56,11 +56,46 @@ describe('forecastDeepSeekExhaustion (pure)', () => {
   })
 })
 
+// COS-OPS-M1: the "peak" a usage-% is measured against must be the peak since
+// the last observed top-up (rise), not the all-time max.
+describe('peakSinceLastTopUp (pure)', () => {
+  const snaps = (balances: number[]) => balances.map((b, i) => ({ balance: b, captured_at: i }))
+
+  it('returns the peak at/after the last rise between consecutive snapshots', () => {
+    expect(peakSinceLastTopUp(snaps([50, 30, 10, 1, 5, 4]))).toBe(5)   // top-up 1 -> 5
+    expect(peakSinceLastTopUp(snaps([10, 8, 12, 9]))).toBe(12)          // top-up 8 -> 12
+    expect(peakSinceLastTopUp(snaps([10, 2, 6, 3, 8, 7]))).toBe(8)      // LAST rise wins (3 -> 8)
+  })
+
+  it('with no rise ever observed, the all-time max is the last top-up level', () => {
+    expect(peakSinceLastTopUp(snaps([50, 30, 4]))).toBe(50)
+    expect(peakSinceLastTopUp(snaps([7]))).toBe(7)
+  })
+
+  it('returns null for an empty history (never a fabricated number)', () => {
+    expect(peakSinceLastTopUp([])).toBeNull()
+  })
+})
+
 describe('parseDeepSeekBalanceUsd', () => {
   it('reads the USD total_balance from the /user/balance shape', () => {
     expect(parseDeepSeekBalanceUsd({ is_available: true, balance_infos: [{ currency: 'USD', total_balance: '4.55' }] })).toBe(4.55)
     expect(parseDeepSeekBalanceUsd({ balance_infos: [{ currency: 'CNY', total_balance: '30' }] })).toBe(30) // falls back to first
-    expect(parseDeepSeekBalanceUsd(null)).toBe(0)
+  })
+
+  // COS-OPS-H2: a malformed-but-200 body used to parse as 0 -- a real-looking
+  // snapshot whose drop-to-zero deriveMtdSpend booked as spend, permanently.
+  // Unknown is null, never a fabricated $0.
+  it('returns null (not 0) for an unrecognizable shape', () => {
+    expect(parseDeepSeekBalanceUsd(null)).toBeNull()
+    expect(parseDeepSeekBalanceUsd('oops')).toBeNull()
+    expect(parseDeepSeekBalanceUsd({ error: 'internal' })).toBeNull()
+    expect(parseDeepSeekBalanceUsd({ balance_infos: [] })).toBeNull()
+    expect(parseDeepSeekBalanceUsd({ balance_infos: [{ currency: 'USD', total_balance: 'NaN-ish' }] })).toBeNull()
+  })
+
+  it('returns null when the provider says the balance is not available', () => {
+    expect(parseDeepSeekBalanceUsd({ is_available: false, balance_infos: [{ currency: 'USD', total_balance: '4.55' }] })).toBeNull()
   })
 })
 
@@ -183,6 +218,79 @@ describe('syncDeepSeekBalance (offline stub)', () => {
     expect(line.original_amount).toBeCloseTo(1.8, 4)
     expect(line.original_currency).toBe('USD')
     expect(line.fx_rate).toBe(360)
+  })
+
+  // COS-OPS-H2: a malformed-but-200 balance response must be an ERROR run with
+  // NO snapshot -- a fabricated $0 snapshot would book the whole remaining
+  // balance as MTD spend (deriveMtdSpend counts drops) and the next good
+  // reading would be ignored as a "top-up", poisoning the month permanently.
+  describe.each([
+    ['malformed 200 body', { error: 'internal' }],
+    ['is_available:false', { is_available: false, balance_infos: [{ currency: 'USD', total_balance: '4.55' }] }],
+    ['empty balance_infos', { is_available: true, balance_infos: [] }],
+  ])('COS-OPS-H2: %s', (_label, badBody) => {
+    it('writes no snapshot, records an error run, and leaves MTD spend unchanged', async () => {
+      const db = getDb()
+      const t0 = Math.floor(Date.UTC(2026, 6, 5) / 1000)
+      const bal = (v: string) => async () => ({ is_available: true, balance_infos: [{ currency: 'USD', total_balance: v }] })
+      // Two good syncs establish a real MTD spend of 1.80 USD.
+      await syncDeepSeekBalance(db, t0, { apiKey: 'k', fxUsdHuf: 360, httpGetJson: bal('5.00') })
+      await syncDeepSeekBalance(db, t0 + 86400, { apiKey: 'k', fxUsdHuf: 360, httpGetJson: bal('3.20') })
+
+      const r = await syncDeepSeekBalance(db, t0 + 2 * 86400, { apiKey: 'k', fxUsdHuf: 360, httpGetJson: async () => badBody })
+      expect(r.ok).toBe(false)
+      expect(r.status).toBe('error')
+
+      // No third snapshot landed -- the two good ones stand alone.
+      const snaps = db.prepare("SELECT COUNT(*) c FROM provider_balance_snapshots WHERE provider='deepseek'").get() as { c: number }
+      expect(snaps.c).toBe(2)
+      // The run is recorded as an error, not an ok with a fabricated 0.
+      const run = db.prepare("SELECT status FROM import_runs WHERE provider='deepseek' ORDER BY id DESC LIMIT 1").get() as { status: string }
+      expect(run.status).toBe('error')
+      // MTD spend is unchanged: still the real 1.80 USD drop, not 5.00 (drop-to-zero).
+      const line = db.prepare("SELECT billed_cost FROM cost_line_items WHERE source_id='deepseek-api'").get() as { billed_cost: number }
+      expect(line.billed_cost).toBeCloseTo(1.8 * 360, 2)
+      // The entitlement still reflects the last GOOD balance reading.
+      const ent = db.prepare("SELECT remaining FROM entitlements WHERE dedup_key='deepseek|prepaid_balance'").get() as { remaining: number }
+      expect(ent.remaining).toBe(3.2)
+    })
+  })
+
+  // COS-OPS-M4: the sync body runs under the shared per-provider import lock
+  // (import-durability.ts) -- a manual sync racing the scheduled one
+  // short-circuits with 'locked' and performs NO fetch and NO write, exactly
+  // like the runCollector-based collectors.
+  it('a concurrent second sync gets status locked and performs no writes (COS-OPS-M4)', async () => {
+    const db = getDb()
+    const t0 = Math.floor(Date.UTC(2026, 6, 5) / 1000)
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let fetches = 0
+    const slowFetch = async () => {
+      fetches++
+      await gate
+      return { is_available: true, balance_infos: [{ currency: 'USD', total_balance: '5.00' }] }
+    }
+    const first = syncDeepSeekBalance(db, t0, { apiKey: 'k', fxUsdHuf: 360, httpGetJson: slowFetch })
+    // wait until the first sync provably holds the lock (it is mid-fetch), then race a second one
+    while (fetches === 0) await new Promise(resolve => setTimeout(resolve, 1))
+    const second = await syncDeepSeekBalance(db, t0 + 1, { apiKey: 'k', fxUsdHuf: 360, httpGetJson: slowFetch })
+    expect(second.ok).toBe(false)
+    expect(second.status).toBe('locked')
+    expect(fetches).toBe(1) // the locked sync never even fetched
+    // the locked run wrote NO snapshot/line/entitlement -- only its audit row
+    expect((db.prepare("SELECT COUNT(*) c FROM provider_balance_snapshots WHERE provider='deepseek'").get() as { c: number }).c).toBe(0)
+    expect((db.prepare("SELECT COUNT(*) c FROM cost_line_items WHERE source_id='deepseek-api'").get() as { c: number }).c).toBe(0)
+    const lockedRun = db.prepare("SELECT status FROM import_runs WHERE provider='deepseek' ORDER BY id DESC LIMIT 1").get() as { status: string }
+    expect(lockedRun.status).toBe('locked')
+
+    release()
+    const r1 = await first
+    expect(r1.ok).toBe(true) // the holder finished normally after the race
+    expect((db.prepare("SELECT COUNT(*) c FROM provider_balance_snapshots WHERE provider='deepseek'").get() as { c: number }).c).toBe(1)
+    // and the lock is released -- a later sync proceeds
+    const r3 = await syncDeepSeekBalance(db, t0 + 3600, { apiKey: 'k', fxUsdHuf: 360, httpGetJson: async () => ({ is_available: true, balance_infos: [{ currency: 'USD', total_balance: '4.00' }] }) })
+    expect(r3.ok).toBe(true)
   })
 
   it('does not fabricate an original currency when no fx rate is configured (fxUsdHuf 0)', async () => {

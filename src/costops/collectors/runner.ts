@@ -148,8 +148,14 @@ export interface UpsertOutcome {
  * NOT AN ERROR. A closed month refusing a write is the system working. The
  * caller turns it into `partial`, and the corrections path (createCorrection)
  * is how a closed month is legitimately changed.
+ *
+ * EXPORTED (COS-OPS-M4), so the snapshot-based collectors that cannot go
+ * through runCollector's collect()->lines flow (deepseek) write through this
+ * single guarded writer instead of a hand-rolled copy. That is exactly why the
+ * closed-period guard belongs HERE and not in runCollector: a second writer
+ * that skipped the guard would reopen AC-9 on the path nobody watches.
  */
-function upsertProviderLines(
+export function upsertProviderLines(
   db: Database.Database, lines: NormalizedCostLine[], now: number,
 ): UpsertOutcome {
   const upsertSource = db.prepare(`
@@ -161,16 +167,20 @@ function upsertProviderLines(
     INSERT INTO cost_line_items
       (source_id, charge_period_start, charge_period_end, charge_category, service_name,
        usage_type, consumed_quantity, consumed_unit, billed_cost, effective_cost, currency,
-       confidence, data_freshness, source_ref, dedup_key, created_at, actual_source)
+       confidence, data_freshness, source_ref, dedup_key, created_at, actual_source,
+       original_amount, original_currency, fx_rate, fx_date)
     VALUES
       (@source_id, @start, @end, 'usage', @source_id,
        @usage_type, @quantity, @unit, @amount, NULL, @currency,
-       @confidence, @freshness, @source_ref, @dedup_key, @now, 'provider_api')
+       @confidence, @freshness, @source_ref, @dedup_key, @now, 'provider_api',
+       @original_amount, @original_currency, @fx_rate, @fx_date)
     ON CONFLICT(dedup_key) DO UPDATE SET
       billed_cost=excluded.billed_cost, currency=excluded.currency,
       confidence=excluded.confidence, data_freshness=excluded.data_freshness,
       source_ref=excluded.source_ref, usage_type=excluded.usage_type,
-      actual_source=excluded.actual_source
+      actual_source=excluded.actual_source,
+      original_amount=excluded.original_amount, original_currency=excluded.original_currency,
+      fx_rate=excluded.fx_rate, fx_date=excluded.fx_date
   `)
   // Closed-month lookups are cached per run: a sync returns hundreds of lines
   // and they all land in one or two months, so asking the DB per line would be
@@ -199,12 +209,49 @@ function upsertProviderLines(
         usage_type: l.usage_type ?? null, quantity: l.quantity ?? null, unit: l.unit ?? null,
         amount: l.amount, currency: l.currency, confidence: l.confidence,
         freshness: l.data_freshness_at, source_ref: l.raw_ref_hash ?? null, dedup_key: l.dedup_key, now,
+        original_amount: l.original_amount ?? null, original_currency: l.original_currency ?? null,
+        fx_rate: l.fx_rate ?? null, fx_date: l.fx_date ?? null,
       })
       n++
     }
     return n
   })
   return { imported: tx(lines), refusedByClosedPeriod }
+}
+
+export interface ImportRunRecord {
+  provider: string
+  collectorName: string
+  status: ImportStatus
+  now: number
+  importedCount: number
+  periodStart?: number | null
+  periodEnd?: number | null
+  errorCode?: string | null
+  errorMessage?: string | null
+  freshness?: number | null
+  detailJson?: string | null
+}
+
+/**
+ * Record ONE import_runs audit row. Exported (COS-OPS-M4) as the single
+ * writer for every collector path -- runCollector, dryRunCollector, and the
+ * snapshot-based collectors (deepseek/codex) that previously each carried
+ * their own hand-rolled INSERT copy.
+ */
+export function recordImportRun(db: Database.Database, r: ImportRunRecord): void {
+  db.prepare(`
+    INSERT INTO import_runs (provider, collector_name, started_at, finished_at, status,
+      period_start, period_end, imported_count, error_code, error_message_sanitized, data_freshness_at, detail_json)
+    VALUES (@provider, @collector, @started, @finished, @status,
+      @ps, @pe, @count, @ecode, @emsg, @fresh, @detail)
+  `).run({
+    provider: r.provider, collector: r.collectorName,
+    started: r.now, finished: r.now, status: r.status,
+    ps: r.periodStart ?? null, pe: r.periodEnd ?? null, count: r.importedCount,
+    ecode: r.errorCode ?? null, emsg: r.errorMessage ?? null,
+    fresh: r.freshness ?? null, detail: r.detailJson ?? null,
+  })
 }
 
 /**
@@ -240,6 +287,14 @@ export interface RunCollectorArgs {
   // v0.5: optional sanitized per-run detail JSON (breakdown) stored on import_runs.
   // MUST be secret-free and contain no raw account/service IDs (type/plan labels only).
   detailJson?: string
+  // COS-OPS-M8: optional collect override, replacing collector.collect() INSIDE the
+  // per-provider lock. Lets a caller that also needs the raw response (e.g. render's
+  // sanitized breakdown detail) do ONE provider fetch for both the imported lines and
+  // the detail, instead of fetching once for the detail and again via collect(). A
+  // detailJson returned here wins over the static detailJson arg (which a locked/
+  // pre-fetch path could never have computed). Existing call sites are untouched --
+  // omitted, runCollector behaves exactly as before.
+  collect?: (opts: CollectOpts) => Promise<{ lines: NormalizedCostLine[]; detailJson?: string }>
 }
 
 export interface DryRunArgs {
@@ -290,15 +345,11 @@ export async function dryRunCollector(args: DryRunArgs): Promise<DryRunReport> {
   // CRITICAL: no provider_api cost_line_items are ever written in a dry-run.
   // Optionally leave a clearly-marked audit trail (no cost, no secret, no raw).
   if (recordRun) {
-    db.prepare(`
-      INSERT INTO import_runs (provider, collector_name, started_at, finished_at, status,
-        period_start, period_end, imported_count, error_code, error_message_sanitized, data_freshness_at)
-      VALUES (@provider, @collector, @started, @finished, @status, @ps, @pe, 0, @ecode, @emsg, @fresh)
-    `).run({
-      provider: collector.provider, collector: collector.collectorName,
-      started: now, finished: now, status,
-      ps: opts.periodStart, pe: opts.periodEnd,
-      ecode: errorCode, emsg: errorMsg, fresh: freshness,
+    recordImportRun(db, {
+      provider: collector.provider, collectorName: collector.collectorName,
+      status, now, importedCount: 0,
+      periodStart: opts.periodStart, periodEnd: opts.periodEnd,
+      errorCode, errorMessage: errorMsg, freshness,
     })
   }
   return {
@@ -322,12 +373,6 @@ export async function dryRunCollector(args: DryRunArgs): Promise<DryRunReport> {
  */
 export async function runCollector(args: RunCollectorArgs): Promise<ImportRunResult> {
   const { db, collector, opts, now } = args
-  const insertRun = db.prepare(`
-    INSERT INTO import_runs (provider, collector_name, started_at, finished_at, status,
-      period_start, period_end, imported_count, error_code, error_message_sanitized, data_freshness_at, detail_json)
-    VALUES (@provider, @collector, @started, @finished, @status,
-      @ps, @pe, @count, @ecode, @emsg, @fresh, @detail)
-  `)
 
   const lockResult = await withImportLock(buildDbImportLockContext(db), collector.provider, now, async () => {
     let status: ImportStatus = 'ok'
@@ -335,8 +380,19 @@ export async function runCollector(args: RunCollectorArgs): Promise<ImportRunRes
     let errorCode: string | null = null
     let errorMsg: string | null = null
     let freshness: number | null = null
+    let detail: string | null = args.detailJson ?? null
     try {
-      const lines = await collector.collect(opts)
+      let lines: NormalizedCostLine[]
+      if (args.collect) {
+        // COS-OPS-M8: single-fetch override -- one provider call yields both the
+        // lines and (optionally) the sanitized run detail. Running it inside the
+        // lock also means a 'locked' concurrent sync performs NO fetch at all.
+        const collected = await args.collect(opts)
+        lines = collected.lines
+        if (collected.detailJson !== undefined) detail = collected.detailJson
+      } else {
+        lines = await collector.collect(opts)
+      }
       const outcome = upsertProviderLines(db, lines, now)
       importedCount = outcome.imported
       // PARTIAL, AND FOR THE FIRST TIME SOMETHING WRITES IT (C-2).
@@ -376,15 +432,15 @@ export async function runCollector(args: RunCollectorArgs): Promise<ImportRunRes
       errorMsg = `${s.code}: ${s.message}`.slice(0, 300)
       // IMPORTANT: delete nothing. Last good data stays.
     }
-    return { status, importedCount, errorCode, errorMsg, freshness }
+    return { status, importedCount, errorCode, errorMsg, freshness, detail }
   })
 
   if (!lockResult.ok) {
-    insertRun.run({
-      provider: collector.provider, collector: collector.collectorName,
-      started: now, finished: now, status: 'locked' as ImportStatus,
-      ps: opts.periodStart, pe: opts.periodEnd, count: 0,
-      ecode: null, emsg: 'a concurrent sync for this provider was already running', fresh: null, detail: null,
+    recordImportRun(db, {
+      provider: collector.provider, collectorName: collector.collectorName,
+      status: 'locked', now, importedCount: 0,
+      periodStart: opts.periodStart, periodEnd: opts.periodEnd,
+      errorMessage: 'a concurrent sync for this provider was already running',
     })
     return {
       provider: collector.provider, collectorName: collector.collectorName,
@@ -392,12 +448,12 @@ export async function runCollector(args: RunCollectorArgs): Promise<ImportRunRes
     }
   }
 
-  const { status, importedCount, errorCode, errorMsg, freshness } = lockResult.result
-  insertRun.run({
-    provider: collector.provider, collector: collector.collectorName,
-    started: now, finished: now, status,
-    ps: opts.periodStart, pe: opts.periodEnd, count: importedCount,
-    ecode: errorCode, emsg: errorMsg, fresh: freshness, detail: args.detailJson ?? null,
+  const { status, importedCount, errorCode, errorMsg, freshness, detail } = lockResult.result
+  recordImportRun(db, {
+    provider: collector.provider, collectorName: collector.collectorName,
+    status, now, importedCount,
+    periodStart: opts.periodStart, periodEnd: opts.periodEnd,
+    errorCode, errorMessage: errorMsg, freshness, detailJson: detail,
   })
   return {
     provider: collector.provider, collectorName: collector.collectorName,

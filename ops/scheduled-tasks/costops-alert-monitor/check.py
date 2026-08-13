@@ -51,11 +51,19 @@ def bot_token():
     return None
 
 def api(path, tok, timeout=45):
-    """Returns (ok, data). ok=False means the fetch failed -> carry forward prior keys."""
+    """Returns (ok, data). ok=False means the fetch failed -> carry forward prior keys.
+    COS-OPS-M5: ok requires HTTP status 200 AND a parseable JSON body -- a 401/500
+    whose body happens to be valid JSON must NOT read as authoritative coverage
+    (it would drop every stored key for that prefix, then re-push duplicate
+    alerts on recovery). Callers additionally verify the expected payload shape."""
     try:
-        out = subprocess.run(['curl', '-s', '--max-time', str(timeout), '-H', f'Authorization: Bearer {tok}', f'{DASH}{path}'],
+        out = subprocess.run(['curl', '-s', '--max-time', str(timeout), '-w', '\n%{http_code}',
+                              '-H', f'Authorization: Bearer {tok}', f'{DASH}{path}'],
                              capture_output=True, text=True, timeout=timeout + 5).stdout
-        return True, json.loads(out)
+        body, _, status = out.rpartition('\n')
+        if status.strip() != '200':
+            return False, None
+        return True, json.loads(body)
     except Exception:
         return False, None
 
@@ -64,7 +72,14 @@ def load_state():
     except Exception: return set()
 
 def save_state(keys):
-    try: json.dump({'alerted': sorted(keys), 'updated': int(time.time())}, open(STATE_FILE, 'w'))
+    # COS-OPS-M5: atomic write (temp file + os.replace) -- a crash/full-disk mid-write
+    # must not leave a truncated state file, which load_state() would read as "nothing
+    # ever alerted" and re-push every standing alert on the next run.
+    try:
+        tmp = STATE_FILE + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump({'alerted': sorted(keys), 'updated': int(time.time())}, f)
+        os.replace(tmp, STATE_FILE)
     except Exception: pass
 
 tok = dash_token()
@@ -75,7 +90,6 @@ first_run = not os.path.exists(STATE_FILE)
 prev = load_state()
 
 alerts = []            # (key, text) -- alertable conditions found this run
-covered_prefixes = []  # prefixes whose source fetched OK (fresh keys authoritative)
 
 def carry(prefix):
     """A source failed to fetch: keep its prior keys so dedup does not flap."""
@@ -84,10 +98,12 @@ def carry(prefix):
 now_keys = set()
 
 # 1. Limit gauges >= 80%
+# COS-OPS-M5: each source must present the EXPECTED payload shape (not merely
+# any 200 JSON) before its fresh keys become authoritative for the prefix --
+# anything else keeps the prior state (no drop -> no duplicate re-alert later).
 ok, lim = api('/api/costs/limits', tok)
-if ok and isinstance(lim, dict):
-    covered_prefixes.append('limit:')
-    for l in (lim.get('limits') or []):
+if ok and isinstance(lim, dict) and isinstance(lim.get('limits'), list):
+    for l in lim['limits']:
         pct = l.get('usage_pct')
         if isinstance(pct, (int, float)) and pct >= 0.80:
             name = l.get('name') or f"{l.get('provider','?')} {l.get('limit_type','')}".strip()
@@ -97,13 +113,21 @@ if ok and isinstance(lim, dict):
 else:
     now_keys |= carry('limit:')
 
-# 2. Warnings with high/critical severity  (slow endpoint: ~30s)
+# 2. Warnings with high/critical/blocked severity  (slow endpoint: ~30s)
+# COS-OPS-M5: 'blocked' is the MOST severe tier in warnings.ts's ladder
+# (low < medium < high < critical < blocked) -- the old high/critical-only
+# filter silently never pushed a 100%-limit-reached warning.
+w_list = None
 ok, w = api('/api/costs/warnings', tok, timeout=50)
 if ok:
-    covered_prefixes.append('warn:')
-    for x in (w.get('warnings') if isinstance(w, dict) else w) or []:
+    if isinstance(w, dict) and isinstance(w.get('warnings'), list):
+        w_list = w['warnings']
+    elif isinstance(w, list):
+        w_list = w
+if w_list is not None:
+    for x in w_list:
         sev = str(x.get('severity', '')).lower()
-        if sev in ('high', 'critical'):
+        if sev in ('high', 'critical', 'blocked'):
             key = f"warn:{x.get('code','')}:{x.get('provider','')}"
             alerts.append((key, f"⚠️ {x.get('provider','')}: {x.get('message','')}"))
 else:
@@ -111,8 +135,7 @@ else:
 
 # 3. Budget forecast breach (from summary)
 ok, s = api('/api/costs/summary', tok)
-if ok and isinstance(s, dict):
-    covered_prefixes.append('budget:')
+if ok and isinstance(s, dict) and 'month' in s:
     b = s.get('budget') or {}
     if b and str(b.get('status', '')).lower() in ('hard', 'critical', 'over'):
         key = f"budget:{s.get('month','')}"
@@ -124,10 +147,15 @@ else:
 # 4. Stale Claude usage snapshot -- weekly-% has NO public API, it is a manual
 #    screenshot entry. Instead of faking a gauge, nudge Istvan when the number goes
 #    stale so he only pastes a screenshot when the system actually asks.
+sub_list = None
 ok, sub = api('/api/costs/subscriptions', tok)
 if ok:
-    covered_prefixes.append('stale:')
-    for sc in (sub.get('subscriptions') if isinstance(sub, dict) else sub) or []:
+    if isinstance(sub, dict) and isinstance(sub.get('subscriptions'), list):
+        sub_list = sub['subscriptions']
+    elif isinstance(sub, list):
+        sub_list = sub
+if sub_list is not None:
+    for sc in sub_list:
         if sc.get('provider') != 'anthropic':
             continue
         us = sc.get('usage_snapshot') or {}

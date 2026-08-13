@@ -142,12 +142,94 @@ describe('optimization decision schema and audit trail', () => {
       NOW + 20,
     )
 
-    const [record] = listOptimizationDecisions(getDb())
+    // Explicit read clock: OPT-M5's read-time promotion would otherwise use
+    // the REAL wall clock, which is past this fixture's 2026-07-30 deferral.
+    const [record] = listOptimizationDecisions(getDb(), {}, NOW + 20)
     expect(record.status).toBe('deferred')
     expect(record.verdict).toBe('CANCEL')
     expect(record.status_changed_by).toBe('owner')
     expect(record.deferred_until).toBe(NOW + 3600)
     expect(getOptimizationDecisionEvents(getDb(), 'package-a')).toEqual(eventsBefore)
+  })
+
+  it('OPT-M5: an insufficient_evidence decision reopens as new the moment an actionable verdict arrives', () => {
+    upsertDecisionsFromRecommendations(getDb(), [recommendation({
+      package_id: 'package-thin',
+      verdict: 'INSUFFICIENT_EVIDENCE',
+      confidence: 'unknown',
+      blocker: 'missing price',
+    })], NOW)
+    expect(listOptimizationDecisions(getDb(), {}, NOW)[0].status).toBe('insufficient_evidence')
+
+    upsertDecisionsFromRecommendations(getDb(), [recommendation({
+      package_id: 'package-thin',
+      verdict: 'DOWNGRADE',
+    })], NOW + 60)
+
+    const [record] = listOptimizationDecisions(getDb(), {}, NOW + 60)
+    expect(record.status).toBe('new')
+    expect(record.verdict).toBe('DOWNGRADE')
+    const events = getOptimizationDecisionEvents(getDb(), 'package-thin')
+    expect(events.at(-1)).toMatchObject({
+      from_status: 'insufficient_evidence',
+      to_status: 'new',
+      actor: 'system',
+    })
+  })
+
+  it('OPT-M5 counterpart: a still-INSUFFICIENT_EVIDENCE refresh does NOT reopen -- there is nothing to act on yet', () => {
+    upsertDecisionsFromRecommendations(getDb(), [recommendation({
+      package_id: 'package-thin',
+      verdict: 'INSUFFICIENT_EVIDENCE',
+      confidence: 'unknown',
+      blocker: 'missing price',
+    })], NOW)
+    upsertDecisionsFromRecommendations(getDb(), [recommendation({
+      package_id: 'package-thin',
+      verdict: 'INSUFFICIENT_EVIDENCE',
+      confidence: 'unknown',
+      blocker: 'still missing price',
+    })], NOW + 60)
+
+    const [record] = listOptimizationDecisions(getDb(), {}, NOW + 60)
+    expect(record.status).toBe('insufficient_evidence')
+    expect(getOptimizationDecisionEvents(getDb(), 'package-thin')).toHaveLength(1)
+  })
+
+  it('OPT-M5: a deferred decision whose deferred_until has passed resurfaces as new at read time, with an audit event', () => {
+    upsertDecisionsFromRecommendations(getDb(), [recommendation()], NOW)
+    setDecisionStatus(getDb(), 'package-a', 'deferred', 'owner', NOW + 10, {
+      deferredUntil: NOW + 3600,
+      note: 'revisit after renewal',
+    })
+
+    const [record] = listOptimizationDecisions(getDb(), {}, NOW + 3600)
+    expect(record.status).toBe('new')
+    expect(record.deferred_until).toBeNull()
+    expect(record.status_changed_by).toBe('system')
+    const events = getOptimizationDecisionEvents(getDb(), 'package-a')
+    expect(events.at(-1)).toMatchObject({
+      from_status: 'deferred',
+      to_status: 'new',
+      actor: 'system',
+      note: 'deferred_until elapsed, resurfaced for review',
+    })
+  })
+
+  it('OPT-M5 counterpart: a future deferred_until stays deferred, and an indefinite (NULL) defer is never promoted', () => {
+    upsertDecisionsFromRecommendations(getDb(), [
+      recommendation({ package_id: 'package-dated' }),
+      recommendation({ package_id: 'package-indefinite' }),
+    ], NOW)
+    setDecisionStatus(getDb(), 'package-dated', 'deferred', 'owner', NOW + 10, { deferredUntil: NOW + 3600 })
+    setDecisionStatus(getDb(), 'package-indefinite', 'deferred', 'owner', NOW + 10)
+
+    const records = listOptimizationDecisions(getDb(), {}, NOW + 3599)
+    expect(records.find(r => r.package_id === 'package-dated')!.status).toBe('deferred')
+    expect(records.find(r => r.package_id === 'package-indefinite')!.status).toBe('deferred')
+    // Even far past, the indefinite defer holds: NULL means "until a human returns".
+    const later = listOptimizationDecisions(getDb(), {}, NOW + 10 * 24 * 3600)
+    expect(later.find(r => r.package_id === 'package-indefinite')!.status).toBe('deferred')
   })
 
   it('returns package_not_found without throwing for an unknown package', () => {

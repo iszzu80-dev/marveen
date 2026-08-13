@@ -122,57 +122,71 @@ export function forecastCodexLimitExhaustion(snapsAsc: RateLimitSnapshotRow[], n
   return Math.floor(now + secsToFull)
 }
 
-function recordRun(db: Database.Database, status: string, count: number, now: number, errMsg: string | null): void {
-  db.prepare(`INSERT INTO import_runs (provider, collector_name, started_at, finished_at, status, imported_count, error_code, error_message_sanitized, data_freshness_at)
-    VALUES ('codex','codex-ratelimit',@now,@now,@status,@count,@ec,@em,@now)`).run({
-    now, status, count, ec: status === 'error' ? 'ratelimit_error' : null, em: errMsg,
-  })
-}
-
 /**
  * LIVE read-only sync: read the Codex weekly rate-limit via the app-server
  * (metadata-only, ZERO quota), record a snapshot, record an import_runs row.
  * Injected reader/clock make it fully offline-testable. On any failure it writes
  * NO snapshot (limits.ts then reports 'unknown') and records a sanitized error.
+ *
+ * COS-OPS-M4: the whole sync body runs under the same per-provider import lock
+ * runCollector gives every other collector (import-durability.ts) -- a manual
+ * "sync now" racing the scheduled tick short-circuits with status 'locked' and
+ * performs NO read and NO write. The run rows go through the shared runner
+ * helper (recordImportRun) instead of a local INSERT copy.
  */
 export async function syncCodexRateLimit(
   db: Database.Database,
   now: number,
   deps: { reader?: CodexRateLimitReader } = {},
 ): Promise<{ ok: boolean; provider: string; status: string; imported_count: number; used_percent?: number; error?: string }> {
-  const { sanitizeError } = await import('./runner.js')
-  const reader = deps.reader ?? readCodexRateLimitLive
-  let snap: CodexRateLimit | null
-  try {
-    const raw = await reader()
-    snap = parseCodexRateLimit(raw)
-  } catch (err) {
-    const s = sanitizeError(err)
-    recordRun(db, 'error', 0, now, s.message)
-    return { ok: false, provider: CODEX_PROVIDER, status: 'error', imported_count: 0, error: s.code }
-  }
-  if (!snap) {
-    recordRun(db, 'error', 0, now, 'unparseable rateLimits result')
-    return { ok: false, provider: CODEX_PROVIDER, status: 'error', imported_count: 0, error: 'parse_error' }
-  }
-  // P2-C: goes through the ONE guarded writer, which stamps confidence +
-  // provenance. Codex is the one capacity source that may claim 'measured': the
-  // app-server metadata read is the provider reporting its own usedPercent, not a
-  // human retyping a number. The guard in capacity-snapshots.ts is what stops any
-  // other collector from borrowing that label.
-  const { writeRateLimitSnapshot } = await import('../capacity-snapshots.js')
-  writeRateLimitSnapshot(db, {
-    provider: CODEX_PROVIDER,
-    limitId: snap.limitId,
-    usedPercent: snap.usedPercent,
-    windowDurationMins: snap.windowDurationMins,
-    resetsAt: snap.resetsAt,
-    planType: snap.planType,
-    source: 'provider_metadata_api',
-    confidence: 'measured',
-    dedupKey: `codex|ratelimit|${now}`,
-    capturedAt: now,
+  const { sanitizeError, recordImportRun } = await import('./runner.js')
+  const { withImportLock, buildDbImportLockContext } = await import('./import-durability.js')
+  const record = (status: 'ok' | 'error' | 'locked', count: number, errMsg: string | null): void => recordImportRun(db, {
+    provider: CODEX_PROVIDER, collectorName: 'codex-ratelimit', status, now, importedCount: count,
+    errorCode: status === 'error' ? 'ratelimit_error' : null, errorMessage: errMsg,
+    freshness: status === 'locked' ? null : now,
   })
-  recordRun(db, 'ok', 1, now, null)
-  return { ok: true, provider: CODEX_PROVIDER, status: 'ok', imported_count: 1, used_percent: snap.usedPercent }
+
+  const lockResult = await withImportLock(buildDbImportLockContext(db), CODEX_PROVIDER, now, async () => {
+    const reader = deps.reader ?? readCodexRateLimitLive
+    let snap: CodexRateLimit | null
+    try {
+      const raw = await reader()
+      snap = parseCodexRateLimit(raw)
+    } catch (err) {
+      const s = sanitizeError(err)
+      record('error', 0, s.message)
+      return { ok: false, provider: CODEX_PROVIDER, status: 'error', imported_count: 0, error: s.code }
+    }
+    if (!snap) {
+      record('error', 0, 'unparseable rateLimits result')
+      return { ok: false, provider: CODEX_PROVIDER, status: 'error', imported_count: 0, error: 'parse_error' }
+    }
+    // P2-C: goes through the ONE guarded writer, which stamps confidence +
+    // provenance. Codex is the one capacity source that may claim 'measured': the
+    // app-server metadata read is the provider reporting its own usedPercent, not a
+    // human retyping a number. The guard in capacity-snapshots.ts is what stops any
+    // other collector from borrowing that label.
+    const { writeRateLimitSnapshot } = await import('../capacity-snapshots.js')
+    writeRateLimitSnapshot(db, {
+      provider: CODEX_PROVIDER,
+      limitId: snap.limitId,
+      usedPercent: snap.usedPercent,
+      windowDurationMins: snap.windowDurationMins,
+      resetsAt: snap.resetsAt,
+      planType: snap.planType,
+      source: 'provider_metadata_api',
+      confidence: 'measured',
+      dedupKey: `codex|ratelimit|${now}`,
+      capturedAt: now,
+    })
+    record('ok', 1, null)
+    return { ok: true, provider: CODEX_PROVIDER, status: 'ok', imported_count: 1, used_percent: snap.usedPercent }
+  })
+
+  if (!lockResult.ok) {
+    record('locked', 0, 'a concurrent sync for this provider was already running')
+    return { ok: false, provider: CODEX_PROVIDER, status: 'locked', imported_count: 0, error: 'a concurrent sync for this provider was already running' }
+  }
+  return lockResult.result
 }

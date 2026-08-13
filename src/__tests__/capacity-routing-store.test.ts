@@ -103,6 +103,20 @@ describe('capacity-routing-store', () => {
       const cfg = readCapacityRoutingConfig(join(dir, 'nope.json'))
       expect(cfg.enabled).toBe(false)
     })
+
+    it('OPT-M8: the COMMITTED example normalizes cleanly and safe-by-default (nothing dropped, enabled:false)', () => {
+      // The example used to exist only inside a never-called scaffold function
+      // (ensureCapacityRoutingConfigExample); now it is a real committed file,
+      // and this test keeps it in sync with the normalizer's schema: every
+      // candidate survives normalization (a dropped candidate would mean the
+      // example documents a shape the code refuses) and the safe defaults hold.
+      const raw = JSON.parse(readFileSync(join(import.meta.dirname, '../../config-examples/capacity-routing-config.example.json'), 'utf-8'))
+      const cfg = normalizeCapacityRoutingConfig(raw)
+      expect(cfg.enabled).toBe(false)
+      expect(cfg.candidates).toHaveLength((raw.candidates as unknown[]).length)
+      expect(cfg.limitedThreshold).toBe(raw.limitedThreshold)
+      expect(cfg.ttlMs).toBe(raw.ttlMs)
+    })
   })
 
   describe('isEnabledForRouting', () => {
@@ -124,6 +138,20 @@ describe('capacity-routing-store', () => {
       writeRuntimeOverlay('devops', entry, overlayPath)
       const model = resolveRuntimeModel('devops', 'claude-opus-5', { overlayPath, configPath })
       expect(model).toBe('claude-sonnet-5')
+    })
+
+    it('OPT-C1: ignores an overlay when config.enabled is false, even though the overlay file still exists on disk', () => {
+      // The emergency stop / kill switch lands `enabled: false` while
+      // deliberately PRESERVING candidate trust flags (see the kill-switch
+      // test: re-arming must not be a re-configuration). So the trust check
+      // alone cannot save a respawn from a surviving overlay -- the candidate
+      // is still trusted. Routing administratively off must mean NO overlay is
+      // applied at spawn, or every respawn re-pins the agent on its fallback
+      // with the sweep (the only climb-back) turned off.
+      writeFileSync(configPath, JSON.stringify({ ...trustedConfig, enabled: false }))
+      writeRuntimeOverlay('devops', entry, overlayPath)
+      const model = resolveRuntimeModel('devops', 'claude-opus-5', { overlayPath, configPath })
+      expect(model).toBe('claude-opus-5')
     })
 
     it('DEFENSE IN DEPTH: falls through to configuredModel when the overlay pair is no longer enabled, even though the overlay entry still exists on disk', () => {

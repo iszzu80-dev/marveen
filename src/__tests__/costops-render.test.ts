@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
-import { mapRenderPlanCost, makeRenderCollector, type RenderPricing } from '../costops/collectors/render.js'
+import { mapRenderPlanCost, makeRenderCollector, syncRenderCollector, type RenderPricing } from '../costops/collectors/render.js'
 import { runCollector } from '../costops/collectors/runner.js'
 import { dryRunCollector } from '../costops/collectors/runner.js'
 import { getCostSummary, monthWindow } from '../costops/ledger.js'
@@ -99,6 +99,33 @@ describe('render collector via runner (offline)', () => {
     expect(rows[0].data_freshness).not.toBe(w.start)
     // secret never in import_runs
     expect(JSON.stringify(getDb().prepare('SELECT * FROM import_runs').all())).not.toContain('rnd_SECRET')
+  })
+})
+
+// COS-OPS-M8: syncRenderCollector used to hit the provider API twice per run --
+// once via collectRaw for the sanitized breakdown detail, then AGAIN through
+// runCollector's collect(). One fetch now feeds both, so the imported line and
+// detail_json can never drift apart, and the API load is halved.
+describe('syncRenderCollector single-fetch (COS-OPS-M8)', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('fetches the services endpoint exactly ONCE per sync; detail still lands on the run row and the result', async () => {
+    const db = getDb()
+    let servicesFetches = 0
+    const stub: HttpGetJson = async (url) => {
+      if (url.includes('/services')) servicesFetches++
+      return url.includes('postgres') ? RAW.postgres : RAW.services
+    }
+    const r = await syncRenderCollector(db, NOW, { apiKey: 'rnd_SECRET', httpGetJson: stub })
+    expect(r.status).toBe('ok')
+    expect(servicesFetches).toBe(1) // was 2 before the fix
+    // the sanitized breakdown still reaches both the result and the audit row
+    expect(r.service_count).toBe(7) // 5 services (one with 2 instances) + 1 postgres
+    const run = db.prepare("SELECT detail_json FROM import_runs WHERE provider='render' ORDER BY id DESC LIMIT 1").get() as { detail_json: string | null }
+    expect(run.detail_json).not.toBeNull()
+    expect(JSON.parse(run.detail_json!).service_count).toBe(7)
+    // no raw service id leaks into the audit row
+    expect(run.detail_json!).not.toContain('srv-')
   })
 })
 
