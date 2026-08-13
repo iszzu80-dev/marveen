@@ -165,7 +165,13 @@ export async function syncDeepSeekBalance(
     }
     let fxUsdHuf = deps.fxUsdHuf
     if (fxUsdHuf === undefined) {
-      try { const { loadRenderPricing } = await import('./render.js'); fxUsdHuf = loadRenderPricing().pricing.fx_usd_huf || 0 } catch { fxUsdHuf = 0 }
+      // COS-OPS-M6: the provider-neutral fx config is the rate's home -- this
+      // used to read the Render plan-pricing file's fx_usd_huf, so a cleanup of
+      // the dead Render config would have zeroed the USD->HUF conversion here
+      // without a word. fx-config.ts seeds itself once from that legacy value,
+      // so nothing already configured is lost. Same dynamic-import shape as the
+      // rest of this sync body (and syncOpenAiCollector).
+      try { const { loadFxRates } = await import('../fx-config.js'); fxUsdHuf = loadFxRates().rates.USD ?? 0 } catch { fxUsdHuf = 0 }
     }
     const httpGetJson = deps.httpGetJson || (async (url: string, headers: Record<string, string>) => {
       const r = await fetch(url, { method: 'GET', headers }); if (!r.ok) throw new Error(`deepseek api ${r.status}`); return r.json()

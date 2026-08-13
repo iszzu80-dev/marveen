@@ -22,6 +22,16 @@ const RENDER_POSTGRES_URL = 'https://api.render.com/v1/postgres?limit=100'
 export interface RenderPricing {
   version: number
   currency: string
+  // LEGACY MIGRATION SEED ONLY (COS-OPS-M6). fx_usd_huf/fx_eur_huf are NOT
+  // Render facts and are no longer the fx source for anything: every CostOps
+  // conversion now reads fx-config.ts (store/costops-fx.json). These two fields
+  // survive for exactly one reader -- fx-config.ts's one-time, idempotent
+  // migration, which seeds costops-fx.json from them so the rate Istvan already
+  // configured here is not lost. Do NOT remove them until that seeding is gone,
+  // and do NOT add new readers: a second live fx source is the drift this
+  // migration exists to end. The one remaining in-file use (syncRenderCollector
+  // passing pricing.fx_usd_huf as this plan map's own USD->HUF factor) is
+  // internal to the Render plan estimate and moot with the account gone.
   fx_usd_huf: number
   // v0.8 (card 6f4d1332): toHuf() (email-ingest.ts) previously only knew USD -> EUR-denominated
   // invoices came back unconvertible (null), even though EUR is the requirements' own worked
@@ -64,7 +74,7 @@ export function loadRenderPricing(): { pricing: RenderPricing; exists: boolean }
 }
 
 const EXAMPLE_PRICING = {
-  _doc: 'CostOps v0.3 Render plan->USD/month map. Copy to store/costops-render-pricing.json (gitignored) and fill REAL Render list prices + fx_usd_huf. All zero here (safe example). Unknown plan -> unpriced warning, never a fabricated amount. static_site/suspended = 0. Overage/seat/tax NOT modelled (see not_covered).',
+  _doc: 'CostOps v0.3 Render plan->USD/month map. Copy to store/costops-render-pricing.json (gitignored) and fill REAL Render list prices. All zero here (safe example). Unknown plan -> unpriced warning, never a fabricated amount. static_site/suspended = 0. Overage/seat/tax NOT modelled (see not_covered). fx_usd_huf/fx_eur_huf here are LEGACY (COS-OPS-M6): set currency rates in store/costops-fx.json -- these two are only read once, to seed that file.',
   version: 1,
   currency: 'HUF',
   fx_usd_huf: 0,

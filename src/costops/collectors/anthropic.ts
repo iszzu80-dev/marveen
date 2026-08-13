@@ -196,9 +196,17 @@ export async function syncAnthropicCostReport(
   }
   let fxUsdHuf = deps.fxUsdHuf
   if (fxUsdHuf === undefined) {
+    // COS-OPS-M6: the rate comes from the provider-neutral fx config, NOT from
+    // the Render plan-pricing file it used to be read out of -- an fx rate was
+    // never a Render fact, and reading it from there meant cleaning up the
+    // dead Render config silently zeroed this collector's conversion (the
+    // teeth behind COS-OPS-H4). fx-config.ts already seeds itself one-time
+    // from the legacy fx_usd_huf, so a configured rate is not lost. Dynamic
+    // import to match syncOpenAiCollector exactly and keep this module's
+    // static import graph free of the config layer.
     try {
-      const { loadRenderPricing } = await import('./render.js')
-      fxUsdHuf = loadRenderPricing().pricing.fx_usd_huf || 0
+      const { loadFxRates } = await import('../fx-config.js')
+      fxUsdHuf = loadFxRates().rates.USD ?? 0
     } catch { fxUsdHuf = 0 }
   }
   // Card 23912ca4 / COS-OPS-H4: fail fast with an explicit blocker instead of
@@ -210,7 +218,7 @@ export async function syncAnthropicCostReport(
   if (!(fxUsdHuf > 0)) {
     return {
       ok: false, provider: 'anthropic', status: 'error', imported_count: 0,
-      error: 'USD->HUF rate is not configured (fx_usd_huf in store/costops-render-pricing.json) -- costs were NOT converted or stored; set the rate and re-run',
+      error: 'USD->HUF rate is not configured (store/costops-fx.json) -- costs were NOT converted or stored; set the rate and re-run',
     }
   }
   const httpGetJson = deps.httpGetJson || (async (url: string, headers: Record<string, string>) => {

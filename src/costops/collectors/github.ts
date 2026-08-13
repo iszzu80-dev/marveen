@@ -167,9 +167,15 @@ export async function syncGitHubCollector(
   }
   let fxUsdHuf = deps.fxUsdHuf
   if (fxUsdHuf === undefined) {
+    // COS-OPS-M6: read the rate from the provider-neutral fx config, not from
+    // the Render plan-pricing file. GitHub's USD spend has nothing to do with
+    // Render's plan prices; while it was read from there, deleting the dead
+    // Render config would have silently converted this collector's real USD
+    // spend to 0 HUF. fx-config.ts seeds itself once from the legacy
+    // fx_usd_huf, so an already-configured rate carries over untouched.
     try {
-      const { loadRenderPricing } = await import('./render.js')
-      fxUsdHuf = loadRenderPricing().pricing.fx_usd_huf || 0
+      const { loadFxRates } = await import('../fx-config.js')
+      fxUsdHuf = loadFxRates().rates.USD ?? 0
     } catch { fxUsdHuf = 0 }
   }
   // Card 23912ca4 / COS-OPS-H4: fail fast with an explicit blocker instead of
@@ -180,7 +186,7 @@ export async function syncGitHubCollector(
   if (!(fxUsdHuf > 0)) {
     return {
       ok: false, provider: 'github', status: 'error', imported_count: 0,
-      error: 'USD->HUF rate is not configured (fx_usd_huf in store/costops-render-pricing.json) -- costs were NOT converted or stored; set the rate and re-run',
+      error: 'USD->HUF rate is not configured (store/costops-fx.json) -- costs were NOT converted or stored; set the rate and re-run',
     }
   }
   const httpGetJson = deps.httpGetJson || (async (url: string, headers: Record<string, string>) => {

@@ -95,7 +95,12 @@ function migrateFromLegacyRenderPricingOnce(): void {
 }
 
 /**
- * The single read path for every USD/EUR/... conversion in CostOps. Returns
+ * The single read path for every USD/EUR/... conversion in CostOps -- and as of
+ * COS-OPS-M6 that is literal, not aspirational: the anthropic, github and
+ * deepseek collectors read their USD rate here too, instead of the Render
+ * plan-pricing file's fx_usd_huf (which is now seed-only, see below).
+ *
+ * Returns
  * an empty table (every currency unset) when nothing is configured -- never a
  * fabricated 0. Pair with fx.ts's resolveFxRate(), which already has the
  * correct "missing -> null, never 0" semantics this file exists to make the

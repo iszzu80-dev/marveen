@@ -356,6 +356,11 @@ export async function tryHandleCostOps(ctx: RouteContext): Promise<boolean> {
   // Phase 3 (GAP-11): every configured budget's LIVE status (current_spend/
   // forecast/variance/status against its scope), not just the raw config
   // entries -- same shape as what period-close's immutable snapshot bundles.
+  // COS-CORE-M3: each status now carries spend_basis ('all_sources_headline'
+  // for every resolved scope, global included -- so the per-provider budgets
+  // sum to the global one and all of them reconcile with the headline spend
+  // figure shown beside them). It rides along in this whole-object
+  // serialization; there is no per-field allowlist to extend.
   if (path === '/api/costs/budgets' && method === 'GET') {
     try {
       const monthKey = url.searchParams.get('month') || undefined
