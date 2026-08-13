@@ -515,11 +515,18 @@ describe('Checkpoint C — Resolver depth (card 53f1fd06)', () => {
         "SELECT safety_assertions_json FROM case_progression_runs WHERE case_id = 'case-thread-test-001' AND domain = 'personal' ORDER BY started_at DESC LIMIT 1",
       ).get() as { safety_assertions_json: string }
 
-      const assertions = JSON.parse(run.safety_assertions_json)
+      const assertions = JSON.parse(run.safety_assertions_json) as
+        Array<{ assertion: string; status: string; passed: boolean | null }>
       expect(assertions).toHaveLength(7)
+      // None violated. The five that structurally cannot apply to a deterministic
+      // shadow run are recorded as not_applicable rather than passed — a ledger
+      // that says "checked and fine" about a check it never ran is the thing
+      // this assertion exists to keep out.
+      expect(assertions.some(a => a.status === 'violated')).toBe(false)
       for (const a of assertions) {
-        expect(a.passed).toBe(true)
+        expect(['passed', 'not_applicable']).toContain(a.status)
       }
+      expect(assertions.find(a => a.assertion === 'cross_domain_leakage')!.status).toBe('passed')
     })
 
     it('all 7 safety assertion definitions remain unchanged', () => {

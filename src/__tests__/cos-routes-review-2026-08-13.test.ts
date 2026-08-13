@@ -14,6 +14,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
+import { tryClaimProgression } from '../cos/progression-scheduler.js'
 import type { RouteContext } from '../web/routes/types.js'
 
 // A18 needs the engine to throw on demand. Everything else in the module keeps
@@ -113,6 +114,56 @@ describe('A18: progressionRan reports what actually happened', () => {
     initDatabase(':memory:')
     cycleShouldThrow.value = false
     seedApprovalQuestion(getDb())
+  })
+
+  // Found BY the A18 fix: with progressionRan hardcoded true, the post-cycle
+  // read asked case_progression_runs for next_best_action_json — a column that
+  // lives on case_progression_state. It threw on every single owner action,
+  // inside the try, and the catch filed it as "the engine failed". So the
+  // instant feedback this control exists for had never once worked.
+  it('returns the decision AND the next best action the cycle produced', async () => {
+    const { ctx, out } = fakeCtxWithBody(
+      `/api/cos/cases/personal/${CASE_ID}/owner-action`, 'POST', {
+        eventType: 'OWNER_DECISION', choice: 'YES',
+        sourceReference: APPROVAL_RUN, caseVersion: 1,
+        idempotencyKey: 'idem-a18-2',
+        decision: 'REQUEST_APPROVAL', nextBestAction: null,
+      })
+    await tryHandleCos(ctx)
+
+    expect(out.body.progressionRan).toBe(true)
+    expect(out.body.progressionError).toBeUndefined()
+    expect(out.body.newDecision).toBeTruthy()
+    expect(out.body.newNextBestAction).toBeTruthy()
+  })
+
+  it('A14: refuses to cycle a case the heartbeat already holds', async () => {
+    const db = getDb()
+    const now = Math.floor(Date.now() / 1000)
+    // The cron runner takes the lease first.
+    const held = tryClaimProgression(db, 'personal', CASE_ID, 'heartbeat-run-1', 300, now, { requireDue: false })
+    expect(held).toBeTruthy()
+
+    const { ctx, out } = fakeCtxWithBody(
+      `/api/cos/cases/personal/${CASE_ID}/owner-action`, 'POST', {
+        eventType: 'OWNER_DECISION', choice: 'YES',
+        sourceReference: APPROVAL_RUN, caseVersion: 1,
+        idempotencyKey: 'idem-a14-1',
+        decision: 'REQUEST_APPROVAL', nextBestAction: null,
+      })
+    await tryHandleCos(ctx)
+
+    // The event still lands — it is the durable part. The cycle does not.
+    expect(out.body.ok).toBe(true)
+    expect(out.body.eventId).toBeGreaterThan(0)
+    expect(out.body.progressionRan).toBe(false)
+    expect(String(out.body.progressionError)).toContain('másik ciklus')
+
+    const runs = db.prepare(
+      `SELECT count(*) c FROM case_progression_runs
+       WHERE case_id = ? AND progression_run_id <> ?`
+    ).get(CASE_ID, APPROVAL_RUN) as { c: number }
+    expect(runs.c).toBe(0)
   })
 
   it('reports progressionRan:false and the cause when the cycle throws', async () => {

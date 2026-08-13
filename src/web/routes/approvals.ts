@@ -62,6 +62,38 @@ export function startApprovalTimeoutSweeper(): NodeJS.Timeout {
   }, 60_000)
 }
 
+/** Who is actually making this request, according to the auth gate — not
+ *  according to the request body.
+ *
+ *  WHY THE BODY IS NOT AN ANSWER. Resolution identity used to be `resolved_by`
+ *  from the JSON body, guarded by `resolved_by === target.agent_id`. Every fleet
+ *  agent holds the same bearer token, so any of them could approve its own
+ *  request by writing `resolved_by: "istvan"`. The string compare is not a weak
+ *  check, it is a check of a value the caller chooses — the same shape the
+ *  codebase already refused once for hard-gated escalations (routes/cos.ts
+ *  removed the move entirely rather than trust a claimed actor).
+ *
+ *  What the gate can prove, in descending strength:
+ *    session  — a human logged into the dashboard. Names a person.
+ *    device   — an enrolled device key. Names a device.
+ *    token    — the SHARED dashboard bearer. Names NOTHING: every fleet agent
+ *               has it, so a token request cannot prove it is not the requester.
+ *    federation — a peer instance. Never a party to this instance's approvals.
+ *
+ *  RESIDUAL GAP, stated rather than hidden: with only the shared token there is
+ *  no server-side identity to bind to, so the permissive direction (approve) is
+ *  refused for token callers and the remedy is named in the response. Closing
+ *  the gap properly means per-agent credentials; until then a fail-closed
+ *  refusal beats a bypassable string compare. */
+function resolutionPrincipal(ctx: RouteContext): { id: string; strong: boolean } | null {
+  const auth = ctx.auth
+  if (!auth) return null
+  if (auth.kind === 'session' && auth.user) return { id: `user:${auth.user}`, strong: true }
+  if (auth.kind === 'device' && auth.device) return { id: `device:${auth.device}`, strong: true }
+  if (auth.kind === 'token') return { id: 'fleet-token', strong: false }
+  return null   // federation, or an auth kind with no identity in it
+}
+
 export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method, url } = ctx
 
@@ -156,18 +188,46 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     }
     const msgId = typeof telegram_message_id === 'number' ? telegram_message_id : null
 
-    // Self-approval guard: the requesting agent cannot approve its own request.
-    // This is a best-effort check on the self-declared resolved_by value (all fleet
-    // agents share the same bearer token, so server-side identity is not enforceable).
-    // It catches naive/accidental self-approvals; the real control lives on the
-    // main-agent side (approval-request-handling skill).
+    const principal = resolutionPrincipal(ctx)
+    if (!principal) {
+      json(res, { error: 'Ehhez a művelethez azonosított hívó kell (bejelentkezés vagy eszközkulcs)' }, 403)
+      return true
+    }
+
     const target = getApproval(idMatch[1])
-    if (target && resolved_by.trim() === target.agent_id) {
+
+    // APPROVING NEEDS A PROVABLE PRINCIPAL. Rejecting and timing out do not.
+    //
+    // The asymmetry is the point: approve GRANTS authority, and a caller that
+    // cannot prove it is not the requesting agent must not be able to grant it
+    // to itself. Reject/timeout only take authority away — a self-rejection
+    // gains an agent nothing — so the shared token stays usable for the
+    // direction that cannot be abused, and the Telegram "NEM" relay keeps
+    // working unchanged.
+    if (status === 'approved' && !principal.strong) {
+      json(res, {
+        error: 'Jóváhagyáshoz azonosított hívó kell: jelentkezz be a dashboardon, vagy használj eszközkulcsot. '
+          + 'A megosztott flotta-token nem bizonyítja, hogy nem a kérelmező ügynök az.',
+        code: 'unattributable_caller',
+      }, 403)
+      return true
+    }
+
+    // Self-approval guard, kept as defence in depth for the strong principals
+    // too: a device key named after an agent must not resolve that agent's own
+    // request. The claimed body value is checked as well, because a caller that
+    // names itself as the requester is telling us something true about intent.
+    if (target && (principal.id === target.agent_id || resolved_by.trim() === target.agent_id)) {
       json(res, { error: 'The requesting agent cannot approve its own request' }, 403)
       return true
     }
 
-    const updated = resolveApproval(idMatch[1], status, resolved_by.trim(), msgId)
+    // The AUTHENTICATED identity is what goes into the audit column; the
+    // self-declared label survives only as an annotation, and only because
+    // "telegram_text" vs "dashboard" is genuinely useful provenance. A reader of
+    // this column can now tell what was proved from what was claimed.
+    const resolvedBy = `${principal.id} (${resolved_by.trim()})`
+    const updated = resolveApproval(idMatch[1], status, resolvedBy, msgId)
     if (!updated) {
       // Either not found or already resolved
       const existing = getApproval(idMatch[1])
@@ -180,7 +240,7 @@ export async function tryHandleApprovals(ctx: RouteContext): Promise<boolean> {
     }
 
     const approval = getApproval(idMatch[1])
-    logger.info({ id: idMatch[1], status, resolved_by }, 'Approval resolved')
+    logger.info({ id: idMatch[1], status, resolved_by: resolvedBy, principal: principal.id }, 'Approval resolved')
     json(res, approval)
     return true
   }

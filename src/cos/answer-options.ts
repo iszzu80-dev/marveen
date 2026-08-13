@@ -139,3 +139,92 @@ export function deriveAnswerOptions(question: string, choices?: AnswerOption[]):
 export function hasButtons(d: DerivedAnswer): boolean {
   return d.options.length > 0
 }
+
+// ── What an option MEANS to the engine ────────────────────────────────────
+//
+// WHY THIS EXISTS. This module was built to stop asking false yes/no pairs, and
+// it succeeded on the surface: Mission Control renders "Lemondjuk", "Várjunk még
+// rá", "Hagyjuk ezt az utat", and submits them as `choice`. Nothing downstream
+// read them. The progression pipeline compared `choice === 'NO'` and treated
+// EVERYTHING else as "the owner answered, move on" — so "Lemondjuk" (cancel) and
+// "Várjunk még rá" (keep waiting) advanced the plan exactly as if he had said go
+// ahead. Offering a real alternative and then ignoring which one he picked is
+// worse than the false pair it replaced: the false pair at least did what the
+// button said.
+//
+// So every value this module can emit is given a meaning HERE, next to the
+// button it belongs to, and the engine reads the meaning rather than the string.
+// A value with no meaning yet is named as such — UNMAPPED is a decision that was
+// made and written down, not an omission. Silence is what caused this.
+export type AnswerIntent =
+  /** Go ahead with what was proposed. The answered step is settled. */
+  | 'PROCEED'
+  /** Explicitly no. The case is blocked for replanning. */
+  | 'REFUSE'
+  /** Not yet — keep waiting. The step is NOT settled and must not advance. */
+  | 'HOLD'
+  /** Stop pursuing this path at all. Blocked with an explicit close intent. */
+  | 'ABANDON'
+  /** Content without an instruction (free text, a confirmation). */
+  | 'INFORM'
+  /** A choice the engine has no consumer for. Recorded, never acted on. */
+  | 'UNMAPPED'
+
+/** Every option value this module can put on a button, and what the engine does
+ *  with it. Keep this exhaustive: `answer-options.test.ts` fails if a PATTERN
+ *  gains an option that is not listed here, because an unlisted value silently
+ *  became UNMAPPED and the button would have stopped meaning anything. */
+export const OPTION_INTENTS: Record<string, AnswerIntent> = {
+  // The genuinely binary pair.
+  YES: 'PROCEED',
+  NO: 'REFUSE',
+
+  // trip-decision. "Megyünk" settles the question; the other two do not.
+  GO: 'PROCEED',
+  POSTPONE: 'HOLD',
+  CANCEL: 'ABANDON',
+
+  // stall-escalation. "Várjunk még rá" is the whole point of the option — it
+  // must NOT advance, or waiting and proceeding become the same button.
+  KEEP_WAITING: 'HOLD',
+  DROP: 'ABANDON',
+  // "Kérjünk mástól is" asks for an action the engine cannot take (it sends
+  // nothing). Advancing on it would claim the request went out. Recorded until
+  // there is an outbound path that can honour it.
+  ASK_OTHERS: 'UNMAPPED',
+
+  // repair-or-replace. Both name the course of action, which settles the
+  // decision step; the engine records which one and proceeds to the next step.
+  REPAIR: 'PROCEED',
+  REPLACE: 'PROCEED',
+  // "Kérjünk rá árat" is again an outbound action nobody performs yet.
+  GET_QUOTE: 'UNMAPPED',
+
+  // timing.
+  NOW: 'PROCEED',
+  LATER: 'HOLD',
+  // "Megmondom mikor" is the free-text box saying it will follow; the date
+  // arrives as text, and no engine step is settled by the promise of one.
+  SPECIFY: 'UNMAPPED',
+}
+
+/** Every option value the module can render. Exported so a test can hold
+ *  OPTION_INTENTS to it — the two drift apart silently otherwise. */
+export function declaredOptionValues(): string[] {
+  const vals = new Set<string>()
+  for (const o of YES_NO) vals.add(o.value)
+  for (const p of PATTERNS) for (const o of p.options) vals.add(o.value)
+  return [...vals]
+}
+
+/** What the engine should do with a submitted choice.
+ *
+ *  An unknown value is UNMAPPED, never PROCEED: case-supplied choices (the
+ *  providers who actually quoted) arrive here too, and a provider name must not
+ *  read as approval just because it is not the string 'NO'. */
+export function answerIntentOf(choice: string | null | undefined): AnswerIntent {
+  if (choice == null) return 'UNMAPPED'
+  const key = choice.trim().toUpperCase()
+  if (!key) return 'UNMAPPED'
+  return OPTION_INTENTS[key] ?? 'UNMAPPED'
+}

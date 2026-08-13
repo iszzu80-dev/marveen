@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import { createCase } from '../cos/case-store.js'
+import { createZstCase } from '../cos/zst-case-store.js'
 import { enrichPendingGoals } from '../cos/goal-enrichment.js'
 import type { LlmClient } from '../cos/progression-interpreter.js'
 
@@ -77,6 +78,74 @@ describe('the enrichment sweep refuses what the Reader would refuse', () => {
     const r = await enrichPendingGoals(getDb(), client('mystery', calls), 5)
     expect(r.sensitivityBlocked).toBe(1)
     expect(calls).toEqual([])
+  })
+
+  // P3 (review 2026-08-13). The gate classified `content` — the stored email
+  // thread, or the empty string when there was no thread doc — while
+  // enrichCaseGoal hands the provider the case TITLE and DESCRIPTION as well.
+  // So sender-authored text in those two fields was never content-classified
+  // here. Intake escalates the declared tier from subject+snippet, which covers
+  // intake-born personal cases only: not other creation paths, not retitled
+  // cases, and not ZST cases, whose ZST_INTERNAL tier maps to PERSONAL and is
+  // therefore DeepSeek-eligible.
+  describe('the gate classifies exactly what is SENT', () => {
+    it('an IBAN in the DESCRIPTION blocks the third-party route', async () => {
+      const calls: string[] = []
+      // Declared PERSONAL — DeepSeek-eligible on the declared tier alone; there
+      // is no email thread, so the old rule classified the empty string.
+      seedCase('c-iban', 'PERSONAL')
+      getDb().prepare(`UPDATE personal_cases SET description = ? WHERE case_id = 'c-iban'`)
+        .run('Kérjük utalja a bank IBAN HU42117730161111101800000000 számlaszámra.')
+      const r = await enrichPendingGoals(getDb(), {
+        general: { client: client('deepseek', calls), provider: 'deepseek' },
+        contracted: null,
+      }, 5)
+      expect(r.sensitivityBlocked).toBe(1)
+      expect(calls, 'the IBAN would have been in the prompt').toEqual([])
+    })
+
+    it('a Hungarian phone number in the TITLE blocks it too', async () => {
+      const calls: string[] = []
+      seedCase('c-title', 'PERSONAL')
+      getDb().prepare(`UPDATE personal_cases SET title = ? WHERE case_id = 'c-title'`)
+        .run('Visszahívás kérése: +36 30 123 4567')
+      const r = await enrichPendingGoals(getDb(), {
+        general: { client: client('deepseek', calls), provider: 'deepseek' },
+        contracted: null,
+      }, 5)
+      expect(r.sensitivityBlocked).toBe(1)
+      expect(calls).toEqual([])
+    })
+
+    it('a ZST_INTERNAL case whose description holds an IBAN is not DeepSeek-eligible', async () => {
+      const calls: string[] = []
+      const db = getDb()
+      createZstCase(db, { caseId: 'z-iban', title: 'Beszállítói utalás', caseType: 'ADMIN' }, NOW)
+      db.prepare(`UPDATE zst_cases SET sensitivity='ZST_INTERNAL', description=? WHERE case_id='z-iban'`)
+        .run('Bank IBAN HU42117730161111101800000000 — utalás a beszállítónak.')
+      db.prepare(
+        `INSERT INTO case_progression_state (domain, case_id, progression_enabled, created_at, updated_at)
+         VALUES ('zst', 'z-iban', 1, ?, ?)`,
+      ).run(NOW, NOW)
+      const r = await enrichPendingGoals(db, {
+        general: { client: client('deepseek', calls), provider: 'deepseek' },
+        contracted: null,
+      }, 5)
+      expect(r.sensitivityBlocked).toBe(1)
+      expect(calls).toEqual([])
+    })
+
+    it('an ordinary title+description still takes the cheap route', async () => {
+      // The counter-check: classifying more text must not block everything.
+      const calls: string[] = []
+      seedCase('c-plain2', 'PERSONAL')
+      const r = await enrichPendingGoals(getDb(), {
+        general: { client: client('deepseek', calls), provider: 'deepseek' },
+        contracted: { client: client('anthropic', calls), provider: 'anthropic' },
+      }, 5)
+      expect(r.sensitivityBlocked).toBe(0)
+      expect(calls.some(c => c.startsWith('deepseek:'))).toBe(true)
+    })
   })
 
   // A sixth test lived here and was REMOVED rather than repaired. It claimed to

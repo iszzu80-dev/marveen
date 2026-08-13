@@ -146,6 +146,26 @@ describe('COS approval envelope (§3.2)', () => {
       expect(personalApprovals.authorizeSend(getDb(), ask({ outboundKind: 'INITIAL' }), NOW).authorized).toBe(true)
     })
 
+    // E14 (review 2026-08-13). `limits.maxPerKind` mapped INITIAL and FOLLOW_UP
+    // and returned null for REPLY. The pre-filter above DID count replies, so
+    // max_autonomous_replies looked enforced — but the only race-safe count is
+    // the one the executor runs inside the SENDING transaction, and it is fed
+    // from `limits`. So two concurrent autonomous replies could both pass the
+    // check-then-act pre-filter and both send.
+    it('E14: the REPLY ceiling reaches limits, not only the pre-filter', () => {
+      personalApprovals.recordApproval(getDb(), baseApproval({ maxAutonomousReplies: 2 }), NOW)
+      const r = personalApprovals.authorizeSend(getDb(), ask({ outboundKind: 'REPLY' }), NOW)
+      expect(r.authorized).toBe(true)
+      // This is what dispatchApprovedSend hands to the executor to count inside
+      // the same transaction as the SENDING write. null here means "no ceiling".
+      expect(r.limits).toMatchObject({ maxPerKind: 2, kind: 'REPLY' })
+      // CONTROL: the other kinds still carry theirs, so the mapping was widened
+      // rather than replaced.
+      getDb().prepare(`UPDATE campaign_approvals SET max_initial_outbound=1 WHERE approval_id='appr-1'`).run()
+      expect(personalApprovals.authorizeSend(getDb(), ask({ outboundKind: 'INITIAL' }), NOW).limits)
+        .toMatchObject({ maxPerKind: 1, kind: 'INITIAL' })
+    })
+
     it('cancelled and terminally failed sends do not consume quota', () => {
       personalApprovals.recordApproval(getDb(), baseApproval({ maxTotalOutbound: 1 }), NOW)
       ledgerRow('l1', 'INITIAL', 'CANCELLED')

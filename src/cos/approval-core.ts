@@ -351,12 +351,26 @@ export function makeApprovalEngine(T: ApprovalTables) {
     // call site would be a second read that could disagree with this one.
     return {
       authorized: true, code: 'ok', reason: 'ok',
-      campaignVersion: c.version, approvalVersion: appr.campaign_version,
+      campaignVersion: c.version,
+      // E20 (review 2026-08-13). NAMING, deliberately left alone. There is no
+      // "approval version" concept in this system: `campaign_approvals.
+      // campaign_version` records the campaign version the approval was granted
+      // AT, and `outbound_ledger.approval_version` stores a second copy of that
+      // same number under a name that suggests otherwise. Renaming a stored
+      // column that AC-21 queries and two ledgers carry is a migration with no
+      // behavioural payoff, so what it gets is a label: this value is the
+      // CAMPAIGN VERSION THE APPROVAL WAS GRANTED AT, not a version of the
+      // approval. Read it that way in every audit query.
+      approvalVersion: appr.campaign_version,
       approvalId: appr.approval_id,
       limits: {
         maxTotal: appr.max_total_outbound,
-        maxPerKind: q.outboundKind === 'INITIAL' ? appr.max_initial_outbound
-          : q.outboundKind === 'FOLLOW_UP' ? appr.max_follow_up_outbound : null,
+        // E14 (review 2026-08-13): REPLY was mapped to null here while the
+        // pre-filter above counted it from `perKind`. So `max_autonomous_replies`
+        // was checked by the check-then-act read and NOT by the count that runs
+        // inside the SENDING transaction — the one place the ceiling is
+        // race-safe. Two concurrent autonomous replies could both pass.
+        maxPerKind: q.outboundKind ? perKind[q.outboundKind] ?? null : null,
         kind: q.outboundKind ?? null,
       },
     }

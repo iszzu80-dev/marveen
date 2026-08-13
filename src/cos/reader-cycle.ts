@@ -82,6 +82,34 @@ export interface ReaderCandidate {
 }
 
 /**
+ * Take `limit` items, one domain at a time, in turn.
+ *
+ * The sweeps used to enumerate `personal` in full and then `zst`, then
+ * `slice(0, limit)`. With a limit of three to five per cycle and any personal
+ * backlog at all, the corporate half of the store was never reached — not
+ * "later", never, because the backlog is refilled by the same sweeps. Order
+ * WITHIN a domain is preserved (it carries the domain's own priority); only the
+ * interleaving is added.
+ */
+export function roundRobinByDomain<T extends { domain: string }>(items: T[], limit: number): T[] {
+  const queues = new Map<string, T[]>()
+  for (const i of items) {
+    const q = queues.get(i.domain)
+    if (q) q.push(i); else queues.set(i.domain, [i])
+  }
+  const out: T[] = []
+  const lists = [...queues.values()]
+  for (let round = 0; lists.some(l => round < l.length); round++) {
+    for (const l of lists) {
+      if (round >= l.length) continue
+      out.push(l[round])
+      if (limit > 0 && out.length >= limit) return out
+    }
+  }
+  return out
+}
+
+/**
  * Cases that RAN since they were last read.
  *
  * This is deliberately bound to the progression run rather than to the clock:
@@ -116,7 +144,9 @@ export function casesNeedingReading(db: Database.Database, limit: number): Reade
       }
     } catch { /* table absent on a fresh store: not a candidate, not an error */ }
   }
-  return limit > 0 ? out.slice(0, limit) : out
+  // FAIR, not first-come: see roundRobinByDomain for what slicing a
+  // personal-then-zst list costs the corporate namespace.
+  return roundRobinByDomain(out, limit)
 }
 
 /** Store one reading — successful or refused. Both are rows; see the schema

@@ -7,6 +7,7 @@
 // Auth is centralized in src/web.ts (requiresAuth gates all /api/*), so every
 // /api/cos/* path here is already Bearer-protected; no auth code needed.
 
+import { randomUUID } from 'node:crypto'
 import { json, readBody } from '../http-helpers.js'
 import { getDb } from '../../db.js'
 import { listActiveCases, listTodayCases } from '../../cos/case-store.js'
@@ -23,6 +24,7 @@ import {
 } from '../../cos/zst-productlab.js'
 import { validateSkillMd, validateSkillPermissions } from '../../cos/skill-permission-validator.js'
 import { getMissionControlProgressionView, runProgressionCycle } from '../../cos/progression-pipeline.js'
+import { tryClaimProgression, releaseProgressionClaim } from '../../cos/progression-scheduler.js'
 import { storeDocument, documentsForCase, readDocumentBytes, resolveShareableAttachments } from '../../cos/cos-documents.js'
 import { engageKillSwitch, releaseKillSwitch, killSwitchState } from '../../cos/kill-switch.js'
 import { evaluateOutputFloors, breachedFloors } from '../../cos/output-floor.js'
@@ -798,21 +800,52 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     // the cycle reporting itself clean while per-item steps failed (83717a6).
     let progressionRan = true
     let progressionError: string | null = null
+    // A14: this route ran the cycle claim-free while the heartbeat runner does
+    // the same work from a separate cron process. Both could cycle one case at
+    // once — duplicate run rows, and the answer-consumption transition racing
+    // itself (the loser throws on seenVersion, is swallowed here, but the run
+    // and state writes it already made stand). The lease is the same one the
+    // heartbeat takes, so the two processes now queue instead of colliding.
+    const claimRunId = `owner-action-${randomUUID()}`
+    const leased = tryClaimProgression(db, domain, caseId, claimRunId, 120, now, { requireDue: false })
+    if (!leased) {
+      // Someone else holds the case right now. The event is already committed,
+      // so the scheduled cycle will pick it up — say so instead of pretending.
+      json(res, {
+        ok: true,
+        eventId: Number(insertResult.lastInsertRowid),
+        progressionRan: false,
+        progressionError: 'az ügyön most fut egy másik ciklus — az esemény rögzült, a következő futás feldolgozza',
+        newDecision: null,
+        newNextBestAction: null,
+      })
+      return true
+    }
     try {
       const pr = runProgressionCycle(db, domain, caseId, now, {
         triggerType: 'MANUAL',
         triggerReference: sourceReference,
       })
-      // Read new state.
-      const newState = db.prepare(
-        `SELECT decision, next_best_action_json
-         FROM case_progression_runs
+      // Read new state. The decision belongs to the RUN that just finished;
+      // next_best_action_json belongs to case_progression_state. This query
+      // used to ask the runs table for both, so it threw "no such column:
+      // next_best_action_json" on EVERY owner action — inside the try, where
+      // the catch read it as "the engine failed". With progressionRan hardcoded
+      // true, the response then reported a successful cycle that returned no
+      // decision, and the instant feedback the control exists for never worked.
+      // Nothing surfaced it because both halves of the lie agreed.
+      const newRun = db.prepare(
+        `SELECT decision FROM case_progression_runs
          WHERE domain = ? AND case_id = ?
-         ORDER BY started_at DESC LIMIT 1`
-      ).get(domain, caseId) as { decision: string | null; next_best_action_json: string | null } | undefined
+         ORDER BY started_at DESC, progression_run_id DESC LIMIT 1`
+      ).get(domain, caseId) as { decision: string | null } | undefined
+      const newNba = db.prepare(
+        `SELECT next_best_action_json FROM case_progression_state
+         WHERE domain = ? AND case_id = ?`
+      ).get(domain, caseId) as { next_best_action_json: string | null } | undefined
       progressionResult = {
-        newDecision: newState?.decision ?? null,
-        newNextBestAction: newState?.next_best_action_json ?? null,
+        newDecision: newRun?.decision ?? null,
+        newNextBestAction: newNba?.next_best_action_json ?? null,
       }
     } catch (e) {
       // Engine failure doesn't roll back the event — the event is already
@@ -820,6 +853,8 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
       progressionResult = { newDecision: null, newNextBestAction: null }
       progressionRan = false
       progressionError = String((e as Error)?.message ?? e)
+    } finally {
+      releaseProgressionClaim(db, domain, caseId, claimRunId, now)
     }
 
     json(res, {
@@ -1215,11 +1250,13 @@ export async function approveAndDispatchZst(
 export function dispatchReasons(r: {
   sent: boolean
   decision: { allowed: boolean; reasons: string[] }
+  /** E18: the dispatcher's own summary of the post-gate refusal. */
+  lastError?: string | null
   action?: { lastError?: string | null }
 }): string[] | undefined {
   if (!r.decision.allowed) return r.decision.reasons
   if (r.sent) return undefined
-  const admissionRefusal = r.action?.lastError
+  const admissionRefusal = r.lastError ?? r.action?.lastError
   return admissionRefusal ? [admissionRefusal] : ['a küldés nem történt meg, ok nélkül — nézd meg a sor állapotát']
 }
 

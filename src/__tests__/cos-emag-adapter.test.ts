@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { EmagAdapter, parseSearchCards, parseProductJsonLd } from '../cos/adapters/emag.js'
+import { EmagAdapter, EmagFetchError, parseSearchCards, parseProductJsonLd } from '../cos/adapters/emag.js'
 import { assertNoCheckoutSurface } from '../cos/shopping-adapter.js'
 
 const SEARCH_HTML = `
@@ -80,10 +80,68 @@ describe('eMAG adapter — live flow (mocked fetch)', () => {
     expect(res[0].currency).toBe('EUR')
   })
 
-  it('empty query and search failure return [] (honest, no crash)', async () => {
+  it('an empty query returns [] without touching the network', async () => {
     const a = new EmagAdapter({ fetchImpl: mockFetch({}) })
     expect(await a.searchProducts('')).toEqual([])
-    expect(await a.searchProducts('anything')).toEqual([]) // 404 search page
+  })
+
+  // P2 (review 2026-08-13). "Could not fetch" must never arrive at the radar as
+  // "eMAG carries nothing": an empty result records a null-price observation,
+  // which flips a HIT item back to ACTIVE, which makes the next successful check
+  // re-alert the owner about the same unchanged offer — one repeat ping per
+  // network blip, with connector_health green throughout because nothing threw.
+  describe('fetch failure is an ERROR, not an empty result', () => {
+    it('throws on a non-ok search page (Cloudflare 403)', async () => {
+      const a = new EmagAdapter({
+        fetchImpl: (async () => ({ ok: false, status: 403, text: async () => '' })) as unknown as typeof fetch,
+      })
+      await expect(a.searchProducts('On Cloud 6')).rejects.toThrow(EmagFetchError)
+      await expect(a.searchProducts('On Cloud 6')).rejects.toThrow(/HTTP 403/)
+    })
+
+    it('throws when the fetch itself rejects (DNS / timeout)', async () => {
+      const a = new EmagAdapter({
+        fetchImpl: (async () => { throw new Error('ETIMEDOUT') }) as unknown as typeof fetch,
+      })
+      await expect(a.searchProducts('On Cloud 6')).rejects.toThrow(EmagFetchError)
+    })
+
+    it('throws when a PRODUCT page is rate-limited (a partial sweep would misreport the cheapest)', async () => {
+      const pages: Record<string, string> = {
+        'https://www.emag.hu/search/On%20Cloud%206': SEARCH_HTML,
+        'https://www.emag.hu/on-cloud-6-futocipo-45-feher/pd/AAA111BM/': productHtml('On Cloud 6 futócipő', '41990'),
+      }
+      const a = new EmagAdapter({
+        fetchImpl: (async (url: string) => {
+          const body = pages[String(url)]
+          if (body == null) return { ok: false, status: 429, text: async () => '' } as Response
+          return { ok: true, status: 200, text: async () => body } as Response
+        }) as unknown as typeof fetch,
+      })
+      await expect(a.searchProducts('On Cloud 6')).rejects.toThrow(EmagFetchError)
+    })
+
+    it('a 404/410 product page is a GONE listing, not a fetch failure — skipped, others kept', async () => {
+      const pages: Record<string, string> = {
+        'https://www.emag.hu/search/On%20Cloud%206': SEARCH_HTML,
+        'https://www.emag.hu/on-cloud-6-futocipo-45-feher/pd/AAA111BM/': productHtml('On Cloud 6 futócipő', '41990'),
+        // the HyperX listing is delisted → mockFetch answers 404
+      }
+      const a = new EmagAdapter({ fetchImpl: mockFetch(pages) })
+      const res = await a.searchProducts('On Cloud 6')
+      expect(res).toHaveLength(1)
+      expect(res[0].priceMinor).toBe(41990)
+    })
+
+    it('a fetched page with no Product JSON-LD is still an honest "not carried"', async () => {
+      const a = new EmagAdapter({
+        fetchImpl: mockFetch({
+          'https://www.emag.hu/search/x': `<a href="https://www.emag.hu/p/pd/C1/" class="card-v2-title">P</a>`,
+          'https://www.emag.hu/p/pd/C1/': '<html><body>no structured data</body></html>',
+        }),
+      })
+      expect(await a.searchProducts('x')).toEqual([])
+    })
   })
 
   it('exposes NO checkout/purchase surface (safety contract)', () => {

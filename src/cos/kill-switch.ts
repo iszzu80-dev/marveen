@@ -63,11 +63,18 @@ export function engageKillSwitch(
     ).run({ r: `${args.reason} (${args.actor})`, now })
 
     // §22.2: authority granted before the stop must not survive it.
+    // E8 (review 2026-08-13): written to revoked_at, not consumed_at. Setting
+    // consumed_at was only ever a BLOCK for single-use tickets — consumption
+    // checks it as `consumed_at IS NULL OR single_use = 0` — so a multi-use
+    // ticket walked through a stop that had counted it as revoked. It also made
+    // the audit unreadable afterwards: a ticket the switch killed and a ticket a
+    // send legitimately spent looked identical.
     let ticketsRevoked = 0
     try {
       ticketsRevoked = db.prepare(
-        `UPDATE action_authorizations SET consumed_at = @now WHERE consumed_at IS NULL`
-      ).run({ now }).changes
+        `UPDATE action_authorizations SET revoked_at = @now, revoked_reason = @reason
+         WHERE revoked_at IS NULL AND consumed_at IS NULL`
+      ).run({ now, reason: `kill switch: ${args.reason} (${args.actor})` }).changes
     } catch {
       // An older store may predate the table. A missing ticket table cannot make
       // the stop fail — the pause is the part that must always land.

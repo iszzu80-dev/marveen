@@ -23,10 +23,31 @@ import {
   findDueCases,
   tryClaimProgression,
   releaseProgressionClaim,
+  deferProgression,
 } from './progression-scheduler.js'
 import { runProgressionCycle, type PipelineOptions } from './progression-pipeline.js'
 import { acquireClaim, releaseClaim } from './case-store.js'
 import { decideTrigger, recordProgressionState, dueDeadline } from './progression-trigger.js'
+import { killSwitchRefusal } from './kill-switch.js'
+
+/** How far out the next check is pushed after a case ran. Matches the sweep
+ *  cadence: the case is examined again on the next sweep, not sooner. */
+export const POST_RUN_RECHECK_SEC = 300
+
+/** How far out the next check is pushed for a case that was due but had NOTHING
+ *  to reason about (§10.8 said no trigger).
+ *
+ *  This is the brake the old comment claimed and did not have. It said "Push the
+ *  next check out anyway", and then called releaseProgressionClaim, which pushes
+ *  nothing — nothing in the system ever advanced next_progression_at after a
+ *  run, so every enabled case stayed permanently due and every five-minute sweep
+ *  claimed and released all of them. Three times the sweep interval is a
+ *  compromise: long enough that an idle case costs a fraction of the writes,
+ *  short enough that a case nobody touched is still looked at four times an
+ *  hour. Anything that genuinely changes the case (an owner answer, a new
+ *  deadline) pulls it back in — recordOwnerAnswer re-arms the check on the spot,
+ *  precisely so this backoff cannot delay an answer. */
+export const NO_TRIGGER_BACKOFF_SEC = 900
 
 export interface HeartbeatResult {
   personal: number
@@ -38,6 +59,8 @@ export interface HeartbeatResult {
   skippedNoTrigger: number
   /** Cases that threw during the cycle. */
   cycleErrors: number
+  /** Set when the §22 master switch stopped the sweep before it started. */
+  killSwitchEngaged?: string
 }
 
 /** Run one heartbeat sweep across both domains.
@@ -60,6 +83,29 @@ export function runProgressionHeartbeat(
     skippedClaimed: 0,
     skippedNoTrigger: 0,
     cycleErrors: 0,
+  }
+
+  // §22 MASTER SWITCH, CHECKED BEFORE THE FIRST CASE IS TOUCHED.
+  //
+  // The switch reached executor-core and the permits() path and stopped there.
+  // The progression engine — which consumes owner answers and transitions cases
+  // between READY, BLOCKED and COMPLETED — never asked. So "stop everything,
+  // now" stopped sending and left the thing that decides what to send running.
+  // Checked here as well as inside runProgressionCycle: here so an engaged
+  // switch costs one read for the whole sweep instead of one refusal row per
+  // case, there so no caller can route around it.
+  let refusal: string | null = null
+  try {
+    refusal = killSwitchRefusal(db)
+  } catch {
+    // cos_autonomy_global belongs to ensureLadderSchema; a store that never ran
+    // it has no switch installed, which is not the same as an engaged one.
+    refusal = null
+  }
+  if (refusal) {
+    result.killSwitchEngaged = refusal
+    result.errors.push(`progression heartbeat refused: ${refusal}`)
+    return result
   }
 
   for (const domain of ['personal', 'zst'] as const) {
@@ -112,9 +158,11 @@ export function runProgressionHeartbeat(
       const trig = decideTrigger(db, domain, dc.case_id, now)
       if (!trig.shouldRun) {
         result.skippedNoTrigger++
-        // Push the next check out anyway, or the same case is re-examined every
-        // cycle for as long as it stays unchanged: cheaper than a run, still not
-        // free.
+        // Push the next check out — for real this time. Re-examining an
+        // unchanged case every cycle is cheaper than a run and still not free,
+        // and until now the line below this comment was a claim release, which
+        // pushes nothing.
+        deferProgression(db, domain, dc.case_id, now + NO_TRIGGER_BACKOFF_SEC, now)
         releaseProgressionClaim(db, domain, dc.case_id, runId, now)
         continue
       }
@@ -135,8 +183,15 @@ export function runProgressionHeartbeat(
         const opts: PipelineOptions = {
           triggerType: trig.trigger,
           triggerReference: trig.triggerReference ?? `heartbeat-${runId.slice(0, 8)}`,
+          // This sweep already holds the claim for this case; the cycle must not
+          // take a second one and refuse itself.
+          claimedBy: runId,
         }
         runProgressionCycle(db, domain, dc.case_id, now, opts)
+        // And schedule the next check. A case that ran is not due again until
+        // the next sweep — the COMPLETE path clears next_progression_at, and
+        // deferProgression deliberately cannot undo that.
+        deferProgression(db, domain, dc.case_id, now + POST_RUN_RECHECK_SEC, now)
         // Recorded AFTER the run, and RE-DERIVED after it — not the hash from
         // before. The cycle mutates the case (version, goal version, wait), so
         // the pre-run hash never matches the post-run state, and recording it

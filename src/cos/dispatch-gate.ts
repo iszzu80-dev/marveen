@@ -38,6 +38,15 @@ export interface DispatchRequest {
   now?: number
   /** N-2: which per-kind ceiling applies. */
   outboundKind?: 'INITIAL' | 'FOLLOW_UP' | 'REPLY'
+  /** E13: the channel this send actually goes out on, checked against the
+   *  approval's allowed_channels. Defaults to EMAIL, which is the only channel
+   *  this gate has ever been asked about — but it is passed rather than assumed
+   *  inside authorizeSend, because the day a second channel exists the default
+   *  must be the thing that changes, not the check. */
+  channel?: string
+  /** E13: the template variables the rendered payload actually used, checked
+   *  against the approval's forbidden_variables / allowed_variable_schema. */
+  usedVariables?: string[]
   /** The rendered outbound content (classified for sensitivity). */
   content: string
   /** The model profile that would process/produce this send. */
@@ -95,10 +104,19 @@ export function evaluateDispatch(db: Database.Database, req: DispatchRequest): D
   // real clock while every other timestamp in the send came from the caller.
   // Harmless while nothing ever set valid_until; the moment approvals got an
   // expiry it made every fixture-time approval look expired.
+  // E13 (review 2026-08-13): `channel` and `usedVariables` are PASSED. They were
+  // not, so three envelope checks authorizeSend implements —
+  // channel_not_allowed, forbidden_variable, variable_not_in_schema — could
+  // never fire on the personal path. approveSend dutifully stored
+  // allowedChannels:['EMAIL'] on every approval and nothing on this side ever
+  // looked at it; the ZST door passed the channel and the personal one did not,
+  // which is the same asymmetry that hid AC-4 from the personal store in August.
   const auth = authorizeSend(db, {
     campaignId: req.campaignId, templateHash: req.templateHash,
     renderedPayloadHash: req.renderedPayloadHash, recipient: req.recipient,
     outboundKind: req.outboundKind,
+    channel: req.channel ?? 'EMAIL',
+    ...(req.usedVariables ? { usedVariables: req.usedVariables } : {}),
   }, req.now)
   if (!auth.authorized) reasons.push(`campaign not authorized: ${auth.reason}`)
 

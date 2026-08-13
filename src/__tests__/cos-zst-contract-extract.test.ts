@@ -78,3 +78,31 @@ describe('ZST contract/renewal extractor (v1 heuristic)', () => {
     expect(c.case_id).toBe(r.caseId) // linked to the case
   })
 })
+
+describe('ZST contract extractor — separators and honest nulls', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('an NBSP-grouped fee is the whole fee, not zero', () => {
+    // This file's copy of parseHufAmounts never grew the NO-BREAK SPACE the
+    // invoice copy had, so the fallback `\d{3,}` matched the LAST group —
+    // "000" — and a 1.2M contract was recorded with a financial commitment of 0.
+    const ex = extractContract({
+      from: '"X Kft." <a@x.hu>', subject: 'Szerződés megújítás',
+      body: 'A szerződés lejár: 2026-09-30. Éves díj: 1 200 000 Ft.',
+    })!
+    expect(ex.financialCommitment).toBe(1200000)
+  })
+
+  it('leaves contract_type NULL when nothing in the mail says what kind it is', () => {
+    // 'SERVICE' used to be the else-branch of a two-way test, so every renewal
+    // notice without a licence cue was filed as a service contract on no
+    // evidence — in a module whose stated contract is that unparseable fields
+    // stay null.
+    const ex = extractContract({
+      from: '"X Kft." <a@x.hu>', subject: 'Szerződés meghosszabbítása',
+      body: 'A megállapodás lejár: 2026-09-30.',
+    })!
+    expect(ex.contractType).toBeUndefined()
+    expect(ex.extracted).not.toContain('contract_type')
+  })
+})

@@ -7,6 +7,7 @@ import { planAction, executeAction } from '../cos/executor.js'
 import { GmailSendAdapter, DryRunTransport } from '../cos/adapters/gmail-send.js'
 import { openBatch, quarantineMessage } from '../cos/email-ingest.js'
 import { dueCases, dueFollowUps, setNextWake, reconcileOutbound, openEmailBatches } from '../cos/scheduler.js'
+import { SENDING_RECOVERY_GRACE_SEC } from '../cos/executor-core.js'
 
 // §22.2: a first send needs a gate-issued ticket, not a caller-side boolean.
 // These tests issue one exactly as production does.
@@ -70,6 +71,24 @@ describe('COS scheduler queries', () => {
     // the assertion above cannot be satisfied by returning nothing ever.
     db.prepare("UPDATE outbound_ledger SET status='OUTCOME_UNKNOWN' WHERE ledger_id=?").run(planned.ledgerId)
     expect(reconcileOutbound(db).map((w) => w.status)).toEqual(['OUTCOME_UNKNOWN'])
+  })
+
+  // E1 (review 2026-08-13). SENDING is written BEFORE the provider call, so a
+  // row that entered it seconds ago is almost certainly still in flight. Offering
+  // it here sent a concurrent tick into a readback of a message the provider has
+  // not indexed yet, which reads as "never sent" and puts the row back on the
+  // queue — the double-send path. The queue now offers a SENDING row only once it
+  // is older than the recovery grace window.
+  it('reconcileOutbound holds back a freshly-SENDING row and offers an aged one', () => {
+    const db = getDb()
+    createCase(db, { caseId: 'c1', title: 'T', caseType: 'X' }, NOW)
+    const p = planAction(db, { caseId: 'c1', actionType: 'EMAIL_SEND', sequenceNumber: 1, payload: { to: 'a@b.c' } }, NOW)
+    db.prepare("UPDATE outbound_ledger SET status='SENDING', sending_at=? WHERE ledger_id=?").run(NOW, p.ledgerId)
+
+    expect(reconcileOutbound(db, 100, NOW + 60).map(w => w.ledger_id)).toEqual([])
+    // CONTROL: past the grace window it IS offered — the guard delays recovery of
+    // an abandoned row, it does not abandon it.
+    expect(reconcileOutbound(db, 100, NOW + SENDING_RECOVERY_GRACE_SEC + 1).map(w => w.ledger_id)).toEqual([p.ledgerId])
   })
 
   it('openEmailBatches returns OPEN/PROCESSING batches, not TERMINAL', () => {

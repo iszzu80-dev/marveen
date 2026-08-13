@@ -121,12 +121,98 @@ describe('COS case linking by entity', () => {
       expect(r.reason).toContain('nincs-ilyen')
     })
 
+    // P6 (review 2026-08-13). The UPDATE carried `AND version = @version` and
+    // nobody looked at info.changes, then the CASE_LINKED event was inserted
+    // unconditionally, stamped version+1. On a stale version that produced an
+    // audit row referencing a case version that never existed, describing a link
+    // that is not in the store — and, since caseA is written before caseB, a
+    // possible one-directional link. transitionCase has always thrown on a
+    // 0-row conditional update.
+    it('a conditional update that matches nothing writes NO link and NO event', () => {
+      const db = getDb()
+      mkCase('a', 'A'); mkCase('b', 'B')
+      // A BEFORE-UPDATE trigger that silently skips the row is exactly what a
+      // stale version looks like to the statement: changes === 0, nothing written.
+      db.exec(`CREATE TRIGGER stale_writer BEFORE UPDATE OF related_case_ids ON personal_cases
+               BEGIN SELECT RAISE(IGNORE); END`)
+      const r = linkCases(db, 'a', 'b', 'azonosító: 120001419444', NOW)
+      db.exec(`DROP TRIGGER stale_writer`)
+
+      expect(r.linked).toBe(false)
+      expect(r.reason).toMatch(/verzióütközés/)
+      expect(linkedCases(db, 'a')).toEqual([])
+      expect(linkedCases(db, 'b')).toEqual([])
+      const events = db.prepare(
+        `SELECT COUNT(*) n FROM personal_case_events WHERE event_type='CASE_LINKED'`,
+      ).get() as { n: number }
+      expect(events.n, 'the audit log may not claim a link the store does not have').toBe(0)
+    })
+
     it('bumps the version on both cases, so a stale writer loses', () => {
       mkCase('a', 'A'); mkCase('b', 'B')
       const before = getDb().prepare(`SELECT version FROM personal_cases WHERE case_id='a'`).get() as { version: number }
       linkCases(getDb(), 'a', 'b', 'ok', NOW)
       const after = getDb().prepare(`SELECT version FROM personal_cases WHERE case_id='a'`).get() as { version: number }
       expect(after.version).toBe(before.version + 1)
+    })
+  })
+
+  // P7 (review 2026-08-13). `\b\d{6,}\b` matched phone numbers in footers, dates
+  // written 20260809, tracking codes and invoice totals, so two unrelated
+  // merchants printing the same courier hotline auto-linked. And the text being
+  // scanned is a STRANGER'S EMAIL, so a sender could embed another case's order
+  // number and have the graph wired for them.
+  describe('what may NOT be treated as an identifier', () => {
+    it('rejects a compact date', () => {
+      expect(extractEntities('Feladva: 20260809, rendelés 120001419444').identifiers)
+        .toEqual(['120001419444'])
+    })
+
+    it('rejects a phone number, however it is written', () => {
+      expect(extractEntities('Ügyfélszolgálat: +36 1 8888888').identifiers).toEqual([])
+      expect(extractEntities('Hívjon: 06301234567').identifiers).toEqual([])
+      expect(extractEntities('Tel: 0036 1 8888888').identifiers).toEqual([])
+    })
+
+    it('rejects an invoice total', () => {
+      expect(extractEntities('Végösszeg: 125000 Ft').identifiers).toEqual([])
+      expect(extractEntities('Összesen 349900 HUF').identifiers).toEqual([])
+    })
+
+    it('two merchants sharing a courier hotline in their footers do not link', () => {
+      mkCase('other', 'Alza rendelés', 'Ügyfélszolgálat: +36 1 8888888')
+      expect(suggestLinks(getDb(), 'Notino visszaigazolás. Hotline: +36 1 8888888')).toEqual([])
+    })
+  })
+
+  describe('auto-linking needs more than a stranger typing a number', () => {
+    it('an identifier that appears only in sender-authored text is a SUGGESTION, not a link', () => {
+      // The case's title/description came from the correspondent's own mail.
+      mkCase('victim', 'eCipő reklamáció 120001419444', 'rendelésszám 120001419444')
+      const s = suggestLinks(getDb(), 'Jó napot, a 120001419444 rendelésről írok')
+      expect(s[0]).toMatchObject({ caseId: 'victim', strength: 'STRONG' })
+      expect(s[0].autoLinkable, 'a sender must not be able to wire the graph').toBe(false)
+    })
+
+    it('the same identifier in a TRUSTED case field makes it auto-linkable', () => {
+      mkCase('claim', 'eCipő reklamáció', 'részletek')
+      // waiting_on is written by the owner / the engine while working the case.
+      getDb().prepare(`UPDATE personal_cases SET waiting_on='visszatérítés a 120001419444 rendelésre' WHERE case_id='claim'`).run()
+      const s = suggestLinks(getDb(), 'Csomagfelvétel a 120001419444 rendeléshez')
+      expect(s[0].autoLinkable).toBe(true)
+    })
+
+    it('the caller may vouch for its own side instead', () => {
+      mkCase('claim', 'eCipő reklamáció 120001419444', 'rendelésszám 120001419444')
+      const s = suggestLinks(getDb(), 'a 120001419444 rendelés', undefined, 'personal_cases',
+        { trustedText: 'Istvan: a 120001419444 rendelést reklamáltam' })
+      expect(s[0].autoLinkable).toBe(true)
+    })
+
+    it('a merchant match is never auto-linkable', () => {
+      mkCase('claim', 'Modivo reklamáció', 'valami')
+      const s = suggestLinks(getDb(), 'MODIVO.COM SA megbízásából csomagfelvétel')
+      expect(s[0]).toMatchObject({ strength: 'WEAK', autoLinkable: false })
     })
   })
 

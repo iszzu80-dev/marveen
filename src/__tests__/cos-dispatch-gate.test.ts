@@ -52,6 +52,42 @@ describe('COS dispatch gate', () => {
     expect(hs.allowed).toBe(false)
   })
 
+  // E13 (review 2026-08-13). evaluateDispatch never passed `channel` or
+  // `usedVariables` to authorizeSend, so three envelope checks the approval
+  // engine implements — channel_not_allowed, forbidden_variable,
+  // variable_not_in_schema — could not fire on the personal path at all.
+  // approveSend stored allowedChannels:['EMAIL'] on every approval and nothing
+  // on this side ever read it; the ZST door passed the channel, the personal one
+  // did not. Same asymmetry that hid AC-4 from the personal store in August.
+  it('E13: the approval envelope CHANNEL is checked on the personal path', () => {
+    const db = getDb()
+    createCase(db, { caseId: 'c1', title: 'T', caseType: 'X' }, 900)
+    registerConnector(db, 'gmail', 'email', 'READ_WRITE', 1000)
+    recordSuccess(db, 'gmail', 1000)
+    createCampaign(db, { campaignId: 'k1', caseId: 'c1', campaignType: 'QUOTE_REQUEST', templateHash: TH }, 1000)
+    approveCampaign(db, 'k1', 1001)
+    setLadder(db, 'QUOTE_REQUEST', { rung: 'EXECUTE_WITH_APPROVAL' }, 1000)
+    // Istvan approved this payload for the CHAT channel only.
+    recordApproval(db, { approvalId: 'a1', campaignId: 'k1', approvedBy: 'istvan', templateHash: TH,
+      renderedPayloadHash: RH, allowedRecipients: ['teszt@pelda.hu'], allowedChannels: ['CHAT'] }, 1002)
+
+    const d = evaluateDispatch(db, REQ) // the gate sends EMAIL
+    expect(d.allowed).toBe(false)
+    expect(d.reasons.join()).toMatch(/channel EMAIL is not approved/)
+  })
+
+  it('E13: a forbidden template variable in the rendered payload vetoes the send', () => {
+    const db = seedGreen()
+    db.prepare(`UPDATE campaign_approvals SET forbidden_variables=? WHERE approval_id='a1'`)
+      .run(JSON.stringify(['bank_account']))
+    // CONTROL first: with no variables declared there is nothing to check, and the
+    // gate must not start refusing hand-composed mail.
+    expect(evaluateDispatch(db, REQ).allowed).toBe(true)
+    const d = evaluateDispatch(db, { ...REQ, usedVariables: ['greeting', 'bank_account'] })
+    expect(d.allowed).toBe(false)
+    expect(d.reasons.join()).toMatch(/forbidden variable/)
+  })
+
   it('connector layer vetoes: READ_ONLY connector blocks a write', () => {
     const db = seedGreen()
     setMode(db, 'gmail', 'READ_ONLY', 1100)

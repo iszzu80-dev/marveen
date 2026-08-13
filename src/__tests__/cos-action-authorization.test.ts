@@ -18,6 +18,7 @@ import {
   type AuthorizationContext,
 } from '../cos/action-authorization.js'
 import { mintGatePermit } from '../cos/gate-permit.js'
+import { engageKillSwitch } from '../cos/kill-switch.js'
 
 const T0 = 1_700_000_000
 const EMAIL = { to: 'v@x.com', subject: 'S', body: 'B' }
@@ -181,6 +182,47 @@ describe('§22.2 authorization ticket — adversarial', () => {
     const { authorizationId } = issueAuthorization(db, c, T0, {}, mintGatePermit({ allowed: true, reasons: [] }))
     expect(revokeAuthorizationsForAction(db, c.actionId, T0 + 1)).toBe(1)
     expect(consumeAuthorization(db, authorizationId, c, T0 + 2).ok).toBe(false)
+  })
+
+  // E8 (review 2026-08-13). Revocation was spelled "set consumed_at", and
+  // consumption only blocks on consumed_at when single_use=1 (the predicate is
+  // `consumed_at IS NULL OR single_use = 0`). So a ticket issued with
+  // singleUse:false walked straight through a revocation that had counted it.
+  // Latent — every issuer today passes single-use — and still a broken §22.2
+  // contract, with the audit row asserting the opposite of what happened.
+  it('E8: revocation blocks a MULTI-USE ticket too, not only a single-use one', () => {
+    const db = getDb()
+    const c = ctx()
+    const multi = issueAuthorization(db, c, T0, { singleUse: false }, mintGatePermit({ allowed: true, reasons: [] }))
+    expect(revokeAuthorizationsForAction(db, c.actionId, T0 + 1)).toBe(1)
+    const r = consumeAuthorization(db, multi.authorizationId, c, T0 + 2)
+    expect(r.ok).toBe(false)
+    expect(r.ok === false && r.reason).toMatch(/revoked/)
+  })
+
+  it('E8: the kill switch kills a multi-use ticket, and the audit says REVOKED not consumed', () => {
+    const db = getDb()
+    const c = ctx()
+    const multi = issueAuthorization(db, c, T0, { singleUse: false }, mintGatePermit({ allowed: true, reasons: [] }))
+    engageKillSwitch(db, { reason: 'allj le', actor: 'istvan' }, T0 + 1)
+    expect(consumeAuthorization(db, multi.authorizationId, c, T0 + 2).ok).toBe(false)
+    // and the two facts are distinguishable afterwards, which they were not while
+    // both were written to consumed_at
+    const row = db.prepare('SELECT revoked_at, revoked_reason, consumed_at FROM action_authorizations WHERE authorization_id=?')
+      .get(multi.authorizationId) as { revoked_at: number | null; revoked_reason: string | null; consumed_at: number | null }
+    expect(row.revoked_at).toBe(T0 + 1)
+    expect(row.consumed_at).toBeNull()
+    expect(String(row.revoked_reason)).toContain('allj le')
+  })
+
+  it('CONTROL: a multi-use ticket that nobody revoked is consumable twice', () => {
+    // Without this, the two tests above could pass by refusing multi-use tickets
+    // outright — which would be a different bug wearing the fix as a disguise.
+    const db = getDb()
+    const c = ctx()
+    const multi = issueAuthorization(db, c, T0, { singleUse: false }, mintGatePermit({ allowed: true, reasons: [] }))
+    expect(consumeAuthorization(db, multi.authorizationId, c, T0 + 1).ok).toBe(true)
+    expect(consumeAuthorization(db, multi.authorizationId, c, T0 + 2).ok).toBe(true)
   })
 
   it('direct adapter bypass → the executor still refuses without a ticket', async () => {

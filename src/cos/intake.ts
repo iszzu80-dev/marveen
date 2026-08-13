@@ -156,16 +156,28 @@ export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now:
     }
     // Cross-thread linking (2026-08-09). Thread matching above only catches a
     // reply on a conversation we already know; a courier or a merchant writes on
-    // its own thread about the same matter. A STRONG match — a shared long
-    // identifier such as an order number — is linked automatically: it is
-    // deterministic, reversible, and acts on nothing outside the store. A WEAK
-    // match (merchant name only) is NOT linked here; two cases mentioning the
-    // same shop are often unrelated, and a wrong link costs more than a missing
-    // one because it has to be disproved.
-    const strong = suggestLinks(db, `${input.subject}\n${input.snippet}`, caseId)
-      .filter((c) => c.strength === 'STRONG')
-    for (const c of strong) {
-      linkCases(db, caseId, c.caseId, c.evidence, now)
+    // its own thread about the same matter.
+    //
+    // NARROWED 2026-08-13 (P7). This used to auto-link every STRONG candidate,
+    // justified as "deterministic, reversible, acts on nothing outside the
+    // store". The missing word is WHOSE text decides: `input.subject` and
+    // `input.snippet` are a STRANGER'S EMAIL. A sender who puts another case's
+    // order number in their message got their case wired to it, deterministically
+    // and with no human in the loop — case-graph poisoning that "reversible"
+    // only helps with if somebody notices. So the shared identifier must also
+    // appear in a field the owner or this system wrote (suggestLinks'
+    // autoLinkable). Everything else is recorded as a SUGGESTION on the new
+    // case's audit trail — visible, checkable, and not acted upon.
+    const candidates = suggestLinks(db, `${input.subject}\n${input.snippet}`, caseId)
+    for (const c of candidates) {
+      if (c.strength === 'STRONG' && c.autoLinkable) {
+        linkCases(db, caseId, c.caseId, c.evidence, now)
+        continue
+      }
+      db.prepare(
+        `INSERT INTO personal_case_events (case_id, case_version, actor, event_type, reason, created_at)
+         VALUES (@id, 1, 'marveen', 'CASE_LINK_SUGGESTED', @reason, @now)`
+      ).run({ id: caseId, reason: `${c.caseId} (${c.strength}): ${c.evidence}`, now })
     }
 
     localApply(db, input.accountId, input.messageId, caseId, now)

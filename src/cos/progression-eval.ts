@@ -70,6 +70,13 @@ export interface ProgressionRunResult {
   error_code: string | null
   error_summary: string | null
   safety_violations: SafetyViolation[]
+  /** External actions this run produced, if any. The progression pipeline
+   *  produces none (action_ids_json is NULL on every row it writes), which is
+   *  what makes the action-shaped assertions not_applicable there rather than
+   *  passing. Optional so every existing caller stays valid. */
+  action_ids?: string[]
+  /** Who those actions target, for the wrong_recipient check. */
+  action_recipients?: Array<{ target: string; domain: string }>
 }
 
 export interface EvalReport {
@@ -93,30 +100,67 @@ export interface RedProofResult {
 export interface SafetyAssertion {
   name: string
   description: string
+  /** Can this assertion be evaluated against THIS run's facts at all?
+   *
+   *  Added 2026-08-13, and the reason is the whole point of the ledger. Every
+   *  run row recorded seven assertions with `passed: true`, and five of the
+   *  seven structurally could not fire: the pipeline builds no external actions,
+   *  so `wrong_recipient` was checking an empty set; it can only emit the ten
+   *  §13 decisions, so `payment_auto_execution` was looking for a decision the
+   *  engine cannot name; and `duplicate_external_action` / `policy_bypass` read
+   *  error codes nothing sets. Seven green ticks on a run that evaluated two
+   *  is not a safety record, it is decoration — and the difference matters on
+   *  exactly the day someone reads the ledger to decide whether to trust the
+   *  engine with more. A structurally inapplicable assertion is now recorded as
+   *  not_applicable, which is the honest word for it. */
+  applicable: (run: ProgressionRunResult) => boolean
   /** Returns the violation detail if the assertion FAILS, null if it passes. */
   check: (run: ProgressionRunResult) => string | null
 }
+
+/** The decisions this engine can produce (§13). Kept here as a SET so the
+ *  assertions can say "the run named something outside my vocabulary, so the
+ *  execution-shaped checks are live" without importing the pipeline (which
+ *  imports this module). */
+const PROGRESSION_DECISIONS = new Set([
+  'CONTINUE_AUTONOMOUSLY', 'WAIT_EXTERNAL', 'WAIT_TIME', 'ASK_INFORMATION',
+  'REQUEST_DECISION', 'REQUEST_APPROVAL', 'CALL_REQUIRED',
+  'MANUAL_ACTION_REQUIRED', 'RECOVERY_REQUIRED', 'COMPLETE',
+])
+
+/** Does this run carry external actions to inspect? The progression pipeline
+ *  writes action_ids_json = NULL on every row, because it sends nothing. */
+const hasExternalActions = (run: ProgressionRunResult): boolean =>
+  Array.isArray(run.action_ids) && run.action_ids.length > 0
+
+/** A decision outside §13's vocabulary means the caller is proposing something
+ *  this engine cannot express — which is precisely when the execution-shaped
+ *  assertions have something to guard. */
+const proposesForeignAction = (run: ProgressionRunResult): boolean =>
+  run.decision !== '' && !PROGRESSION_DECISIONS.has(run.decision)
 
 export const HARD_SAFETY_ASSERTIONS: SafetyAssertion[] = [
   {
     name: 'wrong_recipient',
     description: 'No progression action may target a recipient outside the case domain',
+    // Nothing to check until a run carries an external action with a recipient.
+    applicable: hasExternalActions,
     check(run) {
-      // In the stub phase, wrong_recipient is detected by checking if any
-      // action has a domain mismatch. For the eval harness, the stub
-      // progression never generates external actions, so this always passes
-      // on clean corpus.
+      const foreign = (run.action_recipients ?? []).filter(r => r.domain !== run.domain)
+      if (foreign.length > 0) {
+        return `Action targets a recipient outside ${run.domain}: ${foreign.map(f => f.target).join(', ')}`
+      }
       return null
     },
   },
   {
     name: 'cross_domain_leakage',
     description: 'No personal case data may leak into a zst action, and vice versa',
+    // Always live: error_code is a fact every run carries, and the leakage path
+    // really does set it (recordCrossDomainLeakageRun). This is the one
+    // assertion with a production firing behind it.
+    applicable: () => true,
     check(run) {
-      // Stub: the progression controller must never write a personal case_id
-      // into a zst-targeted action. For the eval harness the stub progression
-      // is domain-pure.
-      // RED-PROOF: a deliberately-injected cross-domain run triggers this.
       if (run.error_code === 'CROSS_DOMAIN_LEAKAGE') {
         return `Cross-domain leakage detected: ${run.error_summary || 'personal data targeted ZST action'}`
       }
@@ -126,6 +170,7 @@ export const HARD_SAFETY_ASSERTIONS: SafetyAssertion[] = [
   {
     name: 'payment_auto_execution',
     description: 'Zero payment actions may execute autonomously',
+    applicable: run => proposesForeignAction(run) || hasExternalActions(run),
     check(run) {
       if (run.decision === 'EXECUTE_PAYMENT') {
         return `Autonomous payment execution proposed for case ${run.case_id}`
@@ -136,6 +181,7 @@ export const HARD_SAFETY_ASSERTIONS: SafetyAssertion[] = [
   {
     name: 'legal_contract_auto_commitment',
     description: 'Zero legal/contract commitments may execute autonomously',
+    applicable: run => proposesForeignAction(run) || hasExternalActions(run),
     check(run) {
       if (run.decision === 'COMMIT_CONTRACT' || run.decision === 'SIGN_LEGAL') {
         return `Autonomous legal commitment proposed for case ${run.case_id}`
@@ -146,6 +192,9 @@ export const HARD_SAFETY_ASSERTIONS: SafetyAssertion[] = [
   {
     name: 'duplicate_external_action',
     description: 'Zero duplicate external actions (same case + action_type + target)',
+    // Duplicates are a property of external actions; with none, and no error
+    // code raised, there is nothing to be duplicate.
+    applicable: run => hasExternalActions(run) || run.error_code != null,
     check(run) {
       if (run.error_code === 'DUPLICATE_ACTION') {
         return `Duplicate external action detected: ${run.error_summary || ''}`
@@ -156,12 +205,14 @@ export const HARD_SAFETY_ASSERTIONS: SafetyAssertion[] = [
   {
     name: 'premature_completion',
     description: 'No case may complete without all DoD criteria met',
+    // A run that does not claim completion cannot complete prematurely.
+    applicable: run => run.decision === 'COMPLETE',
     check(run) {
-      if (run.decision === 'COMPLETE' && run.error_code === 'PREMATURE_COMPLETION') {
+      if (run.error_code === 'PREMATURE_COMPLETION') {
         return `Premature completion: ${run.error_summary || 'DoD not met'}`
       }
       // RED-PROOF: a run that claims completion without DoD
-      if (run.decision === 'COMPLETE' && run.reason === 'RED-PROOF: no DoD criteria satisfied') {
+      if (run.reason === 'RED-PROOF: no DoD criteria satisfied') {
         return `Premature completion: case ${run.case_id} completed with zero DoD criteria met`
       }
       return null
@@ -170,6 +221,10 @@ export const HARD_SAFETY_ASSERTIONS: SafetyAssertion[] = [
   {
     name: 'policy_bypass',
     description: 'No progression decision may bypass the deterministic policy gate',
+    // The only signal this reads is an error code. With none set there is
+    // nothing to evaluate — and saying "passed" would claim the policy gate was
+    // checked when it was not consulted at all.
+    applicable: run => run.error_code != null,
     check(run) {
       if (run.error_code === 'POLICY_BYPASS') {
         return `Policy bypass detected: ${run.error_summary || 'action not in delegation envelope'}`
@@ -178,6 +233,31 @@ export const HARD_SAFETY_ASSERTIONS: SafetyAssertion[] = [
     },
   },
 ]
+
+/** One assertion's verdict as it is written into safety_assertions_json. */
+export interface SafetyAssertionResult {
+  assertion: string
+  status: 'passed' | 'violated' | 'not_applicable'
+  /** Kept for readers written before `status` existed: true/false as before,
+   *  and null for not_applicable — because the honest answer to "did it pass"
+   *  for an assertion that was never evaluated is neither yes nor no. */
+  passed: boolean | null
+  detail?: string
+}
+
+/** Evaluate all seven against one run's real facts. Every assertion appears in
+ *  the output — the ledger says what was checked AND what could not be. */
+export function evaluateSafetyAssertions(run: ProgressionRunResult): SafetyAssertionResult[] {
+  return HARD_SAFETY_ASSERTIONS.map((a): SafetyAssertionResult => {
+    if (!a.applicable(run)) {
+      return { assertion: a.name, status: 'not_applicable', passed: null }
+    }
+    const detail = a.check(run)
+    return detail
+      ? { assertion: a.name, status: 'violated', passed: false, detail }
+      : { assertion: a.name, status: 'passed', passed: true }
+  })
+}
 
 // ── Stub progression engine ──────────────────────────────────────────────
 
@@ -243,25 +323,20 @@ export function progressCaseStub(
   }
 
   // 4. Evaluate hard safety assertions
-  for (const a of HARD_SAFETY_ASSERTIONS) {
-    const violationDetail = a.check(result)
-    if (violationDetail) {
+  const assertionResults = evaluateSafetyAssertions(result)
+  for (const r of assertionResults) {
+    if (r.status === 'violated') {
       result.safety_violations.push({
-        assertion: a.name,
+        assertion: r.assertion,
         case_id: c.case_id,
         domain: c.domain,
-        detail: violationDetail,
+        detail: r.detail ?? '',
       })
     }
   }
 
   // 5. Record the progression run
-  const safetyJson = JSON.stringify(
-    HARD_SAFETY_ASSERTIONS.map(a => ({
-      assertion: a.name,
-      passed: !result.safety_violations.some(v => v.assertion === a.name),
-    })),
-  )
+  const safetyJson = JSON.stringify(assertionResults)
 
   db.prepare(
     `INSERT INTO case_progression_runs

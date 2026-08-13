@@ -64,8 +64,9 @@
 //     also why the engine-side gate can afford to be absolute.
 //
 //   by = 'ENGINE' — allowed only when ALL of:
-//     1. the case has progression state and it is enabled (otherwise the case
-//        is not engine-controlled and the legacy path applies), AND
+//     1. the case has progression state and it is enabled — otherwise the case
+//        is not engine-controlled, and an engine closing a case it does not
+//        drive is the failure this gate exists to stop, AND
 //     2. the DoD provenance is CASE_SPECIFIC, AND
 //     3. every criterion is met, each with an evidence reference.
 //
@@ -437,8 +438,10 @@ export function evaluateDoDCompleteness(
  *  evidence than anything this module can compute. It is also what lets the
  *  engine side be absolute.
  *
- *  ENGINE is allowed only when the case is engine-controlled, its DoD is
- *  CASE_SPECIFIC, and every criterion is met with an evidence reference.
+ *  ENGINE is allowed only when the case is engine-controlled (a progression
+ *  state row exists AND progression_enabled = 1), its DoD is CASE_SPECIFIC, and
+ *  every criterion is met with an evidence reference. A case the engine does
+ *  not control is a case the engine has no business closing.
  *
  *  Read-only — no mutation.
  *  Domain-scoped. */
@@ -463,14 +466,36 @@ export function canCompleteCase(
     dod_verification_json: string | null
   } | undefined
 
-  // No progression state → case is not progression-controlled → allowed
+  // NOT ENGINE-CONTROLLED → THE ENGINE MAY NOT CLOSE IT.
+  //
+  // Both of these used to return allowed:true, described as "the legacy close
+  // path". That was true of the path this gate was written for — a person or an
+  // older code path closing a case — but the progression pipeline calls this
+  // very function as its OWN plan-exhaustion trigger and as its downgrade guard.
+  // So any state row with progression_enabled = 0 that got cycled sailed
+  // straight through on a GENERIC_STATUS_TEMPLATE DoD, and the engine
+  // transitioned the case to COMPLETED: the 2026-08-09 "72 false closures"
+  // failure, re-admitted through the disabled branch, on cases the engine had
+  // explicitly been told not to drive.
+  //
+  // "Not engine-controlled" now means what it says. The legitimate closures the
+  // old branch was protecting all arrive as by = 'OWNER' (completionActor maps
+  // everything except the progression engine's own actor string to OWNER), and
+  // that path returned above without reading any of this.
   if (!state) {
-    return { allowed: true, reason: 'Case is not under progression control', unmet: [] }
+    return {
+      allowed: false,
+      reason: 'Case is not under progression control; the engine may not close it (the owner can)',
+      unmet: [],
+    }
   }
 
-  // Progression disabled → legacy close path → allowed
   if (state.progression_enabled === 0) {
-    return { allowed: true, reason: 'Progression is disabled on this case', unmet: [] }
+    return {
+      allowed: false,
+      reason: 'Progression is disabled on this case; the engine may not close it (the owner can)',
+      unmet: [],
+    }
   }
 
   // Progression-enabled → the DoD has to be this case's DoD before it can be

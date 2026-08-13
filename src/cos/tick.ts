@@ -17,7 +17,7 @@
 import type Database from 'better-sqlite3'
 import { reconcileOutbound, outboundNeedingHuman, dueCases, dueFollowUps } from './scheduler.js'
 import { executeAction, type OutboundAdapter } from './executor.js'
-import { dueRadarChecks, markNotified } from './radar.js'
+import { dueRadarChecks } from './radar.js'
 import { runRentalRadarCheck, runProductRadarCheck } from './radar-runner.js'
 import type { ShoppingAdapter } from './shopping-adapter.js'
 import type { RentalAdapter } from './rental-adapter.js'
@@ -30,11 +30,32 @@ export interface CosTickDeps {
   shoppingAdapter?: ShoppingAdapter
 }
 
+/** One radar hit the owner has NOT been told about yet, with everything
+ *  markNotified needs. The tick deliberately does not persist it — see the
+ *  radarNotifications note on CosTickResult. */
+export interface PendingRadarNotification {
+  radarId: string
+  offerId: string | null
+  price: number | null
+  reason: string | null
+}
+
 export interface CosTickResult {
   outboundProcessed: number
   outboundSkippedNoAdapter: number
   radarChecked: number
   radarHits: string[]
+  /** Hits that still owe the owner an alert. The tick does NOT call markNotified:
+   *  radar.ts:markNotified's contract is "call AFTER the alert is posted", and
+   *  the alert (alertRadarHit) happens in the caller, one `.then()` later. Marking
+   *  here meant a crash — or an alertRadarHit that threw on its first statement —
+   *  left the item recorded as notified while the owner heard nothing; and because
+   *  the status stays HIT for as long as the price stays under target, every
+   *  branch of decideNotify then returns should:false and the deal is NEVER
+   *  surfaced. Silence is the one failure mode the radar cannot have, so the
+   *  decision travels out unpersisted and the caller marks it once the alert has
+   *  actually returned. */
+  radarNotifications: PendingRadarNotification[]
   /** Outbound rows in RECOVERY_REQUIRED — provider claimed success but the marker
    *  is provably absent; a human must resolve them (never auto-resent). */
   recoveryRequired: string[]
@@ -52,7 +73,10 @@ export async function cosTick(db: Database.Database, deps: CosTickDeps, now: num
   // 1. outbound reconcile
   let outboundProcessed = 0
   let outboundSkippedNoAdapter = 0
-  for (const w of reconcileOutbound(db)) {
+  // E1: the queue's SENDING grace window is measured against a clock, and the
+  // tick has its own. Letting it default to wall time would make a test that
+  // injects `now` reason about two different clocks.
+  for (const w of reconcileOutbound(db, 100, now)) {
     const ad = adapters[w.action_type]
     if (!ad) { outboundSkippedNoAdapter++; continue }
     try { await executeAction(db, ad, w.ledger_id, now); outboundProcessed++ }
@@ -61,6 +85,7 @@ export async function cosTick(db: Database.Database, deps: CosTickDeps, now: num
 
   // 2. radar checks
   const radarHits: string[] = []
+  const radarNotifications: PendingRadarNotification[] = []
   let radarChecked = 0
   for (const item of dueRadarChecks(db, now)) {
     // Dispatch by kind to the matching adapter; skip if no adapter for this kind.
@@ -73,11 +98,13 @@ export async function cosTick(db: Database.Database, deps: CosTickDeps, now: num
         ? await runRentalRadarCheck(db, item, deps.rentalAdapter!, now)
         : await runProductRadarCheck(db, item, deps.shoppingAdapter!, now)
       // P1.6: only surface a HIT the owner has not already heard about (new/
-      // different offer, or a significant further drop). markNotified records
-      // what we alerted so an unchanged offer never re-pings next cycle.
+      // different offer, or a significant further drop). The dedup state
+      // (markNotified) is written by whoever posts the alert, not here.
       if (res.notify.should) {
         radarHits.push(item.radar_id)
-        markNotified(db, item.radar_id, { offerId: res.offerId, price: res.bestPrice, reason: res.notify.reason }, now)
+        radarNotifications.push({
+          radarId: item.radar_id, offerId: res.offerId, price: res.bestPrice, reason: res.notify.reason,
+        })
       }
     } catch (e) { errors.push({ where: 'radar', id: item.radar_id, error: String((e as Error)?.message ?? e) }) }
   }
@@ -88,6 +115,7 @@ export async function cosTick(db: Database.Database, deps: CosTickDeps, now: num
     outboundSkippedNoAdapter,
     radarChecked,
     radarHits,
+    radarNotifications,
     recoveryRequired: outboundNeedingHuman(db).map(w => w.ledger_id),
     dueCases: dueCases(db, now).length,
     dueFollowUps: dueFollowUps(db, now).length,

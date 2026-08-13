@@ -8,8 +8,10 @@
 // The loop is therefore safe to run live today.
 
 import { cosTick, type CosTickDeps, type CosTickResult } from './tick.js'
+import type Database from 'better-sqlite3'
 import { DiscoverCarsAdapter } from './adapters/discovercars.js'
 import { EmagAdapter } from './adapters/emag.js'
+import { markNotified } from './radar.js'
 import { alertRadarHit } from './radar-alert.js'
 import { alertOutboundRecovery } from './outbound-alert.js'
 import { registerConnector, recordSuccess } from './connector-health.js'
@@ -48,6 +50,35 @@ export async function runCosTickOnce(
   return cosTick(db, deps, now)
 }
 
+/**
+ * Post every pending radar HIT and only then record it as notified.
+ *
+ * The ORDER is the whole point. markNotified used to run inside cosTick, one
+ * `.then()` earlier than the alert it claims to describe, so anything that went
+ * wrong in between — a crash, an alertRadarHit that threw on its first statement
+ * — left the item stamped "the owner knows" while the owner knew nothing. That is
+ * unrecoverable, not merely late: while the price stays at/under target the item
+ * stays HIT, so decideNotify's every branch returns should:false and the deal is
+ * never mentioned again. A price falls below target once.
+ *
+ * Consequently a failed alert leaves the dedup state UNTOUCHED, so the next tick
+ * re-offers the same hit. Re-telling the owner about a deal is a nuisance; never
+ * telling him is the radar failing at its only job.
+ */
+export function deliverRadarNotifications(
+  db: Database.Database, res: CosTickResult, now = Math.floor(Date.now() / 1000),
+): void {
+  for (const n of res.radarNotifications) {
+    logger.warn({ radarId: n.radarId }, 'COS radar HIT — target price met')
+    try {
+      alertRadarHit(db, n.radarId)
+      markNotified(db, n.radarId, { offerId: n.offerId, price: n.price, reason: n.reason }, now)
+    } catch (err) {
+      logger.error({ err, radarId: n.radarId }, 'radar HIT alert failed — NOT marked notified, will retry next tick')
+    }
+  }
+}
+
 let timer: ReturnType<typeof setInterval> | undefined
 
 /** Start the autonomous COS loop (radar only). Idempotent. Does NOT tick at boot
@@ -62,11 +93,8 @@ export function startCosBackgroundTasks(): ReturnType<typeof setInterval> {
           logger.info({ cos: res }, 'cosTick (autonomous)')
         }
         // A radar HIT is a real deal — post it to the bus (marveen relays it to
-        // Telegram) + the daily log.
-        for (const hit of res.radarHits) {
-          logger.warn({ radarId: hit }, 'COS radar HIT — target price met')
-          try { alertRadarHit(getDb(), hit) } catch (err) { logger.error({ err, radarId: hit }, 'radar HIT alert failed') }
-        }
+        // Telegram) + the daily log, THEN record the dedup state.
+        deliverRadarNotifications(getDb(), res)
         // Outbound rows stuck in RECOVERY_REQUIRED need a human — surface them
         // (the executor will never auto-resend a provider-claimed success).
         if (res.recoveryRequired.length) {

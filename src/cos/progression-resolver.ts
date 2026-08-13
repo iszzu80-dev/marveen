@@ -159,7 +159,8 @@ export function resolveEmailThread(
 ): EmailThreadResolution {
   const tableName = domain === 'personal' ? 'personal_cases' : 'zst_cases'
   const epTable = domain === 'personal' ? 'email_processing' : 'zst_email_processing'
-  const hasBatchCol = domain === 'personal' // zst_email_processing has no batch_id column
+  // (A `hasBatchCol` flag used to sit here, noting that zst_email_processing has
+  // no batch_id column. Nothing read it and no query below selects batch_id.)
 
   // 1. Get thread IDs and source references from the case.
   const caseRow = db.prepare(

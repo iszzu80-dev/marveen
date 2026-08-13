@@ -73,6 +73,28 @@ export function getEscalation(db: Database.Database, escalationId: string): Esca
   return { ...r, hard_gate: isHardGated(r as { target_workspace: string; request_type: string }) } as EscalationRow
 }
 
+/** Is the actor column present on this database?
+ *
+ *  "Who accepted this commitment" is not answerable from the store today: the
+ *  actor is checked by the hard gate and then dropped, so zst_product_escalations
+ *  records that a contract was ACCEPTED and not by whom. The column belongs in
+ *  schema.ts, which this module may not edit — the ALTER TABLE is reported
+ *  instead, and the write is already here behind this probe, so the actor starts
+ *  being recorded the moment the column exists rather than needing a second
+ *  change nobody remembers to make.
+ *
+ *  Cached per database handle: PRAGMA on every transition would be a query for a
+ *  fact that cannot change under a running process. */
+const DECIDED_BY_CACHE = new WeakMap<object, boolean>()
+function hasDecidedByColumn(db: Database.Database): boolean {
+  const cached = DECIDED_BY_CACHE.get(db as unknown as object)
+  if (cached !== undefined) return cached
+  const cols = db.prepare(`PRAGMA table_info(zst_product_escalations)`).all() as Array<{ name: string }>
+  const present = cols.some(c => c.name === 'decided_by')
+  DECIDED_BY_CACHE.set(db as unknown as object, present)
+  return present
+}
+
 const ALLOWED: Record<EscalationStatus, EscalationStatus[]> = {
   OPEN: ['ACKNOWLEDGED', 'CANCELLED'],
   ACKNOWLEDGED: ['IN_PROGRESS', 'WAITING_SOURCE', 'CANCELLED'],
@@ -96,8 +118,24 @@ export function transitionEscalation(
     throw new Error(`escalation ${escalationId} is hard-gated: only Istvan can ACCEPT a ${e.request_type} commitment`)
   }
   const done = to === 'ACCEPTED' || to === 'REJECTED' || to === 'CANCELLED'
-  db.prepare(`UPDATE zst_product_escalations SET status=@to${done ? ', completed_at=@now' : ''} WHERE escalation_id=@id`)
-    .run({ to, now, id: escalationId })
+  // The write is conditional on the status the legality check was made against.
+  // It used to be `WHERE escalation_id = ?`, so the check and the act were two
+  // separate statements with a gap between them: two concurrent transitions both
+  // read RESULT_READY, both found their move legal, and the second one landed on
+  // top of the first — an escalation ACCEPTED after it had been REJECTED, with
+  // nothing anywhere saying it happened. Everything this state machine guards is
+  // a business commitment, so the last writer must not win by accident.
+  const withActor = hasDecidedByColumn(db)
+  const info = db.prepare(
+    `UPDATE zst_product_escalations
+       SET status=@to${done ? ', completed_at=@now' : ''}${withActor ? ', decided_by=@actor' : ''}
+     WHERE escalation_id=@id AND status=@from`,
+  ).run({ to, now, id: escalationId, from, ...(withActor ? { actor } : {}) })
+  if (info.changes === 0) {
+    const current = getEscalation(db, escalationId)
+    throw new Error(
+      `escalation ${escalationId} moved to ${current?.status ?? 'MISSING'} while this ${from} → ${to} was being decided`)
+  }
   return getEscalation(db, escalationId)!
 }
 
