@@ -322,3 +322,61 @@ Ez nem sürgős, de két konkrét következménye van: a `git log`/`git blame` a
 | O-3..O-10 | optimization dashboard §21 | **NYITVA** — a spec §27 szerint továbbra is `NO-GO` |
 | F-1, F-2, F-4, F-7, F-11..F-16 | APG 0.4 UI | nem mértem újra |
 | K-1, K-2, K-3 | APG kernel | **NYITVA** — a `/home/iszzu/...` bedrótozott utak a kernelben változatlanok |
+
+---
+
+# Utólagos kiegészítés — a javítás és a merge megtörtént (2026-08-13, ugyanaznap)
+
+Ez a riport egy állapotot ír le, ami azóta megváltozott. A fenti szöveget nem írtam át (egy audit, amit visszamenőleg átszerkesztenek, nem audit), hanem itt rögzítem, mi lett belőle.
+
+## Ami kiderült a javítás közben
+
+**A találásaim nagy része már meg volt javítva — mergeletlen ágakon.** Ez önmagában a legfontosabb megállapítás, és nem szerepel a fenti riportban, mert a `develop`-ról nem látszott:
+
+| Találás | Hol volt már kész |
+|---|---|
+| R-1, R-2, R-3 (a céges küldési út négy rétege, a `caseType`, az idempotencia-kulcs) | `claude/cos-autonom-code-review-qv04y2` |
+| R-4 (a több-használatos ticket visszavonhatatlan) | ugyanott, `revoked_at` külön oszlopként |
+| R-5 (a §16 assertionök nem tudnak tüzelni) | `claude/progression-v131-fixes-qe1z7m` **és** `cos-autonom` — két ág, két irányból |
+| R-6 (§21 Delegation Envelope: M0) | `claude/progression-v131-fixes-qe1z7m` — „the branch that never existed" |
+| R-8 (a Decision Package 7-ből 2 eleme) | ugyanott, §20 + a §4.2 minőségi mérőszámok |
+| T-1, T-2, T-3 (a 9. kör nyitott tételei) | `claude/cos-review-fixes-qe1z7m` |
+| C-1..C-7 (CostOps) | `claude/costops-review-fixes-qe1z7m` + `claude/costops-agp-lean-review-mksxlj` |
+| K-1 (a kernel bedrótozott útjai) | `claude/apg-kernel-review-fixes-qe1z7m` + `costops-agp-lean` |
+
+Vagyis a rendszer valódi állapota lényegesen jobb volt, mint amit a mainline mutatott — és **a mérés helye volt rossz, nem a mérés.** Ez a 5.2 pont („nyolc nyitott branch, nulla nyitott PR") következménye, és élesebben fogalmazva: a `develop` nem a rendszer állapotát mutatta, hanem azt, hogy mi jutott el odáig.
+
+## Két ág, ugyanaz a hiba, két irányból
+
+A `§16` assertionöket két ág javította párhuzamosan, és a merge-ben **egyik sem volt elég önmagában**:
+
+- az egyik elérte, hogy az assertionök **tudjanak tüzelni** (a ledgert és az `action_authorizations` sorokat olvassák egy `error_code` helyett, amit semmi nem ír, és mindkét névtérben);
+- a másik elérte, hogy a ledger **megmondja, melyik futott le** (`applicable()` → `not_applicable` a `passed: true` helyett).
+
+Check nélkül a hét zöld pipa semmit nem jelent; predikátum nélkül a hétből kettő valódi. A merge mindkettőt megtartja, és a `safety_assertions_json` mostantól az `evaluateSafetyAssertions` saját kimenete, nem egy újraszármaztatás a violations-listából — „nincs a listában" és „megnézve és tiszta" két különböző tény.
+
+Ugyanez a mintázat a `deployment_paths` (kernel) és az `owner-inbox` feloldásában is.
+
+## Kapuk a merge után
+
+| Kapu | Előtte | Utána |
+|---|---|---|
+| `npx tsc --noEmit` | zöld | **zöld** |
+| `npx vitest run` | 5890 zöld / 7 piros / 5 fájl | **6451 zöld / 0 piros / 495 fájlból 495** |
+| `pytest` (kernel) | 322 zöld / 133 piros | **385 zöld / 133 piros** (a 133 mind a hiányzó methodology-pack miatt, változatlan) |
+
+A négy „állandó piros" mindegyike javítva, és egyik sem a küszöb leszállításával: az uid-függők (`chmod 500` root alatt nem akadály) most létező könyvtárral idézik elő ugyanazt a hibát, a bash-verziófüggő sorszám-pin a tulajdonságot állítja a sorszám helyett, a `schedule-runner` pedig egy hiányzó `getDb` mock volt a harness-ben — a fire-út dobott, a `catch` `error`-t csinált belőle, és a teszt úgy olvasott, mint egy állítás a runnerről.
+
+**És ez a lényeg a 4. pontban:** egy állandó piros halmaz pontosan így nyel el egy valódi új hibát. Ezen a napon meg is történt — a `costops-api` három bukása „a három ismert" mögé csúszott.
+
+## A repók most
+
+| Repó | `main` | Tartalom |
+|---|---|---|
+| `marveen-private` | **létrehozva** @ `208b61c` | `develop` + mind a hét nyitott ág + a tíz review-doksi. A `develop` és a review-ág ugyanide van előretekerve. |
+| `marveen-apg-kernel` | **létrehozva** @ `79613ab` | a WP1-ág + mindhárom nyitott `claude/*` ág. |
+| `marveen-suite` | már volt | mind a 30 feature-ág maradéktalanul benne van a `main`-ben (0 ahead) — nincs mit mergelni. |
+
+Mindhárom repóban **nulla olyan távoli ág maradt, ami nincs benne a `main`-ben.**
+
+**Ami emberi kézre vár:** a default branch átállítása a GitHub beállításaiban (`marveen-private`: `develop` → `main`; `marveen-apg-kernel`: `wp1-slice1-executor-registry` → `main`). Ezt API-ból nem tudom megtenni, és amíg nem történik meg, egy friss klón a régi ágon landol.
