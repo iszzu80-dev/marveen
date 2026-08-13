@@ -376,3 +376,71 @@ export function reproduces(a: ReplayRun, b: ReplayRun): boolean {
     && a.outputDigest !== null
     && a.outputDigest === b.outputDigest
 }
+
+
+/**
+ * The DETECTOR configuration's fingerprint — the freeze point as a gate rather
+ * than a date.
+ *
+ * Marveen's objection, 2026-08-13: "a promise that no proactive module will land
+ * is exactly the kind of statement that gets quietly broken." So the calibration
+ * run records this hash and refuses to run against a different one. Frozen from
+ * the commit the calibration starts on, with the hash as the evidence.
+ *
+ * It hashes the SOURCE of the detector modules, not a version string somebody
+ * has to remember to bump. A version string is another promise.
+ *
+ * The intake modules are in the hash too, and that is the less obvious half.
+ * Marveen measured that today's cases were created by his own email-triage
+ * heartbeat — so what looks like an organic arrival rate is partly the output of
+ * our own intake channel. The eligible-observation rate is therefore CONDITIONAL
+ * on an intake configuration, and changing intake invalidates a frozen window
+ * exactly as changing the detector does. A hash covering only the detector would
+ * let the denominator move while the experiment claimed to be frozen.
+ */
+export function detectorConfigFingerprint(
+  readFile: (path: string) => string,
+  listFiles: (dir: string) => string[],
+  roots: readonly string[] = [
+    'src/cos/proactive', 'src/cos/deadline-index.ts',
+    'src/cos/intake.ts', 'src/cos/triage-bridge.ts',
+  ],
+): string {
+  const h = createHash('sha256')
+  const files: string[] = []
+  for (const root of roots) {
+    if (root.endsWith('.ts')) { files.push(root); continue }
+    files.push(...listFiles(root))
+  }
+  for (const f of [...files].sort()) {
+    let body = ''
+    try { body = readFile(f) } catch { body = '<<UNREADABLE>>' }
+    h.update(f + ' ' + body + ' ')
+  }
+  return h.digest('hex').slice(0, 32)
+}
+
+export type ConfigGateResult = { ok: true } | { ok: false; reason: string }
+
+/**
+ * §26/2 as a gate: refuse a run whose detector configuration differs from the
+ * one the registration froze.
+ *
+ * Returns ok when no expectation was registered — a run before the freeze is
+ * legitimate, and refusing it would make the first run impossible. The gate
+ * bites the moment somebody has committed to a hash.
+ */
+export function assertFrozenConfig(
+  expected: string | null | undefined,
+  actual: string,
+): ConfigGateResult {
+  if (!expected) return { ok: true }
+  if (expected === actual) return { ok: true }
+  return {
+    ok: false,
+    reason:
+      'a detektor-konfiguracio megvaltozott a regisztracio ota (vart ' + expected
+      + ', kapott ' + actual + ') — a befagyasztott ablakban felhalmozott meres ervenytelen, '
+      + 'a kalibraciot ujra kell kezdeni',
+  }
+}

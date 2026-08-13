@@ -15,6 +15,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import Database from 'better-sqlite3'
 import {
   ensureReplaySchema, beginRun, recordOutput, sealRun,
+  detectorConfigFingerprint, assertFrozenConfig,
 } from '../cos/replay-run.js'
 import {
   ensureAdjudicationSchema, recordJudgment, evaluateBlinding,
@@ -23,6 +24,8 @@ import {
 import {
   compareArms, buildSessionFromRuns, evaluateValueGate, controlReproducibility,
   shadowEvalCounters, DEFAULT_VALUE_GATE_REGISTRATION,
+  ensureEligibilitySchema, labelEligibleObservation, eligibleObservationCount,
+  completeEligibilityPass,
   type PacketMapper,
 } from '../cos/replay-eval.js'
 
@@ -189,6 +192,20 @@ describe('§24.2 the value gate — blinding can only veto', () => {
   function bigSession(): void {
     const shared = Array.from({ length: 20 }, (_, i) => `s${i}`)
     const only = Array.from({ length: 40 }, (_, i) => `p${i}`)
+    // The eligibility pass comes FIRST — before any arm runs — because that is
+    // the only order in which the labeller can be shown not to have seen the
+    // detector output.
+    ensureEligibilitySchema(db)
+    for (const c of only) {
+      labelEligibleObservation(db, {
+        corpusFingerprint: 'corpus-a', domain: 'personal', caseId: c,
+        shape: 'DEADLINE_PASSED_UNSEEN', labelledBy: 'istvan',
+        labelledAt: T0 - 10, rationale: 'a hatarido eltelt',
+      })
+    }
+    completeEligibilityPass(db, {
+      corpusFingerprint: 'corpus-a', labelledBy: 'istvan', completedAt: T0 - 5,
+    })
     twoArms(shared, [...shared, ...only])
     const r = build()
     if (!r.ok) throw new Error(r.reasons.join('; '))
@@ -306,5 +323,127 @@ describe('§1.4.6(5) reproducibility, and the metrics that refuse to be faked', 
     const c = shadowEvalCounters(db, 'ctl-1', 'sh-1')
     expect(c.existingCaseReuseRate).toBeCloseTo(0.5, 3)
     expect(c.duplicateInitiativeRate).toBe(0)
+  })
+})
+
+
+// Added 2026-08-13 after Marveen's second measurement round. Two of his findings
+// turned into code, and one of them exposed a defect in what was already here.
+describe('the eligible-observation denominator is labelled INDEPENDENTLY', () => {
+  beforeEach(() => {
+    db = new Database(':memory:')
+    ensureReplaySchema(db); ensureAdjudicationSchema(db); ensureEligibilitySchema(db)
+  })
+
+  it('HEADLINE: with nobody having labelled the corpus, the gate does NOT pass', () => {
+    // THE BUG THIS REPLACED. `eligibleObservationCount` used to be
+    // `comparison.proactiveCases` — the number of cases the PROACTIVE ARM
+    // touched. The denominator of "how much value did the detector add" was the
+    // detector's own output, so a detector that noticed less would have scored
+    // equally well by noticing less of a smaller world.
+    //
+    // Marveen's definition is what found it: eligibility must be decidable from
+    // a snapshot by somebody who has not seen the detector output.
+    const shared = Array.from({ length: 20 }, (_, i) => `s${i}`)
+    const only = Array.from({ length: 40 }, (_, i) => `p${i}`)
+    twoArms(shared, [...shared, ...only])
+    const built = build()
+    expect(built.ok).toBe(true)
+    judgeAll('s1', { correctRate: 0.5 })
+
+    const g = evaluateValueGate(db, 's1')
+    expect(g.blinding.verdict).toBe('VALID')
+    expect(g.eligibleObservationCount).toBeNull()
+    expect(g.result).toBe('EVALUATION_WINDOW_DEGRADED')
+    expect(g.detail).toMatch(/nevezoje hianyzik|nevezője hiányzik/)
+  })
+
+  it('HEADLINE: null and zero are different facts, and only one is a result', () => {
+    // An unassessed corpus reads as null; a corpus somebody went through and
+    // found nothing in reads as 0. A gate that cannot tell them apart treats
+    // "nobody looked" as "nothing was there".
+    expect(eligibleObservationCount(db, 'corpus-never-labelled')).toBeNull()
+    completeEligibilityPass(db, {
+      corpusFingerprint: 'corpus-empty', labelledBy: 'istvan', completedAt: T0,
+    })
+    expect(eligibleObservationCount(db, 'corpus-empty')).toBe(0)
+    labelEligibleObservation(db, {
+      corpusFingerprint: 'corpus-a', domain: 'personal', caseId: 'c1',
+      shape: 'DEADLINE_PASSED_UNSEEN', labelledBy: 'istvan',
+      labelledAt: T0, rationale: 'a hatarido eltelt es nem tudott rola',
+    })
+    completeEligibilityPass(db, {
+      corpusFingerprint: 'corpus-a', labelledBy: 'istvan', completedAt: T0,
+    })
+    expect(eligibleObservationCount(db, 'corpus-a')).toBe(1)
+  })
+
+  it('HEADLINE: labelling is refused once a proactive run over that corpus has sealed', () => {
+    // After the detector output exists, a person labelling the corpus can no
+    // longer be SHOWN not to have seen it — and "can no longer be shown" is the
+    // standard §1.4.3 applies to blinding, not "probably did not".
+    arm('ctl-1', 'REACTIVE_CONTROL', ['a'], T0)
+    arm('sh-1', 'PROACTIVE_SHADOW', ['a', 'b'], T0 + 100)
+    const r = labelEligibleObservation(db, {
+      corpusFingerprint: 'corpus-a', domain: 'personal', caseId: 'b',
+      shape: 'FOLLOW_UP_ELAPSED_WITHOUT_MOVEMENT', labelledBy: 'istvan',
+      labelledAt: T0 + 200, rationale: 'kesobb cimkezve',
+    })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toMatch(/vak volt/)
+  })
+
+  it('a label is final — it cannot be edited or removed', () => {
+    labelEligibleObservation(db, {
+      corpusFingerprint: 'corpus-a', domain: 'personal', caseId: 'c1',
+      shape: 'DEADLINE_PASSED_UNSEEN', labelledBy: 'istvan',
+      labelledAt: T0, rationale: 'x',
+    })
+    expect(() => db.prepare("UPDATE eligible_observations SET shape='STATE_CHANGE_INVALIDATED_DECISION'").run())
+      .toThrow(/final/)
+    expect(() => db.prepare('DELETE FROM eligible_observations').run()).toThrow(/final/)
+  })
+})
+
+describe('the freeze point is a gate, not a date', () => {
+  it('HEADLINE: a changed detector configuration invalidates the frozen window', () => {
+    // Marveen: "a promise that no proactive module will land is exactly the kind
+    // of statement that gets quietly broken." So the hash is the evidence.
+    expect(assertFrozenConfig('abc123', 'abc123')).toEqual({ ok: true })
+    const bad = assertFrozenConfig('abc123', 'def456')
+    expect(bad.ok).toBe(false)
+    if (!bad.ok) expect(bad.reason).toMatch(/ujra kell kezdeni|újra kell kezdeni/)
+  })
+
+  it('no registered expectation means no gate — the first run has to be possible', () => {
+    expect(assertFrozenConfig(null, 'anything')).toEqual({ ok: true })
+    expect(assertFrozenConfig(undefined, 'anything')).toEqual({ ok: true })
+  })
+
+  it('HEADLINE: the INTAKE modules are in the hash, not only the detector', () => {
+    // The less obvious half. Marveen measured that today's cases were created by
+    // his own email-triage heartbeat, so what looks like an organic arrival rate
+    // is partly the output of our own intake channel. The eligible-observation
+    // rate is conditional on an intake configuration, and a hash covering only
+    // the detector would let the denominator move while the experiment claimed
+    // to be frozen.
+    const files: Record<string, string> = {
+      'src/cos/proactive/a.ts': 'detector v1',
+      'src/cos/intake.ts': 'intake v1',
+      'src/cos/deadline-index.ts': 'deadlines v1',
+      'src/cos/triage-bridge.ts': 'triage v1',
+    }
+    const read = (p: string): string => files[p] ?? ''
+    const list = (): string[] => ['src/cos/proactive/a.ts']
+    const before = detectorConfigFingerprint(read, list)
+    files['src/cos/intake.ts'] = 'intake v2'
+    expect(detectorConfigFingerprint(read, list)).not.toBe(before)
+  })
+
+  it('an unreadable file is marked, not skipped', () => {
+    // A file that cannot be read is not a file that is unchanged.
+    const boom = (): string => { throw new Error('nope') }
+    const list = (): string[] => []
+    expect(detectorConfigFingerprint(boom, list)).toBeTruthy()
   })
 })
