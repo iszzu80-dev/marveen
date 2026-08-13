@@ -182,15 +182,43 @@ export type EligibleObservationShape =
   | 'FOLLOW_UP_ELAPSED_WITHOUT_MOVEMENT'
   /** A state change that invalidated an earlier owner decision. */
   | 'STATE_CHANGE_INVALIDATED_DECISION'
+  /**
+   * Condition 5 (Marveen's addition, and it is the one I had missed): the
+   * labeller is allowed to say they do not know.
+   *
+   * A binary label forced onto a doubtful case is manufactured certainty. So
+   * UNCERTAIN is counted SEPARATELY and folded into neither side — not into the
+   * denominator, and not into the "nothing here" pile either. A high UNCERTAIN
+   * rate says something about the DEFINITION rather than about the corpus, and
+   * that is worth seeing rather than smoothing away.
+   */
+  | 'UNCERTAIN'
 
 export interface EligibleObservation {
   corpusFingerprint: string
   domain: string
   caseId: string
   shape: EligibleObservationShape
+  /**
+   * Condition 2, evidence precedence. `observedAt` is the T of the definition —
+   * the moment a competent chief of staff would have spoken — and `evidenceAt`
+   * is when the evidence entered the store.
+   *
+   * The evidence must be strictly EARLIER. What only became knowable afterwards
+   * is not a missed observation, and without both timestamps that condition is
+   * an instruction nobody can check.
+   */
+  observedAt: number
+  evidenceAt: number
   /** Who decided. A label with no author cannot be shown to have been blind. */
   labelledBy: string
   labelledAt: number
+  /**
+   * Condition 3, owner relevance rather than system relevance: the test is
+   * whether the OWNER needed to know, not whether the system could compute it.
+   * Not mechanically checkable — but a label whose author could not write a
+   * sentence about it is a label nobody weighed, so the store insists on one.
+   */
   rationale: string
 }
 
@@ -201,12 +229,16 @@ export function ensureEligibilitySchema(db: Database.Database): void {
       domain             TEXT NOT NULL,
       case_id            TEXT NOT NULL,
       shape              TEXT NOT NULL,
+      observed_at        INTEGER NOT NULL,
+      evidence_at        INTEGER NOT NULL,
       labelled_by        TEXT NOT NULL,
       labelled_at        INTEGER NOT NULL,
       rationale          TEXT NOT NULL,
       PRIMARY KEY (corpus_fingerprint, domain, case_id),
       CHECK (shape IN ('DEADLINE_PASSED_UNSEEN','FOLLOW_UP_ELAPSED_WITHOUT_MOVEMENT',
-        'STATE_CHANGE_INVALIDATED_DECISION'))
+        'STATE_CHANGE_INVALIDATED_DECISION','UNCERTAIN')),
+      /* Condition 2, in the schema rather than only in the caller. */
+      CHECK (evidence_at < observed_at)
     )
   `)
   // A label, once given, is evidence about a snapshot. Editing it later is
@@ -268,13 +300,28 @@ export function labelEligibleObservation(
         + 'címkézésről nem mutatható ki, hogy vak volt',
     }
   }
+  // Condition 2, checked before the write so the refusal names the reason
+  // rather than surfacing as a CHECK constraint nobody can read.
+  if (!(obs.evidenceAt < obs.observedAt)) {
+    return {
+      ok: false,
+      reason: 'a bizonyitek nem elozi meg a megfigyeles idopontjat — ami csak kesobb valt '
+        + 'tudhatova, az nem elmulasztott megfigyeles (2. feltetel)',
+    }
+  }
+  // Condition 3 has no mechanical test, so the store insists on the one thing
+  // that shows somebody weighed it: a sentence.
+  if (obs.rationale.trim().length < 10) {
+    return { ok: false, reason: 'a cimke indoklas nelkul nem mutatja, hogy barki merlegelte (3. feltetel)' }
+  }
   try {
     ledger.prepare(
       `INSERT INTO eligible_observations
-         (corpus_fingerprint, domain, case_id, shape, labelled_by, labelled_at, rationale)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         (corpus_fingerprint, domain, case_id, shape, observed_at, evidence_at,
+          labelled_by, labelled_at, rationale)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(obs.corpusFingerprint, obs.domain, obs.caseId, obs.shape,
-      obs.labelledBy, obs.labelledAt, obs.rationale)
+      obs.observedAt, obs.evidenceAt, obs.labelledBy, obs.labelledAt, obs.rationale)
   } catch {
     return { ok: false, reason: 'erre az ügyre már van címke — a címke végleges' }
   }
@@ -326,14 +373,45 @@ export function completeEligibilityPass(
 export function eligibleObservationCount(
   ledger: Database.Database, corpusFingerprint: string,
 ): number | null {
+  return eligibilityTally(ledger, corpusFingerprint)?.eligible ?? null
+}
+
+export interface EligibilityTally {
+  /** The denominator. UNCERTAIN is NOT in it. */
+  eligible: number
+  /** Condition 5. Counted apart, folded into neither side. */
+  uncertain: number
+  /** `uncertain / (eligible + uncertain)`. A high value is a statement about the
+   *  DEFINITION, not about the corpus. */
+  uncertainRate: number
+}
+
+/**
+ * The labelling pass's result, or null when nobody has looked.
+ *
+ * UNCERTAIN is excluded from `eligible` and reported on its own, which is the
+ * whole of condition 5: a binary label forced onto a doubtful case is
+ * manufactured certainty, and averaging it into either side hides exactly the
+ * signal that would tell us the definition needs work.
+ */
+export function eligibilityTally(
+  ledger: Database.Database, corpusFingerprint: string,
+): EligibilityTally | null {
   try {
     const pass = ledger.prepare(
       `SELECT corpus_fingerprint FROM eligibility_passes WHERE corpus_fingerprint = ?`,
     ).get(corpusFingerprint)
     if (!pass) return null
-    return (ledger.prepare(
-      `SELECT COUNT(*) AS n FROM eligible_observations WHERE corpus_fingerprint = ?`,
-    ).get(corpusFingerprint) as { n: number }).n
+    const row = ledger.prepare(
+      `SELECT
+         SUM(CASE WHEN shape = 'UNCERTAIN' THEN 0 ELSE 1 END) AS eligible,
+         SUM(CASE WHEN shape = 'UNCERTAIN' THEN 1 ELSE 0 END) AS uncertain
+       FROM eligible_observations WHERE corpus_fingerprint = ?`,
+    ).get(corpusFingerprint) as { eligible: number | null; uncertain: number | null }
+    const eligible = row.eligible ?? 0
+    const uncertain = row.uncertain ?? 0
+    const total = eligible + uncertain
+    return { eligible, uncertain, uncertainRate: total ? uncertain / total : 0 }
   } catch { return null }
 }
 
@@ -355,11 +433,22 @@ export interface ValueGateRegistration {
    *  question at all, and says so rather than reporting a small number as a
    *  FAIL. */
   minEligibleObservations: number
+  /**
+   * Condition 5's threshold, PRE-REGISTERED or absent.
+   *
+   * Null means the rate is reported and does not gate — which is the honest
+   * default, because a threshold invented after seeing the number is the same
+   * move V4-F14 forbids for the catch count. Registering one before the window
+   * opens turns "the definition may be unusable" from a discussion into a
+   * verdict.
+   */
+  maxUncertainRate: number | null
 }
 
 export const DEFAULT_VALUE_GATE_REGISTRATION: ValueGateRegistration = {
   requiredCatches: 5,
   minEligibleObservations: 30,
+  maxUncertainRate: null,
 }
 
 export interface ValueGateResult {
@@ -376,6 +465,9 @@ export interface ValueGateResult {
   /** Null — not 1 — when there are too few control runs to measure it. A
    *  reproducibility rate of "1.0 out of one run" is a fabricated green. */
   reactiveControlReproducibilityRate: number | null
+  /** Condition 5. Always reported, whether or not a threshold was registered. */
+  uncertainCount: number
+  uncertainRate: number
   blinding: BlindingResult
   detail: string
 }
@@ -449,7 +541,8 @@ export function evaluateValueGate(
   const corpusFingerprint = session
     ? (readRun(ledger, session.proactive_run_id)?.corpusFingerprint ?? '')
     : ''
-  const labelled = eligibleObservationCount(ledger, corpusFingerprint)
+  const tally = eligibilityTally(ledger, corpusFingerprint)
+  const labelled = tally?.eligible ?? null
   const eligible = labelled ?? 0
   const incrementalMaterialCatchRate = eligible
     ? incrementalMaterialCatchCount / eligible
@@ -466,6 +559,8 @@ export function evaluateValueGate(
     eligibleObservationCount: labelled,
     blindAdjudicationCoverageRate,
     reactiveControlReproducibilityRate,
+    uncertainCount: tally?.uncertain ?? 0,
+    uncertainRate: tally?.uncertainRate ?? 0,
     blinding,
   }
 
@@ -492,7 +587,20 @@ export function evaluateValueGate(
       detail: 'a korpuszon senki nem jelölte meg az elfogadható megfigyeléseket — a value gate nevezője hiányzik',
     }
   }
-  // 2b. Then whether the window could answer the question at all.
+  // 2b. Condition 5, when a threshold was pre-registered. A labelling pass that
+  //      could not decide most of what it saw has not measured the corpus; it
+  //      has reported on the definition.
+  if (registration.maxUncertainRate != null
+    && (tally?.uncertainRate ?? 0) > registration.maxUncertainRate) {
+    return {
+      ...base,
+      result: 'EVALUATION_WINDOW_DEGRADED',
+      detail: `a cimkezes ${((tally?.uncertainRate ?? 0) * 100).toFixed(1)}%-ban UNCERTAIN volt `
+        + `(regisztralt hatar ${(registration.maxUncertainRate * 100).toFixed(0)}%) — `
+        + 'ez a definiciorol szol, nem a korpuszrol',
+    }
+  }
+  // 2c. Then whether the window could answer the question at all.
   if (labelled < registration.minEligibleObservations) {
     return {
       ...base,
