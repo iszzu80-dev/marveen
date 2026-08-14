@@ -16,6 +16,7 @@ import {
   ensureCalibrationSchema, freezeCalibration, readFreeze, intakeSurfaceFingerprint,
   openCalibrationWindow, observeConfig, closeCalibrationWindow, readWindow,
   calibratedObservationTotal, assertCalibrationStillValid,
+  recordStabilityObservation, assertConfigStable,
 } from '../cos/calibration-window.js'
 
 const T_FREEZE = 1_700_000_000
@@ -35,13 +36,134 @@ function addConnector(id: string, kind: string, mode = 'READ_ONLY', status = 'OK
     .run(id, kind, mode, status)
 }
 
+/** Két ellenőrzés, közben lefutott ciklusokkal — ez a fagyasztás előfeltétele. */
+function proveStable(det = DET, intake = 'intake-v1'): void {
+  recordStabilityObservation(db, {
+    observedAt: T_FREEZE - 200, detectorConfigFingerprint: det,
+    intakeSurfaceFingerprint: intake, cyclesRan: 10,
+  })
+  recordStabilityObservation(db, {
+    observedAt: T_FREEZE - 100, detectorConfigFingerprint: det,
+    intakeSurfaceFingerprint: intake, cyclesRan: 13,
+  })
+}
+
 function freeze(intake = 'intake-v1'): void {
+  proveStable(DET, intake)
   const r = freezeCalibration(db, {
     calibrationCommit: '30e16ef92753', detectorConfigFingerprint: DET,
     intakeSurfaceFingerprint: intake, frozenAt: T_FREEZE,
   })
   expect(r.ok).toBe(true)
 }
+
+// Marveen fagyasztás-előtti feltétele. Ez volt az utolsó lépés a láncban, ami
+// csak valakinek az emlékezetében élt volna: "reggelig figyelem a két
+// ujjlenyomatot". Egy megfigyelés, ami nincs leírva, utólag nem
+// megkülönböztethető egy meg nem történttől.
+describe('a fagyasztás előfeltétele — a készülék bizonyítottan áll', () => {
+  beforeEach(() => { db = new Database(':memory:'); ensureCalibrationSchema(db) })
+
+  it('HEADLINE: egyetlen pillanatkép nem stabilitás', () => {
+    recordStabilityObservation(db, {
+      observedAt: T_FREEZE - 100, detectorConfigFingerprint: DET,
+      intakeSurfaceFingerprint: 'intake-v1', cyclesRan: 10,
+    })
+    const v = assertConfigStable(db)
+    expect(v.stable).toBe(false)
+    if (!v.stable) expect(v.reason).toMatch(/pillanatkep/)
+  })
+
+  it('HEADLINE: két azonos ujjlenyomat FUTÁS nélkül nem elég', () => {
+    // Marveen szavaival: "nem az számít, hogy ma nem nyúltál hozzá, hanem hogy
+    // a fagyasztott konfiguráció FUTOTT is már, nem csak be van tolva."
+    // Két egyforma hash csak annyit bizonyít, hogy ugyanaz a kód volt a
+    // lemezen — nem azt, hogy működött közben.
+    for (const [at, cycles] of [[T_FREEZE - 200, 10], [T_FREEZE - 100, 10]]) {
+      recordStabilityObservation(db, {
+        observedAt: at, detectorConfigFingerprint: DET,
+        intakeSurfaceFingerprint: 'intake-v1', cyclesRan: cycles,
+      })
+    }
+    const v = assertConfigStable(db)
+    expect(v.stable).toBe(false)
+    if (!v.stable) expect(v.reason).toMatch(/nem futott le teljes ciklus/)
+  })
+
+  it('két azonos ujjlenyomat + lefutott ciklus = áll', () => {
+    proveStable()
+    const v = assertConfigStable(db)
+    expect(v.stable).toBe(true)
+    if (v.stable) expect(v.cyclesBetween).toBe(3)
+  })
+
+  it('elmozdult detektor vagy intake nem stabil', () => {
+    recordStabilityObservation(db, {
+      observedAt: T_FREEZE - 200, detectorConfigFingerprint: DET,
+      intakeSurfaceFingerprint: 'intake-v1', cyclesRan: 10,
+    })
+    recordStabilityObservation(db, {
+      observedAt: T_FREEZE - 100, detectorConfigFingerprint: DET,
+      intakeSurfaceFingerprint: 'intake-v2', cyclesRan: 13,
+    })
+    expect(assertConfigStable(db).stable).toBe(false)
+  })
+
+  it('HEADLINE: a KÉT LEGUTÓBBI számít, nem az, hogy volt-e valaha stabil pár', () => {
+    // Egy régi stabil pár nem mond semmit egy tegnapi landolás után — és a
+    // "volt már ilyen" alakú bizonyíték pont akkor a legcsábítóbb, amikor a
+    // friss adat nem elég.
+    proveStable()
+    expect(assertConfigStable(db).stable).toBe(true)
+    recordStabilityObservation(db, {
+      observedAt: T_FREEZE - 50, detectorConfigFingerprint: 'UJ-DETEKTOR',
+      intakeSurfaceFingerprint: 'intake-v1', cyclesRan: 15,
+    })
+    expect(assertConfigStable(db).stable).toBe(false)
+  })
+
+  it('HEADLINE: bizonyíték nélkül nem lehet fagyasztani', () => {
+    // "Egy fagyasztás egy mozgó készüléken nem gyengébb mérés. Nem mérés."
+    const r = freezeCalibration(db, {
+      calibrationCommit: '30e16ef92753', detectorConfigFingerprint: DET,
+      intakeSurfaceFingerprint: 'intake-v1', frozenAt: T_FREEZE,
+    })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toMatch(/nem bizonyitottan all/)
+    expect(readFreeze(db)).toBeNull()
+  })
+
+  it('HEADLINE: az egyiken bizonyítani és a másikat fagyasztani nem megy', () => {
+    // Enélkül a stabilitást a régi konfiguráción lehetne bizonyítani, és egy
+    // újat befagyasztani. Ez az a lépés, ami sosem szándékosan történik.
+    proveStable(DET, 'intake-v1')
+    const r = freezeCalibration(db, {
+      calibrationCommit: '30e16ef92753', detectorConfigFingerprint: DET,
+      intakeSurfaceFingerprint: 'intake-MASIK', frozenAt: T_FREEZE,
+    })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toMatch(/nem az, amin a stabilitas bizonyitva lett/)
+  })
+
+  it('a stabilitás-nyomvonal végleges', () => {
+    proveStable()
+    expect(() => db.prepare(
+      `UPDATE calibration_stability_observations SET cycles_ran = 99`,
+    ).run()).toThrow(/vegleges/)
+    expect(() => db.prepare(`DELETE FROM calibration_stability_observations`).run())
+      .toThrow(/vegleges/)
+  })
+
+  it('a sikeres fagyasztás megnevezi, mi bizonyította', () => {
+    proveStable()
+    const r = freezeCalibration(db, {
+      calibrationCommit: '30e16ef92753', detectorConfigFingerprint: DET,
+      intakeSurfaceFingerprint: 'intake-v1', frozenAt: T_FREEZE,
+    })
+    expect(r.ok).toBe(true)
+    if (r.ok) expect(r.provenAt).toBe(T_FREEZE - 100)
+  })
+})
 
 describe('1. szabály — csak fagyás UTÁNI ablak számít', () => {
   beforeEach(() => { db = new Database(':memory:'); ensureCalibrationSchema(db) })

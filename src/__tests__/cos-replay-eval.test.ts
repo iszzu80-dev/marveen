@@ -28,7 +28,9 @@ import {
   completeEligibilityPass, eligibilityTally,
   type PacketMapper,
 } from '../cos/replay-eval.js'
-import { ensureCalibrationSchema, freezeCalibration } from '../cos/calibration-window.js'
+import {
+  ensureCalibrationSchema, freezeCalibration, recordStabilityObservation,
+} from '../cos/calibration-window.js'
 
 const T0 = 1_700_000_000
 let db: Database.Database
@@ -321,6 +323,15 @@ describe('§24.2 the value gate — blinding can only veto', () => {
     bigSession()
     judgeAll('s1', { correctRate: 0.5 })
     ensureCalibrationSchema(db)
+    // A fagyasztás előfeltétele: két azonos ellenőrzés, közben lefutott ciklussal.
+    recordStabilityObservation(db, {
+      observedAt: T0 - 1200, detectorConfigFingerprint: 'det-v1',
+      intakeSurfaceFingerprint: 'intake-v1', cyclesRan: 5,
+    })
+    recordStabilityObservation(db, {
+      observedAt: T0 - 1100, detectorConfigFingerprint: 'det-v1',
+      intakeSurfaceFingerprint: 'intake-v1', cyclesRan: 8,
+    })
     freezeCalibration(db, {
       calibrationCommit: '30e16ef92753', detectorConfigFingerprint: 'det-v1',
       intakeSurfaceFingerprint: 'intake-v1', frozenAt: T0 - 1000,
@@ -336,6 +347,15 @@ describe('§24.2 the value gate — blinding can only veto', () => {
     bigSession()
     judgeAll('s1', { correctRate: 0.5 })
     ensureCalibrationSchema(db)
+    // A fagyasztás előfeltétele: két azonos ellenőrzés, közben lefutott ciklussal.
+    recordStabilityObservation(db, {
+      observedAt: T0 - 1200, detectorConfigFingerprint: 'det-v1',
+      intakeSurfaceFingerprint: 'intake-v1', cyclesRan: 5,
+    })
+    recordStabilityObservation(db, {
+      observedAt: T0 - 1100, detectorConfigFingerprint: 'det-v1',
+      intakeSurfaceFingerprint: 'intake-v1', cyclesRan: 8,
+    })
     freezeCalibration(db, {
       calibrationCommit: '30e16ef92753', detectorConfigFingerprint: 'det-v1',
       intakeSurfaceFingerprint: 'intake-v1', frozenAt: T0 - 1000,
