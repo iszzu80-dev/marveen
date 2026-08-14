@@ -40,11 +40,11 @@ function addConnector(id: string, kind: string, mode = 'READ_ONLY', status = 'OK
 function proveStable(det = DET, intake = 'intake-v1'): void {
   recordStabilityObservation(db, {
     observedAt: T_FREEZE - 200, detectorConfigFingerprint: det,
-    intakeSurfaceFingerprint: intake, caseCyclesRan: 10, triageRunsRan: 10,
+    intakeSurfaceFingerprint: intake, caseCyclesRan: 10, intakeBatchesOpened: 10,
   })
   recordStabilityObservation(db, {
     observedAt: T_FREEZE - 100, detectorConfigFingerprint: det,
-    intakeSurfaceFingerprint: intake, caseCyclesRan: 13, triageRunsRan: 13,
+    intakeSurfaceFingerprint: intake, caseCyclesRan: 13, intakeBatchesOpened: 13,
   })
 }
 
@@ -67,7 +67,7 @@ describe('a fagyasztás előfeltétele — a készülék bizonyítottan áll', (
   it('HEADLINE: egyetlen pillanatkép nem stabilitás', () => {
     recordStabilityObservation(db, {
       observedAt: T_FREEZE - 100, detectorConfigFingerprint: DET,
-      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 10, triageRunsRan: 10,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 10, intakeBatchesOpened: 10,
     })
     const v = assertConfigStable(db)
     expect(v.stable).toBe(false)
@@ -82,7 +82,7 @@ describe('a fagyasztás előfeltétele — a készülék bizonyítottan áll', (
     for (const at of [T_FREEZE - 200, T_FREEZE - 100]) {
       recordStabilityObservation(db, {
         observedAt: at, detectorConfigFingerprint: DET,
-        intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 10, triageRunsRan: 10,
+        intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 10, intakeBatchesOpened: 10,
       })
     }
     const v = assertConfigStable(db)
@@ -90,37 +90,43 @@ describe('a fagyasztás előfeltétele — a készülék bizonyítottan áll', (
     if (!v.stable) expect(v.reason).toMatch(/nem futott le UGYCIKLUS/)
   })
 
-  it('HEADLINE: két KÜLÖN számláló — hat triage-futás nulla ügyciklussal nem elég', () => {
+  it('HEADLINE: két KÜLÖN számláló — hat beemelt levél nulla ügyciklussal nem elég', () => {
     // Egy összegzett számláló mellett ez átmenne, és ugyanaz a hiba lenne egy
     // szinttel lejjebb: a rendszer mozog, de nem az a része, amiről bizonyítani
-    // akarunk valamit. Marveen feltétele szó szerint "triage- ÉS ügyciklus".
+    // akarunk valamit. Marveen feltétele szó szerint "triage- ÉS ügyciklus" —
+    // a beviteli oldalt a BEEMELT LEVÉL méri, nem a heartbeat lefutása.
     recordStabilityObservation(db, {
       observedAt: T_FREEZE - 200, detectorConfigFingerprint: DET,
-      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 10, triageRunsRan: 10,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 10, intakeBatchesOpened: 10,
     })
     recordStabilityObservation(db, {
       observedAt: T_FREEZE - 100, detectorConfigFingerprint: DET,
-      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 10, triageRunsRan: 16,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 10, intakeBatchesOpened: 16,
     })
     const v = assertConfigStable(db)
     expect(v.stable).toBe(false)
     if (!v.stable) expect(v.reason).toMatch(/nem futott le UGYCIKLUS/)
   })
 
-  it('...és fordítva: ügyciklus triage nélkül sem elég', () => {
+  it('...és fordítva: ügyciklus BEEMELT LEVÉL nélkül sem elég', () => {
     // A beviteli út az, amiről a nevező szól. Ha az nem futott, a jogosultsági
     // ráta egy nem működő csatornára van feltételezve.
+    //
+    // A mező NEM heartbeateket számol, hanem megnyílt intake-batcheket — egy
+    // heartbeat, ami lefut és helyesen nem talál semmit, nem mozdítja. Ez a
+    // drágább viselkedés, és szándékosan az: a fagyást nem óra dönti el, hanem
+    // az első cselekvést igénylő levél.
     recordStabilityObservation(db, {
       observedAt: T_FREEZE - 200, detectorConfigFingerprint: DET,
-      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 10, triageRunsRan: 10,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 10, intakeBatchesOpened: 10,
     })
     recordStabilityObservation(db, {
       observedAt: T_FREEZE - 100, detectorConfigFingerprint: DET,
-      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 16, triageRunsRan: 10,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 16, intakeBatchesOpened: 10,
     })
     const v = assertConfigStable(db)
     expect(v.stable).toBe(false)
-    if (!v.stable) expect(v.reason).toMatch(/nem futott le TRIAGE/)
+    if (!v.stable) expect(v.reason).toMatch(/nem NYILT INTAKE-BATCH/)
   })
 
   it('két azonos ujjlenyomat + lefutott ciklus = áll', () => {
@@ -133,13 +139,40 @@ describe('a fagyasztás előfeltétele — a készülék bizonyítottan áll', (
   it('elmozdult detektor vagy intake nem stabil', () => {
     recordStabilityObservation(db, {
       observedAt: T_FREEZE - 200, detectorConfigFingerprint: DET,
-      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 10, triageRunsRan: 10,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 10, intakeBatchesOpened: 10,
     })
     recordStabilityObservation(db, {
       observedAt: T_FREEZE - 100, detectorConfigFingerprint: DET,
-      intakeSurfaceFingerprint: 'intake-v2', caseCyclesRan: 13, triageRunsRan: 13,
+      intakeSurfaceFingerprint: 'intake-v2', caseCyclesRan: 13, intakeBatchesOpened: 13,
     })
     expect(assertConfigStable(db).stable).toBe(false)
+  })
+
+  it('HEADLINE: egy TOVÁBBI gondos mérés nem dobja el a már megszerzett minősítést', () => {
+    // Valós csapda volt, és pont azon a napon, amikor Marveen óránként mért és
+    // egy levélre várt. A régi szabály a két legutóbbi megfigyelést hasonlította:
+    // amint megjött a levél, a pár minősített — de egy további mérés a
+    // fagyasztás előtt újra két csendes szomszédot állított elő, és a minősítés
+    // elveszett. Minél lelkiismeretesebben mért valaki, annál nehezebb volt
+    // fagyasztani.
+    //
+    // Egy kapu, ami a gondosságot bünteti, rossz kapu.
+    const at = (t: number, c: number, b: number): void => recordStabilityObservation(db, {
+      observedAt: t, detectorConfigFingerprint: DET,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: c, intakeBatchesOpened: b,
+    })
+    at(T_FREEZE - 400, 100, 32)   // obs 1
+    at(T_FREEZE - 300, 110, 32)   // csend — nem jött levél
+    at(T_FREEZE - 200, 120, 33)   // MEGJÖTT a levél
+    expect(assertConfigStable(db).stable).toBe(true)
+    at(T_FREEZE - 100, 130, 33)   // még egy mérés, fagyasztás előtt
+    const v = assertConfigStable(db)
+    expect(v.stable).toBe(true)
+    // A növekedés a stabil szakasz EGÉSZÉN mérődik, nem a két szomszédon.
+    if (v.stable) {
+      expect(v.sinceAt).toBe(T_FREEZE - 400)
+      expect(v.intakeBatchesBetween).toBe(1)
+    }
   })
 
   it('HEADLINE: a KÉT LEGUTÓBBI számít, nem az, hogy volt-e valaha stabil pár', () => {
@@ -150,9 +183,26 @@ describe('a fagyasztás előfeltétele — a készülék bizonyítottan áll', (
     expect(assertConfigStable(db).stable).toBe(true)
     recordStabilityObservation(db, {
       observedAt: T_FREEZE - 50, detectorConfigFingerprint: 'UJ-DETEKTOR',
-      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 15, triageRunsRan: 15,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 15, intakeBatchesOpened: 15,
     })
     expect(assertConfigStable(db).stable).toBe(false)
+  })
+
+  it('HEADLINE: egy landolás ELVÁGJA a stabil szakaszt — a régi növekedés nem hordozható át', () => {
+    // A csapda-javítás ára az lett volna, ha a "növekedés a szakasz egészén"
+    // szabály engedné átvinni egy KORÁBBI konfiguráción mért futást. Nem
+    // engedi: a szakasz az első ujjlenyomat-eltérésnél lezárul.
+    const at = (t: number, det: string, c: number, b: number): void => recordStabilityObservation(db, {
+      observedAt: t, detectorConfigFingerprint: det,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: c, intakeBatchesOpened: b,
+    })
+    at(T_FREEZE - 400, DET, 100, 32)
+    at(T_FREEZE - 300, DET, 120, 33)          // ez a par onmagaban minositene
+    at(T_FREEZE - 200, 'UJ-DETEKTOR', 130, 34) // LANDOLAS
+    at(T_FREEZE - 100, 'UJ-DETEKTOR', 140, 34) // az uj konfiguracion meg nem jott level
+    const v = assertConfigStable(db)
+    expect(v.stable).toBe(false)
+    if (!v.stable) expect(v.reason).toMatch(/nem NYILT INTAKE-BATCH/)
   })
 
   it('HEADLINE: bizonyíték nélkül nem lehet fagyasztani', () => {
