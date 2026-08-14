@@ -326,11 +326,11 @@ describe('§24.2 the value gate — blinding can only veto', () => {
     // A fagyasztás előfeltétele: két azonos ellenőrzés, közben lefutott ciklussal.
     recordStabilityObservation(db, {
       observedAt: T0 - 1200, detectorConfigFingerprint: 'det-v1',
-      intakeSurfaceFingerprint: 'intake-v1', cyclesRan: 5,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 5, triageRunsRan: 5,
     })
     recordStabilityObservation(db, {
       observedAt: T0 - 1100, detectorConfigFingerprint: 'det-v1',
-      intakeSurfaceFingerprint: 'intake-v1', cyclesRan: 8,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 8, triageRunsRan: 8,
     })
     freezeCalibration(db, {
       calibrationCommit: '30e16ef92753', detectorConfigFingerprint: 'det-v1',
@@ -350,11 +350,11 @@ describe('§24.2 the value gate — blinding can only veto', () => {
     // A fagyasztás előfeltétele: két azonos ellenőrzés, közben lefutott ciklussal.
     recordStabilityObservation(db, {
       observedAt: T0 - 1200, detectorConfigFingerprint: 'det-v1',
-      intakeSurfaceFingerprint: 'intake-v1', cyclesRan: 5,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 5, triageRunsRan: 5,
     })
     recordStabilityObservation(db, {
       observedAt: T0 - 1100, detectorConfigFingerprint: 'det-v1',
-      intakeSurfaceFingerprint: 'intake-v1', cyclesRan: 8,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 8, triageRunsRan: 8,
     })
     freezeCalibration(db, {
       calibrationCommit: '30e16ef92753', detectorConfigFingerprint: 'det-v1',

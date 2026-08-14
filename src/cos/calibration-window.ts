@@ -164,7 +164,8 @@ export function ensureCalibrationSchema(db: Database.Database): void {
       observed_at                 INTEGER PRIMARY KEY,
       detector_config_fingerprint TEXT NOT NULL,
       intake_surface_fingerprint  TEXT NOT NULL,
-      cycles_ran                  INTEGER NOT NULL
+      case_cycles_ran             INTEGER NOT NULL,
+      triage_runs_ran             INTEGER NOT NULL
     )
   `)
   db.exec(`
@@ -196,12 +197,23 @@ export interface StabilityObservation {
   observedAt: number
   detectorConfigFingerprint: string
   intakeSurfaceFingerprint: string
-  /** Monoton számláló: hány triage-/ügyciklus futott le eddig összesen. */
-  cyclesRan: number
+  /**
+   * Két monoton számláló, nem egy összeg.
+   *
+   * Marveen feltétele szó szerint „legalább egy teljes **triage- és** ügyciklus".
+   * Egy összegzett számlálóval hat triage-futás és nulla ügyciklus is átmenne —
+   * ami pontosan ugyanaz a hiba egy szinttel lejjebb: a rendszer mozog, de nem
+   * az a része, amiről bizonyítani akarunk valamit.
+   */
+  caseCyclesRan: number
+  triageRunsRan: number
 }
 
 export type StabilityVerdict =
-  | { stable: true; sinceAt: number; provenAt: number; cyclesBetween: number }
+  | {
+    stable: true; sinceAt: number; provenAt: number
+    caseCyclesBetween: number; triageRunsBetween: number
+  }
   | { stable: false; reason: string }
 
 /** Append-only. Egy elsimítható nyomvonal nem bizonyíték. */
@@ -210,11 +222,12 @@ export function recordStabilityObservation(
 ): void {
   db.prepare(
     `INSERT OR IGNORE INTO calibration_stability_observations
-       (observed_at, detector_config_fingerprint, intake_surface_fingerprint, cycles_ran)
-     VALUES (?, ?, ?, ?)`,
+       (observed_at, detector_config_fingerprint, intake_surface_fingerprint,
+        case_cycles_ran, triage_runs_ran)
+     VALUES (?, ?, ?, ?, ?)`,
   ).run(
     obs.observedAt, obs.detectorConfigFingerprint,
-    obs.intakeSurfaceFingerprint, obs.cyclesRan,
+    obs.intakeSurfaceFingerprint, obs.caseCyclesRan, obs.triageRunsRan,
   )
 }
 
@@ -226,11 +239,12 @@ export function recordStabilityObservation(
  * bizonyíték pont akkor a legcsábítóbb, amikor a friss adat nem elég.
  */
 export function assertConfigStable(db: Database.Database): StabilityVerdict {
-  let rows: Array<{ observed_at: number; d: string; i: string; c: number }> = []
+  let rows: Array<{ observed_at: number; d: string; i: string; c: number; t: number }> = []
   try {
     rows = db.prepare(
       `SELECT observed_at, detector_config_fingerprint AS d,
-              intake_surface_fingerprint AS i, cycles_ran AS c
+              intake_surface_fingerprint AS i,
+              case_cycles_ran AS c, triage_runs_ran AS t
          FROM calibration_stability_observations
         ORDER BY observed_at DESC LIMIT 2`,
     ).all() as typeof rows
@@ -252,13 +266,21 @@ export function assertConfigStable(db: Database.Database): StabilityVerdict {
     return {
       stable: false,
       reason:
-        'a ket ellenorzes kozott nem futott le teljes ciklus — a konfiguracio be van tolva, '
+        'a ket ellenorzes kozott nem futott le UGYCIKLUS — a konfiguracio be van tolva, '
         + 'de nem mutatta meg, hogy mukodik',
+    }
+  }
+  if (later.t <= earlier.t) {
+    return {
+      stable: false,
+      reason:
+        'a ket ellenorzes kozott nem futott le TRIAGE-ciklus — a beviteli ut nem mutatta meg, '
+        + 'hogy mukodik, es a nevezo eppen rola szol',
     }
   }
   return {
     stable: true, sinceAt: earlier.observed_at, provenAt: later.observed_at,
-    cyclesBetween: later.c - earlier.c,
+    caseCyclesBetween: later.c - earlier.c, triageRunsBetween: later.t - earlier.t,
   }
 }
 

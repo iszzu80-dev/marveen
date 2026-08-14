@@ -31,6 +31,7 @@
 
 import { createHash } from 'node:crypto'
 import type Database from 'better-sqlite3'
+import { DETECTOR_BEHAVIOUR_SCOPE } from './detector-scope.js'
 
 /**
  * §1.4.6: the two sides of the comparison — plus a third that is not a side.
@@ -401,10 +402,7 @@ export function reproduces(a: ReplayRun, b: ReplayRun): boolean {
 export function detectorConfigFingerprint(
   readFile: (path: string) => string,
   listFiles: (dir: string) => string[],
-  roots: readonly string[] = [
-    'src/cos/proactive', 'src/cos/deadline-index.ts',
-    'src/cos/intake.ts', 'src/cos/triage-bridge.ts',
-  ],
+  roots: readonly string[] = DETECTOR_BEHAVIOUR_SCOPE,
 ): string {
   const h = createHash('sha256')
   const files: string[] = []

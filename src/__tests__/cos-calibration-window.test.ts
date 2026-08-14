@@ -40,11 +40,11 @@ function addConnector(id: string, kind: string, mode = 'READ_ONLY', status = 'OK
 function proveStable(det = DET, intake = 'intake-v1'): void {
   recordStabilityObservation(db, {
     observedAt: T_FREEZE - 200, detectorConfigFingerprint: det,
-    intakeSurfaceFingerprint: intake, cyclesRan: 10,
+    intakeSurfaceFingerprint: intake, caseCyclesRan: 10, triageRunsRan: 10,
   })
   recordStabilityObservation(db, {
     observedAt: T_FREEZE - 100, detectorConfigFingerprint: det,
-    intakeSurfaceFingerprint: intake, cyclesRan: 13,
+    intakeSurfaceFingerprint: intake, caseCyclesRan: 13, triageRunsRan: 13,
   })
 }
 
@@ -67,7 +67,7 @@ describe('a fagyasztás előfeltétele — a készülék bizonyítottan áll', (
   it('HEADLINE: egyetlen pillanatkép nem stabilitás', () => {
     recordStabilityObservation(db, {
       observedAt: T_FREEZE - 100, detectorConfigFingerprint: DET,
-      intakeSurfaceFingerprint: 'intake-v1', cyclesRan: 10,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 10, triageRunsRan: 10,
     })
     const v = assertConfigStable(db)
     expect(v.stable).toBe(false)
@@ -79,32 +79,65 @@ describe('a fagyasztás előfeltétele — a készülék bizonyítottan áll', (
     // a fagyasztott konfiguráció FUTOTT is már, nem csak be van tolva."
     // Két egyforma hash csak annyit bizonyít, hogy ugyanaz a kód volt a
     // lemezen — nem azt, hogy működött közben.
-    for (const [at, cycles] of [[T_FREEZE - 200, 10], [T_FREEZE - 100, 10]]) {
+    for (const at of [T_FREEZE - 200, T_FREEZE - 100]) {
       recordStabilityObservation(db, {
         observedAt: at, detectorConfigFingerprint: DET,
-        intakeSurfaceFingerprint: 'intake-v1', cyclesRan: cycles,
+        intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 10, triageRunsRan: 10,
       })
     }
     const v = assertConfigStable(db)
     expect(v.stable).toBe(false)
-    if (!v.stable) expect(v.reason).toMatch(/nem futott le teljes ciklus/)
+    if (!v.stable) expect(v.reason).toMatch(/nem futott le UGYCIKLUS/)
+  })
+
+  it('HEADLINE: két KÜLÖN számláló — hat triage-futás nulla ügyciklussal nem elég', () => {
+    // Egy összegzett számláló mellett ez átmenne, és ugyanaz a hiba lenne egy
+    // szinttel lejjebb: a rendszer mozog, de nem az a része, amiről bizonyítani
+    // akarunk valamit. Marveen feltétele szó szerint "triage- ÉS ügyciklus".
+    recordStabilityObservation(db, {
+      observedAt: T_FREEZE - 200, detectorConfigFingerprint: DET,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 10, triageRunsRan: 10,
+    })
+    recordStabilityObservation(db, {
+      observedAt: T_FREEZE - 100, detectorConfigFingerprint: DET,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 10, triageRunsRan: 16,
+    })
+    const v = assertConfigStable(db)
+    expect(v.stable).toBe(false)
+    if (!v.stable) expect(v.reason).toMatch(/nem futott le UGYCIKLUS/)
+  })
+
+  it('...és fordítva: ügyciklus triage nélkül sem elég', () => {
+    // A beviteli út az, amiről a nevező szól. Ha az nem futott, a jogosultsági
+    // ráta egy nem működő csatornára van feltételezve.
+    recordStabilityObservation(db, {
+      observedAt: T_FREEZE - 200, detectorConfigFingerprint: DET,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 10, triageRunsRan: 10,
+    })
+    recordStabilityObservation(db, {
+      observedAt: T_FREEZE - 100, detectorConfigFingerprint: DET,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 16, triageRunsRan: 10,
+    })
+    const v = assertConfigStable(db)
+    expect(v.stable).toBe(false)
+    if (!v.stable) expect(v.reason).toMatch(/nem futott le TRIAGE/)
   })
 
   it('két azonos ujjlenyomat + lefutott ciklus = áll', () => {
     proveStable()
     const v = assertConfigStable(db)
     expect(v.stable).toBe(true)
-    if (v.stable) expect(v.cyclesBetween).toBe(3)
+    if (v.stable) expect(v.caseCyclesBetween).toBe(3)
   })
 
   it('elmozdult detektor vagy intake nem stabil', () => {
     recordStabilityObservation(db, {
       observedAt: T_FREEZE - 200, detectorConfigFingerprint: DET,
-      intakeSurfaceFingerprint: 'intake-v1', cyclesRan: 10,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 10, triageRunsRan: 10,
     })
     recordStabilityObservation(db, {
       observedAt: T_FREEZE - 100, detectorConfigFingerprint: DET,
-      intakeSurfaceFingerprint: 'intake-v2', cyclesRan: 13,
+      intakeSurfaceFingerprint: 'intake-v2', caseCyclesRan: 13, triageRunsRan: 13,
     })
     expect(assertConfigStable(db).stable).toBe(false)
   })
@@ -117,7 +150,7 @@ describe('a fagyasztás előfeltétele — a készülék bizonyítottan áll', (
     expect(assertConfigStable(db).stable).toBe(true)
     recordStabilityObservation(db, {
       observedAt: T_FREEZE - 50, detectorConfigFingerprint: 'UJ-DETEKTOR',
-      intakeSurfaceFingerprint: 'intake-v1', cyclesRan: 15,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 15, triageRunsRan: 15,
     })
     expect(assertConfigStable(db).stable).toBe(false)
   })
@@ -148,7 +181,7 @@ describe('a fagyasztás előfeltétele — a készülék bizonyítottan áll', (
   it('a stabilitás-nyomvonal végleges', () => {
     proveStable()
     expect(() => db.prepare(
-      `UPDATE calibration_stability_observations SET cycles_ran = 99`,
+      `UPDATE calibration_stability_observations SET case_cycles_ran = 99`,
     ).run()).toThrow(/vegleges/)
     expect(() => db.prepare(`DELETE FROM calibration_stability_observations`).run())
       .toThrow(/vegleges/)
