@@ -90,10 +90,11 @@ describe('a fagyasztás előfeltétele — a készülék bizonyítottan áll', (
     if (!v.stable) expect(v.reason).toMatch(/nem futott le UGYCIKLUS/)
   })
 
-  it('HEADLINE: két KÜLÖN számláló — hat triage-futás nulla ügyciklussal nem elég', () => {
+  it('HEADLINE: két KÜLÖN számláló — hat beemelt levél nulla ügyciklussal nem elég', () => {
     // Egy összegzett számláló mellett ez átmenne, és ugyanaz a hiba lenne egy
     // szinttel lejjebb: a rendszer mozog, de nem az a része, amiről bizonyítani
-    // akarunk valamit. Marveen feltétele szó szerint "triage- ÉS ügyciklus".
+    // akarunk valamit. Marveen feltétele szó szerint "triage- ÉS ügyciklus" —
+    // a beviteli oldalt a BEEMELT LEVÉL méri, nem a heartbeat lefutása.
     recordStabilityObservation(db, {
       observedAt: T_FREEZE - 200, detectorConfigFingerprint: DET,
       intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 10, intakeBatchesOpened: 10,

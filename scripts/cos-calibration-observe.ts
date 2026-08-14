@@ -24,9 +24,13 @@
  *
  * ── A két számláló ──────────────────────────────────────────────────────
  *
- * Külön, nem összegezve. Egy összeg mellett hat triage-futás és nulla ügyciklus
+ * Külön, nem összegezve. Egy összeg mellett hat beemelt levél és nulla ügyciklus
  * is átmenne, ami ugyanaz a hiba egy szinttel lejjebb: a rendszer mozog, de nem
  * az a része, amiről bizonyítani akarunk valamit.
+ *
+ * A beviteli oldalt az `email_processing_batches` méri, ami MEGNYÍLT BATCH-eket
+ * számol — egy beemelt levelenként egyet. Egy triage-heartbeat, ami lefut és
+ * helyesen nem talál semmit, NEM mozdítja, mert nem is futtatja az `intake.ts`-t.
  */
 import Database from 'better-sqlite3'
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
