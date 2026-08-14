@@ -37,6 +37,19 @@
 import { createHash } from 'node:crypto'
 import type Database from 'better-sqlite3'
 
+/**
+ * A mérési ledger helye — EGY helyen kimondva.
+ *
+ * Marveen-nek ezt magának kellett kitalálnia, mert a script kötelező flagként
+ * kérte és nem volt alapértelmezés. Ez pontosan az az alak, amiből két ledger
+ * lesz: az egyikbe ír az obs-script, a másikból olvas a value gate, és mindkettő
+ * magabiztosan válaszol. A kódbázis ebbe a hibába már beleszaladt párszor.
+ *
+ * Az útvonalat ő választotta, és jó — itt csak rögzítve van, hogy ne kelljen
+ * még egyszer kitalálni. Fagyás után már nem átnevezhető.
+ */
+export const CALIBRATION_LEDGER_PATH = 'store/cos-ledger.db'
+
 export interface CalibrationFreeze {
   /** A commit, amin a fagyás történt — emberi horgony, nem a kapu. */
   calibrationCommit: string
@@ -165,7 +178,7 @@ export function ensureCalibrationSchema(db: Database.Database): void {
       detector_config_fingerprint TEXT NOT NULL,
       intake_surface_fingerprint  TEXT NOT NULL,
       case_cycles_ran             INTEGER NOT NULL,
-      triage_runs_ran             INTEGER NOT NULL
+      intake_batches_opened       INTEGER NOT NULL
     )
   `)
   db.exec(`
@@ -206,13 +219,34 @@ export interface StabilityObservation {
    * az a része, amiről bizonyítani akarunk valamit.
    */
   caseCyclesRan: number
-  triageRunsRan: number
+  /**
+   * MEGNYÍLT INTAKE-BATCH-EK száma — **nem** triage-heartbeatek száma.
+   *
+   * A név egyszer már hazudott (`triageRunsRan`), és Marveen kérte a
+   * javítását, mert *„valaki egyszer majd azt fogja hinni, hogy a rendszer áll,
+   * holott csak nem jött levél."*
+   *
+   * Amit valóban számol: `email_processing_batches` sorok. Az `openBatch` a
+   * BEVITELI útból hívódik, batch-enként egy beemelt levélre
+   * (`batch_id = triage-private-<messageId>`). Egy triage-heartbeat, ami lefut
+   * és helyesen nem talál semmit, **nem mozdítja** — mert nem is futtatja az
+   * `intake.ts`-t.
+   *
+   * Ez a drágább viselkedés, és SZÁNDÉKOSAN az. Ha a nulla-jelöltes
+   * heartbeatet is számolnánk, pont azt a lyukat nyitnánk vissza, ami miatt a
+   * számláló kettévált: a rendszer mozogna, de nem az a része, amiről
+   * bizonyítani akarunk valamit.
+   *
+   * A gyakorlati következmény: **a fagyást nem óra dönti el, hanem az első
+   * cselekvést igénylő levél** obs 1 után.
+   */
+  intakeBatchesOpened: number
 }
 
 export type StabilityVerdict =
   | {
     stable: true; sinceAt: number; provenAt: number
-    caseCyclesBetween: number; triageRunsBetween: number
+    caseCyclesBetween: number; intakeBatchesBetween: number
   }
   | { stable: false; reason: string }
 
@@ -223,11 +257,11 @@ export function recordStabilityObservation(
   db.prepare(
     `INSERT OR IGNORE INTO calibration_stability_observations
        (observed_at, detector_config_fingerprint, intake_surface_fingerprint,
-        case_cycles_ran, triage_runs_ran)
+        case_cycles_ran, intake_batches_opened)
      VALUES (?, ?, ?, ?, ?)`,
   ).run(
     obs.observedAt, obs.detectorConfigFingerprint,
-    obs.intakeSurfaceFingerprint, obs.caseCyclesRan, obs.triageRunsRan,
+    obs.intakeSurfaceFingerprint, obs.caseCyclesRan, obs.intakeBatchesOpened,
   )
 }
 
@@ -244,7 +278,7 @@ export function assertConfigStable(db: Database.Database): StabilityVerdict {
     rows = db.prepare(
       `SELECT observed_at, detector_config_fingerprint AS d,
               intake_surface_fingerprint AS i,
-              case_cycles_ran AS c, triage_runs_ran AS t
+              case_cycles_ran AS c, intake_batches_opened AS t
          FROM calibration_stability_observations
         ORDER BY observed_at DESC LIMIT 2`,
     ).all() as typeof rows
@@ -274,13 +308,13 @@ export function assertConfigStable(db: Database.Database): StabilityVerdict {
     return {
       stable: false,
       reason:
-        'a ket ellenorzes kozott nem futott le TRIAGE-ciklus — a beviteli ut nem mutatta meg, '
-        + 'hogy mukodik, es a nevezo eppen rola szol',
+        'a ket ellenorzes kozott nem NYILT INTAKE-BATCH — nem erkezett feldolgozando level, '
+        + 'tehat a beviteli ut nem mutatta meg, hogy mukodik, es a nevezo eppen rola szol',
     }
   }
   return {
     stable: true, sinceAt: earlier.observed_at, provenAt: later.observed_at,
-    caseCyclesBetween: later.c - earlier.c, triageRunsBetween: later.t - earlier.t,
+    caseCyclesBetween: later.c - earlier.c, intakeBatchesBetween: later.t - earlier.t,
   }
 }
 

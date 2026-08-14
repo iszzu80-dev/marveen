@@ -69,6 +69,70 @@ function edgesOf(path: string): Edge[] {
   return out
 }
 
+// ── Előbb a MŰSZER, csak utána az ítélet ────────────────────────────────
+//
+// Marveen a saját hibáját pontosabban írta le, mint ahogy én tettem. Nem szűk
+// ellenőrzést futtatott: a feloldója EGYETLEN élt sem oldott fel. A repó
+// `./case-store.js` alakban importál, ő `./case-store.js.ts`-t keresett, tehát
+// minden él csendben `None` lett — és a nullát zártságnak olvasta.
+//
+//     "Egy hiányra épülő állítás, ami nem tud hangosan elbukni, mindig ezt
+//      fogja csinálni."
+//
+// Ez a blokk azért van, mert kipróbáltam, és UGYANEZ A LYUK benne volt ebben a
+// fájlban is. Egy feloldó, ami semmit nem talál, üres `undeclared` listát ad,
+// és a fenti fő állítás zölden átmegy. Egyedül a „nincs felesleges kivétel"
+// teszt fogta meg — véletlenül, és csak amíg a kivétel-lista nem üres.
+//
+// Tehát: a műszert előbb kell ellenőrizni, mint az ítéletet, amit vele mondunk.
+describe('a záró-ellenőrzés MŰSZERE mér is valamit', () => {
+  it('HEADLINE: a feloldó KONKRÉT, ismert éleket old fel', () => {
+    // Ha az importfelismerés vagy az útvonal-leképzés elromlik, ez pirosra vált,
+    // függetlenül attól, hogy a hatókör épp zárt-e. Ez a különbség „nem találtam
+    // sértést" és „nem kerestem" között.
+    const edges = edgesOf('src/cos/intake.ts')
+    const targets = edges.map(e => e.to)
+    expect(targets).toContain('src/cos/email-ingest.ts')
+    expect(targets).toContain('src/cos/case-store.ts')
+    expect(targets).toContain('src/cos/adapters/gmail-send.ts')
+    // ...és a `.js` → `.ts` leképzés tényleg megtörtént, nem `.js.ts` lett belőle.
+    for (const t of targets) expect(t).not.toMatch(/\.js/)
+  })
+
+  it('HEADLINE: a hatókör összesen NEM nulla élt old fel', () => {
+    // A puszta padló. Egy nullát adó műszer minden zártsági állítást igazol.
+    const total = scopeFiles().reduce((n, f) => n + edgesOf(f).length, 0)
+    expect(total).toBeGreaterThan(20)
+  })
+
+  it('a feloldott célok LÉTEZŐ fájlok', () => {
+    // A másik irány: egy feloldó, ami mindent `<valami>.NEM-LETEZIK`-re képez,
+    // szintén „nem talál sértést" — csak épp más okból.
+    const scope = new Set(scopeFiles())
+    for (const f of scope) {
+      for (const e of edgesOf(f)) {
+        expect(existsSync(join(REPO, e.to)), `feloldhatatlan él: ${e.from} -> ${e.to}`).toBe(true)
+      }
+    }
+  })
+
+  it('a behozott NEVEKET is kiolvassa, nem csak az útvonalat', () => {
+    // Az `allowed`-lista ellenőrzése ezen áll. Ha a névkiolvasás üres tömböt ad,
+    // az a korlát is némán megszűnik.
+    const e = edgesOf('src/cos/intake.ts').find(x => x.to === 'src/cos/adapters/gmail-send.ts')
+    expect(e?.names).toContain('IDEMPOTENCY_HEADER')
+  })
+
+  it('a kommentben szereplő import NEM él', () => {
+    // Marveen ezt magától elkapta, mielőtt elküldte volna: a `proactive/types.ts`
+    // egy doc-kommentje épp azt magyarázza, miért NEM importálja a reader.ts-t,
+    // és a regexe a kommentet olvasta. Ugyanez a fájl korábban engem is
+    // megtévesztett, ezért a szűrő itt is meg van írva — és itt is ellenőrizve.
+    expect(edgesOf('src/cos/proactive/types.ts').map(x => x.to))
+      .not.toContain('src/cos/reader.ts')
+  })
+})
+
 describe('a hash hatóköre importra ZÁRT', () => {
   it('HEADLINE: a hatókörből kifelé mutató minden él DEKLARÁLT', () => {
     // Ez az az állítás, amit Marveen szemmel igazolt, és amit szemmel nem lehet.
