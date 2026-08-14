@@ -227,6 +227,10 @@ export function validateCheckpoint(cp: SessionCheckpoint): CheckpointValidation 
   // Delegate reference + excerpt rules to the packet validator.
   const referenceValidation = validateContextPacket({
     packetVersion: 'checkpoint',
+    // A checkpoint is not dispatched to a role -- it is an artifact a session
+    // leaves behind -- so the §12.1-e field is explicitly absent here rather
+    // than borrowing the role of whoever happens to read the file next.
+    executionRole: null,
     goal: cp.goal ?? '',
     references: cp.references ?? [],
     constraints: [],

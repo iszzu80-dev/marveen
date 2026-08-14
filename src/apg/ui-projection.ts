@@ -4,6 +4,10 @@ import Database from 'better-sqlite3'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+// APG 1.9 §35 (WP6): the live feed's liveness signal and §15.2's count, read
+// back from the kernel tables migration 0021 added. Both degrade to a null /
+// UNAVAILABLE answer on a kernel that predates them -- see feed-health.ts.
+import { buildApgFeedHealth, readDoneNotAcceptedCount } from './feed-health.js'
 import type {
   ApgAcceptanceStatus,
   ApgAttentionItem,
@@ -11,6 +15,7 @@ import type {
   ApgClaimStatus,
   ApgDisplayState,
   ApgEvent,
+  ApgKernelVerificationStatus,
   ApgMode,
   ApgModeSource,
   ApgUiSummary,
@@ -105,6 +110,34 @@ interface EvidenceRow {
   created_at: number
 }
 
+/**
+ * A row of the kernel's `claims` table, read defensively.
+ *
+ * Deliberately typed as `unknown` per field and read through the coercion
+ * helpers below, because this table is under active extension in the kernel
+ * repo (§10.1 `product_id`, §10.2 `currentness`, §10.3 supersede). The SELECT is
+ * `*`, so a column that does not exist yet simply does not appear, a column
+ * added tomorrow arrives without a change here, and neither case can throw.
+ */
+interface KernelClaimRow {
+  id?: unknown
+  claim_text?: unknown
+  claim_class?: unknown
+  source_type?: unknown
+  source_locator?: unknown
+  source_observed_at?: unknown
+  verification_status?: unknown
+  verification_receipt_json?: unknown
+  allowed_wording?: unknown
+  blocking_reason?: unknown
+  created_at?: unknown
+  // Not in migration 0009. Read anyway, so the parallel kernel work lands on a
+  // projection that is already waiting for it.
+  currentness?: unknown
+  superseded_by?: unknown
+  product_id?: unknown
+}
+
 interface ProjectionData {
   canonical: CanonicalRow[]
   recommendations: RecommendationRow[]
@@ -112,6 +145,7 @@ interface ProjectionData {
   checkpoints: CheckpointRow[]
   receipts: ReceiptRow[]
   evidence: EvidenceRow[]
+  claims: KernelClaimRow[]
 }
 
 interface CandidateProjection {
@@ -202,6 +236,25 @@ export function deriveDisplayState(input: DeriveDisplayStateInput): ApgDisplaySt
  */
 export const APG_CHECKPOINT_RESULTS = [
   'PASS', 'FAIL', 'UNKNOWN', 'ERROR', 'EXCLUDED',
+] as const
+
+/**
+ * The kernel's claim verification vocabulary, mirrored here.
+ *
+ * Same "two repos, one contract" arrangement as APG_CHECKPOINT_RESULTS above:
+ * this is the UI half of `claim_verification.VERIFICATION_STATUSES`, and the
+ * contract test asserts it against the kernel source. The list exists so that a
+ * status the kernel invents tomorrow shows up as a failing test rather than as
+ * a claim silently falling into UNKNOWN on screen.
+ */
+export const APG_KERNEL_VERIFICATION_STATUSES = [
+  'VERIFIED_CURRENT',
+  'VERIFIED_HISTORICAL_ONLY',
+  'SELF_REPORTED_ONLY',
+  'STALE',
+  'UNKNOWN',
+  'MISSING',
+  'CONTRADICTED',
 ] as const
 
 export function resolveApgKernelDbPath(): string {
@@ -336,6 +389,22 @@ function loadCanonicalRows(db: Database.Database): CanonicalRow[] {
   `)
 }
 
+/**
+ * The kernel's resolved claims.
+ *
+ * `SELECT *` on purpose -- see KernelClaimRow. Naming columns here would make
+ * the projection throw (and, via rowsOrEmpty, report every claim as unresolved)
+ * the moment the kernel adds §10.1/§10.2/§10.3's new columns, which is the
+ * opposite of degrading honestly.
+ */
+function loadKernelClaims(db: Database.Database): KernelClaimRow[] {
+  return rowsOrEmpty<KernelClaimRow>(db, `
+    SELECT *
+    FROM claims
+    ORDER BY created_at ASC, id ASC
+  `)
+}
+
 function loadProjectionData(db: Database.Database, includeEvidence: boolean): ProjectionData {
   // Fresh slate per build, so `capturedProjectionErrors()` describes THIS
   // projection and not a previous request's.
@@ -410,6 +479,9 @@ function loadProjectionData(db: Database.Database, includeEvidence: boolean): Pr
           ORDER BY created_at ASC, id ASC
         `)
       : [],
+    // Claims only ever hang off evidence rows, so they ride the same flag: the
+    // summary build (includeEvidence:false) has no claim rows to attach them to.
+    claims: includeEvidence ? loadKernelClaims(db) : [],
   }
 }
 
@@ -638,42 +710,187 @@ function acceptanceStatusFor(
   }
 }
 
-/** The gates that say something about RUNTIME. A PASS on anything else says the
- *  documents were in order, which is a different claim. */
-const RUNTIME_GATES: ReadonlySet<string> = new Set(['runtime_acceptance', 'release_ready'])
+// ---------------------------------------------------------------------------
+// Claim currentness (WP2 §10.3-b). THE RULE THAT USED TO LIVE HERE IS GONE.
+//
+// This module used to grant VERIFIED_CURRENT itself: any evidence row with
+// status='PRESENT' whose receipt shared a replay_run_id with any PASS
+// checkpoint. That is a second, much weaker copy of a decision the kernel
+// already owns -- no method authority (CLAIM_CLASS_AUTHORITY), no source-type
+// exclusion (NEVER_CURRENT_SOURCE_TYPES: a code comment could not be current no
+// matter what), no required receipt keys (REQUIRED_RECEIPT_KEYS), and above all
+// no recency, so the reused-stale-receipt trust attack the kernel closed with
+// its seven-day ceiling stayed wide open on this path. Two rules for one label
+// means the weaker one decides.
+//
+// So the dashboard does not decide currentness any more. It READS what
+// `claim_verification.resolve_verification_status()` already resolved and
+// stored in the append-only `claims` table, and relabels that answer into the
+// display vocabulary spec 0.4 §10.4 pins. The relabelling below takes exactly
+// one input -- the kernel's own status string -- and no evidence, receipt,
+// checkpoint or timestamp, so it is structurally incapable of disagreeing with
+// the kernel about whether something is current.
+//
+// Where the engine has not spoken, we say so (§3.7 No Silent Unknown) rather
+// than guessing in either direction.
+//
+// MERGE NOTE (develop <- APG 1.9). The develop line reached the same finding
+// from the other end: F-1 hardened the local `claimStatus()` so VERIFIED_CURRENT
+// required a RUNTIME gate (`runtime_acceptance` / `release_ready`) passing in
+// the same replay run AND a receipt with `runtime_status === 'OBSERVED'` --
+// because a PASS on `spec_ready` had been enough to render "citable as a
+// current, verified fact". That fix is not dropped here, it is SUBSUMED: the
+// kernel's `resolve_verification_status()` that this file now reads applies
+// strictly more than F-1 did (method authority, source-type exclusion, required
+// receipt keys, and the seven-day recency ceiling F-1 still lacked). Keeping the
+// hardened local copy would reinstate exactly the two-rules-for-one-label
+// problem above, with the weaker rule deciding. The property F-1 was defending
+// -- a documents-only PASS must not read as runtime-verified -- is asserted
+// against the kernel path instead.
+// ---------------------------------------------------------------------------
+
+function asNonEmptyString(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+function asFiniteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function parseReceiptJson(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== 'string' || value.length === 0) return null
+  try {
+    const parsed: unknown = JSON.parse(value)
+    // The kernel stores the JSON literal `null` when a claim has no receipt --
+    // a real, meaningful value, not a parse failure.
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null
+  } catch {
+    return null
+  }
+}
 
 /**
- * Claim status (F-1, review 2026-08-10, fixed 2026-08-12).
+ * Kernel status -> display label. A pure relabelling, not a derivation.
  *
- * WHAT WAS WRONG. `VERIFIED_CURRENT` renders as "citable as a current, verified
- * fact" — the strongest thing this screen says. It was granted when the evidence
- * row was PRESENT and ANY checkpoint in the same replay run had passed. A PASS
- * on `spec_ready` means the specification was ready; it says nothing about
- * whether the thing runs. §11.1 lists six ways to produce a false green, and two
- * of them — "no runtime verification" and "the file merely exists" — came out of
- * this branch directly.
- *
- * WHAT IT TAKES NOW: a runtime gate that passed IN THE SAME RUN, and a receipt
- * whose own `runtime_status` is OBSERVED. Both, because they answer different
- * halves — the gate says the check ran and agreed, the receipt says the thing
- * was actually seen running. Everything else that has real evidence behind it
- * keeps the honest label that already existed for exactly this case:
- * SUPPORTED_BUT_NOT_RUNTIME_VERIFIED.
+ * Both vocabularies are pinned by spec (the kernel's by
+ * claim_verification.VERIFICATION_STATUSES, the display side by 0.4 §10.4), and
+ * this is where they meet. It is a total 1:1 map, and VERIFIED_CURRENT is
+ * reachable from VERIFIED_CURRENT and from nothing else -- that property is
+ * what makes it safe for this file to name the label at all.
  */
-function claimStatus(row: EvidenceRow, candidate: CandidateProjection): ApgClaimStatus {
-  if (row.status === 'MISSING') return 'BLOCKED_FROM_USE'
-  if (row.status !== 'PRESENT') return 'UNKNOWN'
-  const receipt = candidate.receipts.find((candidateReceipt) =>
-    candidateReceipt.id === row.receipt_id)
-  if (!receipt) return 'SUPPORTED_BUT_NOT_RUNTIME_VERIFIED'
-  const runtimeGatePassed = candidate.checkpoints.some((checkpoint) =>
-    checkpoint.replay_run_id === receipt.replay_run_id
-    && checkpoint.result === 'PASS'
-    && RUNTIME_GATES.has(checkpoint.checkpoint))
-  // 'OBSERVED' is the kernel's word for "seen running" (migration 0001:
-  // OBSERVED | UNKNOWN | MISSING). Anything else is not a runtime observation.
-  if (runtimeGatePassed && receipt.runtime_status === 'OBSERVED') return 'VERIFIED_CURRENT'
-  return 'SUPPORTED_BUT_NOT_RUNTIME_VERIFIED'
+const KERNEL_STATUS_TO_DISPLAY: Record<ApgKernelVerificationStatus, ApgClaimStatus> = {
+  VERIFIED_CURRENT: 'VERIFIED_CURRENT',
+  VERIFIED_HISTORICAL_ONLY: 'VERIFIED_HISTORICAL',
+  // "self-reported only (source code/comment/document/commit/kanban/agent
+  // report), not independently verified" is precisely 0.4 §10.4's "Forrás
+  // támogatja, runtime-ban nem igazolt".
+  SELF_REPORTED_ONLY: 'SUPPORTED_BUT_NOT_RUNTIME_VERIFIED',
+  STALE: 'STALE_OR_SUPERSEDED',
+  UNKNOWN: 'UNKNOWN',
+  // MISSING = no source and no evidence exists. There is nothing to quote.
+  MISSING: 'BLOCKED_FROM_USE',
+  CONTRADICTED: 'CONFLICTING_EVIDENCE',
+}
+
+/**
+ * Translate one stored kernel status, or say that there is none.
+ *
+ * A status string the kernel produced but this build does not recognise is a
+ * THIRD case: the engine spoke, and we cannot read the answer. That is a defect
+ * in the two-repo contract, so it is recorded on the projection error channel
+ * (F-9) and displayed as UNKNOWN -- never as NOT_RESOLVED_BY_ENGINE, which
+ * would claim the engine stayed silent, and never as anything greener.
+ */
+export function displayStatusForKernelStatus(kernelStatus: string | null): ApgClaimStatus {
+  if (kernelStatus === null) return 'NOT_RESOLVED_BY_ENGINE'
+  const mapped = KERNEL_STATUS_TO_DISPLAY[kernelStatus as ApgKernelVerificationStatus]
+  if (mapped === undefined) {
+    projectionReadErrors.push(
+      `unrecognised kernel verification_status "${kernelStatus}" -- `
+      + 'the claim vocabulary contract between the kernel and this projection is out of date',
+    )
+    return 'UNKNOWN'
+  }
+  return mapped
+}
+
+/**
+ * Which kernel claim resolved which evidence row.
+ *
+ * Migration 0009 gives `claims` no foreign key to `evidence_references`, so the
+ * link has to be made out of identity the two rows already share. Two exact
+ * matches, in strict precedence -- both are string equality on an identifier,
+ * never a similarity heuristic, and neither one influences the STATUS in any
+ * way. They only answer "which claim row is about this evidence row".
+ *
+ *   1. The receipt's `store_record_ref` IS this evidence row's id. This is the
+ *      kernel naming the row itself -- REQUIRED_RECEIPT_KEYS calls it "a
+ *      replayable store record" -- and it is the only unambiguous link.
+ *   2. `claims.source_locator` equals `evidence_references.ref_locator`. Both
+ *      columns are locators for the same kind of thing (a file path, commit
+ *      sha, kanban card id); equal locators mean the same subject.
+ *
+ * Built ONCE per projection, not once per evidence row: the work-item LIST
+ * endpoint needs claim_counts for every candidate, and a nested scan would
+ * re-JSON.parse every receipt for every evidence row on every request (§12
+ * forbids the summary rescanning the whole store per call).
+ */
+export interface KernelClaimIndex {
+  byStoreRecordRef: Map<string, KernelClaimRow>
+  bySourceLocator: Map<string, KernelClaimRow>
+}
+
+/**
+ * Newest wins: `claims` is append-only, so re-resolving a claim APPENDS a row
+ * rather than updating one, and the last row is the kernel's latest word. Ties
+ * break on id so the same store always projects the same way (§6.4 replay).
+ */
+function preferNewerClaim(existing: KernelClaimRow | undefined, candidate: KernelClaimRow): KernelClaimRow {
+  if (existing === undefined) return candidate
+  const existingAt = asFiniteNumber(existing.created_at) ?? 0
+  const candidateAt = asFiniteNumber(candidate.created_at) ?? 0
+  if (candidateAt !== existingAt) return candidateAt > existingAt ? candidate : existing
+  const existingId = asNonEmptyString(existing.id) ?? ''
+  const candidateId = asNonEmptyString(candidate.id) ?? ''
+  return candidateId > existingId ? candidate : existing
+}
+
+export function indexKernelClaims(claims: KernelClaimRow[]): KernelClaimIndex {
+  const index: KernelClaimIndex = {
+    byStoreRecordRef: new Map(),
+    bySourceLocator: new Map(),
+  }
+  for (const claim of claims) {
+    const storeRecordRef = asNonEmptyString(
+      parseReceiptJson(claim.verification_receipt_json)?.store_record_ref,
+    )
+    if (storeRecordRef !== null) {
+      index.byStoreRecordRef.set(
+        storeRecordRef,
+        preferNewerClaim(index.byStoreRecordRef.get(storeRecordRef), claim),
+      )
+    }
+    const sourceLocator = asNonEmptyString(claim.source_locator)
+    if (sourceLocator !== null) {
+      index.bySourceLocator.set(
+        sourceLocator,
+        preferNewerClaim(index.bySourceLocator.get(sourceLocator), claim),
+      )
+    }
+  }
+  return index
+}
+
+export function resolveKernelClaimFor(
+  evidence: { id: string; ref_locator: string | null },
+  index: KernelClaimIndex,
+): KernelClaimRow | null {
+  const named = index.byStoreRecordRef.get(evidence.id)
+  if (named !== undefined) return named
+  if (!evidence.ref_locator) return null
+  return index.bySourceLocator.get(evidence.ref_locator) ?? null
 }
 
 function allowedWordingFor(status: ApgClaimStatus): string {
@@ -692,12 +909,29 @@ function allowedWordingFor(status: ApgClaimStatus): string {
       return 'Csak ismeretlen állapotú állításként közölhető.'
     case 'BLOCKED_FROM_USE':
       return 'Nem idézhető tényként.'
+    // Not a hedge and not a downgrade -- a statement about the engine, not
+    // about the claim. The reader must not be able to mistake "nobody has
+    // checked" for "checked and found wanting".
+    case 'NOT_RESOLVED_BY_ENGINE':
+      return 'Az állításmotor nem döntött erről a bizonyítékról; ellenőrzés nélkül nem idézhető.'
   }
 }
 
-function claimsFor(candidate: CandidateProjection): ApgClaim[] {
+function claimsFor(candidate: CandidateProjection, kernelClaims: KernelClaimIndex): ApgClaim[] {
   return candidate.evidence.map((row) => {
-    const status = claimStatus(row, candidate)
+    const kernelClaim = resolveKernelClaimFor(row, kernelClaims)
+    const kernelStatus = kernelClaim === null
+      ? null
+      : asNonEmptyString(kernelClaim.verification_status)
+    const status = displayStatusForKernelStatus(kernelStatus)
+    const receipt = kernelClaim === null
+      ? null
+      : parseReceiptJson(kernelClaim.verification_receipt_json)
+    const observedAt = asFiniteNumber(receipt?.observed_at)
+
+    // Every kernel-sourced field is spread in only when the kernel actually
+    // supplied it. An absent key is the honest form of "not supplied"; the
+    // hardcoded nulls this replaced read as findings of fact.
     return {
       id: row.id,
       text: row.ref_locator
@@ -707,24 +941,68 @@ function claimsFor(candidate: CandidateProjection): ApgClaim[] {
       allowed_wording: allowedWordingFor(status),
       source: row.ref_locator || null,
       observed_at: toIso(row.created_at),
-      verified_at: status === 'VERIFIED_CURRENT' ? toIso(row.created_at) : null,
-      verifier: null,
       receipt_id: row.receipt_id || null,
-      superseded_by: null,
+      ...(kernelClaim === null ? {} : {
+        ...(asNonEmptyString(kernelClaim.id) !== null
+          ? { kernel_claim_id: asNonEmptyString(kernelClaim.id) as string }
+          : {}),
+        ...(kernelStatus !== null && kernelStatus in KERNEL_STATUS_TO_DISPLAY
+          ? { kernel_verification_status: kernelStatus as ApgKernelVerificationStatus }
+          : {}),
+        ...(asNonEmptyString(kernelClaim.allowed_wording) !== null
+          ? { kernel_allowed_wording: asNonEmptyString(kernelClaim.allowed_wording) as string }
+          : {}),
+        // When the verification ran -- NOT when the evidence row was written.
+        // The old code used the evidence row's own created_at, which is the
+        // dashboard's timestamp for its own bookkeeping, not proof of anything.
+        ...(observedAt !== null ? { verified_at: toIso(observedAt) } : {}),
+        // §10.1/§10.2/§10.3 fields: projected verbatim the day the kernel's
+        // parallel work starts storing them, absent until then.
+        ...(asNonEmptyString(kernelClaim.superseded_by) !== null
+          ? { superseded_by: asNonEmptyString(kernelClaim.superseded_by) as string }
+          : {}),
+        ...(asNonEmptyString(kernelClaim.currentness) !== null
+          ? { currentness: asNonEmptyString(kernelClaim.currentness) as string }
+          : {}),
+        ...(asNonEmptyString(kernelClaim.product_id) !== null
+          ? { product_id: asNonEmptyString(kernelClaim.product_id) as string }
+          : {}),
+      }),
     }
   })
+}
+
+/**
+ * APG 1.9 §11.2 role agents for one kanban card, supplied by the CALLER.
+ *
+ * This module is read-only against the APG kernel sidecar and must stay that
+ * way (see the file header) -- the dispatch store it would need is Marveen's
+ * own DB, on the other side of that boundary. So the lookup is injected: the
+ * route hands in a reader backed by costops/dispatch.ts's resolveCardRoleAgents,
+ * and every other caller (tests, the summary path) gets the honest null.
+ */
+export interface ProjectionRoleDeps {
+  roleAgentsFor?: (kanbanCardId: string) => {
+    producer: string | null
+    verifier: string | null
+    owner: string | null
+  }
 }
 
 function summaryFor(
   candidate: CandidateProjection,
   mode: ApgMode,
-  claims: ApgClaim[] = claimsFor(candidate),
+  // No default any more: WP2 §10.3-b made `claimsFor` require the kernel claim
+  // index, so the caller -- which is the only side that has the sidecar handle
+  // -- must resolve the claims and pass them in.
+  claims: ApgClaim[],
   // F-7 (review 2026-08-10, fixed 2026-08-12). This was the literal 'global' on
   // every work item ever projected. The resolver already returns which scope
   // decided the mode -- global, project or card -- and the caller already had
   // it; only this field was not told. So a card-level override was invisible on
   // the screen that exists to show whether the override took effect.
   modeSource: ApgModeSource = 'global',
+  roleDeps: ProjectionRoleDeps = {},
 ): ApgUiWorkItemSummary {
   const displayState = mode === 'off' ? 'off' : candidate.displayState
   const checkpointByName = new Map<string, CheckpointRow>()
@@ -739,12 +1017,23 @@ function summaryFor(
     .filter((checkpoint) => checkpoint.result === 'FAIL')
     .sort((a, b) => b.created_at - a.created_at)[0]?.checkpoint ?? null
 
+  const kanbanCardId = extractKanbanCardId(
+    candidate.canonical?.source_ref,
+    candidate.recommendation?.candidate_id,
+  )
+  // §11.2: these were literal `null`s. They are now RESOLVED values that happen
+  // to be null when no dispatch carried the role -- which today means: producer
+  // is real (the kanban origin stamps role='producer' on every card dispatch),
+  // and accepter is still null because no owner-role dispatch exists yet.
+  // The difference matters: a hardcoded null cannot ever become non-null, and
+  // an operator reading "producer: —" cannot tell which kind of null it is.
+  const roleAgents = kanbanCardId !== null && roleDeps.roleAgentsFor
+    ? roleDeps.roleAgentsFor(kanbanCardId)
+    : null
+
   return {
     id: candidate.id,
-    kanban_card_id: extractKanbanCardId(
-      candidate.canonical?.source_ref,
-      candidate.recommendation?.candidate_id,
-    ),
+    kanban_card_id: kanbanCardId,
     // The sidecar schema has no reliable project field in this stage.
     project: null,
     title: candidate.id,
@@ -755,13 +1044,24 @@ function summaryFor(
     risk: 'unknown',
     attention_reason: attentionReason({ ...candidate, displayState }),
     next_action: nextActionFor(displayState),
-    producer_agent: null,
-    // NULL BECAUSE THE SIDECAR RECORDS NO ACCEPTER, and that is a fact worth
-    // showing rather than papering over (F-2). The 1.8 gap map calls this WP3:
-    // producer/verifier identity separation does not exist yet, so nothing can
-    // truthfully be named here. `acceptanceStatusFor` reads this field, so an
-    // item with no accepter can never display as accepted.
-    accepter_agent: null,
+    // F-2 asked for these to be honest rather than convenient, and noted that
+    // the honest answer was `null` "because the 1.8 gap map calls this WP3:
+    // producer/verifier identity separation does not exist yet". WP3 is what
+    // this merge brings in, so the producer half can now be RESOLVED instead of
+    // hardcoded -- which is the same honesty requirement, one gap later. The
+    // distinction F-2 cared about is preserved and sharpened: a hardcoded null
+    // can never become non-null, so an operator reading "producer: —" could not
+    // tell "nobody" from "not implemented". Now it can.
+    producer_agent: roleAgents?.producer ?? null,
+    // §9.3's dual-sided acceptance needs an accepter that is NOT self-declared.
+    // The only acceptance signal Marveen has today is the `actor` field on the
+    // kanban move request -- a request-body string, i.e. precisely what §11.4
+    // and §26.3 refuse to treat as attribution. So this stays null until an
+    // owner-role dispatch exists to name, rather than being filled with the
+    // most convenient available lie. F-2's downstream invariant is therefore
+    // untouched: `acceptanceStatusFor` reads this field, so an item with no
+    // owner-role dispatch still can never display as accepted.
+    accepter_agent: roleAgents?.owner ?? null,
     gate_progress: {
       passed: latestGates.filter((checkpoint) => checkpoint.result === 'PASS').length,
       // F-8: EXCLUDED gates are not applicable to this profile, so counting
@@ -778,6 +1078,8 @@ function summaryFor(
         claim.status === 'CONFLICTING_EVIDENCE').length,
       unknown: claims.filter((claim) => claim.status === 'UNKNOWN').length,
       blocked: claims.filter((claim) => claim.status === 'BLOCKED_FROM_USE').length,
+      not_resolved: claims.filter((claim) =>
+        claim.status === 'NOT_RESOLVED_BY_ENGINE').length,
     },
     acceptance_status: acceptanceStatusFor(displayState, null),
     updated_at: toIso(candidate.updatedAt),
@@ -842,7 +1144,17 @@ export function buildApgUiSummary(nowIso: string, mode: ApgMode): ApgUiSummary {
       accepted_today: candidates.filter((candidate) =>
         candidate.displayState === 'accepted'
         && toIso(candidate.updatedAt).slice(0, 10) === nowIso.slice(0, 10)).length,
-      done_not_accepted: candidates.filter((candidate) =>
+      // §15.2 (WP6): prefer the WRITER, fall back to the shape.
+      //
+      // Until WP6 nothing recorded a completion claim and nothing recorded an
+      // acceptance verdict, so this count could only be inferred from the shape
+      // of the transition log -- "the latest transition targeted `done` and the
+      // display state is not `accepted`". Both records now exist, and
+      // readDoneNotAcceptedCount reads them. It returns null on a kernel that
+      // predates migration 0021, and the old inference is kept for exactly that
+      // case: a false 0 would report perfect acceptance on the one deployment
+      // shape that cannot measure it.
+      done_not_accepted: readDoneNotAcceptedCount(db) ?? candidates.filter((candidate) =>
         candidate.transition?.to_state === 'done'
         && candidate.displayState !== 'accepted').length,
     }
@@ -882,6 +1194,10 @@ export function buildApgUiSummary(nowIso: string, mode: ApgMode): ApgUiSummary {
       projection_version: 1,
       counts,
       attention_items: attentionItems,
+      // §35: rendered on every successful summary, because a `counts` block
+      // with a stalled feed behind it means the opposite of the same block with
+      // a live one -- "all clear" versus "not looking".
+      feed: buildApgFeedHealth(db, Math.floor((Date.parse(nowIso) || Date.now()) / 1000)),
       ...(readErrors.length > 0
         ? { projection_error: `partial projection: ${readErrors.length} table(s) unreadable — ${readErrors[0]}` }
         : {}),
@@ -910,6 +1226,7 @@ export function buildApgWorkItemSummaries(
     limit: number
     offset: number
   },
+  roleDeps: ProjectionRoleDeps = {},
 ): { items: ApgUiWorkItemSummary[]; total: number } | { error: string } {
   const db = openApgKernelReadonly()
   if (!db) return { error: 'sidecar_unavailable' }
@@ -920,9 +1237,13 @@ export function buildApgWorkItemSummaries(
     // with attention_items' deep_links -- excluding work_item candidates
     // here would let a summary attention item link to a detail id that this
     // list (and buildApgWorkItemDetail's lookup below) reports as not found.
+    const kernelClaims = indexKernelClaims(data.claims)
     let items = candidateIds(data, true)
       .map((id) => buildCandidateProjection(data, id))
-      .map((candidate) => summaryFor(candidate, mode, undefined, filters.modeSource ?? 'global'))
+      .map((candidate) => summaryFor(
+        candidate, mode, claimsFor(candidate, kernelClaims),
+        filters.modeSource ?? 'global', roleDeps,
+      ))
 
     // Project is deliberately always null until the sidecar owns a project field.
     if (filters.project !== undefined) items = []
@@ -958,6 +1279,7 @@ export function buildApgWorkItemDetail(
   mode: ApgMode,
   workItemId: string,
   modeSource: ApgModeSource = 'global',
+  roleDeps: ProjectionRoleDeps = {},
 ): ApgWorkItemDetail | { error: string; notFound?: boolean } {
   const db = openApgKernelReadonly()
   if (!db) return { error: 'sidecar_unavailable' }
@@ -968,8 +1290,8 @@ export function buildApgWorkItemDetail(
     }
 
     const candidate = buildCandidateProjection(data, workItemId)
-    const claims = claimsFor(candidate)
-    const summary = summaryFor(candidate, mode, claims, modeSource)
+    const claims = claimsFor(candidate, indexKernelClaims(data.claims))
+    const summary = summaryFor(candidate, mode, claims, modeSource, roleDeps)
     const transitions = data.transitions.filter(
       (row) => row.change_logical_id === workItemId,
     )
@@ -992,6 +1314,12 @@ export function buildApgWorkItemDetail(
     for (const row of candidate.evidence) sourceIds.add(row.id)
     for (const row of transitions) sourceIds.add(row.id)
 
+    // F-9, extended to the detail page: an unreadable `claims` table would
+    // otherwise render as "the engine has resolved nothing here", which is a
+    // different and much calmer statement than "we could not ask the engine".
+    // Captured AFTER claimsFor() has run, so a vocabulary mismatch lands too.
+    const readErrors = capturedProjectionErrors()
+
     return {
       ...summary,
       goal: '',
@@ -1013,6 +1341,9 @@ export function buildApgWorkItemDetail(
       rollback_info: null,
       side_effect_status: newest(candidate.receipts)?.runtime_status ?? null,
       source_ids: [...sourceIds],
+      ...(readErrors.length > 0
+        ? { projection_error: `partial projection: ${readErrors.length} read error(s) — ${readErrors[0]}` }
+        : {}),
     }
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error) }

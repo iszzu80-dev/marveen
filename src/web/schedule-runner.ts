@@ -678,8 +678,14 @@ async function attemptFireTask(
     // session has no derivable transcript dir).
     // P2-C: stamp the identity columns for this run. The reinjection path below
     // reuses the SAME dispatch row, so it needs no second stamp.
+    // §11.2 role: a scheduled run EXECUTES a task definition that already
+    // existed before this tick -- the agent is not authoring a work package, it
+    // is running a declared one, so the role is `executor`, not `producer`.
+    // Work the run then creates is dispatched separately and carries its own
+    // producer role; calling this one 'producer' would put an author's name on
+    // every heartbeat and audit tick.
     const dispatchId = createDispatchSafe(getDb(), {
-      source: 'scheduler', agent: agentName, taskType: task.type,
+      source: 'scheduler', agent: agentName, taskType: task.type, role: 'executor',
       sessionId: (host || task.targetSession) ? null : resolveCurrentSessionId(agentName),
       ...resolveDispatchIdentitySafe(agentName),
     })

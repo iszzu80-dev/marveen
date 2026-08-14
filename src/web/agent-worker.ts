@@ -683,8 +683,13 @@ async function runWorkerAttempt(ctx: WorkerCtx, message: string, timeoutMs: numb
   // overrides. Resolving them from MAIN_AGENT_ID would stamp the main pane's
   // model and login onto worker requests -- the same mis-attribution the
   // session_id note above avoids.
+  // §11.2 role: the worker is a subordinate execution engine the main agent
+  // calls into, not the author of a work package -- `executor`. Stamping it
+  // 'producer' would make the MAIN agent (whose id this row carries) look like
+  // the producer of everything its worker ran, and §26's first invariant
+  // (no agent accepts its own output) is only checkable if that stays false.
   const dispatchId = createDispatchSafe(getDb(), {
-    source: 'worker', agent: MAIN_AGENT_ID, taskType: 'worker',
+    source: 'worker', agent: MAIN_AGENT_ID, taskType: 'worker', role: 'executor',
     sessionId: resolveSessionIdForCwd(ctx.home),
     ...resolveDispatchIdentitySafe(MAIN_AGENT_ID, {
       configuredModel: WORKER_MODEL,

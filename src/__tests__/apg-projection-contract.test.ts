@@ -8,9 +8,78 @@
 // gates on is unreachable.
 import { describe, it, expect } from 'vitest'
 import { readFileSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
-import { deriveDisplayState, APG_CHECKPOINT_RESULTS } from '../apg/ui-projection.js'
+import {
+  deriveDisplayState,
+  APG_CHECKPOINT_RESULTS,
+  APG_KERNEL_VERIFICATION_STATUSES,
+} from '../apg/ui-projection.js'
+import { EXCLUDED_CLAIM_AUTHORITIES } from '../apg/completion-claim.js'
+import {
+  APG_FEED_STALL_AFTER_SECONDS, REQUIRED_OBSERVATION_DAYS, REQUIRED_ELIGIBLE_WORK_ITEMS,
+} from '../apg/feed-health.js'
+import { deriveExecutionId } from '../apg/execution-binding.js'
+
+/** The WP6 §15.3-d golden vectors, pinned identically in the kernel's own
+ *  tests/test_wp6_kanban_dispatch.py. See the contract block at the end. */
+const VECTOR_WITH_CONTEXT = 'ex-b7848fb7906a827ea7322381e6c37f89'
+const VECTOR_ALL_UNKNOWN = 'ex-a939ce43ca4c30f717c6eec6c4c398c0'
+
+/**
+ * Where the kernel repo is on THIS machine, or null.
+ *
+ * The cross-repo assertions below used to be guarded by a bare
+ * `if (!existsSync(kernel)) return` — which reports a PASS for a comparison
+ * that never happened. "Two repos, one contract" then held only on a machine
+ * with both repos checked out, and the test said nothing about which machine it
+ * was on. A test that reports success for work it did not do is the same class
+ * of defect as the projection findings this file covers.
+ *
+ * Now: found → assert; not found → vitest reports an explicit SKIP (visible in
+ * the run summary, not a green tick); and `APG_REQUIRE_KERNEL_CONTRACT=1` turns
+ * the skip into a failure, so CI can demand the real comparison.
+ */
+function resolveKernelSrc(): string | null {
+  const candidates = [
+    process.env.APG_KERNEL_SRC_ROOT,
+    // develop's R-10 shipped the same escape hatch under a different name and a
+    // different shape: APG_KERNEL_SRC_PATH pointed at checkpoints.py itself, not
+    // at the directory. Honoured here so a machine already configured that way
+    // keeps COMPARING instead of quietly dropping to a skip after this merge.
+    process.env.APG_KERNEL_SRC_PATH ? dirname(process.env.APG_KERNEL_SRC_PATH) : undefined,
+    join(homedir(), 'marveen-local', 'apg-kernel', 'src'),
+    join(process.cwd(), '..', 'marveen-apg-kernel', 'src'),
+    // Kept from develop's R-10 candidate list: a plain sibling checkout in the
+    // home directory. Every extra place the kernel is actually found is one
+    // more run where the contract is really compared instead of skipped.
+    join(homedir(), 'marveen-apg-kernel', 'src'),
+  ].filter((value): value is string => typeof value === 'string' && value.length > 0)
+  return candidates.find((dir) => existsSync(join(dir, 'checkpoints.py'))) ?? null
+}
+
+const KERNEL_SRC = resolveKernelSrc()
+const KERNEL_REQUIRED = process.env.APG_REQUIRE_KERNEL_CONTRACT === '1'
+const NO_KERNEL_REASON =
+  'kernel checkout not found — set APG_KERNEL_SRC_ROOT to the kernel repo src/ '
+  + 'directory (or APG_REQUIRE_KERNEL_CONTRACT=1 to make this a failure)'
+
+/**
+ * Read one `NAME = (...)` / `NAME = [...]` list of quoted UPPERCASE tokens out
+ * of a kernel module. The kernel writes one as a list and one as a tuple, so
+ * the close is whichever bracket the literal actually opened with — matching on
+ * the wrong one silently swallows the rest of the file and turns this contract
+ * into a much weaker assertion.
+ */
+function kernelTokenList(file: string, name: string): string[] {
+  const src = readFileSync(join(KERNEL_SRC as string, file), 'utf8')
+  const start = src.indexOf(`${name} = `)
+  expect(start, `${name} not found in kernel ${file}`).toBeGreaterThanOrEqual(0)
+  const open = src.indexOf('=', start) + 1
+  const bracket = src.slice(open).trimStart().startsWith('[') ? ']' : ')'
+  const body = src.slice(open, src.indexOf(bracket, open) + 1)
+  return [...body.matchAll(/"([A-Z_]+)"/g)].map((m) => m[1]).sort()
+}
 
 // The REAL DeriveDisplayStateInput. The first version of this fixture invented
 // field names; vitest passed it happily (it does not typecheck) and tsc caught
@@ -23,45 +92,35 @@ const base = {
   recommendationEvidenceCompleteness: null,
 }
 
-/**
- * Where the kernel's source lives, for the cross-repo contract check.
- *
- * REVIEW 2026-08-13, R-10. This used to be one hardcoded path under `homedir()`
- * with a bare `if (!existsSync(kernel)) return` in front of it — so on every
- * machine and every CI run where the kernel is NOT checked out at exactly
- * `~/marveen-local/apg-kernel`, the headline assertion did not run and the test
- * reported green. The one guard on the F-8 fix was itself green-by-absence,
- * which is the fourth entry in this file's own list of "ways a projection lied
- * quietly".
- *
- * Two changes. The path is configurable (`APG_KERNEL_SRC_PATH`) and a couple of
- * conventional sibling checkouts are tried, so it finds the kernel far more
- * often than before; and when it genuinely cannot, the test SKIPS VISIBLY
- * instead of passing silently.
- */
-function kernelCheckpointsPath(): string | null {
-  const candidates = [
-    process.env.APG_KERNEL_SRC_PATH,
-    join(homedir(), 'marveen-local', 'apg-kernel', 'src', 'checkpoints.py'),
-    join(process.cwd(), '..', 'marveen-apg-kernel', 'src', 'checkpoints.py'),
-    join(homedir(), 'marveen-apg-kernel', 'src', 'checkpoints.py'),
-  ].filter((p): p is string => Boolean(p))
-  return candidates.find(p => existsSync(p)) ?? null
-}
+describe('the two-repo contract is actually checked, or loudly not checked', () => {
+  it('HEADLINE: this run knows whether it compared against a real kernel checkout', () => {
+    // The one assertion that must never skip. It does not check the vocabulary;
+    // it checks that the SKIP is a decision with a reason, so a green run can
+    // never be mistaken for a verified contract.
+    if (KERNEL_SRC === null) {
+      expect(
+        KERNEL_REQUIRED,
+        `cross-repo contract NOT verified in this run: ${NO_KERNEL_REASON}`,
+      ).toBe(false)
+      return
+    }
+    expect(existsSync(join(KERNEL_SRC, 'checkpoints.py'))).toBe(true)
+    expect(existsSync(join(KERNEL_SRC, 'claim_verification.py'))).toBe(true)
+  })
+})
 
 describe('F-8: the kernel result vocabulary is one contract, not two', () => {
-  const kernel = kernelCheckpointsPath()
-  const withKernel = kernel ? it : it.skip
-
-  withKernel('HEADLINE: the UI list matches the kernel RESULT_VALUES', () => {
-    // Two repos, one contract. The kernel renamed NOT_APPLICABLE to EXCLUDED
-    // and added ERROR; the UI still matched the old name, so both new values
-    // fell through to "executing".
-    const line = readFileSync(kernel!, 'utf8').split('\n').find(l => l.includes('RESULT_VALUES'))
-    expect(line).toBeTruthy()
-    const kernelValues = [...line!.matchAll(/"([A-Z_]+)"/g)].map(m => m[1]).sort()
-    expect([...APG_CHECKPOINT_RESULTS].sort()).toEqual(kernelValues)
-  })
+  it.skipIf(KERNEL_SRC === null && !KERNEL_REQUIRED)(
+    `HEADLINE: the UI list matches the kernel RESULT_VALUES [${KERNEL_SRC ?? NO_KERNEL_REASON}]`,
+    () => {
+      // Two repos, one contract. The kernel renamed NOT_APPLICABLE to EXCLUDED
+      // and added ERROR; the UI still matched the old name, so both new values
+      // fell through to "executing".
+      expect(KERNEL_SRC, NO_KERNEL_REASON).not.toBeNull()
+      expect([...APG_CHECKPOINT_RESULTS].sort())
+        .toEqual(kernelTokenList('checkpoints.py', 'RESULT_VALUES'))
+    },
+  )
 
   it('the UI vocabulary is pinned even when the kernel is not checked out', () => {
     // The half that must hold WITHOUT the sibling repo, so a machine that cannot
@@ -92,6 +151,21 @@ describe('F-8: the kernel result vocabulary is one contract, not two', () => {
   it('a genuinely running gate is still "executing" — the counter-case', () => {
     expect(deriveDisplayState({ ...base, latestCheckpointResult: 'PASS' })).toBe('executing')
   })
+})
+
+describe('WP2 §10.3-b: the claim vocabulary is one contract, not two', () => {
+  it.skipIf(KERNEL_SRC === null && !KERNEL_REQUIRED)(
+    `HEADLINE: the UI list matches the kernel VERIFICATION_STATUSES [${KERNEL_SRC ?? NO_KERNEL_REASON}]`,
+    () => {
+      // The projection no longer decides a claim's verification status; it
+      // relabels the kernel's. That only stays honest while both sides agree on
+      // the vocabulary — a status the kernel adds and this list does not know
+      // would render as UNKNOWN, which is a downgrade nobody asked for.
+      expect(KERNEL_SRC, NO_KERNEL_REASON).not.toBeNull()
+      expect([...APG_KERNEL_VERIFICATION_STATUSES].sort())
+        .toEqual(kernelTokenList('claim_verification.py', 'VERIFICATION_STATUSES'))
+    },
+  )
 })
 
 describe('F-3: the Activity endpoint uses the driver, not a global nobody sets', () => {
@@ -137,4 +211,89 @@ describe('F-10: the enforced archive gate holds when the sidecar is down', () =>
     expect(catchBlock).toMatch(/if \(state\.mode !== 'enforced'\) return/)
     expect(catchBlock.indexOf("state.mode !== 'enforced'")).toBeLessThan(catchBlock.indexOf('event.preventDefault()'))
   })
+})
+
+// ---------------------------------------------------------------------------
+// WP6 (§15.2, §15.3-e, §35). Three more places where the two repositories hold
+// the same value and only one of them can be edited at a time.
+// ---------------------------------------------------------------------------
+
+describe('WP6: the excluded-claim-authority set is one contract, not two', () => {
+  it.skipIf(KERNEL_SRC === null && !KERNEL_REQUIRED)(
+    `HEADLINE: Marveen's EXCLUDED_CLAIM_AUTHORITIES matches the kernel's CLAIM_LINK_POLICY [${KERNEL_SRC ?? NO_KERNEL_REASON}]`,
+    () => {
+      // §15.3-e's whole force is that a self-asserted `done` cannot become
+      // acceptance evidence. That rule is expressed twice -- as
+      // `CLAIM_LINK_POLICY` in the kernel and as `EXCLUDED_CLAIM_AUTHORITIES`
+      // here -- and a word present in one list and not the other would make a
+      // claim count as evidence on one side of the boundary and not the other.
+      const src = readFileSync(join(KERNEL_SRC as string, 'completion_verification.py'), 'utf8')
+      const start = src.indexOf('CLAIM_LINK_POLICY = {')
+      expect(start, 'CLAIM_LINK_POLICY not found in the kernel').toBeGreaterThanOrEqual(0)
+      const policy = src.slice(start, src.indexOf('\n}', start))
+
+      // The kernel writes (qualifying, excluded, wired). The FIRST frozenset is
+      // qualifying and must be EMPTY: no authority makes a completion claim
+      // into acceptance evidence, not even an operator's.
+      expect(policy).toMatch(/frozenset\(\),\s*\n\s*frozenset\(\{/)
+
+      const excluded = policy.slice(policy.indexOf('frozenset({'))
+      for (const authority of EXCLUDED_CLAIM_AUTHORITIES) {
+        expect(excluded, `${authority} is excluded here but not in the kernel`).toContain(authority)
+      }
+      // ...and nothing the kernel excludes is missing from this side.
+      for (const token of [...excluded.matchAll(/\b([A-Z][A-Z_]{4,})\b/g)].map(m => m[1])) {
+        if (token === 'PRESENT' || token === 'MISSING' || token === 'UNKNOWN') continue
+        expect(EXCLUDED_CLAIM_AUTHORITIES as readonly string[]).toContain(token)
+      }
+    },
+  )
+})
+
+describe('WP6: §35\'s three thresholds are one contract, not two', () => {
+  it.skipIf(KERNEL_SRC === null && !KERNEL_REQUIRED)(
+    `HEADLINE: the feed-health thresholds match the kernel's live_ingest constants [${KERNEL_SRC ?? NO_KERNEL_REASON}]`,
+    () => {
+      // feed-health.ts derives FRESH/STALLED and the promotion counts on the
+      // read side, so it needs the same numbers the kernel writes them against.
+      // A kernel that lengthened its stall window while this file did not would
+      // have the dashboard report STALLED about a feed the kernel calls fresh.
+      const src = readFileSync(join(KERNEL_SRC as string, 'live_ingest.py'), 'utf8')
+      const constant = (name: string): string => {
+        const match = src.match(new RegExp(`^${name} = (.+)$`, 'm'))
+        expect(match, `${name} not found in the kernel's live_ingest.py`).not.toBeNull()
+        return (match as RegExpMatchArray)[1].trim()
+      }
+      expect(constant('DEFAULT_CADENCE_SECONDS')).toBe('60 * 60')
+      expect(constant('DEFAULT_STALL_AFTER_SECONDS')).toBe('3 * DEFAULT_CADENCE_SECONDS')
+      expect(APG_FEED_STALL_AFTER_SECONDS).toBe(3 * 60 * 60)
+      expect(constant('REQUIRED_OBSERVATION_DAYS')).toBe(String(REQUIRED_OBSERVATION_DAYS))
+      expect(constant('REQUIRED_ELIGIBLE_WORK_ITEMS')).toBe(String(REQUIRED_ELIGIBLE_WORK_ITEMS))
+    },
+  )
+})
+
+describe('WP6: the execution_id derivation is one contract, not two', () => {
+  it.skipIf(KERNEL_SRC === null && !KERNEL_REQUIRED)(
+    `HEADLINE: both repositories pin the same golden execution ids [${KERNEL_SRC ?? NO_KERNEL_REASON}]`,
+    () => {
+      // §15.3-d's join works because both sides compute the id from the same
+      // seven facts. Neither implementation can import the other, so the
+      // contract is two golden vectors pinned in both test suites -- asserted
+      // here to be literally the same strings, so a "fix" on one side that
+      // quietly re-baselined its own vector is caught.
+      const kernelTest = readFileSync(
+        join(KERNEL_SRC as string, '..', 'tests', 'test_wp6_kanban_dispatch.py'), 'utf8')
+      expect(kernelTest).toContain(VECTOR_WITH_CONTEXT)
+      expect(kernelTest).toContain(VECTOR_ALL_UNKNOWN)
+      // The Marveen half computes them rather than quoting them.
+      expect(deriveExecutionId({
+        workItemId: 'card-9f2a', agentId: 'dex', role: 'producer',
+        createdAt: 1784281157, sessionId: 'sess-7', contextPacketHash: 'b'.repeat(64),
+      })).toBe(VECTOR_WITH_CONTEXT)
+      expect(deriveExecutionId({
+        workItemId: 'card-9f2a', agentId: 'dex', role: 'producer', createdAt: 1784281157,
+      })).toBe(VECTOR_ALL_UNKNOWN)
+    },
+  )
 })

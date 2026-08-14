@@ -57,7 +57,27 @@ export function initPacketMetadataSchema(db: Database.Database): void {
       context_budget_class  TEXT
     )
   `)
+  // APG 1.9 §12.1 packet IDENTITY. Additive, nullable, forward-only, never
+  // backfilled -- the same idempotent-ALTER convention every other CostOps
+  // column uses. A pre-WP4 row keeps NULL here, which honestly means "this
+  // dispatch predates packet identity", never a hash recomputed from a packet
+  // nobody kept.
+  //
+  // These four columns are what give the kernel's `context_packet_hash` a
+  // source (execution_identity.py recorded NO_SOURCE_IN_KERNEL for it), and
+  // `packet_hash` is the join key: same hash => provably the same delivered
+  // context, whatever else differs between two dispatches.
+  //
+  // Still no `packet_body` column, and there must never be one -- the data
+  // sensitivity note above is unchanged by WP4. A hash of the body is not the
+  // body; that asymmetry is the whole reason it is safe to store.
+  for (const column of ['packet_id TEXT', 'packet_hash TEXT', 'generated_at TEXT', 'execution_role TEXT']) {
+    try { db.exec(`ALTER TABLE dispatch_packets ADD COLUMN ${column}`) } catch { /* already exists */ }
+  }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_dispatch_packets_size ON dispatch_packets(task_size, created_at)`)
+  // "Which dispatches ran against THIS context?" -- the query the packet hash
+  // exists to make answerable.
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_dispatch_packets_hash ON dispatch_packets(packet_hash)`)
   db.exec(`
     CREATE TABLE IF NOT EXISTS dispatch_packet_artifacts (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -75,7 +95,16 @@ export function initPacketMetadataSchema(db: Database.Database): void {
 /** What a caller records. `taskSizeSource` comes from resolveTaskSize() so the
  *  provenance of a size ('explicit' | 'workflow_policy' | 'agent_default') is
  *  auditable -- it is how we can later prove no size was model-guessed. */
-export interface PacketMetadataInput extends PacketMetadata {
+export interface PacketMetadataInput extends Omit<PacketMetadata,
+  'packetId' | 'packetHash' | 'generatedAt' | 'executionRole'> {
+  /** §12.1 identity. OPTIONAL on the input, and required on PacketMetadata --
+   *  derivePacketMetadata() always fills them, while a recorder that has no
+   *  packet in hand (an origin instrumenting a send it did not build) stores
+   *  NULL instead of a hash of something it did not deliver. */
+  packetId?: string | null
+  packetHash?: string | null
+  generatedAt?: string | null
+  executionRole?: string | null
   taskSizeSource?: string | null
 }
 
@@ -83,6 +112,10 @@ export interface PacketMetadataRow {
   dispatchId: string
   createdAt: number
   packetVersion: string | null
+  packetId: string | null
+  packetHash: string | null
+  generatedAt: string | null
+  executionRole: string | null
   estimatedFreshTokens: number | null
   estimateConfidence: EstimateConfidence | string
   estimateMethod: string | null
@@ -124,14 +157,20 @@ export function recordPacketMetadata(
   const tx = db.transaction(() => {
     db.prepare(`
       INSERT INTO dispatch_packets
-        (dispatch_id, created_at, packet_version, estimated_fresh_tokens, estimate_confidence,
+        (dispatch_id, created_at, packet_version, packet_id, packet_hash, generated_at,
+         execution_role, estimated_fresh_tokens, estimate_confidence,
          estimate_method, task_size, task_size_source, context_budget_class)
       VALUES
-        (@dispatch_id, @created_at, @packet_version, @estimated_fresh_tokens, @estimate_confidence,
+        (@dispatch_id, @created_at, @packet_version, @packet_id, @packet_hash, @generated_at,
+         @execution_role, @estimated_fresh_tokens, @estimate_confidence,
          @estimate_method, @task_size, @task_size_source, @context_budget_class)
       ON CONFLICT(dispatch_id) DO UPDATE SET
         created_at = excluded.created_at,
         packet_version = excluded.packet_version,
+        packet_id = excluded.packet_id,
+        packet_hash = excluded.packet_hash,
+        generated_at = excluded.generated_at,
+        execution_role = excluded.execution_role,
         estimated_fresh_tokens = excluded.estimated_fresh_tokens,
         estimate_confidence = excluded.estimate_confidence,
         estimate_method = excluded.estimate_method,
@@ -142,6 +181,12 @@ export function recordPacketMetadata(
       dispatch_id: dispatchId,
       created_at: createdAt,
       packet_version: meta.packetVersion ?? null,
+      packet_id: meta.packetId ?? null,
+      // Stored bare-hex lowercase, the same normalisation the artifact hashes
+      // get below, so a hash written by two origins compares equal as SQL.
+      packet_hash: meta.packetHash ? meta.packetHash.replace(/^sha256:/i, '').toLowerCase() : null,
+      generated_at: meta.generatedAt ?? null,
+      execution_role: meta.executionRole ?? null,
       estimated_fresh_tokens: meta.estimatedFreshTokens ?? null,
       estimate_confidence: meta.estimateConfidence,
       estimate_method: meta.estimateMethod ?? null,
@@ -191,11 +236,14 @@ export function recordPacketMetadataSafe(
 /** Read one dispatch's packet metadata. Missing row => null (never a guess). */
 export function readPacketMetadata(db: Database.Database, dispatchId: string): PacketMetadataRow | null {
   const row = db.prepare(`
-    SELECT dispatch_id, created_at, packet_version, estimated_fresh_tokens, estimate_confidence,
+    SELECT dispatch_id, created_at, packet_version, packet_id, packet_hash, generated_at,
+           execution_role, estimated_fresh_tokens, estimate_confidence,
            estimate_method, task_size, task_size_source, context_budget_class
     FROM dispatch_packets WHERE dispatch_id = ?
   `).get(dispatchId) as {
     dispatch_id: string; created_at: number; packet_version: string | null
+    packet_id: string | null; packet_hash: string | null; generated_at: string | null
+    execution_role: string | null
     estimated_fresh_tokens: number | null; estimate_confidence: string; estimate_method: string | null
     task_size: string | null; task_size_source: string | null; context_budget_class: string | null
   } | undefined
@@ -207,6 +255,10 @@ export function readPacketMetadata(db: Database.Database, dispatchId: string): P
     dispatchId: row.dispatch_id,
     createdAt: row.created_at,
     packetVersion: row.packet_version,
+    packetId: row.packet_id,
+    packetHash: row.packet_hash,
+    generatedAt: row.generated_at,
+    executionRole: row.execution_role,
     estimatedFreshTokens: row.estimated_fresh_tokens,
     estimateConfidence: row.estimate_confidence,
     estimateMethod: row.estimate_method,

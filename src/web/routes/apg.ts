@@ -29,6 +29,12 @@ import {
   setScopeOverride,
   writeApgAuditEvent,
 } from '../apg-scope-overrides.js'
+import { resolveApgPrincipal } from '../apg-principal.js'
+import { dispatchRoleDeps } from '../apg-role-agents.js'
+import {
+  checkHumanApprovalAuthority,
+  recordApprovalAttribution,
+} from '../apg-human-approval.js'
 import { json, readBody } from '../http-helpers.js'
 import { atomicWriteFileSync } from '../atomic-write.js'
 import type { RouteContext } from './types.js'
@@ -201,6 +207,26 @@ export async function tryHandleApg(ctx: RouteContext): Promise<boolean> {
         require_owner_decision: false,
         block_unaccepted_archive: true,
       },
+      // APG 1.9 WP3 / 1.8 audit finding 3.1: `wired: true` was TRUE and still
+      // misleading. block_unaccepted_archive had a consumer — in web/apg.js.
+      // A control that only the browser runs is bypassed by any curl holding
+      // the shared token, which is what the audit found. The boolean above
+      // could not express that difference, so this second map does: it names
+      // WHERE the refusal happens. 'server' is the only value that means the
+      // control cannot be walked around; 'client' would be an admission.
+      apg_enforcement_enforced_by: {
+        require_claim_receipt: null,
+        require_independent_acceptance: null,
+        require_owner_decision: null,
+        block_unaccepted_archive: 'server',
+      },
+      // §11.4, published rather than assumed: Marveen has no authenticated
+      // human principal. The strongest credential is a named browser session,
+      // which no dispatched agent can obtain (so §26.2 holds) but which does
+      // not prove a human decided. Every human_required approval resolved on
+      // this deployment carries human_principal_proven:false, and this field is
+      // how a UI knows that BEFORE it renders an approval as owner-signed.
+      apg_human_principal_available: false,
     })
     return true
   }
@@ -231,6 +257,9 @@ export async function tryHandleApg(ctx: RouteContext): Promise<boolean> {
     }
     const offset = Math.max(0, parsedOffset)
     const attentionRaw = url.searchParams.get('attention')
+    // §11.2: the producer/accepter columns are resolved from Marveen's own
+    // dispatch store, injected here rather than reached for inside the
+    // kernel-read-only projection.
     const result = buildApgWorkItemSummaries(modeResult.mode, {
       modeSource: modeResult.source,
       project: project ?? undefined,
@@ -239,7 +268,7 @@ export async function tryHandleApg(ctx: RouteContext): Promise<boolean> {
       kanbanCardId: kanbanCardId ?? undefined,
       limit,
       offset,
-    })
+    }, dispatchRoleDeps())
     if ('error' in result) {
       json(res, { items: [], total: 0, limit, offset, error: result.error })
       return true
@@ -263,7 +292,13 @@ export async function tryHandleApg(ctx: RouteContext): Promise<boolean> {
       json(res, { error: modeResult.error }, 400)
       return true
     }
-    const detail = buildApgWorkItemDetail(modeResult.mode, workItemId, modeResult.source)
+    // Both arguments are load-bearing and neither replaces the other: F-7 needs
+    // `modeResult.source` so a card-level override is visible on the detail
+    // screen, and §11.2 needs the dispatch-role reader so producer_agent is a
+    // resolved value rather than a hardcoded null.
+    const detail = buildApgWorkItemDetail(
+      modeResult.mode, workItemId, modeResult.source, dispatchRoleDeps(),
+    )
     if ('error' in detail) {
       detailError(res, detail)
       return true
@@ -360,15 +395,19 @@ export async function tryHandleApg(ctx: RouteContext): Promise<boolean> {
       json(res, { error: 'actor is required' }, 400)
       return true
     }
+    // §24.0.5 (1.8 audit finding 3.2): the body's `actor` stops being the
+    // identity and becomes a labelled claim; the authority decision is made
+    // against the credential that authenticated this request.
     const result = setScopeOverride({
       scope_type: body.scope_type as ApgScopeOverride['scope_type'],
       scope_id: typeof body.scope_id === 'string' ? body.scope_id : '',
       mode: typeof body.mode === 'string' ? body.mode : '',
-      updated_by: body.actor.trim(),
+      claimed_actor: body.actor.trim(),
       reason: typeof body.reason === 'string' ? body.reason : '',
-    })
+      ttl_minutes: typeof body.ttl_minutes === 'number' ? body.ttl_minutes : null,
+    }, resolveApgPrincipal(ctx.auth))
     if (!result.ok) {
-      json(res, { error: result.error }, 400)
+      json(res, { error: result.error }, result.status ?? 400)
       return true
     }
     invalidateApgCache()
@@ -402,9 +441,10 @@ export async function tryHandleApg(ctx: RouteContext): Promise<boolean> {
       scopeId,
       typeof body.actor === 'string' ? body.actor : '',
       typeof body.reason === 'string' ? body.reason : '',
+      resolveApgPrincipal(ctx.auth),
     )
     if (!result.ok) {
-      json(res, { error: result.error }, 400)
+      json(res, { error: result.error }, result.status ?? 400)
       return true
     }
     invalidateApgCache()
@@ -468,6 +508,33 @@ export async function tryHandleApg(ctx: RouteContext): Promise<boolean> {
     const action = body.action as OwnerAction
     const mappedStatus = action === 'accept' ? 'approved' : 'rejected'
 
+    // §11.4 (1.8 audit finding 3.3): this route already stamped server-side,
+    // but it stamped 'dashboard' -- the SURFACE a click arrived on, not the
+    // principal who made the decision. §11.4 asks for an attribution that names
+    // the decider. resolveApgPrincipal gives the strongest name the credential
+    // supports, and apg-human-approval.ts decides whether that name is allowed
+    // to resolve THIS approval's category at all.
+    const principal = resolveApgPrincipal(ctx.auth)
+    // An approval row carries no card/project link, so the mode is the global
+    // one. Resolving it against a scope we do not have would be a guess, and a
+    // guessed mode here would decide whether §25 fails open or closed.
+    const decisionMode = resolveEffectiveApgMode(null, null).mode
+    const verdict = checkHumanApprovalAuthority(principal, approval.category, decisionMode)
+    if (!verdict.allowed) {
+      recordApprovalAttribution({
+        approval_id: approvalId,
+        category: approval.category,
+        status: `refused:${mappedStatus}`,
+        principal,
+        claimed_by: typeof body.actor === 'string' ? body.actor : null,
+        mode: decisionMode,
+        verdict,
+        surface: 'apg_decision',
+      })
+      json(res, { error: verdict.error }, verdict.status ?? 403)
+      return true
+    }
+
     // F-5 (APG 0.4 review): the same self-approval guard the generic approvals
     // route has. §27 makes weakening it an explicit stop condition, and this
     // path simply did not have it.
@@ -477,13 +544,21 @@ export async function tryHandleApg(ctx: RouteContext): Promise<boolean> {
     // client — the generic route's own comment calls it best-effort for exactly
     // that reason. What it does catch is the naive/accidental case, which is
     // what the guard was built for, and which went through here unchecked.
+    //
+    // WP3 update: with `resolved_by` server-stamped, the old form of this check
+    // (`agent_id === 'dashboard'`) compared against the surface name this route
+    // used to write, and would now never fire. The comparison moves to the
+    // CLAIMED actor -- the only place an agent id can still appear -- which is
+    // the same best-effort footing the generic route's guard stands on, and is
+    // stated as such rather than upgraded by implication.
     const pending = getApproval(approvalId)
-    if (pending?.agent_id && pending.agent_id === 'dashboard') {
+    const claimedActor = typeof body.actor === 'string' ? body.actor.trim() : ''
+    if (pending?.agent_id && (pending.agent_id === 'dashboard' || pending.agent_id === claimedActor)) {
       json(res, { error: 'The requesting agent cannot approve its own request' }, 403)
       return true
     }
 
-    const resolved = resolveApproval(approvalId, mappedStatus, 'dashboard', undefined)
+    const resolved = resolveApproval(approvalId, mappedStatus, principal.attribution, undefined)
     if (!resolved) {
       const racedApproval = getApproval(approvalId)
       json(res, {
@@ -500,7 +575,22 @@ export async function tryHandleApg(ctx: RouteContext): Promise<boolean> {
       action,
       note: body.note ?? null,
       idempotency_key: idempotencyKeyValue,
-      actor: 'dashboard',
+      // Was the literal 'dashboard'. §11.4: name the principal, not the surface
+      // -- the surface is still recorded, under its own key, because knowing
+      // WHERE a decision arrived is useful once it no longer pretends to be WHO.
+      actor: principal.attribution,
+      principal_class: principal.class,
+      surface: 'dashboard',
+    })
+    recordApprovalAttribution({
+      approval_id: approvalId,
+      category: approval.category,
+      status: mappedStatus,
+      principal,
+      claimed_by: typeof body.actor === 'string' ? body.actor : null,
+      mode: decisionMode,
+      verdict,
+      surface: 'apg_decision',
     })
     invalidateApgCache()
     const updatedApproval = getApproval(approvalId)
@@ -508,8 +598,17 @@ export async function tryHandleApg(ctx: RouteContext): Promise<boolean> {
       event_id: randomUUID(),
       approval_id: approvalId,
       action,
+      resolvedBy: principal.attribution,
     }, 'apg owner decision recorded')
-    const responseBody = { ...updatedApproval, apg_action: action }
+    const responseBody = {
+      ...updatedApproval,
+      apg_action: action,
+      // §25: never a false PASS. A human_required decision resolved without a
+      // provable human principal says so in the response body itself, so no UI
+      // downstream can render it as owner-authenticated by omission.
+      human_principal_proven: verdict.humanPrincipalProven,
+      human_attestation: principal.humanAttestation,
+    }
     recordIdempotentResponse(approvalId, idempotencyKeyValue, 200, responseBody)
     json(res, responseBody)
     return true

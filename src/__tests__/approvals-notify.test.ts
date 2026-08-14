@@ -128,7 +128,16 @@ describe('approval resolution is bound to an authenticated principal', () => {
     expect(out.status).toBe(200)
     expect(out.body.status).toBe('approved')
     // The claimed label survives as provenance; the principal is what is proved.
-    expect(out.body.resolved_by).toBe('user:istvan (telegram_text)')
+    //
+    // MERGE (APG 1.9 §11.4): the same two facts, in two fields instead of one
+    // string. This used to assert `'user:istvan (telegram_text)'` -- proved and
+    // claimed concatenated into the audit column. §11.4 forbids any part of a
+    // request body from reaching that column, so the claim moved to its own
+    // field. Nothing is lost and nothing new is trusted: `resolved_by` is still
+    // the server-derived identity, `claimed_by` is still the caller's label,
+    // and a reader can now tell them apart without parsing.
+    expect(out.body.resolved_by).toBe('session:istvan')
+    expect(out.body.claimed_by).toBe('telegram_text')
   })
 
   it('an enrolled device MAY approve', async () => {
@@ -139,7 +148,9 @@ describe('approval resolution is bound to an authenticated principal', () => {
     )
     expect(await tryHandleApprovals(ctx)).toBe(true)
     expect(out.status).toBe(200)
-    expect(out.body.resolved_by).toBe('device:istvan-laptop (cli)')
+    // Same split as above: proved identity in `resolved_by`, claim in `claimed_by`.
+    expect(out.body.resolved_by).toBe('device:istvan-laptop')
+    expect(out.body.claimed_by).toBe('cli')
   })
 
   it('self-approval stays refused even for a strong principal', async () => {

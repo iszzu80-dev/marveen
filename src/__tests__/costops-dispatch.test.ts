@@ -8,7 +8,8 @@ import {
   createDispatch,
   createDispatchSafe,
   recordOutcome,
-  recordAcceptedOutcomeForCard,
+  recordProducerCompletedOutcomeForCard,
+  recordApgAcceptedOutcomeForCard,
   resolveOutcome,
   correlateTokenUsageToDispatches,
   loadDispatchAttributionConfig,
@@ -70,9 +71,16 @@ describe('P2-A schema (installed via the CostOps seam)', () => {
   it('the dispatches table carries NO prompt/PII/secret column', () => {
     const cols = getDb().prepare("SELECT name FROM pragma_table_info('dispatches')").all().map((r: any) => r.name)
     // Only opaque metadata columns; nothing that could hold prompt text.
+    // `role` (APG 1.9 §11.2) joins the list: an enum of four fixed words
+    // decided server-side at the origin. It carries no free text by
+    // construction, which is why it belongs on this side of the boundary.
+    // `execution_id` (APG 1.9 §15.3-d) joins the list on the same grounds as
+    // `role`: a content-derived digest of seven opaque facts, computed
+    // server-side, carrying no free text by construction.
     expect(cols.sort()).toEqual([
       'agent', 'auth_profile', 'billing_mode', 'card_id', 'configured_model', 'created_at',
-      'dispatch_id', 'model_profile', 'project', 'provider', 'runtime_model', 'session_id', 'source', 'task_type',
+      'dispatch_id', 'execution_id', 'model_profile', 'project', 'provider', 'role', 'runtime_model',
+      'session_id', 'source', 'task_type',
     ])
     for (const forbidden of ['prompt', 'content', 'text', 'message', 'body', 'secret', 'token']) {
       expect(cols).not.toContain(forbidden)
@@ -178,13 +186,19 @@ describe('P2-A window bound 1: a TERMINAL outcome closes the window', () => {
   // no dependence on whatever store/dispatch-attribution.json a machine has.
   const NO_CONFIG = join(tmpdir(), 'p2a-no-such-dispatch-attribution.json')
 
-  it('declares exactly accepted/failed/cancelled as terminal (retry+unknown excluded)', () => {
-    expect([...TERMINAL_OUTCOMES].sort()).toEqual(['accepted', 'cancelled', 'failed'])
+  // APG 1.9 §15.2 (WP6) adds `producer_completed`. This list is about TOKEN
+  // ATTRIBUTION, not verification: a card the producer finished has stopped
+  // consuming tokens for that work package whether or not the acceptance chain
+  // later agrees, and leaving it open would re-open every window the old
+  // `accepted`-from-done row used to close -- silently inflating cost per task
+  // by absorbing hours of later, unrelated session activity.
+  it('declares exactly accepted/producer_completed/failed/cancelled as terminal (retry+unknown excluded)', () => {
+    expect([...TERMINAL_OUTCOMES].sort()).toEqual(['accepted', 'cancelled', 'failed', 'producer_completed'])
     expect(TERMINAL_OUTCOMES).not.toContain('retry')
     expect(TERMINAL_OUTCOMES).not.toContain('unknown')
   })
 
-  for (const outcome of ['accepted', 'failed', 'cancelled'] as const) {
+  for (const outcome of ['accepted', 'producer_completed', 'failed', 'cancelled'] as const) {
     it(`a row AFTER the '${outcome}' outcome is not attributed; a row before it still is`, () => {
       const db = getDb()
       // Last (and only) dispatch of the session -> the open-ended case.
@@ -414,24 +428,47 @@ describe('P2-A billingMode from config (NO provider-name heuristic)', () => {
 describe('P2-A outcome rules', () => {
   beforeEach(() => { initDatabase(':memory:') })
 
-  it('accepted comes from kanban status->done for carded dispatches', () => {
+  // APG 1.9 §15.2 (WP6): kanban status->done writes `producer_completed`, NOT
+  // `accepted`. The attack-shaped version of this rule -- that the old claim is
+  // no longer producible from the old path -- lives in apg-done-not-accepted.test.ts.
+  it('producer_completed comes from kanban status->done for carded dispatches', () => {
     const db = getDb()
     const id = createDispatch(db, { source: 'kanban', agent: 'buildfejleszto', cardId: 'card-1' }, ms(T0_SEC))
     expect(resolveOutcome(db, id)).toBe('unknown') // no outcome yet
-    const n = recordAcceptedOutcomeForCard(db, 'card-1', ms(T0_SEC + 5))
+    const n = recordProducerCompletedOutcomeForCard(db, 'card-1', 'PRODUCER_SELF_ASSERTED', ms(T0_SEC + 5))
     expect(n).toBe(1)
-    expect(resolveOutcome(db, id)).toBe('accepted')
+    expect(resolveOutcome(db, id)).toBe('producer_completed')
+    // The authority rides in the evidence string, so a row can be read back as
+    // "the agent that was dispatched to it said so".
+    const row = db.prepare('SELECT evidence FROM dispatch_outcomes WHERE dispatch_id = ?').get(id) as { evidence: string }
+    expect(row.evidence).toBe('kanban:done:PRODUCER_SELF_ASSERTED')
   })
 
   it('is idempotent and never backfills a card that was never instrumented', () => {
     const db = getDb()
     const id = createDispatch(db, { source: 'kanban', agent: 'a', cardId: 'card-1' }, ms(T0_SEC))
-    recordAcceptedOutcomeForCard(db, 'card-1', ms(T0_SEC + 5))
-    expect(recordAcceptedOutcomeForCard(db, 'card-1', ms(T0_SEC + 6))).toBe(0) // idempotent
+    recordProducerCompletedOutcomeForCard(db, 'card-1', 'OPERATOR_ATTESTED', ms(T0_SEC + 5))
+    expect(recordProducerCompletedOutcomeForCard(db, 'card-1', 'OPERATOR_ATTESTED', ms(T0_SEC + 6))).toBe(0) // idempotent
     // A card with no dispatch row gets zero outcomes -- no invented history.
-    expect(recordAcceptedOutcomeForCard(db, 'never-dispatched', ms(T0_SEC + 7))).toBe(0)
+    expect(recordProducerCompletedOutcomeForCard(db, 'never-dispatched', 'OPERATOR_ATTESTED', ms(T0_SEC + 7))).toBe(0)
     expect(db.prepare('SELECT COUNT(*) AS n FROM dispatch_outcomes').get()).toEqual({ n: 1 })
+    expect(resolveOutcome(db, id)).toBe('producer_completed')
+  })
+
+  it('APG acceptance needs a kernel verification reference and refuses without one', () => {
+    const db = getDb()
+    const id = createDispatch(db, { source: 'kanban', agent: 'a', cardId: 'card-1' }, ms(T0_SEC))
+    // §15.2: acceptance is "verification + acceptance contract satisfied". A
+    // caller with nothing to copy gets nothing written, never a courtesy row.
+    expect(recordApgAcceptedOutcomeForCard(db, 'card-1', '', ms(T0_SEC + 5))).toBe(0)
+    expect(recordApgAcceptedOutcomeForCard(db, 'card-1', '   ', ms(T0_SEC + 5))).toBe(0)
+    expect(resolveOutcome(db, id)).toBe('unknown')
+
+    expect(recordApgAcceptedOutcomeForCard(db, 'card-1', 'cc-abc|chg|proposed|specified|17', ms(T0_SEC + 6))).toBe(1)
     expect(resolveOutcome(db, id)).toBe('accepted')
+    const row = db.prepare('SELECT evidence FROM dispatch_outcomes WHERE outcome = ?').get('accepted') as { evidence: string }
+    // Traceable back to the advance that granted it -- never to a card move.
+    expect(row.evidence).toBe('apg:verification:cc-abc|chg|proposed|specified|17')
   })
 
   it('unknown is the default for any dispatch without an outcome row', () => {
@@ -458,8 +495,8 @@ describe('P2-A pricing (reused from pricing.ts) + cost_per_accepted_task', () =>
     // Two accepted dispatches for buildfejleszto on anthropic/opus, same period.
     const d1 = createDispatch(db, { source: 'kanban', agent: 'buildfejleszto', cardId: 'c1', provider: 'anthropic', runtimeModel: 'claude-opus-4-8', modelProfile: 'default', taskType: 'build', project: 'MK', billingMode: 'subscription_included' }, ms(T0_SEC))
     const d2 = createDispatch(db, { source: 'kanban', agent: 'buildfejleszto', cardId: 'c2', provider: 'anthropic', runtimeModel: 'claude-opus-4-8', modelProfile: 'default', taskType: 'build', project: 'MK', billingMode: 'subscription_included' }, ms(T0_SEC))
-    recordAcceptedOutcomeForCard(db, 'c1', ms(T0_SEC))
-    recordAcceptedOutcomeForCard(db, 'c2', ms(T0_SEC))
+    recordProducerCompletedOutcomeForCard(db, 'c1', 'PRODUCER_SELF_ASSERTED', ms(T0_SEC))
+    recordProducerCompletedOutcomeForCard(db, 'c2', 'PRODUCER_SELF_ASSERTED', ms(T0_SEC))
     insertTokenUsage({ agent: 'buildfejleszto', session_id: 's', timestamp: T0_SEC + 1, input: 1_000_000, output: 0, model: 'claude-opus-4-8', dispatch_id: d1 })
     insertTokenUsage({ agent: 'buildfejleszto', session_id: 's', timestamp: T0_SEC + 2, input: 1_000_000, output: 0, model: 'claude-opus-4-8', dispatch_id: d2 })
 
@@ -478,6 +515,9 @@ describe('P2-A pricing (reused from pricing.ts) + cost_per_accepted_task', () =>
     expect(g.billingMode).toBe('subscription_included')
     expect(g.period).toBe('2026-07')
     expect(g.acceptedTasks).toBe(2)
+    // §15.2 (WP6): the default denominator is DELIVERY, and the group says so
+    // rather than leaving a reader to infer it from the function's name.
+    expect(g.acceptanceBasis).toBe('delivery_completed')
     // MARGINAL: 2 * $15 execution cost = $30, per task $15.
     expect(g.marginalCost).toBeCloseTo(30, 4)
     expect(g.marginalCostPerTask).toBeCloseTo(15, 4)
@@ -490,7 +530,7 @@ describe('P2-A pricing (reused from pricing.ts) + cost_per_accepted_task', () =>
   it('computes for research too, and unpriced model keeps marginal null while accepted still counts', () => {
     const db = getDb()
     const d = createDispatch(db, { source: 'scheduler', agent: 'research', cardId: 'r1', provider: 'anthropic', runtimeModel: 'unlisted-model', taskType: 'research' }, ms(T0_SEC))
-    recordAcceptedOutcomeForCard(db, 'r1', ms(T0_SEC))
+    recordProducerCompletedOutcomeForCard(db, 'r1', 'PRODUCER_SELF_ASSERTED', ms(T0_SEC))
     insertTokenUsage({ agent: 'research', session_id: 's', timestamp: T0_SEC + 1, input: 500_000, output: 0, model: 'unlisted-model', dispatch_id: d })
     const rows = costPerAcceptedTask(db, { pricing })
     expect(rows.length).toBe(1)

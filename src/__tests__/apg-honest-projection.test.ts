@@ -35,32 +35,59 @@ function fakeCtx(path: string): { ctx: RouteContext; out: { status: number; body
 // ways to produce a false green; this branch produced two of them by itself.
 describe('F-1: a green claim needs a RUNTIME gate and a runtime observation', () => {
   const src = readFileSync(join(REPO, 'src/apg/ui-projection.ts'), 'utf8')
-  const fn = src.slice(src.indexOf('function claimStatus('), src.indexOf('function allowedWordingFor('))
 
-  it('HEADLINE: the gate must be a runtime gate, not any passing gate', () => {
-    expect(fn).toContain('RUNTIME_GATES.has(checkpoint.checkpoint)')
-    // The old form -- any PASS in the run -- must be gone.
-    expect(fn).not.toMatch(/result === 'PASS'\s*\)\s*\)?\s*\{?\s*return 'VERIFIED_CURRENT'/)
+  // MERGE NOTE (develop <- APG 1.9 WP2 §10.3-b). This block used to read the
+  // body of `claimStatus()` and assert that F-1's hardening was present in it:
+  // RUNTIME_GATES.has(...), receipt.runtime_status === 'OBSERVED', and
+  // `spec_ready` absent from the gate set. That function NO LONGER EXISTS. The
+  // APG line removed the projection's local currentness rule outright rather
+  // than hardening it, because a second rule for one label means the weaker one
+  // decides -- and F-1's version, good as it was, still had no method
+  // authority, no source-type exclusion, no required receipt keys and no
+  // recency ceiling. The kernel's resolve_verification_status() has all four.
+  //
+  // So F-1's PROPERTY is not dropped, it is asserted against the architecture
+  // that replaced the code F-1 patched. The strongest possible form of "a
+  // documents-only PASS must not read as runtime-verified" is that this module
+  // cannot reach a checkpoint result at all when it labels a claim -- which is
+  // what these assertions now pin. The behavioural half (STALE survives a
+  // PASSing gate, an unresolved claim is NOT_RESOLVED_BY_ENGINE) lives in
+  // apg-claim-currentness.test.ts against a real sidecar-shaped database.
+
+  it('HEADLINE: a passing gate can no longer promote anything, because the projection cannot see gates', () => {
+    // F-1's defect needed three inputs: a checkpoint result, a replay run id and
+    // a receipt. If the claim-labelling code cannot reach any of them, the bug
+    // class is structurally unreachable -- including a version of it reintroduced
+    // next month. This is strictly stronger than requiring a RUNTIME gate.
+    const start = src.indexOf('function asNonEmptyString')
+    const end = src.indexOf('function summaryFor')
+    expect(start).toBeGreaterThan(0)
+    expect(end).toBeGreaterThan(start)
+    const region = src.slice(start, end)
+    expect(region).not.toMatch(/replay_run_id/)
+    expect(region).not.toMatch(/candidate\.checkpoints/)
+    expect(region).not.toMatch(/'PASS'/)
   })
 
-  it('and the receipt must say the thing was OBSERVED running', () => {
-    // Two different halves of one question: the gate says a check ran and
-    // agreed, the receipt says the thing was actually seen. OBSERVED is the
-    // kernel's own word (migration 0001: OBSERVED | UNKNOWN | MISSING).
-    expect(fn).toContain("receipt.runtime_status === 'OBSERVED'")
+  it('the module never grants the strongest label on its own authority', () => {
+    // The whole of F-1 in one grep. VERIFIED_CURRENT may be RELABELLED from a
+    // kernel status; it may never be RETURNED by code that weighed evidence.
+    expect(src).not.toMatch(/return 'VERIFIED_CURRENT'/)
+  })
+
+  it('the hardened-but-still-local rule is gone, not merely outvoted', () => {
+    // Belt and braces on the merge itself: if anyone restores claimStatus() or
+    // its RUNTIME_GATES set, the two-rules-for-one-label problem is back and
+    // this fails immediately.
+    expect(src).not.toContain('function claimStatus(')
+    expect(src).not.toContain('RUNTIME_GATES')
   })
 
   it('everything else keeps the honest label that already existed', () => {
-    // The counter-case: this must not become "refuse everything". Evidence with
-    // a real receipt behind it is still SUPPORTED, just not runtime-verified.
-    expect(fn).toContain('SUPPORTED_BUT_NOT_RUNTIME_VERIFIED')
-  })
-
-  it('only runtime-meaning gates are in the set', () => {
-    const set = src.slice(src.indexOf('const RUNTIME_GATES'), src.indexOf('const RUNTIME_GATES') + 200)
-    expect(set).toContain('runtime_acceptance')
-    // spec_ready is the gate that caused the finding — it must never be here.
-    expect(set).not.toContain('spec_ready')
+    // The counter-case F-1 was careful about, unchanged: this must not become
+    // "refuse everything". The honest middle label still exists and is still
+    // reachable for evidence that has real support but no runtime proof.
+    expect(src).toContain('SUPPORTED_BUT_NOT_RUNTIME_VERIFIED')
   })
 })
 

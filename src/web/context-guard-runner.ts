@@ -165,6 +165,37 @@ export function readLiveSaturationSignals(name: string): { pct: number | null; p
   return { pct, paneSaturated }
 }
 
+/**
+ * APG 1.9 §12.3-b (WP4): the fresh-session primitives, exported.
+ *
+ * The three functions below were private helpers of the saturation sweep. They
+ * are exactly what a FRESH VERIFIER needs -- "start this agent with an empty
+ * context and hand it one document" is the same mechanism whether the trigger
+ * is a full context window or an independent verification -- so web/
+ * fresh-verifier.ts composes them instead of growing a second restart path.
+ *
+ * What it deliberately does NOT reuse is `resumePrompt()`. That prompt's body
+ * tells the fresh session to check its in_progress cards and CONTINUE the work
+ * the previous session started; for a verifier that instruction is the §12.3
+ * violation itself -- a verifier that continues the producer's work has stopped
+ * being an independent reader of it. So the restart is shared and the prompt is
+ * not; see freshVerifierPrompt().
+ */
+export function restartSessionFresh(name: string): void {
+  performRestart(name)
+}
+
+/** The tmux session a fresh prompt is injected into (main-aware). */
+export function agentSessionFor(name: string): string {
+  return sessionFor(name)
+}
+
+/** The agent's working directory -- where a brief is written so the fresh
+ *  session can open it by path, exactly as HANDOFF.md is. */
+export function agentWorkingDir(name: string): string {
+  return workingDirFor(name)
+}
+
 function performRestart(name: string): void {
   if (name === MAIN_AGENT_ID) {
     // Platform-correct main-session restart. This was a hardcoded

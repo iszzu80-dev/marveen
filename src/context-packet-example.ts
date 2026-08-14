@@ -34,6 +34,10 @@ const EXAMPLE_SOURCES = {
  */
 export const EXAMPLE_PACKET: ContextPacket = buildContextPacket({
   cardId: 'a1b2c3d4',
+  // §12.1-e. The reference instance declares a role, so the committed example
+  // shows what a PRODUCER packet looks like -- and so the field is exercised by
+  // the byte-equality test rather than only by its own unit tests.
+  executionRole: 'producer',
   goal:
     'Raise the dashboard token-usage page from per-agent totals to per-agent, per-model totals, ' +
     'reading from the existing token_usage rows. Measurement only: no new collector, no schema change.',

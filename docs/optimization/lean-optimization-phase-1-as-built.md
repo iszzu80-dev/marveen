@@ -6,6 +6,14 @@ Built by fullstackfejleszto, 2026-07-29. Gated by marveen.
 This document records what was actually built, including the parts that were
 scoped OUT mid-build. It is not a plan.
 
+> **Állapot 2026-08-14 — ez a dokumentum az ÁGAT írja le, nem a `develop`-et.**
+> A `feat/lean-opt-phase1-gate` három commitja nincs bemergelve. A `develop`-en a
+> kapunak **egyetlen** hívója van (`src/web/message-router.ts:35`), a
+> `sendPromptToSession` bekötés (`src/web/agent-process.ts`) és a
+> `GET /api/security/gate-health` (`src/web/routes/security.ts`) **nem létezik**,
+> és a három rögzítő teszt sem. Az ág megvan és push-olva van; amíg nem landol,
+> az alábbi jelen idő az ágra igaz, a futó rendszerre nem.
+
 ## Scope as it ended up
 
 Phase 1 started as two blocks. Partway through, Istvan removed the privacy

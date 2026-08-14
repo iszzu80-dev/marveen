@@ -70,13 +70,40 @@ export interface KpiGroupKey {
 
 export interface KpiGroupRow extends KpiGroupKey {
   dispatches: number
-  accepted_tasks: number
+  /**
+   * APG 1.9 §15.2 (WP6): WHICH population the per-task figures were divided by.
+   * Always 'delivery_completed' on this report -- see `completed_tasks`. Carried
+   * explicitly so no reader has to infer it from a field name.
+   */
+  acceptance_basis: 'delivery_completed'
+  /**
+   * Dispatches whose work package REACHED ITS END: `producer_completed` (a
+   * producer said done) or `accepted` (the APG chain accepted).
+   *
+   * THIS FIELD WAS CALLED `accepted_tasks`, and the rename is the point. Before
+   * WP6 the kanban done handler wrote `accepted` for every finished card, so
+   * "accepted tasks" counted producer claims while being named after a
+   * verification that had never happened -- §28.16's RED condition, expressed
+   * as a KPI. The number is unchanged; only its name now matches what it counts.
+   */
+  completed_tasks: number
+  /**
+   * §15.2's second field: dispatches the ACCEPTANCE CHAIN accepted. Zero on this
+   * deployment until the chain has a live writer, which is the honest state and
+   * is exactly what `done_not_accepted` has been showing all along.
+   */
+  apg_accepted_tasks: number
   /** MARGINAL and ALLOCATED, never combined into one "cost" number. */
-  cost_per_accepted_task: { marginal: KpiValue; allocated: KpiValue }
-  first_pass_acceptance: KpiValue
+  cost_per_completed_task: { marginal: KpiValue; allocated: KpiValue }
+  /** Completed on the first attempt (never retried), over dispatches with any
+   *  outcome. Renamed from `first_pass_acceptance` for the reason above: it
+   *  measures completion, and calling it acceptance was the claim WP6 removes. */
+  first_pass_completion: KpiValue
+  /** The §15.2 reading of the same ratio: APG-ACCEPTED on the first attempt. */
+  apg_first_pass_acceptance: KpiValue
   retry_rate: KpiValue
   failure_rate: KpiValue
-  tokens_per_accepted_task: KpiValue
+  tokens_per_completed_task: KpiValue
   context_packet_fresh_tokens: KpiValue
   /**
    * Scope note: saturation observations are recorded per AGENT (an admission
@@ -97,7 +124,10 @@ export interface KpiReport {
   totals: {
     dispatches: number
     with_outcome: number
-    accepted: number
+    /** §15.2's first field, fleet-wide: work packages a producer finished. */
+    completed: number
+    /** §15.2's second field, fleet-wide: work packages the chain accepted. */
+    apg_accepted: number
     token_attributed_rows: number
     packet_rows: number
     routing_events: number
@@ -130,7 +160,10 @@ interface DispatchAggRow {
   billing_mode: string | null
   created_at: number
   dispatch_id: string
-  accepted: number
+  /** §15.2's first field: the work package ended (producer_completed OR accepted). */
+  completed: number
+  /** §15.2's second field: the acceptance chain accepted it. */
+  apg_accepted: number
   retried: number
   failed: number
   any_outcome: number
@@ -169,7 +202,12 @@ export function buildPhase2Kpis(
     rows = db.prepare(`
       SELECT d.agent, d.model_profile, d.runtime_model, d.provider, d.task_type, d.project,
              d.billing_mode, d.created_at, d.dispatch_id,
-             (SELECT COUNT(*) FROM dispatch_outcomes o WHERE o.dispatch_id = d.dispatch_id AND o.outcome = 'accepted') AS accepted,
+             -- §15.2 (WP6): the two words are counted SEPARATELY. Before WP6 the
+             -- kanban done handler wrote 'accepted' for every finished card, so one
+             -- subquery answered both questions and got the second one wrong.
+             (SELECT COUNT(*) FROM dispatch_outcomes o WHERE o.dispatch_id = d.dispatch_id
+                AND o.outcome IN ('accepted', 'producer_completed')) AS completed,
+             (SELECT COUNT(*) FROM dispatch_outcomes o WHERE o.dispatch_id = d.dispatch_id AND o.outcome = 'accepted') AS apg_accepted,
              (SELECT COUNT(*) FROM dispatch_outcomes o WHERE o.dispatch_id = d.dispatch_id AND o.outcome = 'retry') AS retried,
              (SELECT COUNT(*) FROM dispatch_outcomes o WHERE o.dispatch_id = d.dispatch_id AND o.outcome = 'failed') AS failed,
              (SELECT COUNT(*) FROM dispatch_outcomes o WHERE o.dispatch_id = d.dispatch_id) AS any_outcome,
@@ -193,7 +231,7 @@ export function buildPhase2Kpis(
       group_by: KPI_GROUP_BY,
       rows: [],
       totals: {
-        dispatches: 0, with_outcome: 0, accepted: 0, token_attributed_rows: 0,
+        dispatches: 0, with_outcome: 0, completed: 0, apg_accepted: 0, token_attributed_rows: 0,
         packet_rows: 0, routing_events: 0, saturation_observations: 0,
       },
       notes: ['the Phase 2 measurement tables are not present on this database; every KPI is unknown'],
@@ -215,13 +253,15 @@ export function buildPhase2Kpis(
     k: KpiGroupKey
     dispatches: number
     withOutcome: number
-    accepted: number
+    completed: number
+    apgAccepted: number
     firstPass: number
+    apgFirstPass: number
     retried: number
     failed: number
     tokenRows: number
     totalTokens: number
-    acceptedWithTokens: number
+    completedWithTokens: number
     packetRows: number
     packetFresh: number
     packetConfidences: Set<string>
@@ -241,8 +281,9 @@ export function buildPhase2Kpis(
     let acc = groups.get(key)
     if (!acc) {
       acc = {
-        k, dispatches: 0, withOutcome: 0, accepted: 0, firstPass: 0, retried: 0, failed: 0,
-        tokenRows: 0, totalTokens: 0, acceptedWithTokens: 0,
+        k, dispatches: 0, withOutcome: 0, completed: 0, apgAccepted: 0,
+        firstPass: 0, apgFirstPass: 0, retried: 0, failed: 0,
+        tokenRows: 0, totalTokens: 0, completedWithTokens: 0,
         packetRows: 0, packetFresh: 0, packetConfidences: new Set(),
         routingEvents: 0, fallbacks: 0,
       }
@@ -250,17 +291,21 @@ export function buildPhase2Kpis(
     }
     acc.dispatches++
     if (r.any_outcome > 0) acc.withOutcome++
-    if (r.accepted > 0) {
-      acc.accepted++
-      // First pass = accepted AND never retried. A dispatch accepted after a retry
-      // is still accepted; it is just not first-pass.
+    if (r.completed > 0) {
+      acc.completed++
+      // First pass = completed AND never retried. A dispatch completed after a
+      // retry is still completed; it is just not first-pass.
       if (r.retried === 0) acc.firstPass++
-      if (r.token_rows > 0) acc.acceptedWithTokens++
+      if (r.token_rows > 0) acc.completedWithTokens++
+    }
+    if (r.apg_accepted > 0) {
+      acc.apgAccepted++
+      if (r.retried === 0) acc.apgFirstPass++
     }
     if (r.retried > 0) acc.retried++
     if (r.failed > 0) acc.failed++
     acc.tokenRows += r.token_rows
-    if (r.accepted > 0) acc.totalTokens += r.total_tokens ?? 0
+    if (r.completed > 0) acc.totalTokens += r.total_tokens ?? 0
     acc.packetRows += r.packet_rows
     acc.packetFresh += r.packet_fresh_tokens ?? 0
     for (const c of (r.packet_estimate_confidences ?? '').split(',')) if (c) acc.packetConfidences.add(c)
@@ -271,7 +316,8 @@ export function buildPhase2Kpis(
   const totals = {
     dispatches: rows.length,
     with_outcome: rows.filter(r => r.any_outcome > 0).length,
-    accepted: rows.filter(r => r.accepted > 0).length,
+    completed: rows.filter(r => r.completed > 0).length,
+    apg_accepted: rows.filter(r => r.apg_accepted > 0).length,
     token_attributed_rows: rows.reduce((s, r) => s + r.token_rows, 0),
     packet_rows: rows.reduce((s, r) => s + r.packet_rows, 0),
     routing_events: rows.reduce((s, r) => s + r.routing_events, 0),
@@ -290,39 +336,48 @@ export function buildPhase2Kpis(
     return {
       ...acc.k,
       dispatches: acc.dispatches,
-      accepted_tasks: acc.accepted,
-      cost_per_accepted_task: {
+      acceptance_basis: 'delivery_completed',
+      completed_tasks: acc.completed,
+      apg_accepted_tasks: acc.apgAccepted,
+      cost_per_completed_task: {
         marginal: cost?.marginalCostPerTask != null
-          ? measured(cost.marginalCostPerTask, acc.accepted, 'currency_per_task')
+          ? measured(cost.marginalCostPerTask, acc.completed, 'currency_per_task')
           : unknown(
-            acc.accepted === 0
-              ? 'no accepted dispatch in this group, so there is no per-task cost to divide'
-              : 'no priced token_usage is attributed to the accepted dispatches in this group',
-            acc.accepted, 'currency_per_task',
+            acc.completed === 0
+              ? 'no completed dispatch in this group, so there is no per-task cost to divide'
+              : 'no priced token_usage is attributed to the completed dispatches in this group',
+            acc.completed, 'currency_per_task',
           ),
         allocated: cost?.allocatedCostPerTask != null
-          ? measured(cost.allocatedCostPerTask, acc.accepted, 'currency_per_task')
+          ? measured(cost.allocatedCostPerTask, acc.completed, 'currency_per_task')
           : unknown(
             'no subscription cost line exists for this provider and period, so nothing can be allocated',
-            acc.accepted, 'currency_per_task',
+            acc.completed, 'currency_per_task',
           ),
       },
-      first_pass_acceptance: acc.withOutcome > 0
+      first_pass_completion: acc.withOutcome > 0
         ? measured(ratio(acc.firstPass, acc.withOutcome), acc.withOutcome)
-        : unknown('no dispatch in this group has a recorded outcome, so acceptance is unknown (absence of an outcome row is not a rejection)', 0),
+        : unknown('no dispatch in this group has a recorded outcome, so completion is unknown (absence of an outcome row is not a rejection)', 0),
+      // §15.2's second field as a rate. Deliberately reported as MEASURED zero
+      // rather than unknown when outcomes exist: "nothing here was accepted by
+      // the acceptance chain" is a measurement, and it is the one this
+      // deployment most needs to keep seeing.
+      apg_first_pass_acceptance: acc.withOutcome > 0
+        ? measured(ratio(acc.apgFirstPass, acc.withOutcome), acc.withOutcome)
+        : unknown('no dispatch in this group has a recorded outcome, so APG acceptance is unknown (absence of an outcome row is not a rejection)', 0),
       retry_rate: acc.withOutcome > 0
         ? measured(ratio(acc.retried, acc.withOutcome), acc.withOutcome)
         : unknown('no dispatch in this group has a recorded outcome, so the retry rate is unknown', 0),
       failure_rate: acc.withOutcome > 0
         ? measured(ratio(acc.failed, acc.withOutcome), acc.withOutcome)
         : unknown('no dispatch in this group has a recorded outcome, so the failure rate is unknown', 0),
-      tokens_per_accepted_task: acc.acceptedWithTokens > 0
-        ? measured(Math.round(acc.totalTokens / acc.acceptedWithTokens), acc.acceptedWithTokens, 'tokens')
+      tokens_per_completed_task: acc.completedWithTokens > 0
+        ? measured(Math.round(acc.totalTokens / acc.completedWithTokens), acc.completedWithTokens, 'tokens')
         : unknown(
-          acc.accepted === 0
-            ? 'no accepted dispatch in this group'
-            : 'no token_usage row is attributed to any accepted dispatch in this group',
-          acc.accepted, 'tokens',
+          acc.completed === 0
+            ? 'no completed dispatch in this group'
+            : 'no token_usage row is attributed to any completed dispatch in this group',
+          acc.completed, 'tokens',
         ),
       context_packet_fresh_tokens: acc.packetRows > 0
         ? estimated(

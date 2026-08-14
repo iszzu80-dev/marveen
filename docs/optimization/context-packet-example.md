@@ -4,7 +4,7 @@
 
 # Context Packet -- card a1b2c3d4
 
-> packetVersion: p2b-1 | taskSize: normal | contextBudgetClass: standard
+> packetVersion: p2b-1 | executionRole: producer | taskSize: normal | contextBudgetClass: standard
 
 ## Goal
 Raise the dashboard token-usage page from per-agent totals to per-agent, per-model totals, reading from the existing token_usage rows. Measurement only: no new collector, no schema change.
