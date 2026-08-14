@@ -148,6 +148,33 @@ describe('a fagyasztás előfeltétele — a készülék bizonyítottan áll', (
     expect(assertConfigStable(db).stable).toBe(false)
   })
 
+  it('HEADLINE: egy TOVÁBBI gondos mérés nem dobja el a már megszerzett minősítést', () => {
+    // Valós csapda volt, és pont azon a napon, amikor Marveen óránként mért és
+    // egy levélre várt. A régi szabály a két legutóbbi megfigyelést hasonlította:
+    // amint megjött a levél, a pár minősített — de egy további mérés a
+    // fagyasztás előtt újra két csendes szomszédot állított elő, és a minősítés
+    // elveszett. Minél lelkiismeretesebben mért valaki, annál nehezebb volt
+    // fagyasztani.
+    //
+    // Egy kapu, ami a gondosságot bünteti, rossz kapu.
+    const at = (t: number, c: number, b: number): void => recordStabilityObservation(db, {
+      observedAt: t, detectorConfigFingerprint: DET,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: c, intakeBatchesOpened: b,
+    })
+    at(T_FREEZE - 400, 100, 32)   // obs 1
+    at(T_FREEZE - 300, 110, 32)   // csend — nem jött levél
+    at(T_FREEZE - 200, 120, 33)   // MEGJÖTT a levél
+    expect(assertConfigStable(db).stable).toBe(true)
+    at(T_FREEZE - 100, 130, 33)   // még egy mérés, fagyasztás előtt
+    const v = assertConfigStable(db)
+    expect(v.stable).toBe(true)
+    // A növekedés a stabil szakasz EGÉSZÉN mérődik, nem a két szomszédon.
+    if (v.stable) {
+      expect(v.sinceAt).toBe(T_FREEZE - 400)
+      expect(v.intakeBatchesBetween).toBe(1)
+    }
+  })
+
   it('HEADLINE: a KÉT LEGUTÓBBI számít, nem az, hogy volt-e valaha stabil pár', () => {
     // Egy régi stabil pár nem mond semmit egy tegnapi landolás után — és a
     // "volt már ilyen" alakú bizonyíték pont akkor a legcsábítóbb, amikor a
@@ -159,6 +186,23 @@ describe('a fagyasztás előfeltétele — a készülék bizonyítottan áll', (
       intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 15, intakeBatchesOpened: 15,
     })
     expect(assertConfigStable(db).stable).toBe(false)
+  })
+
+  it('HEADLINE: egy landolás ELVÁGJA a stabil szakaszt — a régi növekedés nem hordozható át', () => {
+    // A csapda-javítás ára az lett volna, ha a "növekedés a szakasz egészén"
+    // szabály engedné átvinni egy KORÁBBI konfiguráción mért futást. Nem
+    // engedi: a szakasz az első ujjlenyomat-eltérésnél lezárul.
+    const at = (t: number, det: string, c: number, b: number): void => recordStabilityObservation(db, {
+      observedAt: t, detectorConfigFingerprint: det,
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: c, intakeBatchesOpened: b,
+    })
+    at(T_FREEZE - 400, DET, 100, 32)
+    at(T_FREEZE - 300, DET, 120, 33)          // ez a par onmagaban minositene
+    at(T_FREEZE - 200, 'UJ-DETEKTOR', 130, 34) // LANDOLAS
+    at(T_FREEZE - 100, 'UJ-DETEKTOR', 140, 34) // az uj konfiguracion meg nem jott level
+    const v = assertConfigStable(db)
+    expect(v.stable).toBe(false)
+    if (!v.stable) expect(v.reason).toMatch(/nem NYILT INTAKE-BATCH/)
   })
 
   it('HEADLINE: bizonyíték nélkül nem lehet fagyasztani', () => {
