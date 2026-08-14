@@ -27,6 +27,7 @@
 //     owning pipeline sets it — see runProgressionCycle in progression-pipeline.ts)
 
 import type Database from 'better-sqlite3'
+import type { ProgressionMode } from './outbound-mode-gate.js'
 import { domainGuard } from './progression-resolver.js'
 
 // ── Wake scheduling ──────────────────────────────────────────────────────
@@ -315,7 +316,12 @@ export function setProgressionEnabled(
   domain: 'personal' | 'zst',
   caseId: string,
   enabled: boolean,
-  mode: string = 'shadow',
+  // 2026-08-15: was `mode: string = 'shadow'`. Untyped, so a typo reached the
+  // schema CHECK at runtime instead of tsc at build time — and since this is the
+  // ONLY writer of progression_mode outside the pipeline's own defaults, it is
+  // the one place `external_shadow` or `live` can ever be set. The value that
+  // decides whether an approval may run by itself should not be a free string.
+  mode: ProgressionMode = 'shadow',
   now: number = Math.floor(Date.now() / 1000),
 ): void {
   domainGuard(db, domain, caseId, 'setProgressionEnabled')

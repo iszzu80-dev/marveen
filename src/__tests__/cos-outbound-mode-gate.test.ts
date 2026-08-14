@@ -215,3 +215,33 @@ describe('progression_mode actually gates the outbound path', () => {
     })
   })
 })
+
+// ── The setter, and the gap it does NOT close ───────────────────────────────
+//
+// Measured after the gate landed: NO production code path writes
+// `external_shadow` or `live`. The only writer outside the pipeline's own
+// defaults is setProgressionEnabled, and it has zero production callers. So the
+// gate is armed and correct, and no case can currently be put into either state
+// it distinguishes. Pinned here rather than left as a comment, because a gate
+// nobody can reach is the failure this whole card was about, one level up.
+describe('setting the mode is possible but nothing does it yet', () => {
+  beforeEach(() => {
+    initDatabase(':memory:')
+    createCase(getDb(), { caseId: 'c1', title: 'T', caseType: 'CLAIM' }, NOW)
+    setMode('c1', 'internal')
+  })
+
+  it('setProgressionEnabled can move a case to live, and the gate then agrees', async () => {
+    const { setProgressionEnabled } = await import('../cos/progression-scheduler.js')
+    expect(mayApprove(getDb(), 'personal', 'c1', 'automation').allowed).toBe(false)
+    setProgressionEnabled(getDb(), 'personal', 'c1', true, 'live', NOW)
+    expect(mayApprove(getDb(), 'personal', 'c1', 'automation').allowed).toBe(true)
+  })
+
+  it('and to external_shadow, which composes but refuses automatic approval', async () => {
+    const { setProgressionEnabled } = await import('../cos/progression-scheduler.js')
+    setProgressionEnabled(getDb(), 'personal', 'c1', true, 'external_shadow', NOW)
+    expect(mayCompose(getDb(), 'personal', 'c1', 'progression').allowed).toBe(true)
+    expect(mayApprove(getDb(), 'personal', 'c1', 'automation').allowed).toBe(false)
+  })
+})
