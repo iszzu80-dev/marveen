@@ -2,7 +2,9 @@
 /**
  * Egy stabilitás-megfigyelés rögzítése — a fagyasztás előfeltétele.
  *
- *   npx tsx scripts/cos-calibration-observe.ts --ledger <path> [--db <path>]
+ *   npx tsx scripts/cos-calibration-observe.ts [--ledger <path>] [--db <path>]
+
+ * Alapertelmezett ledger: `store/cos-ledger.db` (`CALIBRATION_LEDGER_PATH`).
  *
  * Marveen feltétele: *„nem az számít, hogy ma nem nyúltál hozzá, hanem hogy a
  * fagyasztott konfiguráció FUTOTT is már, nem csak be van tolva."* Ez a script
@@ -31,7 +33,7 @@ import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import {
   ensureCalibrationSchema, recordStabilityObservation, assertConfigStable,
-  intakeSurfaceFingerprint,
+  intakeSurfaceFingerprint, CALIBRATION_LEDGER_PATH,
 } from '../src/cos/calibration-window.js'
 import { detectorConfigFingerprint } from '../src/cos/replay-run.js'
 
@@ -40,12 +42,10 @@ function flag(name: string): string | null {
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : null
 }
 
-const ledgerPath = flag('--ledger')
-if (!ledgerPath) {
-  console.error('--ledger <path> kotelezo: a stabilitas-nyomvonal merési műtermék,')
-  console.error('es a value gate is onnan olvassa a fagyasztast.')
-  process.exit(2)
-}
+// Alapertelmezes VAN, es szandekosan: egy kotelezo flag mellett minden hivo
+// maga talalja ki az utvonalat, es ket ledger lesz belole — az egyikbe ir az
+// obs, a masikbol olvas a kapu, es mindketto magabiztosan valaszol.
+const ledgerPath = flag('--ledger') ?? CALIBRATION_LEDGER_PATH
 const dbPath = flag('--db') ?? join(process.env.HOME ?? '.', '.claudeclaw', 'claudeclaw.db')
 
 const REPO = process.cwd()
@@ -74,7 +74,7 @@ function countRows(db: Database.Database, table: string): number {
 
 const opDb = new Database(resolve(dbPath), { readonly: true })
 const caseCyclesRan = countRows(opDb, 'case_progression_runs')
-const triageRunsRan = countRows(opDb, 'email_processing_batches')
+const intakeBatchesOpened = countRows(opDb, 'email_processing_batches')
 const intakeFp = intakeSurfaceFingerprint(opDb)
 opDb.close()
 
@@ -86,20 +86,20 @@ recordStabilityObservation(ledger, {
   observedAt: Math.floor(Date.now() / 1000),
   detectorConfigFingerprint: detectorFp,
   intakeSurfaceFingerprint: intakeFp,
-  caseCyclesRan, triageRunsRan,
+  caseCyclesRan, intakeBatchesOpened,
 })
 
 console.log('stabilitas-megfigyeles rogzitve')
 console.log(`  detector_config_fingerprint  ${detectorFp}`)
 console.log(`  intake_surface_fingerprint   ${intakeFp}`)
 console.log(`  case_progression_runs        ${caseCyclesRan}`)
-console.log(`  email_processing_batches     ${triageRunsRan}`)
+console.log(`  email_processing_batches     ${intakeBatchesOpened}`)
 
 const v = assertConfigStable(ledger)
 ledger.close()
 if (v.stable) {
   console.log(`\nA keszulek ALL: ${v.caseCyclesBetween} ugyciklus es `
-    + `${v.triageRunsBetween} triage-futas a ket ellenorzes kozott.`)
+    + `${v.intakeBatchesBetween} intake-batch a ket ellenorzes kozott.`)
   console.log('Fagyasztas innentol lehetseges — a kimondas nem ezé a scripté.')
 } else {
   console.log(`\nMeg nem fagyaszthato: ${v.reason}`)
