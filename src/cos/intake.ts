@@ -149,6 +149,27 @@ export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now:
     if (input.threadId) patch.gmail_thread_ids = JSON.stringify([input.threadId])
     // An outgoing email should be watched for a reply; default a follow-up.
     if (outbound) { patch.waiting_on = `reply from ${input.to ?? 'recipient'}`; patch.follow_up_at = input.followUpAt ?? now + 3 * 86400 }
+    // AN INBOUND CASE IS DUE FOR ITS FIRST LOOK NOW, and until 2026-08-14 it said
+    // so nowhere. `listTodayCases` (case-engine-core.ts) shows a case only when
+    // one of due_at / follow_up_at / next_wake_at is within the horizon, OR the
+    // status is one of the five attention statuses. A freshly intaked case is
+    // NEW with all three dates null, so it matched no branch of that WHERE --
+    // invisible in the Today view from the moment it was created, not merely
+    // until somebody triaged it. Measured before this line existed: 28 of 67
+    // open cases were missing from the view, 17 of them NEW.
+    //
+    // The date is the honest fix rather than adding NEW to the attention set,
+    // because the claim being made really is a date: this needs a first look
+    // now. The attention statuses mean something else -- the engine is stuck on
+    // this case -- and widening them would have made every consumer of that set
+    // say something it does not mean.
+    //
+    // SAFE AGAINST THE FOLLOW-UP DRAFTER, checked rather than assumed
+    // (followup-autodraft.ts:80,89): drafting requires status WAITING_EXTERNAL
+    // or FOLLOW_UP_DUE *and* a follow_up_at older than the two-day grace. A NEW
+    // case with follow_up_at = now fails both gates, so this cannot make the
+    // system write to anybody.
+    else patch.follow_up_at = now
     const keys = Object.keys(patch)
     if (keys.length) {
       db.prepare(`UPDATE personal_cases SET ${keys.map((k) => `${k}=@${k}`).join(', ')} WHERE case_id=@id`)
