@@ -172,12 +172,24 @@ def schedule_reaches(task_name, symbol, max_depth=4):
     Ezert ez a valtozat VEGIGMEGY a lancon: SKILL.md -> a benne nevezett
     scripts/ belepesi pont -> annak import- es script-hivatkozasai -> ... amig
     meg nem talalja a szimbolumot. Ha barmelyik lancszem kiesik (pl. valaki
-    kiveszi a followups lepest a cos-cycle.ts-bol), ez PIROSRA valt."""
+    kiveszi a followups lepest a cos-cycle.ts-bol), ez PIROSRA valt.
+
+    NYOLCADIK alkalom, es ez a legkinosabb, mert a sajat vokabularium ellen szol:
+    ez a fuggveny `False`-t adott, ha a SKILL.md-t NEM TUDTA ELOLVASNI. A hivo
+    ebbol FAIL-t csinalt, a FAIL pedig a fejlec szerint azt jelenti, hogy "a
+    check really ran and found a proven miss". Nem futott le, es nem talalt
+    semmit -- csak nem volt mit olvasnia.
+    A §3.7 (No Silent Unknown) tukorkepe: ott az UNKNOWN nem PASS, itt az ERROR
+    nem FAIL. Egy hamis piros ugyanugy hazudik, mint egy hamis zold, csak
+    kellemetlenebb iranyba, ezert tovabb el.
+    Ezert `None` a "nem tudtam megnezni", az `absent_in_prod` es a
+    `has_prod_caller` mar meglevo konvencioja szerint.
+    """
     try:
         with open(os.path.join(TASKS, task_name, "SKILL.md"), encoding="utf-8", errors="replace") as f:
             skill = f.read()
-    except OSError:
-        return False, "a SKILL.md nem olvashato"
+    except OSError as exc:
+        return None, "a SKILL.md nem olvashato (%s)" % exc.strerror
     entries = {os.path.join(REPO, "scripts", m) for m in _SCRIPT_REF.findall(skill)}
     entries = {p for p in entries if os.path.exists(p)}
     if not entries:
@@ -230,6 +242,18 @@ def has_prod_caller(symbol, defining_file):
 
 
 # --- scheduled tasks ---------------------------------------------------------
+
+def tasks_dir_usable():
+    """Is the scheduled-task substrate readable at all?
+
+    `task_config` returns None for two different facts -- "this task is not
+    configured" and "I cannot see the scheduled-tasks directory". A criterion
+    that cannot tell them apart reports the second as the first, which is a
+    FAIL where the vocabulary requires an ERROR. This is the positive control
+    for that whole group, in the same spirit as `search_usable`.
+    """
+    return os.path.isdir(TASKS)
+
 
 def task_config(name):
     p = os.path.join(TASKS, name, "task-config.json")
@@ -535,6 +559,8 @@ def _lv3():
     if not ok:
         return FAIL, "nincs keres nelkuli javaslat-ut (utankovetes-sopres)"
     wired, why = schedule_reaches("personal-case-wake", "sweepFollowUpCandidates")
+    if wired is None:
+        return ERROR, "a bekotes nem ellenorizheto: %s" % why
     if not wired:
         return FAIL, "a javaslat-ut letezik, de nincs bekotve az utemezesbe (%s)" % why
     ever = one("SELECT COUNT(*) FROM outbound_ledger WHERE status NOT IN ('CANCELLED')")
@@ -548,7 +574,7 @@ SPEC_TASKS = ["personal-case-wake", "personal-gmail-delta", "personal-daily-reco
 
 @crit("SD-1", "scheduler", "§14", "a spec négy ütemezett feladata létezik és engedélyezett")
 def _sd1():
-    if not os.path.isdir(TASKS):
+    if not tasks_dir_usable():
         return ERROR, "a scheduled-tasks könyvtár nem érhető el"
     bad = []
     for t in SPEC_TASKS:
@@ -570,6 +596,8 @@ def _sd1():
 def _sd2():
     # Ugyanaz a feladat, 2026-08-09-en a spec §14 nevere atnevezve
     # (cos-progression-heartbeat -> personal-case-wake) es bekapcsolva.
+    if not tasks_dir_usable():
+        return ERROR, "a scheduled-tasks könyvtár nem érhető el"
     cfg = task_config("personal-case-wake") or task_config("cos-progression-heartbeat")
     if cfg is None:
         return FAIL, "az ugy-ebreszto feladat nincs"
@@ -581,6 +609,8 @@ def _sd3():
     # A feladat 2026-08-09-en at lett nevezve a spec §14 nevere
     # (email-triage -> personal-gmail-delta), es orankentire allitva. A kriterium
     # a feladatot koveti, nem a regi nevet; a tartalma valtozatlan.
+    if not tasks_dir_usable():
+        return ERROR, "a scheduled-tasks könyvtár nem érhető el"
     cfg = task_config("personal-gmail-delta") or task_config("email-triage")
     if cfg is None:
         return FAIL, "a bejovo levelfigyelo feladat nincs"
