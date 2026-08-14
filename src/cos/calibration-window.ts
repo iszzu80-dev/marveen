@@ -280,7 +280,7 @@ export function assertConfigStable(db: Database.Database): StabilityVerdict {
               intake_surface_fingerprint AS i,
               case_cycles_ran AS c, intake_batches_opened AS t
          FROM calibration_stability_observations
-        ORDER BY observed_at DESC LIMIT 2`,
+        ORDER BY observed_at DESC`,
     ).all() as typeof rows
   } catch { rows = [] }
   if (rows.length < 2) {
@@ -289,32 +289,56 @@ export function assertConfigStable(db: Database.Database): StabilityVerdict {
       reason: 'kevesebb mint ket ellenorzes van — egy pillanatkep nem stabilitas',
     }
   }
-  const [later, earlier] = rows
-  if (later.d !== earlier.d) {
-    return { stable: false, reason: 'a detektor-konfiguracio elmozdult a ket ellenorzes kozott' }
+  // A LEGFRISSEBB FUTAM: a legutobbi megfigyelestol visszafele, amig az
+  // ujjlenyomatok azonosak. Az elso elteres lezarja — egy tegnapi landolas
+  // elotti stabil szakasz nem mond semmit a mairol.
+  const latest = rows[0]
+  const run = [latest]
+  for (const r of rows.slice(1)) {
+    if (r.d !== latest.d || r.i !== latest.i) break
+    run.push(r)
   }
-  if (later.i !== earlier.i) {
-    return { stable: false, reason: 'a beviteli felulet elmozdult a ket ellenorzes kozott' }
+  if (run.length < 2) {
+    // Volt korabbi megfigyeles, de mas konfiguracion: a futam egyelemu.
+    const prev = rows[1]
+    return {
+      stable: false,
+      reason: prev.d !== latest.d
+        ? 'a detektor-konfiguracio elmozdult az utolso ket ellenorzes kozott'
+        : 'a beviteli felulet elmozdult az utolso ket ellenorzes kozott',
+    }
   }
-  if (later.c <= earlier.c) {
+  const oldest = run[run.length - 1]
+  // A NOVEKEDES a futam EGESZEN mérodik, nem a ket legutobbi szomszedon.
+  //
+  // Ez a kulonbseg gyakorlati, es egy valodi csapdat szuntet meg. A regi
+  // szabaly a ket legutobbi megfigyelest hasonlitotta: ha a level megjott,
+  // a par minositett — de egy TOVABBI, gondos meres a fagyasztas elott
+  // ujra ket csendes szomszedot allitott elo, es a minosites elveszett.
+  // Vagyis minel lelkiismeretesebben mert valaki, annal nehezebb volt
+  // fagyasztani. Egy kapu, ami a gondossagot bunteti, rossz kapu.
+  //
+  // Amit ez NEM enged el: a futam az elso ujjlenyomat-eltéresnel lezarul,
+  // tehat egy regi stabil szakasz tovabbra sem hordozhato at egy landolason.
+  if (latest.c <= oldest.c) {
     return {
       stable: false,
       reason:
-        'a ket ellenorzes kozott nem futott le UGYCIKLUS — a konfiguracio be van tolva, '
+        'a stabil szakasz alatt nem futott le UGYCIKLUS — a konfiguracio be van tolva, '
         + 'de nem mutatta meg, hogy mukodik',
     }
   }
-  if (later.t <= earlier.t) {
+  if (latest.t <= oldest.t) {
     return {
       stable: false,
       reason:
-        'a ket ellenorzes kozott nem NYILT INTAKE-BATCH — nem erkezett feldolgozando level, '
+        'a stabil szakasz alatt nem NYILT INTAKE-BATCH — nem erkezett feldolgozando level, '
         + 'tehat a beviteli ut nem mutatta meg, hogy mukodik, es a nevezo eppen rola szol',
     }
   }
   return {
-    stable: true, sinceAt: earlier.observed_at, provenAt: later.observed_at,
-    caseCyclesBetween: later.c - earlier.c, intakeBatchesBetween: later.t - earlier.t,
+    stable: true, sinceAt: oldest.observed_at, provenAt: latest.observed_at,
+    caseCyclesBetween: latest.c - oldest.c, intakeBatchesBetween: latest.t - oldest.t,
   }
 }
 
