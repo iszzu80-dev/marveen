@@ -44,6 +44,14 @@ fi
 # egy ures bizonyitvany rosszabb a hianyanal, mert ugy nez ki, mintha lenne.
 cwd="$(pwd -P)" || { echo "measured.sh: a munkakonyvtar nem allapithato meg" >&2; exit 2; }
 
+# KI merte. Ketten dolgozunk ugyanazon a repon, KET KULON FABAN, es a ket
+# checkout utja hasonlit. Egy beillesztett "528 passed" onmagaban nem mondja
+# meg, melyikunk fajan szuletett -- 2026-08-15-en ez ket alkalommal is szamitott
+# egy nap alatt. A konvencio ("irjuk oda kezzel") ugyanaz a hibaosztaly, mint
+# amit ez a szkript megszuntet: olyasmi, amire EMLEKEZNI kell. Ezert a muszer
+# irja, nem a jelentes iroja.
+who="$( { id -un; } 2>/dev/null || echo '?' )@$( { hostname; } 2>/dev/null || echo '?' )"
+
 if git rev-parse --git-dir >/dev/null 2>&1; then
   branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
   head_sha="$(git rev-parse --short HEAD 2>/dev/null || echo '?')"
@@ -65,6 +73,7 @@ started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 printf '%s\n' "── MERES ────────────────────────────────────────────────────────"
 printf '  parancs   : %s\n' "$*"
 printf '  konyvtar  : %s\n' "$cwd"
+printf '  merte     : %s\n' "$who"
 printf '  %s\n' "$repo_state"
 printf '  indult    : %s (UTC)\n' "$started"
 printf '%s\n' "─────────────────────────────────────────────────────────────────"

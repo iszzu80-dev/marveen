@@ -79,6 +79,29 @@ rm -f "$probe"
 case "$out" in *"a fa VALTOZOTT a meres alatt"*) ok "jelzi, ha a fa valtozott futas kozben" ;;
                                               *) bad "nem jelezte a fa valtozasat" ;; esac
 
+# ── 7. A meres megnevezi, KI merte ─────────────────────────────────────────
+# Ketten merunk ket kulon fabam ugyanazon a repon. Nem eleg, hogy legyen egy
+# "merte:" sor -- annak a VALODI felhasznalot kell tartalmaznia, kulonben egy
+# uresen maradt mezo pontosan ugy nez ki, mint egy kitoltott.
+out=$(cd "$ROOT" && bash "$M" true 2>&1)
+me="$(id -un 2>/dev/null || echo '?')"
+case "$out" in *"merte"*) ok "a kimenet megnevezi, ki merte" ;;
+                       *) bad "a kimenetbol hianyzik a mero azonositoja" ;; esac
+# POZITIV KONTROLL a mezore magara: a VALODI felhasznalonev alljon ott. E nelkul
+# egy `merte : @` sor is atmenne a fenti ellenorzesen.
+case "$out" in *"merte     : $me@"*) ok "a mezoben a valodi felhasznalonev all" ;;
+                                  *) bad "a 'merte' mezo nem a valodi felhasznalot tartalmazza" ;; esac
+
+# ── 8. A szkript KOZVETLENUL futtathato ────────────────────────────────────
+# Minden fenti teszt `bash "$M"`-mel hiv, ami akkor is mukodik, ha a futtatasi
+# bit lehullott -- vagyis a szvit szerkezetileg vak volt pontosan arra a hibara,
+# amit 2026-08-15-en el is kovettem: egy mutacios kor `mv /tmp`-bol
+# visszamasolta a fajlt 644-gyel, es a commit ezt vitte tovabb. A dokumentalt
+# hasznalat (`scripts/measured.sh npx vitest run`) onnantol `Permission denied`.
+# Ezert ez az EGY teszt nem `bash`-sel indit, hanem ugy, ahogy a README mondja.
+"$M" true >/dev/null 2>&1
+check "kozvetlenul futtatva is lefut (a futtatasi bit megvan)" 0 $?
+
 echo
 echo "  $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
