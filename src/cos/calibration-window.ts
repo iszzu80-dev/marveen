@@ -153,14 +153,149 @@ export function ensureCalibrationSchema(db: Database.Database): void {
     BEFORE DELETE ON calibration_config_observations
     BEGIN SELECT RAISE(ABORT, 'a konfiguracio-megfigyeles vegleges'); END
   `)
+  // A fagyás ELŐTTI stabilitás-nyomvonal.
+  //
+  // Ez volt az utolsó memóriában tartott lépés az egész láncban: „reggelig
+  // figyelem a két ujjlenyomatot". Egy megfigyelés, ami csak valakinek az
+  // emlékezetében él, utólag nem különböztethető meg egy meg nem történttől —
+  // és pont a fagyasztás az a pont, ahol a legkevésbé engedhetjük meg.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS calibration_stability_observations (
+      observed_at                 INTEGER PRIMARY KEY,
+      detector_config_fingerprint TEXT NOT NULL,
+      intake_surface_fingerprint  TEXT NOT NULL,
+      cycles_ran                  INTEGER NOT NULL
+    )
+  `)
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_calibration_stability_no_update
+    BEFORE UPDATE ON calibration_stability_observations
+    BEGIN SELECT RAISE(ABORT, 'a stabilitas-megfigyeles vegleges'); END
+  `)
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_calibration_stability_no_delete
+    BEFORE DELETE ON calibration_stability_observations
+    BEGIN SELECT RAISE(ABORT, 'a stabilitas-megfigyeles vegleges'); END
+  `)
 }
 
-export type FreezeResult = { ok: true } | { ok: false; reason: string }
+// ── Fagyás ELŐTTI stabilitás ────────────────────────────────────────────
 
-/** Befagyaszt. Egyszer. */
+/**
+ * Marveen fagyasztás-előtti feltétele, nyomvonalként.
+ *
+ * A saját szavaival: *„Nem az számít, hogy ma nem nyúltál hozzá, hanem hogy a
+ * fagyasztott konfiguráció FUTOTT is már, nem csak be van tolva."*
+ *
+ * Ezért van a `cyclesRan`. Két azonos ujjlenyomat önmagában csak annyit
+ * bizonyít, hogy két időpontban ugyanaz a kód volt a lemezen — azt nem, hogy a
+ * készülék működött közben. Egy fagyasztás egy soha nem futott konfiguráción
+ * ugyanaz a hiba, mint egy mozgón, csak nehezebb észrevenni.
+ */
+export interface StabilityObservation {
+  observedAt: number
+  detectorConfigFingerprint: string
+  intakeSurfaceFingerprint: string
+  /** Monoton számláló: hány triage-/ügyciklus futott le eddig összesen. */
+  cyclesRan: number
+}
+
+export type StabilityVerdict =
+  | { stable: true; sinceAt: number; provenAt: number; cyclesBetween: number }
+  | { stable: false; reason: string }
+
+/** Append-only. Egy elsimítható nyomvonal nem bizonyíték. */
+export function recordStabilityObservation(
+  db: Database.Database, obs: StabilityObservation,
+): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO calibration_stability_observations
+       (observed_at, detector_config_fingerprint, intake_surface_fingerprint, cycles_ran)
+     VALUES (?, ?, ?, ?)`,
+  ).run(
+    obs.observedAt, obs.detectorConfigFingerprint,
+    obs.intakeSurfaceFingerprint, obs.cyclesRan,
+  )
+}
+
+/**
+ * Áll-e a készülék — a KÉT LEGUTÓBBI megfigyelés alapján.
+ *
+ * Szándékosan a két legutóbbi, nem „volt-e valaha két egyforma". Egy régi stabil
+ * pár nem mond semmit egy tegnapi landolás után, és a „volt már ilyen" alakú
+ * bizonyíték pont akkor a legcsábítóbb, amikor a friss adat nem elég.
+ */
+export function assertConfigStable(db: Database.Database): StabilityVerdict {
+  let rows: Array<{ observed_at: number; d: string; i: string; c: number }> = []
+  try {
+    rows = db.prepare(
+      `SELECT observed_at, detector_config_fingerprint AS d,
+              intake_surface_fingerprint AS i, cycles_ran AS c
+         FROM calibration_stability_observations
+        ORDER BY observed_at DESC LIMIT 2`,
+    ).all() as typeof rows
+  } catch { rows = [] }
+  if (rows.length < 2) {
+    return {
+      stable: false,
+      reason: 'kevesebb mint ket ellenorzes van — egy pillanatkep nem stabilitas',
+    }
+  }
+  const [later, earlier] = rows
+  if (later.d !== earlier.d) {
+    return { stable: false, reason: 'a detektor-konfiguracio elmozdult a ket ellenorzes kozott' }
+  }
+  if (later.i !== earlier.i) {
+    return { stable: false, reason: 'a beviteli felulet elmozdult a ket ellenorzes kozott' }
+  }
+  if (later.c <= earlier.c) {
+    return {
+      stable: false,
+      reason:
+        'a ket ellenorzes kozott nem futott le teljes ciklus — a konfiguracio be van tolva, '
+        + 'de nem mutatta meg, hogy mukodik',
+    }
+  }
+  return {
+    stable: true, sinceAt: earlier.observed_at, provenAt: later.observed_at,
+    cyclesBetween: later.c - earlier.c,
+  }
+}
+
+export type FreezeResult = { ok: true; provenAt: number } | { ok: false; reason: string }
+
+/**
+ * Befagyaszt. Egyszer, és csak álló készüléken.
+ *
+ * A stabilitás-feltétel itt KAPU, nem ajánlás. Marveen döntése marad, hogy
+ * MIKOR mondja ki; ez csak azt zárja ki, hogy egy mozgó vagy soha nem futott
+ * konfiguráción mondja ki — ami pontosan az, amit ő maga nem akar. Egy
+ * fagyasztás egy mozgó készüléken nem gyengébb mérés: nem mérés.
+ *
+ * A bizonyított és a befagyasztott ujjlenyomatnak EGYEZNIE kell. Enélkül a
+ * stabilitást az egyik konfiguráción lehetne bizonyítani, és egy másikat
+ * befagyasztani — és pont ez az a lépés, ami sosem szándékosan történik.
+ */
 export function freezeCalibration(
   db: Database.Database, freeze: CalibrationFreeze,
 ): FreezeResult {
+  const stability = assertConfigStable(db)
+  if (!stability.stable) {
+    return { ok: false, reason: `a keszulek nem bizonyitottan all: ${stability.reason}` }
+  }
+  const proven = db.prepare(
+    `SELECT detector_config_fingerprint AS d, intake_surface_fingerprint AS i
+       FROM calibration_stability_observations ORDER BY observed_at DESC LIMIT 1`,
+  ).get() as { d: string; i: string }
+  if (proven.d !== freeze.detectorConfigFingerprint
+    || proven.i !== freeze.intakeSurfaceFingerprint) {
+    return {
+      ok: false,
+      reason:
+        'a befagyasztott ujjlenyomat nem az, amin a stabilitas bizonyitva lett — '
+        + 'egy masik konfiguracio fagyasztasa a bizonyitekot ervenytelenne teszi',
+    }
+  }
   try {
     db.prepare(
       `INSERT INTO calibration_freeze
@@ -173,7 +308,7 @@ export function freezeCalibration(
   } catch {
     return { ok: false, reason: 'mar van befagyasztas — a befagyasztas vegleges' }
   }
-  return { ok: true }
+  return { ok: true, provenAt: stability.provenAt }
 }
 
 export function readFreeze(db: Database.Database): CalibrationFreeze | null {
