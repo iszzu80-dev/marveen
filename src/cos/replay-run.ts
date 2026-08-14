@@ -31,9 +31,24 @@
 
 import { createHash } from 'node:crypto'
 import type Database from 'better-sqlite3'
+import { DETECTOR_BEHAVIOUR_SCOPE } from './detector-scope.js'
 
-/** §1.4.6: the two sides of the comparison. */
-export type ReplayArm = 'REACTIVE_CONTROL' | 'PROACTIVE_SHADOW'
+/**
+ * §1.4.6: the two sides of the comparison — plus a third that is not a side.
+ *
+ * CALIBRATION exists because of a measurement Marveen took on 2026-08-13: the
+ * 90-day corpus §26/3 asks for does not exist anywhere. The live Case layer is
+ * eight days deep on the personal side and six on the corporate one. So the
+ * eligible-observation VOLUME — the thing the 90 days was a proxy for — has to
+ * be measured forward rather than backward.
+ *
+ * A calibration run measures volume and NOTHING ELSE. Its outputs never enter an
+ * adjudication session, which is what keeps V4-F14's named FAIL out of reach:
+ * choosing a threshold after seeing RESULTS is manufacturing a PASS, and results
+ * are what adjudication produces. Volume is not a result. The firewall between
+ * them is enforced below rather than remembered.
+ */
+export type ReplayArm = 'REACTIVE_CONTROL' | 'PROACTIVE_SHADOW' | 'CALIBRATION'
 
 export interface ReplayRun {
   runId: string
@@ -75,7 +90,7 @@ export function ensureReplaySchema(db: Database.Database): void {
       sealed_at          INTEGER,
       output_digest      TEXT,
       output_count       INTEGER NOT NULL DEFAULT 0,
-      CHECK (arm IN ('REACTIVE_CONTROL','PROACTIVE_SHADOW'))
+      CHECK (arm IN ('REACTIVE_CONTROL','PROACTIVE_SHADOW','CALIBRATION'))
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_replay_corpus ON replay_runs(corpus_fingerprint, arm)`)
@@ -203,18 +218,23 @@ export function beginRun(
   if (existing) return { ok: false, reason: `ez a run azonosító már létezik: ${input.runId}` }
 
   if (input.arm === 'REACTIVE_CONTROL') {
+    // A CALIBRATION run counts here exactly as a shadow run does, and that is
+    // deliberate. It produces proactive output — unadjudicated, but seen — and
+    // a control built afterwards was built by someone who had seen it. The
+    // consequence falls out as a property worth having: calibration and
+    // measurement cannot share a corpus.
     const proactive = ledger.prepare(
-      `SELECT run_id FROM replay_runs
-        WHERE corpus_fingerprint = ? AND arm = 'PROACTIVE_SHADOW'
+      `SELECT run_id, arm FROM replay_runs
+        WHERE corpus_fingerprint = ? AND arm IN ('PROACTIVE_SHADOW','CALIBRATION')
         ORDER BY started_at LIMIT 1`,
-    ).get(input.corpusFingerprint) as { run_id: string } | undefined
+    ).get(input.corpusFingerprint) as { run_id: string; arm: string } | undefined
     if (proactive) {
       return {
         ok: false,
         reason:
-          `ezen a korpuszon már futott proaktív ág (${proactive.run_id}), ezért a reaktív kontroll `
-          + 'most már nem hozható létre: a §1.4.6 szerint a proaktív kimenet ismeretében '
-          + 'előállított baseline nem elfogadható kontroll',
+          `ezen a korpuszon már futott proaktív ág (${proactive.run_id}, ${proactive.arm}), ezért a `
+          + 'reaktív kontroll most már nem hozható létre: a §1.4.6 szerint a proaktív kimenet '
+          + 'ismeretében előállított baseline nem elfogadható kontroll',
       }
     }
   }
@@ -322,6 +342,15 @@ export function assertComparable(
   if (!control) reasons.push(`nincs ilyen kontroll-futás: ${controlRunId}`)
   if (!proactive) reasons.push(`nincs ilyen proaktív futás: ${proactiveRunId}`)
   if (control && proactive) {
+    // The calibration firewall, stated where it bites. A calibration run exists
+    // to size the window; letting one into an adjudication session would put the
+    // very observations that CHOSE the threshold inside the sample the threshold
+    // is applied to.
+    for (const r of [control, proactive]) {
+      if (r.arm === 'CALIBRATION') {
+        reasons.push(`a(z) ${r.runId} kalibrációs futás — kalibrációs kimenet nem kerülhet adjudikációba`)
+      }
+    }
     if (control.arm !== 'REACTIVE_CONTROL') reasons.push('a kontrollnak jelölt futás nem REACTIVE_CONTROL ágon van')
     if (proactive.arm !== 'PROACTIVE_SHADOW') reasons.push('a proaktívnak jelölt futás nem PROACTIVE_SHADOW ágon van')
     if (control.corpusFingerprint !== proactive.corpusFingerprint) {
@@ -347,4 +376,69 @@ export function reproduces(a: ReplayRun, b: ReplayRun): boolean {
     && a.configVersion === b.configVersion
     && a.outputDigest !== null
     && a.outputDigest === b.outputDigest
+}
+
+
+/**
+ * The DETECTOR configuration's fingerprint — the freeze point as a gate rather
+ * than a date.
+ *
+ * Marveen's objection, 2026-08-13: "a promise that no proactive module will land
+ * is exactly the kind of statement that gets quietly broken." So the calibration
+ * run records this hash and refuses to run against a different one. Frozen from
+ * the commit the calibration starts on, with the hash as the evidence.
+ *
+ * It hashes the SOURCE of the detector modules, not a version string somebody
+ * has to remember to bump. A version string is another promise.
+ *
+ * The intake modules are in the hash too, and that is the less obvious half.
+ * Marveen measured that today's cases were created by his own email-triage
+ * heartbeat — so what looks like an organic arrival rate is partly the output of
+ * our own intake channel. The eligible-observation rate is therefore CONDITIONAL
+ * on an intake configuration, and changing intake invalidates a frozen window
+ * exactly as changing the detector does. A hash covering only the detector would
+ * let the denominator move while the experiment claimed to be frozen.
+ */
+export function detectorConfigFingerprint(
+  readFile: (path: string) => string,
+  listFiles: (dir: string) => string[],
+  roots: readonly string[] = DETECTOR_BEHAVIOUR_SCOPE,
+): string {
+  const h = createHash('sha256')
+  const files: string[] = []
+  for (const root of roots) {
+    if (root.endsWith('.ts')) { files.push(root); continue }
+    files.push(...listFiles(root))
+  }
+  for (const f of [...files].sort()) {
+    let body = ''
+    try { body = readFile(f) } catch { body = '<<UNREADABLE>>' }
+    h.update(f + ' ' + body + ' ')
+  }
+  return h.digest('hex').slice(0, 32)
+}
+
+export type ConfigGateResult = { ok: true } | { ok: false; reason: string }
+
+/**
+ * §26/2 as a gate: refuse a run whose detector configuration differs from the
+ * one the registration froze.
+ *
+ * Returns ok when no expectation was registered — a run before the freeze is
+ * legitimate, and refusing it would make the first run impossible. The gate
+ * bites the moment somebody has committed to a hash.
+ */
+export function assertFrozenConfig(
+  expected: string | null | undefined,
+  actual: string,
+): ConfigGateResult {
+  if (!expected) return { ok: true }
+  if (expected === actual) return { ok: true }
+  return {
+    ok: false,
+    reason:
+      'a detektor-konfiguracio megvaltozott a regisztracio ota (vart ' + expected
+      + ', kapott ' + actual + ') — a befagyasztott ablakban felhalmozott meres ervenytelen, '
+      + 'a kalibraciot ujra kell kezdeni',
+  }
 }

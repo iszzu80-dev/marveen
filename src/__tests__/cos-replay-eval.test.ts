@@ -15,6 +15,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import Database from 'better-sqlite3'
 import {
   ensureReplaySchema, beginRun, recordOutput, sealRun,
+  detectorConfigFingerprint, assertFrozenConfig,
 } from '../cos/replay-run.js'
 import {
   ensureAdjudicationSchema, recordJudgment, evaluateBlinding,
@@ -23,8 +24,13 @@ import {
 import {
   compareArms, buildSessionFromRuns, evaluateValueGate, controlReproducibility,
   shadowEvalCounters, DEFAULT_VALUE_GATE_REGISTRATION,
+  ensureEligibilitySchema, labelEligibleObservation, eligibleObservationCount,
+  completeEligibilityPass, eligibilityTally,
   type PacketMapper,
 } from '../cos/replay-eval.js'
+import {
+  ensureCalibrationSchema, freezeCalibration, recordStabilityObservation,
+} from '../cos/calibration-window.js'
 
 const T0 = 1_700_000_000
 let db: Database.Database
@@ -186,9 +192,33 @@ describe('§24.2 the value gate — blinding can only veto', () => {
 
   /** 20 shared + 40 proactive-only cases: enough packets for the blinding
    *  minimum and enough proactive-only cases for the catch threshold. */
-  function bigSession(): void {
+  function bigSession(uncertainCount = 0): void {
     const shared = Array.from({ length: 20 }, (_, i) => `s${i}`)
     const only = Array.from({ length: 40 }, (_, i) => `p${i}`)
+    const uncertain = Array.from({ length: uncertainCount }, (_, i) => `u${i}`)
+    // The eligibility pass comes FIRST — before any arm runs — because that is
+    // the only order in which the labeller can be shown not to have seen the
+    // detector output.
+    ensureEligibilitySchema(db)
+    for (const c of only) {
+      labelEligibleObservation(db, {
+        corpusFingerprint: 'corpus-a', domain: 'personal', caseId: c,
+        shape: 'DEADLINE_PASSED_UNSEEN', observedAt: T0 - 20, evidenceAt: T0 - 100,
+        labelledBy: 'istvan', labelledAt: T0 - 10,
+        rationale: 'a hatarido eltelt es a tulajdonos nem tudott rola',
+      })
+    }
+    for (const c of uncertain) {
+      labelEligibleObservation(db, {
+        corpusFingerprint: 'corpus-a', domain: 'personal', caseId: c,
+        shape: 'UNCERTAIN', observedAt: T0 - 20, evidenceAt: T0 - 100,
+        labelledBy: 'istvan', labelledAt: T0 - 10,
+        rationale: 'nem tudom eldonteni, hogy a tulajdonosnak kellett-e tudnia rola',
+      })
+    }
+    completeEligibilityPass(db, {
+      corpusFingerprint: 'corpus-a', labelledBy: 'istvan', completedAt: T0 - 5,
+    })
     twoArms(shared, [...shared, ...only])
     const r = build()
     if (!r.ok) throw new Error(r.reasons.join('; '))
@@ -254,6 +284,96 @@ describe('§24.2 the value gate — blinding can only veto', () => {
     expect(evaluateValueGate(db, 's1').result).toBe('EVALUATION_WINDOW_DEGRADED')
   })
 
+  it('HEADLINE (5): a PRE-REGISTERED uncertain threshold degrades the window', () => {
+    // Marveen's fifth condition, at the gate. A labelling pass that could not
+    // decide most of what it saw has not measured the corpus — it has reported
+    // on the definition. That is worth seeing, not smoothing over.
+    bigSession(60) // 40 decided, 60 UNCERTAIN → 60%
+    judgeAll('s1', { correctRate: 0.5 })
+    const g = evaluateValueGate(db, 's1', {
+      ...DEFAULT_VALUE_GATE_REGISTRATION, maxUncertainRate: 0.3,
+    })
+    expect(g.uncertainCount).toBe(60)
+    expect(g.uncertainRate).toBeCloseTo(0.6, 3)
+    expect(g.result).toBe('EVALUATION_WINDOW_DEGRADED')
+    expect(g.detail).toMatch(/UNCERTAIN/)
+    // The denominator itself never absorbed them.
+    expect(g.eligibleObservationCount).toBe(40)
+  })
+
+  it('(5): without a registered threshold the same rate is reported and does not gate', () => {
+    // A threshold invented after seeing the number is the move V4-F14 forbids
+    // for the catch count. So the default reports and stands aside.
+    bigSession(60)
+    judgeAll('s1', { correctRate: 0.5 })
+    const g = evaluateValueGate(db, 's1')
+    expect(g.uncertainRate).toBeCloseTo(0.6, 3)
+    expect(g.result).not.toBe('EVALUATION_WINDOW_DEGRADED')
+  })
+
+  it('HEADLINE: a lejárt kalibráció SAJÁT kimenet, és megelőzi a volumen-kérdéseket', () => {
+    // A sorrend a lényeg. A `minEligibleObservations` egy adott fagyasztott
+    // készülékre volt méretezve; egy számot ehhez mérni azután, hogy a készülék
+    // megváltozott, nem gyengébb válasz — válasz egy kérdésre, amit senki nem
+    // tett fel.
+    //
+    // És miért saját kimenet, nem `EVALUATION_WINDOW_DEGRADED`: ez az a fajta
+    // elavulás, amitől semmi nem hibázik. Egy általános „degraded" címke alá
+    // söpörve pont az észrevehetetlensége maradna meg.
+    bigSession()
+    judgeAll('s1', { correctRate: 0.5 })
+    ensureCalibrationSchema(db)
+    // A fagyasztás előfeltétele: két azonos ellenőrzés, közben lefutott ciklussal.
+    recordStabilityObservation(db, {
+      observedAt: T0 - 1200, detectorConfigFingerprint: 'det-v1',
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 5, triageRunsRan: 5,
+    })
+    recordStabilityObservation(db, {
+      observedAt: T0 - 1100, detectorConfigFingerprint: 'det-v1',
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 8, triageRunsRan: 8,
+    })
+    freezeCalibration(db, {
+      calibrationCommit: '30e16ef92753', detectorConfigFingerprint: 'det-v1',
+      intakeSurfaceFingerprint: 'intake-v1', frozenAt: T0 - 1000,
+    })
+    const g = evaluateValueGate(db, 's1', DEFAULT_VALUE_GATE_REGISTRATION, {
+      detectorConfigFingerprint: 'det-v1', intakeSurfaceFingerprint: 'intake-v2',
+    })
+    expect(g.result).toBe('CALIBRATION_EXPIRED')
+    expect(g.detail).toMatch(/LEJART/)
+  })
+
+  it('a változatlan készülék mellett a kapu a szokásos úton megy tovább', () => {
+    bigSession()
+    judgeAll('s1', { correctRate: 0.5 })
+    ensureCalibrationSchema(db)
+    // A fagyasztás előfeltétele: két azonos ellenőrzés, közben lefutott ciklussal.
+    recordStabilityObservation(db, {
+      observedAt: T0 - 1200, detectorConfigFingerprint: 'det-v1',
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 5, triageRunsRan: 5,
+    })
+    recordStabilityObservation(db, {
+      observedAt: T0 - 1100, detectorConfigFingerprint: 'det-v1',
+      intakeSurfaceFingerprint: 'intake-v1', caseCyclesRan: 8, triageRunsRan: 8,
+    })
+    freezeCalibration(db, {
+      calibrationCommit: '30e16ef92753', detectorConfigFingerprint: 'det-v1',
+      intakeSurfaceFingerprint: 'intake-v1', frozenAt: T0 - 1000,
+    })
+    const g = evaluateValueGate(db, 's1', DEFAULT_VALUE_GATE_REGISTRATION, {
+      detectorConfigFingerprint: 'det-v1', intakeSurfaceFingerprint: 'intake-v1',
+    })
+    expect(g.result).not.toBe('CALIBRATION_EXPIRED')
+  })
+
+  it('futáskori konfiguráció nélkül nincs lejárat-ellenőrzés', () => {
+    // Ugyanaz az elv, mint az `assertFrozenConfig`-nál: egy kapu, ami az első
+    // futást lehetetlenné teszi, nem kapu.
+    bigSession()
+    judgeAll('s1', { correctRate: 0.5 })
+    expect(evaluateValueGate(db, 's1').result).not.toBe('CALIBRATION_EXPIRED')
+  })
+
   it('reports coverage, so a half-judged session cannot look complete', () => {
     bigSession()
     const rows = db.prepare(`SELECT packet_id FROM adjudication_packets WHERE session_id='s1' LIMIT 10`)
@@ -306,5 +426,185 @@ describe('§1.4.6(5) reproducibility, and the metrics that refuse to be faked', 
     const c = shadowEvalCounters(db, 'ctl-1', 'sh-1')
     expect(c.existingCaseReuseRate).toBeCloseTo(0.5, 3)
     expect(c.duplicateInitiativeRate).toBe(0)
+  })
+})
+
+
+// Added 2026-08-13 after Marveen's second measurement round. Two of his findings
+// turned into code, and one of them exposed a defect in what was already here.
+describe('the eligible-observation denominator is labelled INDEPENDENTLY', () => {
+  beforeEach(() => {
+    db = new Database(':memory:')
+    ensureReplaySchema(db); ensureAdjudicationSchema(db); ensureEligibilitySchema(db)
+  })
+
+  it('HEADLINE: with nobody having labelled the corpus, the gate does NOT pass', () => {
+    // THE BUG THIS REPLACED. `eligibleObservationCount` used to be
+    // `comparison.proactiveCases` — the number of cases the PROACTIVE ARM
+    // touched. The denominator of "how much value did the detector add" was the
+    // detector's own output, so a detector that noticed less would have scored
+    // equally well by noticing less of a smaller world.
+    //
+    // Marveen's definition is what found it: eligibility must be decidable from
+    // a snapshot by somebody who has not seen the detector output.
+    const shared = Array.from({ length: 20 }, (_, i) => `s${i}`)
+    const only = Array.from({ length: 40 }, (_, i) => `p${i}`)
+    twoArms(shared, [...shared, ...only])
+    const built = build()
+    expect(built.ok).toBe(true)
+    judgeAll('s1', { correctRate: 0.5 })
+
+    const g = evaluateValueGate(db, 's1')
+    expect(g.blinding.verdict).toBe('VALID')
+    expect(g.eligibleObservationCount).toBeNull()
+    expect(g.result).toBe('EVALUATION_WINDOW_DEGRADED')
+    expect(g.detail).toMatch(/nevezoje hianyzik|nevezője hiányzik/)
+  })
+
+  it('HEADLINE: null and zero are different facts, and only one is a result', () => {
+    // An unassessed corpus reads as null; a corpus somebody went through and
+    // found nothing in reads as 0. A gate that cannot tell them apart treats
+    // "nobody looked" as "nothing was there".
+    expect(eligibleObservationCount(db, 'corpus-never-labelled')).toBeNull()
+    completeEligibilityPass(db, {
+      corpusFingerprint: 'corpus-empty', labelledBy: 'istvan', completedAt: T0,
+    })
+    expect(eligibleObservationCount(db, 'corpus-empty')).toBe(0)
+    labelEligibleObservation(db, {
+      corpusFingerprint: 'corpus-a', domain: 'personal', caseId: 'c1',
+      shape: 'DEADLINE_PASSED_UNSEEN', observedAt: T0 - 10, evidenceAt: T0 - 100,
+      labelledBy: 'istvan', labelledAt: T0,
+      rationale: 'a hatarido eltelt es nem tudott rola',
+    })
+    completeEligibilityPass(db, {
+      corpusFingerprint: 'corpus-a', labelledBy: 'istvan', completedAt: T0,
+    })
+    expect(eligibleObservationCount(db, 'corpus-a')).toBe(1)
+  })
+
+  it('HEADLINE: labelling is refused once a proactive run over that corpus has sealed', () => {
+    // After the detector output exists, a person labelling the corpus can no
+    // longer be SHOWN not to have seen it — and "can no longer be shown" is the
+    // standard §1.4.3 applies to blinding, not "probably did not".
+    arm('ctl-1', 'REACTIVE_CONTROL', ['a'], T0)
+    arm('sh-1', 'PROACTIVE_SHADOW', ['a', 'b'], T0 + 100)
+    const r = labelEligibleObservation(db, {
+      corpusFingerprint: 'corpus-a', domain: 'personal', caseId: 'b',
+      shape: 'FOLLOW_UP_ELAPSED_WITHOUT_MOVEMENT', observedAt: T0 - 10, evidenceAt: T0 - 100,
+      labelledBy: 'istvan', labelledAt: T0 + 200,
+      rationale: 'kesobb cimkezve, a futas lezarasa utan',
+    })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toMatch(/vak volt/)
+  })
+
+  it('a label is final — it cannot be edited or removed', () => {
+    labelEligibleObservation(db, {
+      corpusFingerprint: 'corpus-a', domain: 'personal', caseId: 'c1',
+      shape: 'DEADLINE_PASSED_UNSEEN', observedAt: T0 - 10, evidenceAt: T0 - 100,
+      labelledBy: 'istvan', labelledAt: T0, rationale: 'eleg hosszu indoklas',
+    })
+    expect(() => db.prepare("UPDATE eligible_observations SET shape='STATE_CHANGE_INVALIDATED_DECISION'").run())
+      .toThrow(/final/)
+    expect(() => db.prepare('DELETE FROM eligible_observations').run()).toThrow(/final/)
+  })
+})
+
+describe('the freeze point is a gate, not a date', () => {
+  it('HEADLINE: a changed detector configuration invalidates the frozen window', () => {
+    // Marveen: "a promise that no proactive module will land is exactly the kind
+    // of statement that gets quietly broken." So the hash is the evidence.
+    expect(assertFrozenConfig('abc123', 'abc123')).toEqual({ ok: true })
+    const bad = assertFrozenConfig('abc123', 'def456')
+    expect(bad.ok).toBe(false)
+    if (!bad.ok) expect(bad.reason).toMatch(/ujra kell kezdeni|újra kell kezdeni/)
+  })
+
+  it('no registered expectation means no gate — the first run has to be possible', () => {
+    expect(assertFrozenConfig(null, 'anything')).toEqual({ ok: true })
+    expect(assertFrozenConfig(undefined, 'anything')).toEqual({ ok: true })
+  })
+
+  it('HEADLINE: the INTAKE modules are in the hash, not only the detector', () => {
+    // The less obvious half. Marveen measured that today's cases were created by
+    // his own email-triage heartbeat, so what looks like an organic arrival rate
+    // is partly the output of our own intake channel. The eligible-observation
+    // rate is conditional on an intake configuration, and a hash covering only
+    // the detector would let the denominator move while the experiment claimed
+    // to be frozen.
+    const files: Record<string, string> = {
+      'src/cos/proactive/a.ts': 'detector v1',
+      'src/cos/intake.ts': 'intake v1',
+      'src/cos/deadline-index.ts': 'deadlines v1',
+      'src/cos/triage-bridge.ts': 'triage v1',
+    }
+    const read = (p: string): string => files[p] ?? ''
+    const list = (): string[] => ['src/cos/proactive/a.ts']
+    const before = detectorConfigFingerprint(read, list)
+    files['src/cos/intake.ts'] = 'intake v2'
+    expect(detectorConfigFingerprint(read, list)).not.toBe(before)
+  })
+
+  it('an unreadable file is marked, not skipped', () => {
+    // A file that cannot be read is not a file that is unchanged.
+    const boom = (): string => { throw new Error('nope') }
+    const list = (): string[] => []
+    expect(detectorConfigFingerprint(boom, list)).toBeTruthy()
+  })
+})
+
+
+describe('conditions 2, 3 and 5 of the eligible-observation definition', () => {
+  beforeEach(() => {
+    db = new Database(':memory:')
+    ensureReplaySchema(db); ensureAdjudicationSchema(db); ensureEligibilitySchema(db)
+  })
+
+  const label = (over: Record<string, unknown> = {}) => labelEligibleObservation(db, {
+    corpusFingerprint: 'corpus-a', domain: 'personal', caseId: 'c1',
+    shape: 'DEADLINE_PASSED_UNSEEN', observedAt: T0, evidenceAt: T0 - 1000,
+    labelledBy: 'istvan', labelledAt: T0, rationale: 'a hatarido eszrevetlenul telt el',
+    ...over,
+  } as Parameters<typeof labelEligibleObservation>[1])
+
+  it('HEADLINE (2): evidence that arrived AFTER the moment is not a missed observation', () => {
+    // "What only became knowable later" — the condition that separates a missed
+    // catch from hindsight. Without both timestamps it is an instruction nobody
+    // can check.
+    const r = label({ evidenceAt: T0 + 100 })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toMatch(/2\. feltetel/)
+  })
+
+  it('evidence strictly before the moment is accepted', () => {
+    expect(label().ok).toBe(true)
+  })
+
+  it('(3): a label with no reasoning is refused', () => {
+    // Owner-relevance has no mechanical test. What CAN be insisted on is the one
+    // thing that shows somebody weighed it.
+    const r = label({ rationale: 'ok' })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toMatch(/3\. feltetel/)
+  })
+
+  it('HEADLINE (5): UNCERTAIN is counted apart, and folded into neither side', () => {
+    // A binary label forced onto a doubtful case is manufactured certainty.
+    label({ caseId: 'a', shape: 'DEADLINE_PASSED_UNSEEN' })
+    label({ caseId: 'b', shape: 'UNCERTAIN' })
+    label({ caseId: 'c', shape: 'UNCERTAIN' })
+    completeEligibilityPass(db, { corpusFingerprint: 'corpus-a', labelledBy: 'istvan', completedAt: T0 })
+    const t = eligibilityTally(db, 'corpus-a')!
+    expect(t.eligible).toBe(1)
+    expect(t.uncertain).toBe(2)
+    expect(t.uncertainRate).toBeCloseTo(2 / 3, 3)
+    // ...and the denominator the gate reads excludes them.
+    expect(eligibleObservationCount(db, 'corpus-a')).toBe(1)
+  })
+
+  it('(5): with no threshold registered the rate is reported and does not gate', () => {
+    // The honest default. A threshold invented after seeing the number is the
+    // same move V4-F14 forbids for the catch count.
+    expect(DEFAULT_VALUE_GATE_REGISTRATION.maxUncertainRate).toBeNull()
   })
 })

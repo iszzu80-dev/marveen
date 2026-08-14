@@ -247,3 +247,43 @@ describe('§1.4.6 comparability is a verdict, not an assumption', () => {
     expect(readRun(ledger, 'nope')).toBeNull()
   })
 })
+
+// The CALIBRATION arm, added 2026-08-13 after Marveen measured the live store
+// and found what §26/3 assumes does not exist: the Case layer is eight days
+// deep on the personal side, six on the corporate one. There is no 90-day
+// corpus to replay, anywhere.
+//
+// So the eligible-observation VOLUME — the thing the 90 days was a proxy for —
+// has to be measured forward. A calibration run does that and nothing else, and
+// the firewall below is what keeps it from contaminating the measurement it
+// exists to size: V4-F14's named FAIL is choosing a threshold after seeing
+// RESULTS, and results are what adjudication produces. Volume is not a result.
+describe('the CALIBRATION arm is walled off from adjudication', () => {
+  beforeEach(() => { ledger = newLedger() })
+
+  it('HEADLINE: a calibration run may never enter an adjudication comparison', () => {
+    beginRun(ledger, { runId: 'cal-1', arm: 'CALIBRATION', corpusFingerprint: 'corpus-a', config: CONFIG }, T0)
+    sealRun(ledger, 'cal-1', T0 + 10)
+    begin('p1', 'PROACTIVE_SHADOW', 'corpus-a', T0 + 20)
+    sealRun(ledger, 'p1', T0 + 30)
+    const v = assertComparable(ledger, 'cal-1', 'p1')
+    expect(v.comparable).toBe(false)
+    expect(v.reasons.join(' ')).toMatch(/kalibrációs kimenet nem kerülhet adjudikációba/)
+  })
+
+  it('HEADLINE: calibrating a corpus disqualifies it for the control arm', () => {
+    // A calibration run produces proactive output — unadjudicated, but seen. A
+    // control built afterwards was built by someone who had seen it. The
+    // consequence is a property worth having: calibration and measurement cannot
+    // share a corpus.
+    beginRun(ledger, { runId: 'cal-1', arm: 'CALIBRATION', corpusFingerprint: 'corpus-a', config: CONFIG }, T0)
+    const control = begin('c1', 'REACTIVE_CONTROL', 'corpus-a', T0 + 10)
+    expect(control.ok).toBe(false)
+    if (!control.ok) expect(control.reason).toMatch(/CALIBRATION/)
+  })
+
+  it('a fresh corpus is still available for the real experiment', () => {
+    beginRun(ledger, { runId: 'cal-1', arm: 'CALIBRATION', corpusFingerprint: 'corpus-a', config: CONFIG }, T0)
+    expect(begin('c1', 'REACTIVE_CONTROL', 'corpus-b', T0 + 10).ok).toBe(true)
+  })
+})
