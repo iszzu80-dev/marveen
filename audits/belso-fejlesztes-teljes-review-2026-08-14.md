@@ -118,6 +118,19 @@ Két ok, két rétegben:
 
 Downstream kár: a `has_ingested_evidence` `True`-t ad az `5ef97220` kártyára, tehát az **hamisan ELIGIBLE**, valaki más token-költése alapján.
 
+> **KORREKCIÓ (Marveen, 2026-08-15 02:00, mérve a live store-on).** A `True` igaz,
+> **az indoklás nem áll.** Az `5ef97220` korrelációnak van **2 valódi
+> `kanban_card_event` ACCEPTED sora** is a 6380 `token_usage` mellett, tehát a
+> jogosultság a hibás sorok **nélkül is állna** — nem idegen token-költés tartja
+> életben. Ellenkontroll az egész táblára: **nincs egyetlen** olyan korreláció sem,
+> amit kizárólag `source_event_id = 'None'` sorok tartanának `ACCEPTED`-ben.
+> A `reconstruct_live` szintén nem használja ezeket a sorokat (a `token_usage` a
+> `LIVE_LINK_POLICY` egyetlen `qualifying` és `excluded` halmazában sem szerepel);
+> a valódi függvényt lefuttatva a linkek: change/work_item PRESENT (a 2 kanban-sorból),
+> implementation/test/build MISSING, deployment/runtime UNKNOWN.
+> Az eredeti mondat szándékosan marad a helyén, hogy látszódjon, mit hittünk és mi
+> volt a baj vele. Részletek: `~/marveen-local/apg-kernel/audits/errata-6380-token-usage-envelopes-2026-08-15.md`.
+
 **Kapcsolódó hiány (kártya `54c27163`):** a 230 látva / 0 beemelve nyolc órán át `PARTIAL` maradt, és semmi nem riasztott. Ugyanaz a szó fedi az egy elbukott tételt és a 100%-os bukást.
 
 ---
