@@ -1959,4 +1959,35 @@ export function initProgressionSchema(db: Database.Database): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_held_open ON cos_channel_held(resolved_at, received_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cep_conflict ON case_evidence_packets(conflict_reason, created_at)`)
+
+  // ── Checkpoint E.5 (card 59c06cbc): structured escalation records ──────
+  // SHADOW-ONLY: escalations are LOGGED, never delivered. No Telegram, email,
+  // or bus side effect. The payload_json carries descriptive strings only —
+  // prompt-injected thread content cannot fabricate an escalation that carries
+  // an action (same construction discipline as Checkpoint D's validateInterpretation).
+  // Controlled Action Executor is absent/inert at this stage.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS case_escalations (
+      escalation_id       TEXT PRIMARY KEY,
+      domain              TEXT NOT NULL,
+      case_id             TEXT NOT NULL,
+      progression_run_id  TEXT,
+      trigger_reason      TEXT NOT NULL,
+      escalation_level    TEXT NOT NULL,
+      summary             TEXT NOT NULL,
+      source_context      TEXT,
+      decision_context    TEXT,
+      payload_json        TEXT,
+      resolution_status   TEXT NOT NULL DEFAULT 'OPEN',
+      resolved_by         TEXT,
+      resolution_note     TEXT,
+      created_at          INTEGER NOT NULL,
+      resolved_at         INTEGER,
+      CHECK (domain IN ('personal','zst')),
+      CHECK (escalation_level IN ('L1_INFO_GAP','L2_BLOCKED','L3_OVERDUE','L4_RECOVERY_FAILED','L5_POLICY_GATE')),
+      CHECK (resolution_status IN ('OPEN','ACKNOWLEDGED','RESOLVED','DISMISSED'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_cesc_case ON case_escalations(domain, case_id, created_at)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_cesc_status ON case_escalations(domain, resolution_status, created_at)`)
 }

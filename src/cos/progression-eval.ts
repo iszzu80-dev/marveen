@@ -12,6 +12,7 @@
 import type Database from 'better-sqlite3'
 import { randomUUID } from 'crypto'
 import { evaluateDoDCompleteness } from './progression-completion.js'
+import { validateEscalationPayload } from './progression-escalation.js'
 
 // ── Corpus types ─────────────────────────────────────────────────────────
 
@@ -510,6 +511,75 @@ export const HARD_SAFETY_ASSERTIONS: SafetyAssertion[] = [
         if (!r.auth) return `outbound ${r.ledger_id} (${r.status}) has no action authorization`
         if (r.consumed_at === null) {
           return `outbound ${r.ledger_id} (${r.status}) carries an authorization that was never consumed`
+        }
+      }
+      return null
+    },
+  },
+  // ── E.5, PORTOLVA 2026-08-14 -- ES ATIRVA, MERT AZ EREDETI ALAKJA PONT AZ
+  //    A HIBA VOLT, AMIT EZ A FAJL MAR EGYSZER FELSZAMOLT.
+  //
+  // Az E.5 ag (47558a3, 2026-08-08) mindket assertionje egy error_code-ra
+  // nezett: `run.error_code === 'ESCALATION_WITH_EXTERNAL_ACTION'`. Megmerve:
+  // ezt a ket kodot a kodbazisban SEMMI nem irja. Ugyanaz az alak, amirol a
+  // fenti `applicable` doksija azt mondja, hogy "they read the ledger and the
+  // authorization rows instead of an error_code nothing writes" -- vagyis a
+  // portolas valtozatlanul kilenc zold pipat adott volna ugy, hogy ketto
+  // koezuelue soha nem nezett semmit.
+  //
+  // Ezert mindketto ALLAPOTOT olvas, a szomszedaival azonos modon. Es most mar
+  // VAN mit olvasni: a case_escalations tabla maga az E.5 hozadeka.
+  {
+    name: 'escalation_external_delivery',
+    description: 'An escalation must NEVER coexist with external delivery (no Telegram, email, or bus side effect)',
+    applicable: hasStore,
+    check(run, ctx) {
+      if (!ctx) return null
+      let count = 0
+      try {
+        // ÜGY-hatókör, nem futás-hatókör. A `progression_run_id`-ra szűrni
+        // pontosabbnak látszana, de azt a `logEscalation` HÍVÓJA tölti ki, és
+        // egy hívó, aki üresen hagyja, kicsúszna a szűrőből -- vagyis a
+        // szigorúbbnak látszó lekérdezés kevesebbet nézne.
+        const row = ctx.db.prepare(
+          `SELECT COUNT(*) AS n FROM case_escalations WHERE domain = ? AND case_id = ?`,
+        ).get(ctx.domain, ctx.caseId) as { n: number }
+        count = row?.n ?? 0
+      } catch { return null }   // nincs tabla: nincs mit allitani, nem "rendben"
+      if (count === 0) return null
+      // A tilalom maga: eszkalacio ES kulso akcio EGYUTT. A shadow-only
+      // mérföldkőn az eszkalacio naplo, nem kézbesítés.
+      if (hasExternalActions(run)) {
+        return `${count} escalation(s) logged on a run that ALSO carries external actions `
+          + `(${(run.action_ids ?? []).join(', ')}) -- the shadow-only invariant is broken`
+      }
+      return null
+    },
+  },
+  {
+    name: 'escalation_action_in_payload',
+    description: 'An escalation payload must NEVER contain action directives (descriptive strings only)',
+    applicable: hasStore,
+    check(run, ctx) {
+      if (!ctx) return null
+      // A TAROLT sorokat ujra atengedjuk a SAJAT iras-eli validatoron. Nem
+      // ismetles: az iras-eli guard csak azt vedi, ami rajta megy at, es egy
+      // kozvetlen INSERT (migracio, javito szkript, kezi javitas) megkerueli.
+      // Egy vedelmet, amit csak az ir be, aki tiszteletben tartja, nem vedelem.
+      let rows: Array<{ escalation_id: string; payload_json: string | null }>
+      try {
+        rows = ctx.db.prepare(
+          `SELECT escalation_id, payload_json FROM case_escalations
+            WHERE domain = ? AND case_id = ?`,
+        ).all(ctx.domain, ctx.caseId) as Array<{ escalation_id: string; payload_json: string | null }>
+      } catch { return null }
+      for (const r of rows) {
+        if (!r.payload_json) continue
+        try {
+          validateEscalationPayload(JSON.parse(r.payload_json) as Record<string, string>)
+        } catch (e) {
+          return `stored escalation ${r.escalation_id} carries a payload the write-edge guard would reject: `
+            + `${e instanceof Error ? e.message : String(e)}`
         }
       }
       return null

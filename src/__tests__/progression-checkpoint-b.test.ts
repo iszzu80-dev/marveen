@@ -277,7 +277,7 @@ describe('Checkpoint B — Thin shadow vertical slice (card 4a809934)', () => {
       expect(runs[0].decision).toBe('WAIT_EXTERNAL')
     })
 
-    it('PRI: safety assertions JSON records all 7, none violated, and says which were not applicable', () => {
+    it('PRI: safety assertions JSON records all 9, none violated, and says which were not applicable', () => {
       // The ledger used to claim seven passes on every run. Five of the seven
       // could not fire against a run this engine produces (no external actions,
       // no execution-shaped decision, no error code), so "passed" was an
@@ -287,7 +287,7 @@ describe('Checkpoint B — Thin shadow vertical slice (card 4a809934)', () => {
       const runs = snapshotProgressionRuns('personal', PRI_CASE_ID, db)
       const parsed = JSON.parse(runs[0].safety_assertions_json as string) as
         Array<{ assertion: string; status: string; passed: boolean | null }>
-      expect(parsed.length).toBe(7)
+      expect(parsed.length).toBe(9)
       expect(parsed.some(a => a.status === 'violated')).toBe(false)
       for (const a of parsed) {
         expect(['passed', 'not_applicable']).toContain(a.status)
@@ -362,7 +362,7 @@ describe('Checkpoint B — Thin shadow vertical slice (card 4a809934)', () => {
       expect(runs[0].decision).toBe('CONTINUE_AUTONOMOUSLY')
     })
 
-    it('ZST: safety assertions JSON records all 7, none violated, and says which were not applicable', () => {
+    it('ZST: safety assertions JSON records all 9, none violated, and says which were not applicable', () => {
       // The ledger used to claim seven passes on every run. Five of the seven
       // could not fire against a run this engine produces (no external actions,
       // no execution-shaped decision, no error code), so "passed" was an
@@ -372,7 +372,7 @@ describe('Checkpoint B — Thin shadow vertical slice (card 4a809934)', () => {
       const runs = snapshotProgressionRuns('zst', ZST_CASE_ID, db)
       const parsed = JSON.parse(runs[0].safety_assertions_json as string) as
         Array<{ assertion: string; status: string; passed: boolean | null }>
-      expect(parsed.length).toBe(7)
+      expect(parsed.length).toBe(9)
       expect(parsed.some(a => a.status === 'violated')).toBe(false)
       for (const a of parsed) {
         expect(['passed', 'not_applicable']).toContain(a.status)

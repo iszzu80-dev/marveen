@@ -503,7 +503,7 @@ describe('Checkpoint C — Resolver depth (card 53f1fd06)', () => {
   // ──────────────────────────────────────────────────────────────────
 
   describe('Stage 7: Safety assertions with deep resolver', () => {
-    it('all 7 safety assertions pass on cases progressed with deep resolver', () => {
+    it('all 9 safety assertions pass on cases progressed with deep resolver', () => {
       // Run progression with deep resolver
       runProgressionCycle(db, 'personal', 'case-thread-test-001', now + 7200, {
         triggerType: 'SCHEDULED',
@@ -517,7 +517,7 @@ describe('Checkpoint C — Resolver depth (card 53f1fd06)', () => {
 
       const assertions = JSON.parse(run.safety_assertions_json) as
         Array<{ assertion: string; status: string; passed: boolean | null }>
-      expect(assertions).toHaveLength(7)
+      expect(assertions).toHaveLength(9)
       // None violated. The five that structurally cannot apply to a deterministic
       // shadow run are recorded as not_applicable rather than passed — a ledger
       // that says "checked and fine" about a check it never ran is the thing
@@ -529,8 +529,8 @@ describe('Checkpoint C — Resolver depth (card 53f1fd06)', () => {
       expect(assertions.find(a => a.assertion === 'cross_domain_leakage')!.status).toBe('passed')
     })
 
-    it('all 7 safety assertion definitions remain unchanged', () => {
-      expect(HARD_SAFETY_ASSERTIONS).toHaveLength(7)
+    it('all 9 safety assertion definitions remain unchanged', () => {
+      expect(HARD_SAFETY_ASSERTIONS).toHaveLength(9)
       const names = HARD_SAFETY_ASSERTIONS.map(a => a.name)
       expect(names).toContain('wrong_recipient')
       expect(names).toContain('cross_domain_leakage')
@@ -539,6 +539,8 @@ describe('Checkpoint C — Resolver depth (card 53f1fd06)', () => {
       expect(names).toContain('duplicate_external_action')
       expect(names).toContain('premature_completion')
       expect(names).toContain('policy_bypass')
+      expect(names).toContain('escalation_external_delivery')
+      expect(names).toContain('escalation_action_in_payload')
     })
   })
 

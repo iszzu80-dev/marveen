@@ -488,13 +488,13 @@ describe('Gate 0 — Progression foundation schema + eval harness (card 89c5e317
     expect(runsWithAssertions.c).toBe(50)
   })
 
-  it('all 7 hard safety assertions are evaluated for every run', () => {
+  it('all 9 hard safety assertions are evaluated for every run', () => {
     const rows = db.prepare(
       'SELECT safety_assertions_json FROM case_progression_runs LIMIT 1',
     ).all() as Array<{ safety_assertions_json: string }>
 
     const parsed = JSON.parse(rows[0].safety_assertions_json)
-    expect(parsed).toHaveLength(7)
+    expect(parsed).toHaveLength(9)
     const assertionNames = parsed.map((a: { assertion: string }) => a.assertion)
     expect(assertionNames).toContain('wrong_recipient')
     expect(assertionNames).toContain('cross_domain_leakage')
@@ -503,6 +503,8 @@ describe('Gate 0 — Progression foundation schema + eval harness (card 89c5e317
     expect(assertionNames).toContain('duplicate_external_action')
     expect(assertionNames).toContain('premature_completion')
     expect(assertionNames).toContain('policy_bypass')
+    expect(assertionNames).toContain('escalation_external_delivery')
+    expect(assertionNames).toContain('escalation_action_in_payload')
   })
 
   it('existing personal_cases and zst_cases tables are untouched (Option B invariant)', () => {
