@@ -153,7 +153,13 @@ Itt találtam a legnagyobb **dokumentum ↔ kód** eltérést, és élesebb, min
 | `:104` „reported by `GET /api/security/gate-health`" | `grep -rn "gate-health" src/ web/` → **0 találat**. |
 | `:138` „removing the gate call fails 3 wiring tests" | Az egyetlen teszt (`src/__tests__/data-sensitivity-gate.test.ts`) tiszta unit-teszt: `isProviderTrusted`, `parseTrustedProviders`, `classifyContent`, `evaluateDispatch`. **Wiring-teszt nincs.** A `checkDispatchGate` hívás törlése `message-router.ts`-ből egyetlen tesztet sem buktat. |
 
-Tehát nem csak „a három rögzítő teszt maradt kint" — **a blokk érdemi megerősítései (áthelyezés + health-végpont) sincsenek a `develop`-on, miközben az as-built késznek írja őket.**
+**Utólagos korrekció (2026-08-14, Marveen visszajelzése után, ellenőrizve).** A táblázat jobb oldala igaz, a belőle levont következtetésem nem volt az. A `feat/lean-opt-phase1-gate` ág azóta fel van töltve, és mindhárom állítás **igaz rá**:
+
+- `src/web/agent-process.ts:24` importálja a `checkDispatchGate`-et, és `:1683` a tmux-injekció **előtt** állítja meg a dispatchet;
+- `src/web/routes/security.ts:37` a `GET /api/security/gate-health`;
+- a három rögzítő teszt (`-canary`, `-no-dispatch`, `-wiring`) ott van.
+
+Tehát **nem a doksi képzelte oda a kódot — a doksi landolt a kód nélkül.** A különbség számít: az első hanyag dokumentálás, a második egy szállítási sorrend-hiba, és a javítása is más (az ág landolása, nem a doksi átírása). Amit a riport eredetileg állított — hogy a `develop`-on nincsenek meg —, változatlanul igaz, és amíg az ág nem landol, **egy élő biztonsági kapu fut az egyetlen hívási helyén, a rögzítői nélkül.**
 
 **Amit viszont a javára kell írni, és ez komoly:** `src/web/data-sensitivity-gate-runner.ts:138–180` egy futásidejű **liveness-szonda**, ami az **audit-logot** olvassa, nem a hívást — vagyis kifejezetten azt az esetet fogja meg, amikor egy merge elejti a hívási helyet (card `aaabd99c`, ez már megtörtént egyszer). Ez helyes és ritka minta. De futásidejű probe, nem regressziós kapu: **CI nélkül (2.2) semmi nem akadályozza meg, hogy a hívás megint eltűnjön** — csak utólag derül ki.
 
@@ -200,6 +206,14 @@ Nem csak a `develop`-ról hiányoznak: **a `marveen-private` egyetlen ref-jén s
 ```
 
 plusz `progression-scheduler.ts` + `capability-preflight.ts` (a controller-szerep), és `owner-question.ts` + `decision-package.ts` (az eszkaláció). Tehát **nem az a helyzet, hogy három kártya olyat állít késznek, ami nem fut** — sokkal inkább az, hogy három kártya olyan *modulneveket* nevez meg, amik sosem születtek meg, mert a megvalósítás más szeleteléssel ment. Ez kártya-higiéniai kérdés, nem funkcionális lyuk. **De ellenőrizni kell**, mert ha a kártyák szövegében van olyan acceptance-pont, amit a pipeline nem fed, akkor az valóban kiesett.
+
+**Kiegészítés (2026-08-14): a `progression_mode` egy ötállású biztonsági tárcsa, amit semmi nem olvas.** Marveen E.2-es leletét visszamértem a `develop`-on, és áll:
+
+`schema.ts:1701` — `progression_mode TEXT NOT NULL DEFAULT 'off'`, `:1717` — `CHECK (progression_mode IN ('off','shadow','internal','external_shadow','live'))`. Ez a fokozatos élesítés létrája. Az összes előfordulása a produkciós kódban **INSERT-oszloplista, UPDATE SET vagy séma** (`case-progression-seed`, `intake`, `progression-eval:547`, `progression-migrate:77,95`, `progression-pipeline:721,1284`, `progression-scheduler:325`). **Egyetlen elágazás sincs az értékére.** A `mode === 'off'` minták a `develop`-on mind az APG-hez (`apg/ui-projection.ts:1007,1116`, `web/apg-archive-gate.ts:109`) vagy a data-sensitivity kapuhoz tartoznak.
+
+Az árnyalat, ami a súlyt behatárolja: **a `progression_enabled` viszont OLVASÓDIK** — `goal-enrichment.ts:62`, `owner-question.ts:796`, `progression-completion.ts:493`. A biztonsági tulajdonság tehát ma nagyrészt áll, csak nem attól, amitől a séma állítja.
+
+Mert a `schema.ts:1682` ezt mondja: *„progression_enabled=0 + progression_mode='off' means legacy behavior unchanged."* Ez egy **konjunkció, aminek csak az első tagja létezik kódban.** A második egy CHECK-constraint olvasó nélkül. Aki a tárcsát `'live'`-ra vagy `'off'`-ra állítja, egyik irányban sem változtat semmin.
 
 **Amit külön érdemes kiemelni:** a `progression-pipeline.ts:36-44` fejléce leírja, hogy a **régi fejléc hazudott** („ZERO side effects", „progression_mode stays 'shadow'"), miközben a fájl a Checkpoint E óta BLOCKED/READY/COMPLETED átmeneteket ír, és ezt a rendszer legnagyobb blast radius-ú fájlján tette. Ez a fajta önkorrekció a kódbázis legjobb tulajdonsága, és ugyanannak a hibaosztálynak a példánya, amit a 4.3-ban a lean-opt as-built-nál most találtam meg — csak ott még nincs javítva.
 
@@ -277,7 +291,17 @@ Ez a `releases/` téma pontos alakja. A minta **szándékos és jó**: `releases
 
 A `ops/scheduled-tasks/context-watchdog/check.sh:27` szerint ez a `GUARD` — a proaktív, dispatch előtti kontextus-telítettség kapu. A 08-09-i kanban-bejegyzés maga írja: *„dispatch-guard.sh (intentionally untracked locally) via disk-copy"*.
 
-Tehát nem az a baj, hogy „egy kapu gitignore-olt könyvtárból fut" — az a terv. Az a baj, hogy **pontosan egy fájl van, amit egy lemezhiba után nem lehet visszaállítani semmiből.** Ez egy `git add`.
+Tehát nem az a baj, hogy „egy kapu gitignore-olt könyvtárból fut" — az a terv.
+
+**Utólagos korrekció (2026-08-14, Marveen mérése után).** Azt írtam, „pontosan egy fájl van". **Három van**, és kettőt a cron percenként futtat:
+
+| Szkript | Állapot a mérésekor | Cron |
+|---|---|---|
+| `dispatch-guard.sh` | van története, de a `develop`-en nem volt | — |
+| `fleet-resume-guard.sh` | **semelyik refen nem volt** | 3 percenként |
+| `suite-checkout-ff-guard.sh` | **semelyik refen nem volt** | 5 percenként |
+
+És az ok, amiért az én keresésem nem találta meg őket: mindhárom a **`.git/info/exclude`**-ban ült, ami **gép-lokális** lista — nem a verziókövetett `.gitignore`-ban. Egy `git status` tehát tisztát mutatott, és az én `git log --all --diff-filter=A` keresésem nulla találatot adott, amit én bizonyítéknak olvastam. Ez ugyanaz a hibaosztály, amit ez a riport végig mér, most a saját műszeremen: **a nulla találat nem bizonyíték, ha a műszer nem tudta megnézni a helyet.** Mindhárom bent van azóta (`29ce2ba`, `git add -f`).
 
 ---
 
