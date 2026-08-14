@@ -1,0 +1,86 @@
+# The typecheck and the suite, on a machine that is nobody's.
+#
+# WHY. As of 2026-08-14 this repo had a pull_request_template.md and no
+# workflows at all: the PR process had a form to fill in and no gate behind it.
+# Every "6811 green" in every audit came from one laptop, and the APG kernel
+# repo showed what that costs -- its default branch had been unrunnable for
+# days without anyone being wrong about it.
+name: tests
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'      # package.json engines: >=20 <24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Suite
+        run: npx vitest run
+
+  # The two-repo vocabulary contract (APG_CHECKPOINT_RESULTS vs the kernel's
+  # RESULT_VALUES) lives half in each repo, and its only guard is a test that
+  # SKIPS when the kernel is not checked out. `APG_REQUIRE_KERNEL_CONTRACT=1`
+  # turns that skip into a failure -- and until this job existed, that variable
+  # was set in exactly zero places, so the guard had never once been enforced.
+  #
+  # Kept a SEPARATE job on purpose. Reaching a second private repo needs a PAT;
+  # if the secret is absent this job is skipped and says so in the checks list,
+  # which is a visible gap. Folding it into `suite` would have made a missing
+  # secret look like a passing contract -- the exact shape of bug this job
+  # exists to catch.
+  kernel-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: marveen-private
+
+      - name: Check out the kernel
+        id: kernel
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          repository: iszzu80-dev/marveen-apg-kernel
+          # Default branch on purpose: the contract must hold against what the
+          # kernel actually ships, not against a branch chosen to make it pass.
+          token: ${{ secrets.KERNEL_REPO_TOKEN }}
+          path: marveen-apg-kernel
+
+      - name: Announce which mode this run is in
+        run: |
+          if [ "${{ steps.kernel.outcome }}" = "success" ]; then
+            echo "::notice::kernel checked out -- contract will be ENFORCED"
+          else
+            echo "::warning::KERNEL_REPO_TOKEN missing or checkout failed -- the two-repo contract is NOT verified by this run"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: marveen-private/package-lock.json
+
+      - working-directory: marveen-private
+        run: npm ci
+
+      - name: Contract test, strict
+        working-directory: marveen-private
+        env:
+          APG_REQUIRE_KERNEL_CONTRACT: '1'
+          APG_KERNEL_SRC_ROOT: ${{ github.workspace }}/marveen-apg-kernel/src
+        run: npx vitest run src/__tests__/apg-projection-contract.test.ts
