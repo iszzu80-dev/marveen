@@ -146,7 +146,12 @@ describe('channel-monitor: periodic detached-claude reap (CB6CF755 durable fix)'
     // Durable fix is wired by calling the SAME reapDetachedChannelClaudes on a
     // throttle inside check() -- NOT a second/parallel reaper implementation.
     expect(src).toMatch(/shouldRunPeriodicReap\(\s*lastDetachedReapAt/)
-    expect(src).toMatch(/reapDetachedChannelClaudes\(\s*{\s*tmuxPath:\s*TMUX\s*}\s*\)/)
+    // `tmuxBin()`, not `TMUX`: the module-level `resolveFromPath('tmux')` const
+    // became a lazy resolver, because resolving a binary at IMPORT time made
+    // this module -- and everything importing it -- unloadable on a machine
+    // without tmux/claude installed. The assertion still pins the same
+    // property: ONE reaper, called with the resolved tmux path.
+    expect(src).toMatch(/reapDetachedChannelClaudes\(\s*{\s*tmuxPath:\s*tmuxBin\(\)\s*}\s*\)/)
     // throttle interval is a sane slow cadence (minutes, not every 60s tick).
     const m = src.match(/const\s+DETACHED_REAP_INTERVAL_MS\s*=\s*([\d*\s_]+)/)
     expect(m, 'DETACHED_REAP_INTERVAL_MS not found').not.toBeNull()

@@ -33,13 +33,13 @@
 // the recovery thread and only fires once per respawn, so the cost is bounded.
 
 import { execFileSync } from 'node:child_process'
-import { resolveFromPath } from '../platform.js'
+import { makeLazyBinResolver } from '../platform.js'
 import { logger } from '../logger.js'
 import type { ChannelProviderType } from '../channel-provider.js'
 import { tryAcquireSessionSendLane } from './session-send-lock.js'
 import { delay } from './delay.js'
 
-const TMUX = resolveFromPath('tmux')
+const tmuxBin = makeLazyBinResolver('tmux')
 
 // Mirror of scripts/channels.sh post-init grace. The plugin handshake
 // (bun spawn + Telegram getMe + sendMessage) usually completes within 15s
@@ -103,7 +103,7 @@ export function wasPluginConfirmedAbsent(session: string, withinMs: number): boo
 
 function getSessionClaudePid(session: string): number | null {
   try {
-    const raw = execFileSync(TMUX, ['list-panes', '-t', session, '-F', '#{pane_pid}'], {
+    const raw = execFileSync(tmuxBin(), ['list-panes', '-t', session, '-F', '#{pane_pid}'], {
       timeout: 3000,
       encoding: 'utf-8',
     }).trim().split('\n')[0]
@@ -141,7 +141,7 @@ function hasBunChild(claudePid: number): boolean {
 // the plugin into Disable, exactly the 2026-06-01 18:55 root cause.
 function isSessionReadyForUnlock(session: string): boolean {
   try {
-    const pane = execFileSync(TMUX, ['capture-pane', '-t', session, '-p'], {
+    const pane = execFileSync(tmuxBin(), ['capture-pane', '-t', session, '-p'], {
       timeout: 3000,
       encoding: 'utf-8',
     })
@@ -163,7 +163,7 @@ async function sendUnlockKeystrokes(session: string, provider: ChannelProviderTy
   try {
     // Open the MCP dialog. Claude renders the server list within ~2s; the
     // 3s settle ensures the cursor is on the first item before we move.
-    execFileSync(TMUX, ['send-keys', '-t', session, '/mcp', 'Enter'], { timeout: 5000 })
+    execFileSync(tmuxBin(), ['send-keys', '-t', session, '/mcp', 'Enter'], { timeout: 5000 })
     await delay(MCP_OPEN_SETTLE_MS)
 
     // Safety gate: check whether the channel plugin appears in the /mcp list
@@ -173,13 +173,13 @@ async function sendUnlockKeystrokes(session: string, provider: ChannelProviderTy
     // MCP server. If the provider slug is absent, bail out with Escape.
     let paneAfterOpen = ''
     try {
-      paneAfterOpen = execFileSync(TMUX, ['capture-pane', '-t', session, '-p'], {
+      paneAfterOpen = execFileSync(tmuxBin(), ['capture-pane', '-t', session, '-p'], {
         timeout: 3000,
         encoding: 'utf-8',
       })
     } catch (err) {
       logger.warn({ err, session }, 'channel-plugin-unlock: capture-pane after /mcp open failed -- aborting')
-      try { execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 5000 }) } catch { /* ignore */ }
+      try { execFileSync(tmuxBin(), ['send-keys', '-t', session, 'Escape'], { timeout: 5000 }) } catch { /* ignore */ }
       return
     }
     if (!paneAfterOpen.includes(provider)) {
@@ -189,21 +189,21 @@ async function sendUnlockKeystrokes(session: string, provider: ChannelProviderTy
       // Record the absent verdict so the down-cascade escalates to the operator
       // after one restart instead of looping fresh-restarts that cannot help.
       markPluginAbsent(session)
-      try { execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 5000 }) } catch { /* ignore */ }
+      try { execFileSync(tmuxBin(), ['send-keys', '-t', session, 'Escape'], { timeout: 5000 }) } catch { /* ignore */ }
       return
     }
 
     // Up wraps to the bottom of the list, where the plugin servers live
     // (claude lists them last). Built-in MCPs are above Plugin MCPs in the
     // sort order, so the bottommost entry is the channel plugin we want.
-    execFileSync(TMUX, ['send-keys', '-t', session, 'Up'], { timeout: 5000 })
+    execFileSync(tmuxBin(), ['send-keys', '-t', session, 'Up'], { timeout: 5000 })
     await delay(KEYSTROKE_SETTLE_MS)
     // First Enter opens the action menu for the selected MCP server.
-    execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+    execFileSync(tmuxBin(), ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
     await delay(KEYSTROKE_SETTLE_MS)
     // Second Enter activates the first action - "Enable" for disabled,
     // "Reconnect" for failed. Both revive the plugin.
-    execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
+    execFileSync(tmuxBin(), ['send-keys', '-t', session, 'Enter'], { timeout: 5000 })
     // After activation, the pane stays in the MCP server list (Claude Code
     // does NOT auto-dismiss to the prompt). detectPaneState reads that as
     // non-idle, every scheduled tick + inter-agent msg piles up with
@@ -215,9 +215,9 @@ async function sendUnlockKeystrokes(session: string, provider: ChannelProviderTy
     // prompt), with a settle between so the first Escape lands before
     // the second arrives.
     await delay(POST_UNLOCK_SETTLE_MS)
-    execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 5000 })
+    execFileSync(tmuxBin(), ['send-keys', '-t', session, 'Escape'], { timeout: 5000 })
     await delay(KEYSTROKE_SETTLE_MS)
-    execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 5000 })
+    execFileSync(tmuxBin(), ['send-keys', '-t', session, 'Escape'], { timeout: 5000 })
     logger.warn({ session }, 'channel-plugin-unlock: sent /mcp+Up+Enter+Enter+Esc+Esc unlock sequence')
   } catch (err) {
     logger.error({ err, session }, 'channel-plugin-unlock: failed to deliver unlock keystrokes')

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { resolveFromPath } from '../platform.js'
+import { makeLazyBinResolver } from '../platform.js'
 import { logger } from '../logger.js'
 import { MAIN_AGENT_ID, CHANNEL_PROVIDER } from '../config.js'
 import { readAgentChannelProvider } from './agent-config.js'
@@ -10,7 +10,7 @@ import { tryAcquireSessionSendLane } from './session-send-lock.js'
 import { paneLooksIdle, detectPaneState } from '../pane-state.js'
 import { delay } from './delay.js'
 
-const TMUX = resolveFromPath('tmux')
+const tmuxBin = makeLazyBinResolver('tmux')
 const MAX_UP_ATTEMPTS = 8
 
 /**
@@ -36,7 +36,7 @@ const MAX_UP_ATTEMPTS = 8
 async function dismissMcpMenu(session: string): Promise<void> {
   for (let i = 0; i < 4; i++) {
     try {
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
+      execFileSync(tmuxBin(), ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
       await delay(400)
     } catch {
       return
@@ -191,10 +191,10 @@ export async function attemptChannelMcpReconnect(agentName: string): Promise<Rec
   }
 
   try {
-    execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
+    execFileSync(tmuxBin(), ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
     await delay(1000)
 
-    execFileSync(TMUX, ['send-keys', '-t', session, '/mcp', 'Enter'], { timeout: 3000 })
+    execFileSync(tmuxBin(), ['send-keys', '-t', session, '/mcp', 'Enter'], { timeout: 3000 })
     await delay(1000)
 
     const pane1 = capturePane(session)
@@ -206,9 +206,9 @@ export async function attemptChannelMcpReconnect(agentName: string): Promise<Rec
 
     let matchedAt = -1
     for (let upCount = 1; upCount <= MAX_UP_ATTEMPTS; upCount++) {
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Up'], { timeout: 3000 })
+      execFileSync(tmuxBin(), ['send-keys', '-t', session, 'Up'], { timeout: 3000 })
       await delay(200)
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 3000 })
+      execFileSync(tmuxBin(), ['send-keys', '-t', session, 'Enter'], { timeout: 3000 })
       await delay(1000)
 
       const pane = capturePane(session)
@@ -216,7 +216,7 @@ export async function attemptChannelMcpReconnect(agentName: string): Promise<Rec
         matchedAt = upCount
         break
       }
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
+      execFileSync(tmuxBin(), ['send-keys', '-t', session, 'Escape'], { timeout: 3000 })
       await delay(500)
     }
 
@@ -253,7 +253,7 @@ export async function attemptChannelMcpReconnect(agentName: string): Promise<Rec
         onTarget = true
         break
       }
-      execFileSync(TMUX, ['send-keys', '-t', session, 'Down'], { timeout: 3000 })
+      execFileSync(tmuxBin(), ['send-keys', '-t', session, 'Down'], { timeout: 3000 })
       await delay(300)
       submenu = capturePane(session) ?? ''
     }
@@ -267,7 +267,7 @@ export async function attemptChannelMcpReconnect(agentName: string): Promise<Rec
       return { ok: false, message: `Could not select ${target.source} within ${SUBMENU_MAX_STEPS} steps` }
     }
 
-    execFileSync(TMUX, ['send-keys', '-t', session, 'Enter'], { timeout: 3000 })
+    execFileSync(tmuxBin(), ['send-keys', '-t', session, 'Enter'], { timeout: 3000 })
     await delay(2000)
     await dismissMcpMenu(session)
 

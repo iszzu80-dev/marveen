@@ -12,6 +12,8 @@ vi.mock('node:child_process', () => ({
 
 vi.mock('../platform.js', () => ({
   resolveFromPath: (name: string) => `/usr/local/bin/${name}`,
+  // Same fake path, resolved lazily -- see channel-mcp-reconnect.test.ts.
+  makeLazyBinResolver: (name: string) => () => `/usr/local/bin/${name}`,
 }))
 
 vi.mock('../logger.js', () => ({

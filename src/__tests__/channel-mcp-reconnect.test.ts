@@ -19,6 +19,10 @@ vi.mock('../web/delay.js', () => ({
 
 vi.mock('../platform.js', () => ({
   resolveFromPath: (name: string) => `/usr/local/bin/${name}`,
+  // The module under test resolves its binaries lazily now. The mock returns
+  // the same fake path either way, so every existing assertion about the tmux
+  // path is unchanged -- what changed is only WHEN the resolution happens.
+  makeLazyBinResolver: (name: string) => () => `/usr/local/bin/${name}`,
 }))
 
 vi.mock('../logger.js', () => ({
