@@ -214,7 +214,7 @@ export interface StabilityObservation {
    * Két monoton számláló, nem egy összeg.
    *
    * Marveen feltétele szó szerint „legalább egy teljes **triage- és** ügyciklus".
-   * Egy összegzett számlálóval hat triage-futás és nulla ügyciklus is átmenne —
+   * Egy összegzett számlálóval hat beemelt levél és nulla ügyciklus is átmenne —
    * ami pontosan ugyanaz a hiba egy szinttel lejjebb: a rendszer mozog, de nem
    * az a része, amiről bizonyítani akarunk valamit.
    */
