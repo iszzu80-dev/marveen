@@ -26,7 +26,7 @@ import { createCampaign, getCampaign, approveCampaign, recordApproval } from './
 import type { ApprovalEnvelope } from './approval-core.js'
 import { planAction, executeAction, cancelAction, type OutboundAdapter, type OutboundAction, type ExecuteOpts } from './executor.js'
 import { evaluateDispatch, type DispatchDecision } from './dispatch-gate.js'
-import { acquireClaim, releaseClaim } from './case-store.js'
+import { acquireClaim, releaseClaim, appendCaseEvent } from './case-store.js'
 import { issueAuthorization, type AuthorizationContext } from './action-authorization.js'
 
 /** The case a ledger row belongs to, and the version it is at right now. Read
@@ -144,6 +144,34 @@ export function draftSend(db: Database.Database, input: DraftSendInput, now: num
        outbound_kind=COALESCE(outbound_kind, @k), first_attempt_at=COALESCE(first_attempt_at, @now)
      WHERE ledger_id=@id`
   ).run({ k: seq === 1 ? 'INITIAL' : 'FOLLOW_UP', now, id: planned.ledgerId })
+  // 2026-08-15: the case's OWN timeline said nothing about this. Every other
+  // meaningful thing that happens to a case appends an event, and "a letter was
+  // composed in your name and is waiting for your yes" was the exception — so
+  // reading the case history gave no hint that an outbound draft existed. The
+  // ledger had it, the timeline did not, and only one of those is what you read
+  // when you ask what happened to this case.
+  //
+  // Written unconditionally, not only in a future shadow mode. If the event were
+  // shadow-only, the LIVE path — the one that can actually reach a real
+  // recipient — would be the blind one.
+  //
+  // No body here either, for the reason the PLANNED digest gives: the timeline is
+  // a read surface, the body stays in the ledger. Subject and recipient are kept,
+  // because a wrong address is what has to be noticed first.
+  appendCaseEvent(db, {
+    caseId: input.caseId,
+    caseVersion: caseVersionOfLedger(db, planned.ledgerId) ?? 0,
+    actor: 'marveen',
+    eventType: 'OUTBOUND_DRAFTED',
+    reason: `Level megfogalmazva, jovahagyasra var: ${input.email.subject}`,
+    sourceSystem: 'cos:send-flow',
+    sourceReference: planned.ledgerId,
+    payload: {
+      ledgerId: planned.ledgerId, campaignId, templateId: input.templateId,
+      recipient: input.email.to, subject: input.email.subject,
+      renderedPayloadHash: rHash, sequenceNumber: seq,
+    },
+  }, now)
   return {
     campaignId, ledgerId: planned.ledgerId, sequenceNumber: seq,
     templateHash, renderedPayloadHash: rHash, email: input.email, status: 'AWAITING_APPROVAL',
