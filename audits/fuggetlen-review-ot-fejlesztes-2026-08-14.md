@@ -137,7 +137,9 @@ A `docs/apg/apg-1.9-...-2026-08-13.md` (4650 sor) és a `audits/apg-1.8-full-spe
 
 **A funkcionális hiány, amit kód-oldalról meg tudok erősíteni:** a költségvetés-túllépés riasztás konstrukció szerint per-budget-sor tüzel — `src/costops/alerts.ts:86,89,106` mindhárom ága `s.budget_id`-re épül. **Nulla beállított költségvetés mellett a riasztás nem hogy nem tüzelt: nem is tüzelhetett.** A táblák tartalmát ebből a konténerből nem látom (nincs store), de az állítás szerkezeti része igazolt.
 
-- **P3:** `docs/costops/core-functional-scope-v1.0.1.md` §2 out-of-scope listája még mindig azt mondja, hogy nincs és nem lesz routing-integráció. A `src/optimization/optimization-routing.ts` a `costops/dispatch-identity`-ből és `costops/pricing`-ből importál. A rétegzés iránya helyes (`optimization → costops`, visszafelé nulla import), a dokumentum viszont az egyetlen hely, ahol egy új olvasó a két modul viszonyát megállapítaná — és az ellenkezőjét mondja. Egy mondat.
+- ~~**P3:** a scope-dokumentum §2 out-of-scope listája ellentmond a Lean Optimizationnek.~~ **Visszavonva — a javítás már bent van.** A `docs/costops/core-functional-scope-v1.0.1.md:73-77` egy 08-13-i, `review R-14` jelzésű korrekciós blokkot tartalmaz, ami pontosan ezt tisztázza: a mondat a CostOps modulhatárára vonatkozik, nem a deploymentre, és a routing a fölötte lévő `src/optimization/`-ban él.
+
+  Miért hagyom benne áthúzva: a `:71` sort megnéztem és nem olvastam tovább. Ez ugyanaz a hibaosztály, amit ez a riport végig mér — **a mérőeszköz egy sort nézett, nem a dokumentumot** —, csak ezúttal a mérő tévedett. A többi találás grep-, teszt- vagy parancskimenet-alapú; ez volt az egyetlen, ami egyetlen sor elolvasásán állt.
 
 ### 4.3 Lean Optimization
 
@@ -331,7 +333,8 @@ Becsületesen elhatárolva, mert az összefoglaló jelentős része erre épül:
 9. **E.1/E.2/E.5 kártyák:** végigolvasni az acceptance-pontjaikat, és megnézni, fedi-e őket a `progression-pipeline.ts` 3./4./6. stage-e. Ha igen — a kártyák lezárása helyes, csak a modulnevek elavultak. Ha nem — az a maradék a valódi lyuk.
 10. **`marveen-suite` PR-triázs**, #18-cal kezdve (P0 GDPR, 25 nap), majd #13/#14 (a két kapu, ami a többit védené).
 11. **APG §18 kockázati profil** — a következő érdemi fejlesztési tétel, négy blokkot old egyszerre.
-12. **CostOps scope-doksi egy mondata** (4.2).
+
+*(A korábbi 12. tétel — a CostOps scope-doksi mondata — törölve: a javítás már a `develop`-on van, lásd 4.2.)*
 
 ---
 
