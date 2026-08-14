@@ -32,6 +32,11 @@ const STEPS: Step[] = [
   { name: 'batches', args: ['scripts/cos-close-batches.ts'] },
   { name: 'threads', args: ['scripts/cos-fetch-threads.ts', '--limit', '10'] },
   { name: 'followups', args: ['scripts/cos-draft-followups.ts', '--limit', '5'] },
+  // A megfogalmazas es a FELSZINRE HOZASA ket kulon lepes, ugyanazert, amiert a
+  // kerdes megirasa es kikuldese az: enelkul egy PLANNED sor, amirol senki nem
+  // szol, ugy nez ki, mint "nem volt mit megfogalmazni". A lepes naponta egyszer
+  // szolal meg (sajat napi-naplo nyugtaja a kapu), es a nulla esetet is kimondja.
+  { name: 'plannedDigest', args: ['scripts/cos-planned-digest.ts'] },
   // A kerdes megirasa es a KIKULDESE ket kulon lepes: ha egybe lennenek, egy
   // kezbesitesi hiba ugy nezne ki, mint "nincs mit kerdezni".
   { name: 'channel', args: ['scripts/cos-channel-send.ts'] },
