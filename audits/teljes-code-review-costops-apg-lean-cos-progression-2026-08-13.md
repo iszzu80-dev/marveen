@@ -380,3 +380,17 @@ A négy „állandó piros" mindegyike javítva, és egyik sem a küszöb leszá
 Mindhárom repóban **nulla olyan távoli ág maradt, ami nincs benne a `main`-ben.**
 
 **Ami emberi kézre vár:** a default branch átállítása a GitHub beállításaiban (`marveen-private`: `develop` → `main`; `marveen-apg-kernel`: `wp1-slice1-executor-registry` → `main`). Ezt API-ból nem tudom megtenni, és amíg nem történik meg, egy friss klón a régi ágon landol.
+
+---
+
+## Utólagos korrekció — 2026-08-14
+
+Ez a fejezet a lezárásakor igaz volt a szándékra, de **ma két ponton nem írja le a valóságot.** Egy audit, amit visszamenőleg átszerkesztenek, nem audit, ezért a fenti szöveg érintetlen; a különbség itt áll.
+
+**1. A `marveen-private`-on nincs `main` ág, és nem is lesz.** A `git ls-remote --heads origin` ma tíz refet ad, `main` nincs köztük. A `208b61c` commit létezik és a `develop` őse, tehát a *tartalom* landolt — az ág maga vagy sosem lett push-olva, vagy törölték.
+
+Az owner 2026-08-14-i döntése: **a `develop` marad a mainline.** A `~/marveen` három távolival dolgozik (`origin` = a hivatalos upstream, `fork`, `private`), és a `develop` név ezt a felállást követi. A „hozz létre `main`-t és állítsd át a defaultot" tétel tehát **nem elmaradt, hanem visszavont** — nincs teendő.
+
+**2. A `marveen-apg-kernel`-nél viszont megtörtént.** A default `main`, a `wp1-slice1-executor-registry` már csak egy azonos mutató. Ez a fejezet két emberi lépést kért; **egyik megtörtént, a másik tárgytalanná vált.** Nyitott tétel nem maradt belőle.
+
+**Amit a mai nap ehhez hozzátett:** a kernel `main`-je 2026-08-14-én megkapta az APG 1.9-et (`79613ab` → `ae1d70d`), és ezzel a default ág tesztszvitje először futtatható a szerző gépén kívül: **504 teszt / 133 törés → 1080 teszt / 0 bukás.** Részletek: `audits/fuggetlen-review-ot-fejlesztes-2026-08-14.md`.
