@@ -1118,6 +1118,8 @@ export function approveOutbound(
   approveSend(db, {
     campaignId: row.campaign_id, templateHash: row.template_hash, renderedPayloadHash: hash,
     approvedBy, recipient: draft.to,
+    // A jovahagyo gomb a dashboardon: Istvan nyomja meg, nem gep.
+    initiatedBy: 'human',
   }, now)
   return { ok: true, reason: 'jóváhagyva', caseType: row.case_type ?? undefined }
 }

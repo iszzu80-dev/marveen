@@ -30,7 +30,7 @@ function setup() {
   return db
 }
 function draftArgs() {
-  return { caseId: 'c1', connectorId: 'gmail', templateId: 'quote-request', email: EMAIL, declaredSensitivity: 'PERSONAL' }
+  return { caseId: 'c1', connectorId: 'gmail', templateId: 'quote-request', email: EMAIL, declaredSensitivity: 'PERSONAL', origin: 'owner' as const }
 }
 function dispatchArgs(d: ReturnType<typeof draftSend>) {
   return {
@@ -56,7 +56,7 @@ describe('COS approval-gated send flow (#4)', () => {
   it('draft → approve → dispatch SENDS exactly once (through the gate)', async () => {
     const db = getDb()
     const d = draftSend(db, draftArgs(), NOW)
-    approveSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to }, NOW + 1)
+    approveSend(db, { initiatedBy: 'human', campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to }, NOW + 1)
     const t = new DryRunTransport()
     const r = await dispatchApprovedSend(db, new GmailSendAdapter(t), dispatchArgs(d), NOW + 2)
     expect(r.decision.allowed).toBe(true)
@@ -68,7 +68,7 @@ describe('COS approval-gated send flow (#4)', () => {
   it('a payload EDITED after approval is rejected (rendered-hash mismatch)', async () => {
     const db = getDb()
     const d = draftSend(db, draftArgs(), NOW)
-    approveSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to }, NOW + 1)
+    approveSend(db, { initiatedBy: 'human', campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to }, NOW + 1)
     // attacker/typo edits the body → a different rendered hash than what was approved
     const tampered = { ...EMAIL, body: EMAIL.body + ' (utólag módosítva)' }
     const t = new DryRunTransport()
@@ -82,7 +82,7 @@ describe('COS approval-gated send flow (#4)', () => {
   it('rejectSend cancels the planned row → a later dispatch is a no-op', async () => {
     const db = getDb()
     const d = draftSend(db, draftArgs(), NOW)
-    approveSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to }, NOW + 1)
+    approveSend(db, { initiatedBy: 'human', campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to }, NOW + 1)
     const cancelled = rejectSend(db, d.ledgerId, 'Istvan meggondolta magát', NOW + 2)
     expect(cancelled.status).toBe('CANCELLED')
     const t = new DryRunTransport()
@@ -94,7 +94,7 @@ describe('COS approval-gated send flow (#4)', () => {
   it('a READ_ONLY connector blocks the send even with a valid approval', async () => {
     const db = getDb()
     const d = draftSend(db, draftArgs(), NOW)
-    approveSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to }, NOW + 1)
+    approveSend(db, { initiatedBy: 'human', campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to }, NOW + 1)
     setMode(db, 'gmail', 'READ_ONLY', NOW + 2) // connector downgraded
     const t = new DryRunTransport()
     const r = await dispatchApprovedSend(db, new GmailSendAdapter(t), dispatchArgs(d), NOW + 3)
@@ -112,7 +112,7 @@ describe('COS approval-gated send flow (#4)', () => {
   it('E2: two overlapping dispatches of the same row contend — only one gets the claim', async () => {
     const db = getDb()
     const d = draftSend(db, draftArgs(), NOW)
-    approveSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to, envelope: { maxTotalOutbound: 5 } }, NOW + 1)
+    approveSend(db, { initiatedBy: 'human', campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to, envelope: { maxTotalOutbound: 5 } }, NOW + 1)
     const t = new DryRunTransport()
     // A transport that blocks inside send() until we let it go: the second
     // dispatch runs while the first is genuinely mid-flight, which is the window
@@ -142,7 +142,7 @@ describe('COS approval-gated send flow (#4)', () => {
   it('E7: the default send quota is live on the dispatch door', async () => {
     const db = getDb()
     const d = draftSend(db, draftArgs(), NOW)
-    approveSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to }, NOW + 1)
+    approveSend(db, { initiatedBy: 'human', campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to }, NOW + 1)
     const t = new DryRunTransport()
     await dispatchApprovedSend(db, new GmailSendAdapter(t), dispatchArgs(d), NOW + 2)
     // The counter exists and moved — before this, send_quotas stayed empty
@@ -153,7 +153,7 @@ describe('COS approval-gated send flow (#4)', () => {
   it('E7: a full quota window refuses the send, and the reason reaches the caller (E18)', async () => {
     const db = getDb()
     const d = draftSend(db, draftArgs(), NOW)
-    approveSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to }, NOW + 1)
+    approveSend(db, { initiatedBy: 'human', campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to }, NOW + 1)
     const t = new DryRunTransport()
     const r = await dispatchApprovedSend(db, new GmailSendAdapter(t), dispatchArgs(d), NOW + 2,
       { quota: { key: 'personal:EMAIL_SEND:gmail', maxCount: 0, windowSec: 3600 } })
@@ -169,7 +169,7 @@ describe('COS approval-gated send flow (#4)', () => {
     const db = getDb()
     const sensitive = { to: 'x@y.z', subject: 'kártyaadatok', body: 'a kártyaszám 4111 1111 1111 1111' }
     const d = draftSend(db, { ...draftArgs(), email: sensitive }, NOW)
-    approveSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: sensitive.to }, NOW + 1)
+    approveSend(db, { initiatedBy: 'human', campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: sensitive.to }, NOW + 1)
     const t = new DryRunTransport()
     const r = await dispatchApprovedSend(db, new GmailSendAdapter(t), {
       ...dispatchArgs(d), email: sensitive, renderedPayloadHash: d.renderedPayloadHash, targetProfile: 'routine_lowcost' }, NOW + 2)

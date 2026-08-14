@@ -124,8 +124,8 @@ describe('§22.2 authorization ticket — adversarial', () => {
     const db = getDb()
     registerConnector(db, 'gmail', 'email', 'READ_WRITE', T0)
     setLadder(db, 'QUOTE', { rung: 'EXECUTE_WITH_APPROVAL' }, T0 - 1000)
-    const d = draftSend(db, { caseId: 'c1', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
-    approveSend(db, {
+    const d = draftSend(db, { origin: 'owner', caseId: 'c1', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
+    approveSend(db, { initiatedBy: 'human',
       campaignId: d.campaignId, templateHash: d.templateHash,
       renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to,
       approvalId: 'appr-live',
@@ -146,8 +146,8 @@ describe('§22.2 authorization ticket — adversarial', () => {
     // §3.4's other withdrawal route, same shape: id unchanged, authority gone.
     const db = getDb()
     registerConnector(db, 'gmail', 'email', 'READ_WRITE', T0)
-    const d = draftSend(db, { caseId: 'c1', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
-    approveSend(db, {
+    const d = draftSend(db, { origin: 'owner', caseId: 'c1', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
+    approveSend(db, { initiatedBy: 'human',
       campaignId: d.campaignId, templateHash: d.templateHash,
       renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to,
       approvalId: 'appr-stop',
@@ -165,8 +165,8 @@ describe('§22.2 authorization ticket — adversarial', () => {
     // approval id attached.
     const db = getDb()
     registerConnector(db, 'gmail', 'email', 'READ_WRITE', T0)
-    const d = draftSend(db, { caseId: 'c1', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
-    approveSend(db, {
+    const d = draftSend(db, { origin: 'owner', caseId: 'c1', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
+    approveSend(db, { initiatedBy: 'human',
       campaignId: d.campaignId, templateHash: d.templateHash,
       renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to,
       approvalId: 'appr-ok',
@@ -243,8 +243,8 @@ describe('§22.2 authorization ticket — adversarial', () => {
     const db = getDb()
     registerConnector(db, 'gmail', 'email', 'READ_WRITE', T0)
     setLadder(db, 'QUOTE', { rung: 'EXECUTE_WITH_APPROVAL' }, T0 - 1000)
-    const d = draftSend(db, { caseId: 'c1', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
-    approveSend(db, {
+    const d = draftSend(db, { origin: 'owner', caseId: 'c1', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
+    approveSend(db, { initiatedBy: 'human',
       campaignId: d.campaignId, templateHash: d.templateHash,
       renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to,
     }, T0)

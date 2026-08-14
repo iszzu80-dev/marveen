@@ -20,7 +20,7 @@ function seed(rung: 'PREPARE' | 'EXECUTE_WITH_APPROVAL' = 'EXECUTE_WITH_APPROVAL
   const db = getDb()
   createCase(db, { caseId: 'c1', title: 'HOFF reklamáció', caseType: 'ADMIN' }, NOW - 1000)
   setLadder(db, 'ADMIN', { rung }, NOW - 1000)
-  const d = draftSend(db, {
+  const d = draftSend(db, { origin: 'owner',
     caseId: 'c1', connectorId: 'gmail', templateId: 'hoff-return', email: EMAIL,
   }, NOW - 100)
   return { db, draft: d }

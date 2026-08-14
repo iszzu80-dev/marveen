@@ -18,7 +18,7 @@ interface EventRow {
 }
 
 function draft(subject = 'Re: hol tart az ugy', to = 'them@example.com') {
-  return draftSend(getDb(), {
+  return draftSend(getDb(), { origin: 'owner',
     caseId: 'c1', connectorId: 'gmail', templateId: 'followup-nudge',
     email: { to, subject, body: 'TITKOS LEVELTORZS' },
   }, NOW)

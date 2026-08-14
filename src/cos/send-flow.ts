@@ -27,6 +27,10 @@ import type { ApprovalEnvelope } from './approval-core.js'
 import { planAction, executeAction, cancelAction, type OutboundAdapter, type OutboundAction, type ExecuteOpts } from './executor.js'
 import { evaluateDispatch, type DispatchDecision } from './dispatch-gate.js'
 import { acquireClaim, releaseClaim, appendCaseEvent } from './case-store.js'
+import {
+  mayCompose, mayApprove, OutboundModeRefusal,
+  type OutboundOrigin, type ApprovalInitiator,
+} from './outbound-mode-gate.js'
 import { issueAuthorization, type AuthorizationContext } from './action-authorization.js'
 
 /** The case a ledger row belongs to, and the version it is at right now. Read
@@ -81,6 +85,10 @@ export interface DraftSendInput {
   email: EmailDraft
   declaredSensitivity?: unknown
   campaignId?: string
+  /** WHICH outbound path this is. REQUIRED on purpose (card fa36dc4b): a new
+   *  send route must state what it is rather than inherit a default that happens
+   *  to let it through. tsc names every call site that has not chosen. */
+  origin: OutboundOrigin
 }
 export interface DraftSendResult {
   campaignId: string
@@ -96,6 +104,16 @@ export interface DraftSendResult {
  *  text) and plans the outbound row. Sends nothing; the payload is NOT yet
  *  approved, so a dispatch now would be vetoed. */
 export function draftSend(db: Database.Database, input: DraftSendInput, now: number): DraftSendResult {
+  // THE MODE GATE, at the choke point rather than per caller. Same reasoning
+  // dispatch-gate.ts states in its own header: gating at one choke point means a
+  // new send path cannot forget the check. A mode test scattered through the
+  // pipeline is precisely what a new route forgets.
+  //
+  // It refuses by THROWING. A gate that returns "no" politely is one ignored
+  // return value away from being no gate at all, and the whole promise of the
+  // mode is that it cannot be walked past.
+  const gate = mayCompose(db, 'personal', input.caseId, input.origin)
+  if (!gate.allowed) throw new OutboundModeRefusal(gate, input.caseId)
   const templateHash = templateHashFor(input.templateId)
   const rHash = renderedPayloadHash(input.email)
   const campaignId = input.campaignId ?? `camp-${input.caseId}-EMAIL_SEND`
@@ -190,6 +208,11 @@ export interface ApproveSendInput {
   recipient: string
   /** Optional narrowing: expiry, quotas, stop conditions (§3.2). */
   envelope?: Partial<ApprovalEnvelope>
+  /** Is a person pressing this, or a machine? REQUIRED, and required rather than
+   *  optional-defaulting-to-'human' for one reason: an optional field lets an
+   *  automated approver pass for a human by simply not setting it. The field that
+   *  guards the difference must not have a value you can reach by omission. */
+  initiatedBy: ApprovalInitiator
 }
 /** The owner's explicit YES to THIS exact rendered payload. After this,
  *  authorizeSend passes for the matching payload at the current campaign version. */
@@ -210,6 +233,32 @@ export const DEFAULT_APPROVAL_TTL_SEC = 7 * 24 * 3600
 export const DEFAULT_APPROVAL_MAX_OUTBOUND = 1
 
 export function approveSend(db: Database.Database, input: ApproveSendInput, now: number): void {
+  // The fifth mode's whole purpose. external_shadow and live are identical
+  // everywhere else in this file; the ONE place they differ is here, and Istvan's
+  // sentence is the specification: in external_shadow the approval may never run
+  // by itself.
+  //
+  // A human approval always passes — including in external_shadow, which is where
+  // every drafted letter waits today. Blocking that would not be caution, it would
+  // mean nothing could ever be sent.
+  //
+  // Default-deny for automation: no progression row, an unrecognised value, a case
+  // nobody classified — all refused. Automatic approval is a capability that does
+  // not exist yet, and a capability that does not exist yet starts closed.
+  const caseId = (db.prepare('SELECT case_id FROM campaigns WHERE campaign_id = ?')
+    .get(input.campaignId) as { case_id: string | null } | undefined)?.case_id ?? null
+  if (caseId !== null) {
+    const gate = mayApprove(db, 'personal', caseId, input.initiatedBy)
+    if (!gate.allowed) throw new OutboundModeRefusal(gate, caseId)
+  } else if (input.initiatedBy === 'automation') {
+    // No campaign row means no case to look the mode up on. For a human that is
+    // somebody else's bug; for automation it is an unclassifiable approval, and
+    // an unclassifiable approval is exactly what must not go through.
+    throw new OutboundModeRefusal({
+      allowed: false, code: 'mode_unknown', mode: null,
+      reason: `automatikus jovahagyas: a(z) ${input.campaignId} kampanyhoz nem tartozik ugy, tehat nincs mire modot nezni`,
+    }, input.campaignId)
+  }
   recordApproval(db, {
     approvalId: input.approvalId ?? `appr-${input.campaignId}-${input.renderedPayloadHash.slice(0, 16)}`,
     campaignId: input.campaignId, approvedBy: input.approvedBy,

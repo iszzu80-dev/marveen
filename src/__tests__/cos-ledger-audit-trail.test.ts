@@ -38,7 +38,7 @@ describe('the outbound ledger carries its own audit trail (F-2 / AC-21)', () => 
 
   it('plan time: campaign, recipient, payload hash and case version are on the row', () => {
     const db = getDb()
-    const d = draftSend(db, { caseId: 'c1', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
+    const d = draftSend(db, { origin: 'owner', caseId: 'c1', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
     const r = row(d.ledgerId)
     expect(r.campaign_id).toBe(d.campaignId)
     expect(r.recipient).toBe(EMAIL.to)
@@ -53,7 +53,7 @@ describe('the outbound ledger carries its own audit trail (F-2 / AC-21)', () => 
     // this asserts the property that makes the window impossible: the columns
     // are non-null on a row that has never been updated (created_at == updated_at).
     const db = getDb()
-    const d = draftSend(db, { caseId: 'c1', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
+    const d = draftSend(db, { origin: 'owner', caseId: 'c1', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
     const r = db.prepare(
       `SELECT campaign_id, recipient, rendered_payload_hash FROM outbound_ledger
        WHERE ledger_id = ? AND rowid IN (SELECT rowid FROM outbound_ledger WHERE ledger_id = ?)`
@@ -65,8 +65,8 @@ describe('the outbound ledger carries its own audit trail (F-2 / AC-21)', () => 
 
   it('send time: run id, campaign version, approval version and provider id are recorded', async () => {
     const db = getDb()
-    const d = draftSend(db, { caseId: 'c1', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
-    approveSend(db, {
+    const d = draftSend(db, { origin: 'owner', caseId: 'c1', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
+    approveSend(db, { initiatedBy: 'human',
       campaignId: d.campaignId, templateHash: d.templateHash,
       renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to,
     }, T0)
@@ -89,8 +89,8 @@ describe('the outbound ledger carries its own audit trail (F-2 / AC-21)', () => 
 
   it('AC-21 in one query: every field the criterion names is answerable from the row', async () => {
     const db = getDb()
-    const d = draftSend(db, { caseId: 'c1', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
-    approveSend(db, {
+    const d = draftSend(db, { origin: 'owner', caseId: 'c1', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
+    approveSend(db, { initiatedBy: 'human',
       campaignId: d.campaignId, templateHash: d.templateHash,
       renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to,
     }, T0)

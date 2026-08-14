@@ -27,6 +27,9 @@ for (const c of eligible) {
   draftSend(db, {
     caseId: c.caseId, connectorId: 'gmail', templateId: 'followup-nudge',
     email: { to: c.recipient, subject: d.subject, body: d.body },
+    // Ez a regi utankoveto sopres, nem a progression pipeline. A sajat kapuja
+    // (followUpEligibility) dontott mar rola; a progression_mode nem ez.
+    origin: 'followup-sweep',
   }, now)
   drafted.push(c.caseId)
 }

@@ -32,8 +32,8 @@ function prep(caseId = 'c1') {
 
 function draftApprove(caseId: string, envelope?: Record<string, unknown>) {
   const db = getDb()
-  const d = draftSend(db, { caseId, connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
-  approveSend(db, {
+  const d = draftSend(db, { origin: 'owner', caseId, connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
+  approveSend(db, { initiatedBy: 'human',
     campaignId: d.campaignId, templateHash: d.templateHash,
     renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to,
     ...(envelope ? { envelope } : {}),
@@ -78,8 +78,8 @@ describe('the live dispatch door passes the claim and the ceilings (N-2)', () =>
     const first = await dispatchApprovedSend(db, new GmailSendAdapter(new DryRunTransport()), dispatchInput(d1), T0 + 1)
     expect(first.sent).toBe(true)
 
-    const d2 = draftSend(db, { caseId: 'c2', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL, campaignId: d1.campaignId }, T0)
-    approveSend(db, {
+    const d2 = draftSend(db, { origin: 'owner', caseId: 'c2', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL, campaignId: d1.campaignId }, T0)
+    approveSend(db, { initiatedBy: 'human',
       campaignId: d1.campaignId, templateHash: d2.templateHash,
       renderedPayloadHash: d2.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to,
       approvalId: 'appr-second', // the default id is derived from the payload hash, identical here

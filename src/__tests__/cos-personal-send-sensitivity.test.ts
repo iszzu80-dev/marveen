@@ -33,8 +33,8 @@ function setup(sensitivity: string) {
   createCase(db, { caseId: 'c1', title: 'T', caseType: 'QUOTE' }, T0)
   db.prepare('UPDATE personal_cases SET sensitivity = ? WHERE case_id = ?').run(sensitivity, 'c1')
   registerConnector(db, 'gmail', 'email', 'READ_WRITE', T0)
-  const d = draftSend(db, { caseId: 'c1', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
-  approveSend(db, {
+  const d = draftSend(db, { origin: 'owner', caseId: 'c1', connectorId: 'gmail', templateId: 'freeform-v1', email: EMAIL }, T0)
+  approveSend(db, { initiatedBy: 'human',
     campaignId: d.campaignId, templateHash: d.templateHash,
     renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to,
   }, T0)
