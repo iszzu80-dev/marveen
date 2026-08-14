@@ -15,7 +15,10 @@
 // match; a recipient not on the list is vetoed; a free-text campaign is refused.
 
 import type Database from 'better-sqlite3'
-import { mayApprove, OutboundModeRefusal, type ApprovalInitiator } from './outbound-mode-gate.js'
+import {
+  mayApprove, mayCompose, OutboundModeRefusal,
+  type ApprovalInitiator, type OutboundOrigin,
+} from './outbound-mode-gate.js'
 import { appendZstCaseEvent } from './zst-case-store.js'
 import { randomUUID } from 'node:crypto'
 import { isUsable } from './connector-health.js'
@@ -45,6 +48,10 @@ export interface DraftZstSendInput {
   templateId: string
   email: EmailDraft
   campaignId?: string
+  /** WHICH outbound path this is. Same required field and same reason as the
+   *  personal DraftSendInput: a new corporate send route must name itself rather
+   *  than inherit a default that happens to let it through. */
+  origin: OutboundOrigin
 }
 export interface DraftZstSendResult {
   campaignId: string
@@ -58,6 +65,18 @@ export interface DraftZstSendResult {
 
 /** PREPARE. Typed campaign (allows_free_text=0) + planned ledger row. Not approved. */
 export function draftZstSend(db: Database.Database, input: DraftZstSendInput, now: number): DraftZstSendResult {
+  // The COMPOSE half of the mode gate. Missed on the first pass: the corporate
+  // approval got mayApprove, and the corporate DRAFT did not get mayCompose — so
+  // a case in `shadow` could still have a letter composed and a ledger row
+  // written on this path, which is exactly what shadow is supposed to prevent.
+  //
+  // Found by reading the review card's task list line by line against the code
+  // instead of against what I remembered doing. My own parity guard did not catch
+  // it either, and could not: it named three protections and this is a fourth.
+  // The guard was honest about its coverage, which is the only reason the gap was
+  // findable rather than assumed closed.
+  const gate = mayCompose(db, 'zst', input.caseId, input.origin)
+  if (!gate.allowed) throw new OutboundModeRefusal(gate, input.caseId)
   const templateHash = templateHashFor(input.templateId)
   const rHash = renderedPayloadHash(input.email)
   const campaignId = input.campaignId ?? `zcamp-${input.caseId}-EMAIL_SEND`

@@ -40,7 +40,7 @@ describe('ZST approval-gated send (Slice 1 write-half, AT-ZA)', () => {
 
   function draftAndApprove(email = EMAIL, recipients = [EMAIL.to]) {
     const db = getDb()
-    const d = draftZstSend(db, { caseId: 'ZST-ACC-1', templateId: 'accounting-package', email }, T0)
+    const d = draftZstSend(db, { origin: 'owner', caseId: 'ZST-ACC-1', templateId: 'accounting-package', email }, T0)
     approveZstSend(db, { initiatedBy: 'human', campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', allowedRecipients: recipients }, T0 + 1)
     return d
   }
@@ -106,7 +106,7 @@ describe('ZST approval-gated send (Slice 1 write-half, AT-ZA)', () => {
     expect((await dispatchZstSend(db, m.adapter, dispatchInput(first), T0 + 2)).sent).toBe(true)
 
     const second = { ...EMAIL, body: 'Még egy kérdés a júliusi csomaghoz.' }
-    const d2 = draftZstSend(db, { caseId: 'ZST-ACC-1', templateId: 'accounting-package', email: second }, T0 + 10)
+    const d2 = draftZstSend(db, { origin: 'owner', caseId: 'ZST-ACC-1', templateId: 'accounting-package', email: second }, T0 + 10)
     approveZstSend(db, { initiatedBy: 'human',
       campaignId: d2.campaignId, templateHash: d2.templateHash,
       renderedPayloadHash: d2.renderedPayloadHash, approvedBy: 'istvan', allowedRecipients: [EMAIL.to],
@@ -158,7 +158,7 @@ describe('ZST approval-gated send (Slice 1 write-half, AT-ZA)', () => {
 
   it('F-1/F-2: the drafted row is attributable from birth, and the seq is MAX+1', () => {
     const db = getDb()
-    const d = draftZstSend(db, { caseId: 'ZST-ACC-1', templateId: 'accounting-package', email: EMAIL }, T0)
+    const d = draftZstSend(db, { origin: 'owner', caseId: 'ZST-ACC-1', templateId: 'accounting-package', email: EMAIL }, T0)
     const row = db.prepare(
       `SELECT campaign_id, recipient, rendered_payload_hash, case_version, outbound_kind, sequence_number
        FROM zst_outbound_ledger WHERE ledger_id = ?`,
@@ -176,10 +176,10 @@ describe('ZST approval-gated send (Slice 1 write-half, AT-ZA)', () => {
 
     // The next draft takes MAX(seq)+1 — and survives a hole in the sequence that
     // COUNT(*)+1 would have walked straight into, re-using a live number.
-    const d2 = draftZstSend(db, { caseId: 'ZST-ACC-1', templateId: 'accounting-package', email: { ...EMAIL, body: 'másik' } }, T0 + 1)
+    const d2 = draftZstSend(db, { origin: 'owner', caseId: 'ZST-ACC-1', templateId: 'accounting-package', email: { ...EMAIL, body: 'másik' } }, T0 + 1)
     expect(d2.sequenceNumber).toBe(2)
     db.prepare('DELETE FROM zst_outbound_ledger WHERE ledger_id = ?').run(d.ledgerId)
-    const d3 = draftZstSend(db, { caseId: 'ZST-ACC-1', templateId: 'accounting-package', email: { ...EMAIL, body: 'harmadik' } }, T0 + 2)
+    const d3 = draftZstSend(db, { origin: 'owner', caseId: 'ZST-ACC-1', templateId: 'accounting-package', email: { ...EMAIL, body: 'harmadik' } }, T0 + 2)
     expect(d3.sequenceNumber).toBe(3)
   })
 
@@ -194,7 +194,7 @@ describe('ZST approval-gated send (Slice 1 write-half, AT-ZA)', () => {
 
   it('AT-ZA06: a draft that is NOT approved does not send', async () => {
     const db = getDb()
-    const d = draftZstSend(db, { caseId: 'ZST-ACC-1', templateId: 'accounting-package', email: EMAIL }, T0)
+    const d = draftZstSend(db, { origin: 'owner', caseId: 'ZST-ACC-1', templateId: 'accounting-package', email: EMAIL }, T0)
     const m = mockAdapter()
     const res = await dispatchZstSend(db, m.adapter, dispatchInput(d), T0 + 2)
     expect(res.sent).toBe(false)
@@ -265,7 +265,7 @@ describe('ZST approval-gated send (Slice 1 write-half, AT-ZA)', () => {
 
   it('rejectZstSend cancels a planned, not-yet-sent row', () => {
     const db = getDb()
-    const d = draftZstSend(db, { caseId: 'ZST-ACC-1', templateId: 't', email: EMAIL }, T0)
+    const d = draftZstSend(db, { origin: 'owner', caseId: 'ZST-ACC-1', templateId: 't', email: EMAIL }, T0)
     const a = rejectZstSend(db, d.ledgerId, 'owner aborted', T0 + 1)
     expect(a.status).toBe('CANCELLED')
   })

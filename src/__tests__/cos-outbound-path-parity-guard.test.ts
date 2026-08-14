@@ -69,7 +69,14 @@ function setMode(path: Path, caseId: string, mode: ProgressionMode) {
 function draft(path: Path, caseId: string, at = NOW) {
   return path === 'personal'
     ? draftSend(getDb(), { caseId, connectorId: 'gmail', templateId: 'followup-nudge', email: EMAIL, origin: 'owner' }, at)
-    : draftZstSend(getDb(), { caseId, templateId: 'zst-freeform-v1', email: EMAIL }, at)
+    : draftZstSend(getDb(), { origin: 'owner', caseId, templateId: 'zst-freeform-v1', email: EMAIL }, at)
+}
+
+/** The same draft, but declared as the PROGRESSION path — the one the mode governs. */
+function draftPipeline(path: Path, caseId: string, at = NOW) {
+  return path === 'personal'
+    ? draftSend(getDb(), { caseId, connectorId: 'gmail', templateId: 'followup-nudge', email: EMAIL, origin: 'progression' }, at)
+    : draftZstSend(getDb(), { caseId, templateId: 'zst-freeform-v1', email: EMAIL, origin: 'progression' }, at)
 }
 
 function approveAutomated(path: Path, d: { campaignId: string; templateHash: string; renderedPayloadHash: string }) {
@@ -96,6 +103,14 @@ function probeModeGateRefusesAutomation(path: Path, mode: ProgressionMode): bool
   setMode(path, caseId, mode)
   const d = draft(path, caseId)
   try { approveAutomated(path, d); return false } catch { return true }
+}
+
+/** Does the compose gate stop the pipeline drafting on a case whose mode forbids it? */
+function probeComposeGateRefuses(path: Path, mode: ProgressionMode): boolean {
+  const caseId = `${path}-comp`
+  seed(path, caseId)
+  setMode(path, caseId, mode)
+  try { draftPipeline(path, caseId); return false } catch { return true }
 }
 
 /** Does drafting leave an OUTBOUND_DRAFTED row on this path's case timeline? */
@@ -157,6 +172,18 @@ describe('parity guard: a protection on one send path must exist on the other', 
     })
   })
 
+  describe('4. the compose gate stops the pipeline before a letter exists', () => {
+    it.each(PATHS)('%s path refuses a pipeline draft on shadow', (path) => {
+      expect(probeComposeGateRefuses(path, 'shadow')).toBe(true)
+    })
+
+    // POSITIVE CONTROL: external_shadow is the mode that PERMITS composing, so
+    // the honest answer here is false.
+    it.each(PATHS)('%s probe says FALSE on external_shadow, where composing is allowed', (path) => {
+      expect(probeComposeGateRefuses(path, 'external_shadow')).toBe(false)
+    })
+  })
+
   // The guard's own completeness. If a fourth protection is added to one path and
   // this file is not extended, nothing here goes red — a guard cannot detect what
   // it was never told about, and pretending otherwise is worse than admitting it.
@@ -169,8 +196,15 @@ describe('parity guard: a protection on one send path must exist on the other', 
       'mode gate refuses automatic approval',
       'OUTBOUND_DRAFTED on the case timeline',
       'PLANNED digest sees the ledger',
+      // Added after this guard shipped covering three. The fourth protection —
+      // the COMPOSE half of the mode gate — was wired on the personal path and
+      // missing on the corporate one, and this file could not see it, because a
+      // guard cannot detect what it was never told about. Found by reading the
+      // review card's task list against the code rather than against memory.
+      // The honest coverage count is what made it findable.
+      'mode gate refuses composing',
     ]
-    expect(COVERED).toHaveLength(3)
+    expect(COVERED).toHaveLength(4)
     // Not covered here, and deliberately named rather than left silent: the
     // autonomy ladder (both paths call permits(...,'SEND'); asserted by
     // cos-dispatch-gate.test.ts and cos-zst-send.test.ts, which drive the full

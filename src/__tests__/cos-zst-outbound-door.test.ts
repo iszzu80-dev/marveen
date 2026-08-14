@@ -35,7 +35,7 @@ const T0 = 1_700_000_000
 const EMAIL = { to: 'zoltan@drvamosi.hu', subject: 'Üzletrész-adásvétel', body: 'Csatolva az igazolványok.' }
 
 function draft(email = EMAIL, caseId = 'ZST-LEGAL-1') {
-  return draftZstSend(getDb(), { caseId, templateId: 'zst-freeform-v1', email }, T0)
+  return draftZstSend(getDb(), { origin: 'owner', caseId, templateId: 'zst-freeform-v1', email }, T0)
 }
 
 function approvals(): number {

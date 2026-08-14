@@ -73,7 +73,7 @@ describe('ZST email intake (Slice 1, read-only)', () => {
   function sentLetter(caseId: string, messageId: string, threadId: string): void {
     const db = getDb()
     createZstCase(db, { caseId, title: 'Kimenő levél', caseType: 'CONTRACT' }, T0)
-    const d = draftZstSend(db, {
+    const d = draftZstSend(db, { origin: 'owner',
       caseId, templateId: 'zst-freeform-v1',
       email: { to: 'partner@x.com', subject: 'Ajánlat', body: 'Csatolva.' },
     }, T0)

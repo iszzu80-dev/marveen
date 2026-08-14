@@ -429,6 +429,10 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     try {
       const r = draftZstSend(getDb(), {
         caseId: b.caseId,
+        // A vallalati fogalmazo ajto a dashboardon: Istvan nyitja meg, kezzel.
+        // A tulajdonos szemelyes cselekvéset egy ugy-szintu automatizalasi
+        // jelzo nem vetozza meg -- ugyanaz a dontes, mint a szemelyes uton.
+        origin: 'owner',
         templateId: b.templateId ?? 'zst-freeform-v1',
         // Threading is opt-in and explicit. The first real corporate send went
         // out without it and landed as a new conversation in the recipient's

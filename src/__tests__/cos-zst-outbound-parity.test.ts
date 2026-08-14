@@ -35,7 +35,7 @@ function setZstMode(caseId: string, mode: ProgressionMode) {
 }
 
 function draftZst(caseId = 'z1', at = NOW) {
-  return draftZstSend(getDb(), { caseId, templateId: 'zst-freeform-v1', email: EMAIL }, at)
+  return draftZstSend(getDb(), { origin: 'owner', caseId, templateId: 'zst-freeform-v1', email: EMAIL }, at)
 }
 
 describe('the corporate send path gets the same protections as the personal one', () => {
