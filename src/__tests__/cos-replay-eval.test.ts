@@ -28,6 +28,7 @@ import {
   completeEligibilityPass, eligibilityTally,
   type PacketMapper,
 } from '../cos/replay-eval.js'
+import { ensureCalibrationSchema, freezeCalibration } from '../cos/calibration-window.js'
 
 const T0 = 1_700_000_000
 let db: Database.Database
@@ -306,6 +307,51 @@ describe('§24.2 the value gate — blinding can only veto', () => {
     const g = evaluateValueGate(db, 's1')
     expect(g.uncertainRate).toBeCloseTo(0.6, 3)
     expect(g.result).not.toBe('EVALUATION_WINDOW_DEGRADED')
+  })
+
+  it('HEADLINE: a lejárt kalibráció SAJÁT kimenet, és megelőzi a volumen-kérdéseket', () => {
+    // A sorrend a lényeg. A `minEligibleObservations` egy adott fagyasztott
+    // készülékre volt méretezve; egy számot ehhez mérni azután, hogy a készülék
+    // megváltozott, nem gyengébb válasz — válasz egy kérdésre, amit senki nem
+    // tett fel.
+    //
+    // És miért saját kimenet, nem `EVALUATION_WINDOW_DEGRADED`: ez az a fajta
+    // elavulás, amitől semmi nem hibázik. Egy általános „degraded" címke alá
+    // söpörve pont az észrevehetetlensége maradna meg.
+    bigSession()
+    judgeAll('s1', { correctRate: 0.5 })
+    ensureCalibrationSchema(db)
+    freezeCalibration(db, {
+      calibrationCommit: '30e16ef92753', detectorConfigFingerprint: 'det-v1',
+      intakeSurfaceFingerprint: 'intake-v1', frozenAt: T0 - 1000,
+    })
+    const g = evaluateValueGate(db, 's1', DEFAULT_VALUE_GATE_REGISTRATION, {
+      detectorConfigFingerprint: 'det-v1', intakeSurfaceFingerprint: 'intake-v2',
+    })
+    expect(g.result).toBe('CALIBRATION_EXPIRED')
+    expect(g.detail).toMatch(/LEJART/)
+  })
+
+  it('a változatlan készülék mellett a kapu a szokásos úton megy tovább', () => {
+    bigSession()
+    judgeAll('s1', { correctRate: 0.5 })
+    ensureCalibrationSchema(db)
+    freezeCalibration(db, {
+      calibrationCommit: '30e16ef92753', detectorConfigFingerprint: 'det-v1',
+      intakeSurfaceFingerprint: 'intake-v1', frozenAt: T0 - 1000,
+    })
+    const g = evaluateValueGate(db, 's1', DEFAULT_VALUE_GATE_REGISTRATION, {
+      detectorConfigFingerprint: 'det-v1', intakeSurfaceFingerprint: 'intake-v1',
+    })
+    expect(g.result).not.toBe('CALIBRATION_EXPIRED')
+  })
+
+  it('futáskori konfiguráció nélkül nincs lejárat-ellenőrzés', () => {
+    // Ugyanaz az elv, mint az `assertFrozenConfig`-nál: egy kapu, ami az első
+    // futást lehetetlenné teszi, nem kapu.
+    bigSession()
+    judgeAll('s1', { correctRate: 0.5 })
+    expect(evaluateValueGate(db, 's1').result).not.toBe('CALIBRATION_EXPIRED')
   })
 
   it('reports coverage, so a half-judged session cannot look complete', () => {

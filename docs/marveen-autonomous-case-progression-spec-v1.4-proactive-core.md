@@ -2,7 +2,7 @@
 ## Proactive Core
 ### Brownfield proactive detection, qualification and internal preparation — zero new external execution surface
 
-**Spec verzió:** v1.4.2 — lásd a **§32. Amendment log**-ot  
+**Spec verzió:** v1.4.3 — lásd a **§32. Amendment log**-ot  
 **Státusz:** proposed implementation baseline — review-integrated revision  
 **Dátum:** 2026-08-13  
 **Előző baseline:** `marveen-autonomous-case-progression-spec-v1.3.1.md`  
@@ -146,6 +146,43 @@ egy `CALIBRATION` karú futással **előre méri** a volument. Két kódban kik�
 és nem is elrejtett kudarc: megállapítás a korpuszról. Ablakot **utólag**, a szám megismerése után
 tágítani tilos — az ugyanaz a lépés, amit a `V4-F14` a találat-küszöbnél tilt.
 
+#### A kalibrációs ablak három szabálya
+
+**1. Csak fagyás utáni ablak számít.** Az ablaknak **teljes egészében** a kalibrációs commit és a
+hash befagyasztása **után** kell kezdődnie és végződnie.
+
+Ez egyszerre old meg hármat: a **2026-08-06-i migrációs csúcs** (45 ügy egyetlen napon, ami migráció
+és nem érkezés, és soha nem ismétlődik meg) kívül esik; az intake fagyott, tehát a nevező nem
+mozdulhat a kísérlet alatt; és a triage által létrehozott ügyek **bent maradnak**, ahol a helyük van.
+
+> **Pontosítás a korábbi figyelmeztetéshez.** Az email-triage **nem mérési műtermék**, hanem a
+> termelési beviteli út, ami a kísérlet alatt is futni fog. Az általa létrehozott ügyek kizárása egy
+> **nem létező populációt** mérne, és a küszöböt egy soha nem futó rendszerre méretezné. A „mérendő
+> rendszer és a mérés forrása nem független" figyelmeztetés ott érvényes, ahol felmerült: az
+> **organikus érkezési ráta** becslésénél. A kalibráció nem azt becsüli, hanem a jogosult
+> megfigyelések volumenét abban a rendszerben, **ahogy ténylegesen működni fog.**
+
+**2. Ha a hash egy ablak közben változik, azt az ablakot egészben el kell dobni, nem levágni.** Egy
+félig fagyott ablak nem fagyott ablak, és a levágott ablak pont azt a szakaszt tartaná meg,
+amelyikről nem tudjuk, milyen konfiguráción futott. Az eldobott ablak volumene **nulla**, nem
+„annyi, amennyi a változásig gyűlt".
+
+**3. Lejárati feltétel.** Mivel az intake a fagyasztott készülék **része**, a kalibráció ennek a
+konfigurációnak a volumenét méri. Ha később bővül a bevitel — **új konnektor, szélesebb triage,
+READ_ONLY → READ_WRITE** —, a kalibrált küszöb **lejár**, és a kapu kimenete `CALIBRATION_EXPIRED`.
+
+Ezt előre kell kimondani, mert ettől **semmi nem hibázik**: a küszöb különben tovább élne, mint a
+rendszer, amire mérték, és senki nem venné észre. Ezért van két külön ujjlenyomat:
+
+```text
+detector_config_fingerprint   a KÓD tartalom-hashe (detektor + intake modulok)
+intake_surface_fingerprint    a beviteli FELÜLET hashe (connector_id | kind | mode)
+```
+
+A második azért kell, mert egy új konnektor **adat, nem kód**: bekerülhet anélkül, hogy egyetlen
+`.ts` fájl megváltozna. A `status` szándékosan **nincs** benne — egy ma DOWN konnektor nem másik
+beviteli felület, és egy kapu, ami naponta zajból tüzel, az a kapu, amit kikapcsolnak.
+
 #### Az „elfogadható megfigyelés" definíciója
 
 `eligible_observation_count` **nem** származhat a detektor kimenetéből. A nevező **kizárólag egy
@@ -194,8 +231,10 @@ value_gate_registration:
   # A befagyasztási pont: KAPU, nem dátum.
   reactive_baseline_run_id: <independently persisted control run>
   detector_config_fingerprint: <a detektor- ÉS intake-források tartalom-hashe>
+  intake_surface_fingerprint: <connector_id | kind | mode; status NÉLKÜL>
   calibration_commit: <commit sha>
   frozen_at:
+  calibration_expires_on_intake_change: true   # §1.4.1 / 3. szabály
 ```
 
 **A `frozen_at` önmagában nem elég.** Egy ígéret, hogy a befagyasztás után nem landol proaktív modul,
@@ -1536,6 +1575,12 @@ Kötelező negatív tesztek:
 
 Primary acceptance: a §1.4-ben **a volumen-kalibráció után, live shadow előtt befagyasztott** value-gate konfiguráció szerint. A `5 catches / 30 nap` csak default candidate, ha a mért eligible volume ezt mérhetővé teszi. `NO_EVIDENCE_DUE_TO_LOW_VOLUME` és `EVALUATION_WINDOW_DEGRADED` nem PASS.
 
+`CALIBRATION_EXPIRED` szintén nem PASS, és **saját kimenet**, nem `EVALUATION_WINDOW_DEGRADED` — egy
+általános „degraded" címke alá söpörve pont az észrevehetetlensége maradna meg. A kapuban a lejárat
+ellenőrzése **megelőzi** a volumen-kérdéseket: egy számot a `minimum_eligible_observations`-höz mérni
+azután, hogy a készülék megváltozott, nem gyengébb válasz, hanem válasz egy kérdésre, amit senki nem
+tett fel.
+
 `eligible_observation_count` a §1.4.1 szerinti **független címkézési menetből** származik. Ha a
 korpuszt senki nem nézte át, a metrika **null**, és a kimenet `EVALUATION_WINDOW_DEGRADED` — nem 0,
 és nem PASS. `uncertain_count` és `uncertain_rate` mindig jelentendő; küszöböt csak akkor kapuz, ha
@@ -1881,6 +1926,33 @@ Ez a specifikáció a korábbi `marveen-autonomous-case-progression-spec-v1.4` �
 A spec saját szabálya szerint (`§22`) PASS-feltételt gyengíteni verzió-bump nélkül tilos. Ez a napló
 a fordítottját is rögzíti: azokat a módosításokat, amelyek egy feltételt **szigorítottak vagy
 pontosítottak**, mert a laza megfogalmazás egy mérést tett volna érvénytelenné.
+
+## v1.4.3 — 2026-08-13 — a kalibrációs ablak három szabálya
+
+**Érintett szakaszok:** §1.4.1 (kibővítve), §24.2.
+
+**Mi változott.** A „fagyástól számol" döntés mellé bekerült a három szabály, ami nélkül a
+befagyasztás papír: (1) csak teljes egészében fagyás utáni ablak számít; (2) hash-elmozdulás esetén
+az ablakot **egészben** el kell dobni, nem levágni; (3) a bevitel bővülése **lejáratja** a kalibrált
+küszöböt, `CALIBRATION_EXPIRED` kimenettel.
+
+**Egy visszavont figyelmeztetés.** A korábbi szövegben szerepelt, hogy a saját email-triage
+heartbeat által létrehozott ügyek szennyezik a mérést. Ez tényként igaz, de **rossz következtetést
+sugallt**: az email-triage a termelési beviteli út, nem mérési műtermék, és a kizárása egy nem
+létező populációt mérne. A figyelmeztetés az **organikus érkezési ráta** becslésénél marad
+érvényben, ahol felmerült. A valódi, korábbi szennyeződés a migrációs csúcs, és azt az 1. szabály
+zárja ki.
+
+**Miért két ujjlenyomat.** A forrás-hash kódot fed; egy új konnektor **adat**. A beviteli felület
+külön hash-e (`connector_id | kind | mode`) az egyetlen mód, hogy a bővülés lejáratként jelenjen
+meg. A `status` szándékosan kimarad: egy kapu, ami átmeneti konnektor-hibából naponta tüzel, az a
+kapu, amit kikapcsolnak.
+
+**Egy megjegyzés a redundanciáról.** Az eldobott ablak volumenét **két** zár védi: a záráskori
+`count = null`, és az összegzés `WHERE state = 'VALID'` feltétele. A mutáns-próbán kiderült, hogy a
+másodikat egyedül semmi nem fogja meg, mert az első miatt amúgy sem lenne mit összeadni. Egy védelem,
+aminek a hiánya nem látszik, addig áll, amíg valaki „feleslegesként" ki nem veszi — ezért kapott
+saját tesztet, ami egy jövőbeli írót játszik el.
 
 ## v1.4.2 — 2026-08-13 — a 90 napos korpusz-proxy leváltása
 
