@@ -41,7 +41,7 @@ describe('ZST approval-gated send (Slice 1 write-half, AT-ZA)', () => {
   function draftAndApprove(email = EMAIL, recipients = [EMAIL.to]) {
     const db = getDb()
     const d = draftZstSend(db, { caseId: 'ZST-ACC-1', templateId: 'accounting-package', email }, T0)
-    approveZstSend(db, { campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', allowedRecipients: recipients }, T0 + 1)
+    approveZstSend(db, { initiatedBy: 'human', campaignId: d.campaignId, templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', allowedRecipients: recipients }, T0 + 1)
     return d
   }
   const dispatchInput = (d: ReturnType<typeof draftAndApprove>, email = EMAIL) => ({
@@ -107,7 +107,7 @@ describe('ZST approval-gated send (Slice 1 write-half, AT-ZA)', () => {
 
     const second = { ...EMAIL, body: 'Még egy kérdés a júliusi csomaghoz.' }
     const d2 = draftZstSend(db, { caseId: 'ZST-ACC-1', templateId: 'accounting-package', email: second }, T0 + 10)
-    approveZstSend(db, {
+    approveZstSend(db, { initiatedBy: 'human',
       campaignId: d2.campaignId, templateHash: d2.templateHash,
       renderedPayloadHash: d2.renderedPayloadHash, approvedBy: 'istvan', allowedRecipients: [EMAIL.to],
     }, T0 + 11)

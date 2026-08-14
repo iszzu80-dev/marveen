@@ -1241,7 +1241,7 @@ export async function approveAndDispatchZst(
     return { sent: false, reasons: [`a kérés a jóváhagyott címzetti listát bővítené (${widened.join(', ')}) — csak a megjelenített címzett hagyható jóvá`] }
   }
 
-  approveZstSend(db, {
+  approveZstSend(db, { initiatedBy: 'human',
     campaignId: row.campaign_id, templateHash: row.template_hash,
     renderedPayloadHash: hash, approvedBy, allowedRecipients: recipients,
   }, now)

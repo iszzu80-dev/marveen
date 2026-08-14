@@ -72,7 +72,25 @@ const DAY = 86400
 interface PlannedRow {
   ledger_id: string; case_id: string | null; case_title: string | null
   recipient: string | null; payload: string | null; created_at: number
+  /** Which namespace the row came from, so a corporate letter is not reported as
+   *  a personal one. */
+  ns: 'szemelyes' | 'ZST'
 }
+
+// TWO ledgers, not one. The first version of this digest read `outbound_ledger`
+// alone, which is the personal namespace — so a corporate letter would have sat
+// waiting for approval exactly the way ob-mv-4655682f sat for two days, and this
+// digest, whose entire job is to stop that, would have reported zero.
+//
+// Found by the review peer within an hour of the digest landing, and it is the
+// same shape as three other findings the same night: every new protection is born
+// on the personal path and the corporate one gets it later, on a separate code
+// path, maybe. Fixed here by making ONE function read both, rather than growing a
+// second digest that drifts from this one.
+const LEDGERS = [
+  { table: 'outbound_ledger', cases: 'personal_cases', ns: 'szemelyes' as const },
+  { table: 'zst_outbound_ledger', cases: 'zst_cases', ns: 'ZST' as const },
+]
 
 export interface PlannedDigest {
   count: number
@@ -85,23 +103,43 @@ export interface PlannedDigest {
 /** The PLANNED outbound queue as a human-facing digest. Pure over the DB →
  *  testable, and callable for a read-only look without posting anything. */
 export function buildPlannedDigest(db: Database.Database, now: number, limit = 20): PlannedDigest {
-  const rows = db.prepare(
-    `SELECT l.ledger_id, l.case_id, c.title AS case_title, l.recipient, l.payload, l.created_at
-       FROM outbound_ledger l LEFT JOIN personal_cases c ON c.case_id = l.case_id
-      WHERE l.status = 'PLANNED'
-      ORDER BY l.created_at ASC LIMIT ?`
-  ).all(limit) as PlannedRow[]
-  const total = (db.prepare(
-    `SELECT COUNT(*) AS n FROM outbound_ledger WHERE status='PLANNED'`
-  ).get() as { n: number }).n
+  const rows: PlannedRow[] = []
+  let total = 0
+  for (const L of LEDGERS) {
+    // A missing table is not an empty queue. If the ZST schema has not been
+    // created in this database, say so by throwing rather than reporting zero —
+    // "nothing is waiting" and "I could not look" must not render identically.
+    const part = db.prepare(
+      `SELECT l.ledger_id, l.case_id, c.title AS case_title, l.recipient, l.payload, l.created_at
+         FROM ${L.table} l LEFT JOIN ${L.cases} c ON c.case_id = l.case_id
+        WHERE l.status = 'PLANNED'
+        ORDER BY l.created_at ASC LIMIT ?`
+    ).all(limit) as Omit<PlannedRow, 'ns'>[]
+    for (const r of part) rows.push({ ...r, ns: L.ns })
+    total += (db.prepare(
+      `SELECT COUNT(*) AS n FROM ${L.table} WHERE status='PLANNED'`
+    ).get() as { n: number }).n
+  }
+  // Oldest first ACROSS both namespaces, then cut — otherwise a long personal
+  // queue would push every corporate row past the limit.
+  rows.sort((a, b) => a.created_at - b.created_at)
+  rows.splice(limit)
 
   if (total === 0) {
     return { count: 0, oldestAgeDays: null,
       text: `${PLANNED_DIGEST_HEADER}: 0 sor. Nincs jovahagyasra varo megfogalmazott level.` }
   }
 
+  // Age ROUNDED DOWN to days reported a 46-hour-old letter as "1 napja". On a
+  // signal whose whole point is urgency that is the wrong direction to round, so
+  // under two days it is stated in hours.
+  const ageOf = (t: number): string => {
+    const sec = Math.max(0, now - t)
+    return sec < 2 * DAY ? `${Math.floor(sec / 3600)} oraja` : `${Math.floor(sec / DAY)} napja`
+  }
   const ageDays = (t: number) => Math.floor((now - t) / DAY)
   const oldest = rows.length > 0 ? ageDays(rows[0]!.created_at) : 0
+  const oldestText = rows.length > 0 ? ageOf(rows[0]!.created_at) : '0 oraja'
   const subjectOf = (payload: string | null): string => {
     if (!payload) return '(nincs targy)'
     try {
@@ -110,7 +148,7 @@ export function buildPlannedDigest(db: Database.Database, now: number, limit = 2
     } catch { return '(olvashatatlan payload)' }
   }
   const lines = rows.map(r =>
-    `- ${ageDays(r.created_at)} napja: "${subjectOf(r.payload)}" -> ${r.recipient ?? '(nincs cimzett)'}`
+    `- [${r.ns}] ${ageOf(r.created_at)}: "${subjectOf(r.payload)}" -> ${r.recipient ?? '(nincs cimzett)'}`
     + ` [${r.ledger_id}${r.case_id ? `, ugy ${r.case_title ?? r.case_id}` : ''}]`)
   // The listing is capped; say so rather than let a truncated list read as the
   // whole queue. Same reason sweepFollowUpCandidates reports scan_window_exhausted.
@@ -118,7 +156,7 @@ export function buildPlannedDigest(db: Database.Database, now: number, limit = 2
   return {
     count: total, oldestAgeDays: oldest,
     text: `${PLANNED_DIGEST_HEADER}: ${total} megfogalmazott level var a jovahagyasodra`
-      + ` (a legregebbi ${oldest} napja). Semmi nem ment el.\n${lines.join('\n')}${more}`,
+      + ` (a legregebbi ${oldestText}). Semmi nem ment el.\n${lines.join('\n')}${more}`,
   }
 }
 

@@ -15,6 +15,8 @@
 // match; a recipient not on the list is vetoed; a free-text campaign is refused.
 
 import type Database from 'better-sqlite3'
+import { mayApprove, OutboundModeRefusal, type ApprovalInitiator } from './outbound-mode-gate.js'
+import { appendZstCaseEvent } from './zst-case-store.js'
 import { randomUUID } from 'node:crypto'
 import { isUsable } from './connector-health.js'
 import { effectiveZstSensitivity, isProfileAllowedForZstSensitivity, coerceZstSensitivity } from './zst-sensitivity.js'
@@ -114,6 +116,22 @@ export function draftZstSend(db: Database.Database, input: DraftZstSendInput, no
        SET campaign_version = @v, outbound_kind = COALESCE(outbound_kind, @k), updated_at = @now
      WHERE ledger_id = @id`,
   ).run({ v: version, k: seq === 1 ? 'INITIAL' : 'FOLLOW_UP', now, id: planned.ledgerId })
+  // The corporate case timeline knew nothing about a composed letter either — the
+  // same blindness fixed on the personal path hours earlier, in the other
+  // namespace. Written here rather than left for the shared entry point, because
+  // "the timeline will mention it once we refactor" is how a case history stays
+  // wrong for weeks. No body, subject and recipient only, same reasoning as there.
+  appendZstCaseEvent(db, {
+    caseId: input.caseId, caseVersion: caseVersion ?? 0, actor: 'marveen',
+    eventType: 'OUTBOUND_DRAFTED',
+    reason: `Level megfogalmazva, jovahagyasra var: ${input.email.subject}`,
+    sourceSystem: 'cos:zst-send', sourceReference: planned.ledgerId,
+    payload: {
+      ledgerId: planned.ledgerId, campaignId, templateId: input.templateId,
+      recipient: input.email.to, subject: input.email.subject,
+      renderedPayloadHash: rHash, sequenceNumber: seq,
+    },
+  }, now)
   return { campaignId, ledgerId: planned.ledgerId, sequenceNumber: seq, templateHash, renderedPayloadHash: rHash, email: input.email, status: 'AWAITING_APPROVAL' }
 }
 
@@ -122,6 +140,9 @@ export interface ApproveZstSendInput {
   templateHash: string
   renderedPayloadHash: string
   approvedBy: string
+  /** Human or machine. Same required field, same reason, as the personal path:
+   *  an optional flag lets an automated approver pass for a person by omission. */
+  initiatedBy: ApprovalInitiator
   /** The recipient(s) this approval authorises. A send to anyone else is vetoed. */
   allowedRecipients: string[]
   approvalId?: string
@@ -147,6 +168,28 @@ export const ZST_DEFAULT_APPROVAL_MAX_OUTBOUND = 1
 
 /** The owner's explicit YES to THIS exact payload + recipient list. */
 export function approveZstSend(db: Database.Database, input: ApproveZstSendInput, now: number): void {
+  // 2026-08-15. The fifth mode landed on the personal path only, and this was the
+  // FOURTH protection to be born there and skip the corporate one (after the §22
+  // dispatch check this file's own comment at the recovery path already names,
+  // the PLANNED digest, and the OUTBOUND_DRAFTED event). Four times is not four
+  // bugs, it is the shape of having two send paths.
+  //
+  // So this is NOT a fifth copy: mayApprove has taken `domain` since it was
+  // written, and this is a second CALLER of the same gate. Copying the logic is
+  // what the choke-point doctrine forbids; adding a caller is what it asks for.
+  // The structural fix — one entry point in front of both paths — is carded
+  // separately, and it is bigger than tonight.
+  const zCaseId = (db.prepare('SELECT case_id FROM zst_campaigns WHERE campaign_id = ?')
+    .get(input.campaignId) as { case_id: string | null } | undefined)?.case_id ?? null
+  if (zCaseId !== null) {
+    const gate = mayApprove(db, 'zst', zCaseId, input.initiatedBy)
+    if (!gate.allowed) throw new OutboundModeRefusal(gate, zCaseId)
+  } else if (input.initiatedBy === 'automation') {
+    throw new OutboundModeRefusal({
+      allowed: false, code: 'mode_unknown', mode: null,
+      reason: `automatikus jovahagyas: a(z) ${input.campaignId} ZST-kampanyhoz nem tartozik ugy`,
+    }, input.campaignId)
+  }
   // Through the shared engine, not around it. recordApproval carries the whole
   // §3.2 envelope and refuses at write time what the raw INSERT accepted
   // silently: a campaign that does not exist (the old code shrugged with
