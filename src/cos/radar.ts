@@ -94,13 +94,26 @@ export function radarCreationRefusal(item: NewRadarItem): string | null {
       return 'nincs keresokifejezes (query.terms) -- egy ugy CIME ritkan keresokifejezes, es a rossz kereses ures eredmenye ugy nez ki, mint a nincs jo ajanlat'
     }
   }
+  if (item.kind === 'SERVICE_QUOTE') {
+    // A renewing contract IS a deadline by definition; without the date there
+    // is no moment at which the question stops being worth asking, and the
+    // watch would outlive the contract it was about.
+    if (item.expiresAt == null) {
+      return 'SERVICE_QUOTE megujulasi hatarido nelkul -- ennel a fajtanal a datum maga az ugy'
+    }
+    if (item.watchShape !== undefined && item.watchShape !== 'DEADLINE') {
+      return `SERVICE_QUOTE csak DEADLINE alakban ertelmes, ez ${item.watchShape}`
+    }
+    const terms = typeof q?.terms === 'string' ? q.terms.trim() : ''
+    if (terms === '') return 'SERVICE_QUOTE keresokifejezes nelkul -- mit ujitunk meg?'
+  }
   if (item.watchShape === 'DEADLINE' && item.expiresAt == null) {
     // Refused rather than defaulted: a deadline watch whose date is missing
     // would run for ever under the standing rhythm, which is precisely the
     // "created, running, never ending" shape the gate exists to prevent.
     return 'HATARIDOS figyeles hatarido nelkul (expiresAt hianyzik) -- sosem zarulna le'
   }
-  if (item.expiresAt != null && item.watchShape !== 'DEADLINE') {
+  if (item.expiresAt != null && item.watchShape !== 'DEADLINE' && item.kind !== 'SERVICE_QUOTE') {
     return `hatarido (expiresAt) csak HATARIDOS figyeleshez tartozik, ez ${item.watchShape ?? 'STANDING'}`
   }
   if (item.kind === 'RENTAL') {
@@ -120,8 +133,10 @@ export function createRadarItem(db: Database.Database, item: NewRadarItem, now: 
   // is honoured only when no shape was given (the pre-2026-08-15 fixtures);
   // once a shape is stated, the interval is derived, so a model cannot talk the
   // radar into checking hourly and nobody can explain it a fortnight later.
-  const shape: WatchShape = item.watchShape ?? 'STANDING'
-  const interval = item.watchShape
+  // SERVICE_QUOTE is deadline-shaped by nature, so it does not have to be
+  // stated — and stating anything else is refused above.
+  const shape: WatchShape = item.watchShape ?? (item.kind === 'SERVICE_QUOTE' ? 'DEADLINE' : 'STANDING')
+  const interval = (item.watchShape || item.kind === 'SERVICE_QUOTE')
     ? (rhythmFor(shape, item.expiresAt ?? null, now).intervalSec || 86400)
     : (item.checkIntervalSec ?? 86400)
   db.prepare(
