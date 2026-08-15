@@ -20,94 +20,23 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync, readdirSync, existsSync } from 'node:fs'
 import { join, dirname, resolve, relative } from 'node:path'
 
-const REPO = process.cwd()
+
+import { importClosure, sources, importSpecifiers, stripComments, REPO } from './helpers/import-closure.js'
+
 const PROACTIVE_DIR = 'src/cos/proactive'
 
-/** Every production `.ts` under a root, recursively, tests excluded. */
-function sources(root: string): string[] {
-  const out: string[] = []
-  const walk = (dir: string): void => {
-    if (!existsSync(join(REPO, dir))) return
-    for (const e of readdirSync(join(REPO, dir), { withFileTypes: true })) {
-      const rel = `${dir}/${e.name}`
-      if (e.isDirectory()) {
-        if (e.name === '__tests__' || e.name === 'node_modules') continue
-        walk(rel)
-      } else if (e.name.endsWith('.ts') && !e.name.endsWith('.test.ts')) out.push(rel)
-    }
-  }
-  walk(root)
-  return out.sort()
-}
 
-/** Comment lines, dropped before the import scan.
- *
- *  Found by this check's own first run: `types.ts` explains in prose why it does
- *  NOT import from `reader.ts`, quoting the import statement it removed — and
- *  the scanner read the quote as an import and reported the very dependency the
- *  comment exists to say is gone. A boundary check that reads documentation as
- *  code punishes writing the documentation, and the fix a tired person reaches
- *  for is to delete the explanation. */
-function stripComments(src: string): string {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .split('\n')
-    .filter(l => !/^\s*(\/\/|\*)/.test(l))
-    .join('\n')
-}
 
-/** The module specifiers a file imports, static and dynamic alike.
- *
- *  Dynamic `import()` is included deliberately: it is the obvious way to acquire
- *  a forbidden dependency while keeping the static import list clean, and a
- *  boundary check that only reads the top of the file is a boundary check with a
- *  published bypass. */
-function importSpecifiers(file: string): string[] {
-  const src = stripComments(readFileSync(join(REPO, file), 'utf8'))
-  const out: string[] = []
-  const patterns = [
-    /\bimport\s+[^'"]*?from\s*['"]([^'"]+)['"]/g,   // import x from 'y'
-    /\bimport\s*['"]([^'"]+)['"]/g,                  // import 'y'
-    /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g,        // await import('y')
-    /\brequire\s*\(\s*['"]([^'"]+)['"]\s*\)/g,       // require('y')
-    /\bexport\s+[^'"]*?from\s*['"]([^'"]+)['"]/g,    // re-export
-  ]
-  for (const re of patterns) {
-    for (const m of src.matchAll(re)) out.push(m[1])
-  }
-  return out
-}
 
-/** Resolve a relative specifier to a repo-relative `.ts` path, or null when it
- *  is a package (which the package rule below judges by name instead). */
-function resolveLocal(fromFile: string, spec: string): string | null {
-  if (!spec.startsWith('.')) return null
-  const abs = resolve(join(REPO, dirname(fromFile)), spec)
-  for (const cand of [abs.replace(/\.js$/, '.ts'), `${abs}.ts`, join(abs, 'index.ts')]) {
-    if (existsSync(cand)) return relative(REPO, cand).replace(/\\/g, '/')
-  }
-  return null
-}
 
 /** The full transitive closure of local modules the Proactive Core depends on,
- *  plus every external package name anything in that closure imports. */
+ *  plus every external package name anything in that closure imports.
+ *
+ *  The traversal itself now lives in helpers/import-closure.ts: the
+ *  SERVICE_QUOTE boundary needed the same reasoning (2026-08-15), and a second
+ *  copy is where this one's fixes would have stopped arriving. */
 function proactiveClosure(): { files: Set<string>; packages: Map<string, string> } {
-  const files = new Set<string>()
-  const packages = new Map<string, string>()   // package -> the file that pulled it in
-  const queue = sources(PROACTIVE_DIR)
-  for (const f of queue) files.add(f)
-  while (queue.length) {
-    const file = queue.shift()!
-    for (const spec of importSpecifiers(file)) {
-      const local = resolveLocal(file, spec)
-      if (local) {
-        if (!files.has(local)) { files.add(local); queue.push(local) }
-      } else if (!packages.has(spec)) {
-        packages.set(spec, file)
-      }
-    }
-  }
-  return { files, packages }
+  return importClosure(sources(PROACTIVE_DIR))
 }
 
 /** Modules and packages that can reach the outside world. A dependency on any

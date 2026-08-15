@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { importClosure } from './helpers/import-closure.js'
 import { initDatabase, getDb } from '../db.js'
 import { createRadarItem, radarCreationRefusal, getRadarItem, recordObservation } from '../cos/radar.js'
 import {
@@ -158,14 +159,69 @@ describe('SERVICE_QUOTE: the deadline day speaks — especially with nothing fou
 })
 
 describe('SERVICE_QUOTE: it can never ask for a quote itself', () => {
-  it('STANDING: the module exposes no outbound-capable function', () => {
-    // Structural, not mode-dependent. Istvan's mode is external_shadow today,
-    // so an outbound send has no live path anyway — which is exactly why the
-    // refusal must not BE the mode check: a later mode change must not turn a
-    // calculator lookup into an outbound path.
-    const src = readFileSync(new URL('../cos/service-quote.ts', import.meta.url), 'utf8')
-    for (const forbidden of ['createAgentMessage', 'enqueueOutbox', 'sendMail', 'executeAction', 'fetch(']) {
-      expect(src.includes(forbidden), `service-quote.ts references ${forbidden}`).toBe(false)
+  /**
+   * Structural, not mode-dependent. Istvan's mode is external_shadow today, so
+   * an outbound send has no live path anyway — which is EXACTLY why the refusal
+   * must not BE the mode check: a later mode change must not turn a calculator
+   * lookup into an outbound path.
+   *
+   * THE FIRST VERSION OF THIS GUARD WAS WRONG IN BOTH DIRECTIONS, found by
+   * Claude's mutation pass 2026-08-15. It grepped the whole file as text:
+   *   FALSE POSITIVE  a comment saying "this module never calls enqueueOutbox"
+   *                   turned it red — a true sentence about the code breaking
+   *                   the check on the code. That is the "grep prose, not
+   *                   chain" failure this codebase already had a name for.
+   *   FALSE NEGATIVE  a helper that sends, imported here, passed 17/17. The
+   *                   capability was one hop away and the guard could not see
+   *                   it — and that hop is exactly what the structural boundary
+   *                   was supposed to prevent.
+   *
+   * Now it reads the IMPORT CLOSURE: prose cannot trip it, and a hop cannot
+   * hide from it. The closure helper is shared with the Proactive Core boundary
+   * (import-closure.ts) rather than copied — the second copy is where the first
+   * one's fixes stop arriving.
+   */
+  const ENTRY = 'src/cos/service-quote.ts'
+
+  /** Local modules that can reach the outside world or the bus. Reaching ANY of
+   *  them, at any depth, means this kind acquired a way to speak to someone
+   *  other than Istvan. */
+  const OUTBOUND_MODULES = [
+    'src/db.ts',                      // createAgentMessage / appendDailyLog
+    'src/cos/channel-outbox.ts',      // the owner's channel queue
+    'src/cos/executor.ts',            // outbound action execution
+    'src/cos/executor-core.ts',
+    'src/cos/radar-alert.ts',         // bus + outbox
+    'src/cos/cos-telegram.ts',
+    'src/cos/gmail-send.ts',
+  ]
+  const OUTBOUND_PACKAGES = ['nodemailer', 'googleapis', 'node-fetch', 'axios', 'undici', 'ws', 'node:http', 'node:https']
+
+  it('STANDING: nothing outbound is reachable from this module, at any depth', () => {
+    const { files, packages } = importClosure([ENTRY])
+    for (const m of OUTBOUND_MODULES) {
+      expect(files.has(m), `${ENTRY} reaches ${m} (transitively)`).toBe(false)
     }
+    for (const p of OUTBOUND_PACKAGES) {
+      expect(packages.has(p), `${ENTRY} reaches package ${p} (transitively)`).toBe(false)
+    }
+  })
+
+  it('STANDING: the closure is real — the entry itself is in it, and it is small', () => {
+    // Positive control. A closure computed as empty (a broken resolver, a typo
+    // in the entry path) would pass every assertion above while checking
+    // nothing at all.
+    const { files } = importClosure([ENTRY])
+    expect(files.has(ENTRY)).toBe(true)
+    expect(files.size).toBeGreaterThan(1)
+  })
+
+  it('a COMMENT naming a forbidden function does NOT trip the guard', () => {
+    // The false positive, asserted directly: the module's own header explains
+    // what it never does, and saying so must stay allowed.
+    const src = readFileSync(new URL('../cos/service-quote.ts', import.meta.url), 'utf8')
+    expect(src).toMatch(/NEVER REQUESTS A QUOTE/)
+    const { files } = importClosure([ENTRY])
+    expect(files.has('src/cos/channel-outbox.ts')).toBe(false)
   })
 })
