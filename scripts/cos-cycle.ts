@@ -37,6 +37,13 @@ const STEPS: Step[] = [
   // szol, ugy nez ki, mint "nem volt mit megfogalmazni". A lepes naponta egyszer
   // szolal meg (sajat napi-naplo nyugtaja a kapu), es a nulla esetet is kimondja.
   { name: 'plannedDigest', args: ['scripts/cos-planned-digest.ts'] },
+  // Ugyanaz az alak, mas targy: a radar celar alatti, de NEM igazolt
+  // szallithatosagu talalatai. Ezek nem riasztanak (nem mondjuk Istvannak hogy
+  // vegye meg, amirol nem tudjuk hogy megkapja) -- de ha eltunnenek, a "semmi
+  // nem volt eleg olcso" es a "harom is volt, csak nem tudtuk ellenorizni"
+  // megkulonboztethetetlen lenne. Naponta egyszer, sajat nyugtaval, a nulla
+  // esetet is kimondva.
+  { name: 'radarDigest', args: ['scripts/cos-radar-digest.ts'] },
   // A kerdes megirasa es a KIKULDESE ket kulon lepes: ha egybe lennenek, egy
   // kezbesitesi hiba ugy nezne ki, mint "nincs mit kerdezni".
   { name: 'channel', args: ['scripts/cos-channel-send.ts'] },

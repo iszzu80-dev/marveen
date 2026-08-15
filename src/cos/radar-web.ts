@@ -22,7 +22,7 @@
  * every time. The weak link was that the last step belonged to a prompt.
  */
 import type Database from 'better-sqlite3'
-import { recordObservation, type ObservationResult } from './radar.js'
+import { recordObservation, type ObservationResult, type Shippability } from './radar.js'
 import { deliverRadarNotification } from './runtime.js'
 
 export interface WebObservationInput {
@@ -32,6 +32,15 @@ export interface WebObservationInput {
   shop: string
   url?: string
   currency?: string
+  /**
+   * What the sweep could ESTABLISH about delivery to Hungary — not what it
+   * hopes. Omitted means 'UNKNOWN', and 'UNKNOWN' is the honest answer most of
+   * the time: a search result page rarely states shipping terms. An UNKNOWN
+   * find is not a hit, but it is not lost either — it lands on the daily
+   * "szállítás nem igazolt" line, which is the whole reason the field has three
+   * values instead of a boolean.
+   */
+  shippableHu?: Shippability
 }
 
 export interface WebObservationResult extends ObservationResult {
@@ -71,6 +80,7 @@ export function recordWebObservation(
     // This only works now that the path marks what it notified.
     offerId: `websearch|${input.shop}`,
     offerRef: { shop: input.shop, url: input.url ?? '', price: Math.round(input.price) },
+    shippableHu: input.shippableHu ?? 'UNKNOWN',
   }, now)
 
   const delivered = res.notify.should

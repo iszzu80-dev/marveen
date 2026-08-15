@@ -6,7 +6,10 @@
 // logic as the adapter path — no parallel bookkeeping.
 //
 // Usage:
-//   node scripts/radar-web-record.mjs <radar_id> <priceMajor> <shop> <url>
+//   node scripts/radar-web-record.mjs <radar_id> <priceMajor> <shop> <url> [YES|NO|UNKNOWN]
+// The 5th argument is what the sweep could ESTABLISH about delivery to Hungary.
+// Omit it when the page did not say — it defaults to UNKNOWN, which keeps the
+// find visible on the daily "not verified" line without turning it into a deal.
 // priceMajor is the price in the item's currency major unit (e.g. 60990 for HUF).
 // Prints a JSON line: {hit, isNewLow, status, bestPrice, notify, offerId, delivered}.
 //
@@ -27,7 +30,7 @@
 import Database from '../node_modules/better-sqlite3/lib/index.js'
 import { recordWebObservation } from '../dist/cos/radar-web.js'
 
-const [, , radarId, priceRaw, shop = 'web', url = ''] = process.argv
+const [, , radarId, priceRaw, shop = 'web', url = '', shippableRaw] = process.argv
 if (!radarId || priceRaw == null) {
   console.error('usage: radar-web-record.mjs <radar_id> <priceMajor> <shop> <url>')
   process.exit(2)
@@ -40,8 +43,17 @@ const now = Math.floor(Date.now() / 1000)
 const item = db.prepare("SELECT radar_id, currency FROM radar_items WHERE radar_id=? AND kind='PRODUCT'").get(radarId)
 if (!item) { console.error(`no PRODUCT radar item ${radarId}`); process.exit(1) }
 
+const SHIPPABLE = new Set(['YES', 'NO', 'UNKNOWN'])
+const shippableHu = shippableRaw ? String(shippableRaw).toUpperCase() : 'UNKNOWN'
+// A typo must not silently become a guarantee: an unrecognised value is
+// rejected outright rather than falling back to YES (or, worse, being passed
+// through to the DB's CHECK-less TEXT column).
+if (!SHIPPABLE.has(shippableHu)) {
+  console.error(`shippable must be YES, NO or UNKNOWN (got: ${shippableRaw})`); process.exit(2)
+}
+
 const res = recordWebObservation(db, {
-  radarId, price, shop, url, currency: item.currency || 'HUF',
+  radarId, price, shop, url, currency: item.currency || 'HUF', shippableHu,
 }, now)
 db.close()
 console.log(JSON.stringify(res))

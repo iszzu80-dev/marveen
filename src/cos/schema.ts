@@ -856,7 +856,12 @@ export function initCosSchema(db: Database.Database): void {
       fx_rate               REAL,
       fx_rate_source        TEXT,
       fx_rate_timestamp     INTEGER,
-      converted_final_price INTEGER
+      converted_final_price INTEGER,
+      -- Deliverability to Hungary for THIS offer: 'YES' | 'NO' | 'UNKNOWN'.
+      -- Three-valued on purpose: "we could not establish it" is a different
+      -- fact from "it does not ship", and collapsing the two is how a blind
+      -- radar looks like a quiet one.
+      shippable_hu TEXT NOT NULL DEFAULT 'UNKNOWN'
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_radarobs_item ON radar_observations(radar_id, observed_at)`)
@@ -869,6 +874,16 @@ export function initCosSchema(db: Database.Database): void {
     offer_id: 'TEXT', original_currency: 'TEXT', original_final_price: 'INTEGER',
     comparison_currency: 'TEXT', fx_rate: 'REAL', fx_rate_source: 'TEXT',
     fx_rate_timestamp: 'INTEGER', converted_final_price: 'INTEGER',
+    // Can this offer actually be ordered from Hungary and delivered here?
+    // 'YES' | 'NO' | 'UNKNOWN' (see Shippability in radar.ts).
+    //
+    // THE DEFAULT IS 'UNKNOWN', AND THAT IS THE POINT. Every row written before
+    // this column existed was recorded without anyone checking delivery, so
+    // 'UNKNOWN' is what those rows actually mean. Defaulting to 'YES' would
+    // backdate a verification that never happened onto 87 historical rows — the
+    // same move as reading `best_price IS NULL` as "price above target", which
+    // is exactly the misreading that hid a week of radar silence.
+    shippable_hu: "TEXT NOT NULL DEFAULT 'UNKNOWN'",
   })
 
   // ── send_quotas (P0.4 atomic quota reservation; §9) ───────────────────

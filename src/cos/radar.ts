@@ -77,12 +77,34 @@ export function dueRadarChecks(db: Database.Database, now: number, limit = 100):
   ).all(now, limit) as RadarItemRow[]
 }
 
+/**
+ * Can this offer be ordered from Hungary and delivered here?
+ *
+ * THREE values, not two, and the third is the one that matters. A web search
+ * establishes a price far more often than it establishes delivery — a Spanish
+ * or German brand's cheapest listing frequently says nothing about shipping to
+ * Hungary. So 'UNKNOWN' is the common case, not the edge case, and it must be
+ * its own value: "we could not establish it" and "it does not ship here" are
+ * different facts, and a system that stores them the same way cannot tell
+ * correct silence from blindness. That distinction is the entire point of the
+ * 2026-08-15 card — the radar was silent for a week and looked fine.
+ *
+ * 'UNKNOWN' does NOT produce a hit (we will not tell Istvan to buy something we
+ * cannot confirm he can receive), but it is never dropped: it surfaces on the
+ * daily "szállítás nem igazolt" line.
+ */
+export type Shippability = 'YES' | 'NO' | 'UNKNOWN'
+
 export interface Observation {
   bestPrice: number | null      // comparison-currency price used for HIT (= converted)
   currency?: string             // comparison currency (falls back to item.currency)
   offerCount?: number
   offerRef?: unknown
   offerId?: string | null       // stable id of the best offer (for dedup)
+  /** Deliverability to Hungary. Omitted means 'UNKNOWN' — an observation whose
+   *  source said nothing about delivery has not been verified, and must not be
+   *  recorded as if it had. */
+  shippableHu?: Shippability
   /** P1.5 FX breakdown when the merchant quotes a different currency than the
    *  target. Omit for a single-currency merchant (recorded as identity fx). */
   fx?: {
@@ -102,7 +124,12 @@ export interface NotifyDecision {
 }
 
 export interface ObservationResult {
+  /** Price met AND (for products) delivery to Hungary confirmed. */
   hit: boolean
+  /** Price met, regardless of deliverability. */
+  priceMet: boolean
+  /** What we know about delivery for this offer. */
+  shippable: Shippability
   isNewLow: boolean
   status: RadarStatus
   /** The comparison-currency price recorded (= converted_final_price). */
@@ -166,19 +193,35 @@ export function recordObservation(db: Database.Database, radarId: string, obs: O
       `INSERT INTO radar_observations
         (radar_id, observed_at, best_price, currency, offer_count, offer_ref, offer_id,
          original_currency, original_final_price, comparison_currency,
-         fx_rate, fx_rate_source, fx_rate_timestamp, converted_final_price)
+         fx_rate, fx_rate_source, fx_rate_timestamp, converted_final_price, shippable_hu)
        VALUES (@radarId, @now, @best, @currency, @count, @ref, @offerId,
-         @origCur, @origPrice, @cmpCur, @rate, @rateSrc, @rateTs, @best)`
+         @origCur, @origPrice, @cmpCur, @rate, @rateSrc, @rateTs, @best, @shippable)`
     ).run({
       radarId, now, best: obs.bestPrice, currency: comparisonCurrency,
       count: obs.offerCount ?? null, ref: obs.offerRef === undefined ? null : JSON.stringify(obs.offerRef),
       offerId: obs.offerId ?? null,
       origCur: fx.originalCurrency, origPrice: fx.originalPrice, cmpCur: comparisonCurrency,
       rate: fx.rate, rateSrc: fx.rateSource, rateTs: fx.rateTimestamp,
+      shippable: obs.shippableHu ?? 'UNKNOWN',
     })
     const isNewLow = obs.bestPrice != null && (item.best_seen_price == null || obs.bestPrice < item.best_seen_price)
     const newLow = isNewLow ? obs.bestPrice! : item.best_seen_price
-    const hit = obs.bestPrice != null && item.target_price != null && obs.bestPrice <= item.target_price
+    const priceMet = obs.bestPrice != null && item.target_price != null && obs.bestPrice <= item.target_price
+    // DELIVERABILITY GATES THE HIT — FOR PRODUCTS ONLY.
+    //
+    // Istvan's condition (2026-08-15): a find is only a find if he can order it
+    // from Hungary and have it delivered. A cheaper price he cannot receive is
+    // not a deal, it is a distraction.
+    //
+    // Restricted to PRODUCT on purpose. A rental car is collected at a counter,
+    // not shipped; asking whether it "delivers to Hungary" is meaningless, and
+    // gating on it would silently kill the ONE radar path that demonstrably
+    // works — the rental item is the only one that has ever alerted. A new
+    // condition that breaks the only working case is not a stricter system, it
+    // is a broken one.
+    const needsDelivery = item.kind === 'PRODUCT'
+    const shippable: Shippability = obs.shippableHu ?? 'UNKNOWN'
+    const hit = priceMet && (!needsDelivery || shippable === 'YES')
     // The status reports THIS observation, not the best moment in the item's
     // history. It used to be `hit ? 'HIT' : item.status`, which could enter HIT
     // and never leave: radar-spain-rental still read HIT at 91 241 HUF against
@@ -196,7 +239,15 @@ export function recordObservation(db: Database.Database, radarId: string, obs: O
     db.prepare(
       `UPDATE radar_items SET best_seen_price=@newLow, status=@status, next_check_at=@next, updated_at=@now WHERE radar_id=@radarId`
     ).run({ newLow: newLow ?? null, status, next: now + item.check_interval_sec, radarId, now })
-    return { hit, isNewLow, status, bestPrice: obs.bestPrice, offerId: obs.offerId ?? null, notify }
+    return {
+      hit, isNewLow, status, bestPrice: obs.bestPrice, offerId: obs.offerId ?? null, notify,
+      // priceMet and shippable travel SEPARATELY from `hit` because the daily
+      // signal needs the difference: priceMet && !hit is precisely the "cheaper,
+      // but delivery not verified" line. Returning only `hit` would leave the
+      // caller unable to distinguish that from "nothing was cheap enough" —
+      // rebuilding the exact ambiguity this change exists to remove.
+      priceMet, shippable,
+    }
   })
   return tx()
 }

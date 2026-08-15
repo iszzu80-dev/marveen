@@ -17,6 +17,11 @@ import { recordWebObservation } from '../cos/radar-web.js'
  * `recordWebObservation` and exactly the first test here goes red, while the
  * "no hit, no alert" test stays green. Delivery is not covered by the fact that
  * a notification was *computed*.
+ *
+ * These cases state `shippableHu: 'YES'` explicitly because they are about
+ * whether the ALERT goes out, not about whether the shop ships. Since the
+ * 2026-08-15 deliverability gate, a PRODUCT hit needs both; leaving it implicit
+ * here would test the gate a second time and this path not at all.
  */
 
 const NOW = 1_000_000
@@ -39,7 +44,7 @@ describe('websearch sweep delivery', () => {
     const deliver = vi.fn().mockReturnValue(true)
 
     const res = recordWebObservation(db, {
-      radarId: 'r1', price: 27990, shop: 'Shopsy', url: 'https://shopsy.hu/x',
+      radarId: 'r1', price: 27990, shop: 'Shopsy', url: 'https://shopsy.hu/x', shippableHu: 'YES',
     }, NOW + 60, deliver)
 
     // The decision is right...
@@ -71,7 +76,7 @@ describe('websearch sweep delivery', () => {
     // him twice — a price falls below target once.
     const deliver = vi.fn().mockReturnValue(false)
 
-    const res = recordWebObservation(db, { radarId: 'r1', price: 27990, shop: 'Shopsy' }, NOW + 60, deliver)
+    const res = recordWebObservation(db, { radarId: 'r1', price: 27990, shop: 'Shopsy', shippableHu: 'YES' }, NOW + 60, deliver)
 
     expect(res.notify.should).toBe(true)
     expect(res.delivered).toBe(false)
@@ -85,11 +90,11 @@ describe('websearch sweep delivery', () => {
     // (no injected fake) precisely because the marking is what is under test.
     const db = seed()
 
-    const first = recordWebObservation(db, { radarId: 'r1', price: 27990, shop: 'Shopsy' }, NOW + 60)
+    const first = recordWebObservation(db, { radarId: 'r1', price: 27990, shop: 'Shopsy', shippableHu: 'YES' }, NOW + 60)
     expect(first.delivered).toBe(true)
     expect(getRadarItem(db, 'r1')!.last_notified_at).toBe(NOW + 60)
 
-    const second = recordWebObservation(db, { radarId: 'r1', price: 27990, shop: 'Shopsy' }, NOW + 86460)
+    const second = recordWebObservation(db, { radarId: 'r1', price: 27990, shop: 'Shopsy', shippableHu: 'YES' }, NOW + 86460)
     expect(second.hit).toBe(true)
     expect(second.notify.should).toBe(false)
     expect(second.delivered).toBe(false)
@@ -97,9 +102,9 @@ describe('websearch sweep delivery', () => {
 
   it('a NEW cheaper shop is news even after the first was notified', () => {
     const db = seed()
-    recordWebObservation(db, { radarId: 'r1', price: 27990, shop: 'Shopsy' }, NOW + 60)
+    recordWebObservation(db, { radarId: 'r1', price: 27990, shop: 'Shopsy', shippableHu: 'YES' }, NOW + 60)
 
-    const other = recordWebObservation(db, { radarId: 'r1', price: 24990, shop: 'About You' }, NOW + 120)
+    const other = recordWebObservation(db, { radarId: 'r1', price: 24990, shop: 'About You', shippableHu: 'YES' }, NOW + 120)
 
     expect(other.notify.should).toBe(true)
     expect(other.delivered).toBe(true)

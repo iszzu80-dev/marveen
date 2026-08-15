@@ -8,9 +8,24 @@ const T0 = 1_700_000_000
 
 // A deterministic mock price source (real adapters plug in the same way). HUF
 // prices in minor units (HUF exponent 0 → minor == forint).
+// Stands in for a Hungarian storefront, so it DECLARES deliverability. Since
+// 2026-08-15 a product hit needs both a price and confirmed delivery to Hungary;
+// an adapter that stays silent yields UNKNOWN and cannot produce a hit. That is
+// the point, and `mockAdapterSilentOnDelivery` below is its test.
 function mockAdapter(results: ProductSearchResult[]): ShoppingAdapter {
   return {
     id: 'mock', displayName: 'Mock', capabilities: { search: true, priceWatch: true, cart: false },
+    deliversToHu: 'YES',
+    async searchProducts() { return results },
+    async getProduct() { return null },
+  }
+}
+
+/** An adapter wired in WITHOUT answering the delivery question. */
+function mockAdapterSilentOnDelivery(results: ProductSearchResult[]): ShoppingAdapter {
+  return {
+    id: 'mock-silent', displayName: 'Mock (no delivery claim)',
+    capabilities: { search: true, priceWatch: true, cart: false },
     async searchProducts() { return results },
     async getProduct() { return null },
   }
@@ -49,6 +64,19 @@ describe('PRODUCT radar price-watch engine', () => {
     expect(res.hit).toBe(true)
     expect(res.status).toBe('HIT')
     expect(res.notify).toMatchObject({ should: true, reason: 'NEW_HIT' })
+  })
+
+  it('an adapter that does not declare delivery cannot produce a HIT', async () => {
+    // Omission must not earn a guarantee. If this ever goes green with hit:true,
+    // a future adapter gets deliverability to Hungary by forgetting to answer —
+    // and Istvan gets told to buy something nobody checked he can receive.
+    makeItem()
+    const res = await runProductRadarCheck(getDb(), getRadarItem(getDb(), 'BUY-TEST')!,
+      mockAdapterSilentOnDelivery([p('b', 'On Cloud 6 midnight', 44000)]), T0 + 1)
+    expect(res.priceMet).toBe(true)   // the price is not in dispute
+    expect(res.shippable).toBe('UNKNOWN')
+    expect(res.hit).toBe(false)
+    expect(res.notify.should).toBe(false)
   })
 
   it('applies mustMatch / excludeTerms filters', async () => {

@@ -73,6 +73,8 @@ export interface CartMutationResult {
 }
 
 // NOTE: no `order` / `checkout` / `pay` flag exists here, by design.
+import type { Shippability } from './radar.js'
+
 export interface ShoppingAdapterCapabilities {
   search: boolean
   priceWatch: boolean
@@ -83,6 +85,21 @@ export interface ShoppingAdapter {
   readonly id: string
   readonly displayName: string
   readonly capabilities: ShoppingAdapterCapabilities
+
+  /**
+   * Does this source deliver to Hungary?
+   *
+   * A property of the SOURCE, not of a guess about one offer: a Hungarian
+   * storefront (emag.hu) delivers here by construction, while a price scraped
+   * off the open web says nothing about it. Adapters that cannot answer must
+   * leave this undefined, which is read as 'UNKNOWN' — never as 'YES'.
+   *
+   * Declared here rather than inferred per result so a new adapter has to state
+   * its answer to be wired in. An adapter that forgets gets 'UNKNOWN' and its
+   * finds surface on the "delivery not verified" line: visible, but never sold
+   * to Istvan as a deal we cannot confirm he can receive.
+   */
+  readonly deliversToHu?: Shippability
 
   // Always available (even browser/scraper adapters can search).
   searchProducts(query: string, opts?: { limit?: number }): Promise<ProductSearchResult[]>

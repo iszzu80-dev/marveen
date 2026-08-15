@@ -112,6 +112,13 @@ export async function runProductRadarCheck(
     offerCount: priced.length,
     offerId: cheapest ? `${cheapest.ref.adapterId}|${cheapest.ref.productId}` : null,
     offerRef: cheapest ? { name: cheapest.name, priceMinor: cheapest.priceMinor, currency: cheapest.currency, available: cheapest.available, adapter: cheapest.ref.adapterId } : null,
+    // The ADAPTER answers this, not this function: whether a source delivers to
+    // Hungary is a fact about the storefront. An adapter that declares nothing
+    // yields 'UNKNOWN' — its finds stay visible on the "delivery not verified"
+    // line but never become a hit. Defaulting to 'YES' here would let any future
+    // adapter claim deliverability by omission, which is how an unchecked
+    // assumption becomes a shipped guarantee.
+    shippableHu: adapter.deliversToHu ?? 'UNKNOWN',
   }, now)
 }
 

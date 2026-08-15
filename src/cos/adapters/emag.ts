@@ -127,6 +127,17 @@ export class EmagAdapter implements ShoppingAdapter {
   readonly id = 'emag'
   readonly displayName = 'eMAG.hu'
   readonly capabilities: ShoppingAdapterCapabilities = { search: true, priceWatch: true, cart: false }
+  /**
+   * 'YES' because this adapter searches emag.HU — a Hungarian storefront that
+   * delivers domestically. This is a claim about the shop, not an inference
+   * about an individual listing, which is the only kind of deliverability claim
+   * worth trusting without checking.
+   *
+   * It is stated here rather than assumed anywhere else, so that if it ever
+   * stops being true (a marketplace seller shipping from abroad, say) there is
+   * one line to change and one line to argue with.
+   */
+  readonly deliversToHu = 'YES' as const
   private readonly fetch: typeof fetch
 
   constructor(opts: EmagAdapterOpts = {}) {
