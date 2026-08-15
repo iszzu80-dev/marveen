@@ -302,12 +302,25 @@ A fenti külön szakasz szerint, **utoljára**, mert más alak.
    A csendes számlálás **nem** elfogadható kimenet. A `heldBacklogFull` ma is
    számlálódik — a ciklus-telemetriában. Ez nem ugyanaz, mint hogy Istvan tudja.
 
-   **Nyitott tervezési kérdés Marveennek, a spec része:** kapjon-e a `SERVICE_QUOTE`
-   kivételt a plafon alól? Mellette szól, hogy határidős és nem sürgethető; ellene,
-   hogy a plafon saját indoklása (`owner-question.ts:420`) épp az, hogy *„past a
-   handful, one more question does not get answered faster, it gets the channel
-   muted"*. **A javaslatom: NE kapjon kivételt** — inkább látszódjon, hogy vár. Egy
-   kivétel az első fajta, ami átfúrja a plafont, és a második már könnyebben megy.
+   **ELDÖNTVE (Claude + Marveen, 2026-08-15): a `SERVICE_QUOTE` NEM kap kivételt a
+   plafon alól.**
+
+   Az érv, amiért felmerült: a fajta határidős, és egy lejárt biztosítás-hosszabbítást
+   nem lehet utólag megkérdezni. Az érv ellene két részből áll, és a második Marveené,
+   aki élesebben fogalmazta meg, mint az első változat:
+
+   - a plafon saját indoklása (`owner-question.ts:420`) épp az, hogy *„past a handful,
+     one more question does not get answered faster, it gets the channel muted"* — egy
+     kivétel az első fajta, ami átfúrja, és a második már könnyebben megy;
+   - **és a kivétel nem enyhíti a szűkösséget, hanem ÁTHELYEZI.** A `SERVICE_QUOTE`
+     kérdése kimenne, és cserébe a másik öt közül nyomna ki egyet a figyelemből.
+     Ugyanaz a néma veszteség, csak **nem látszik, kit szorítottunk ki** — vagyis
+     rosszabb, mint a mai állapot, ahol legalább a `heldBacklogFull` számol.
+
+   **Amit helyette építünk:** a held-állapot a napi jelzésbe kerül, névvel. Ez nem új
+   út — a `plannedDigest` már ma is naponta megszólal, a nulla esetet is kimondja, és
+   a saját nyugtáját olvassa. **Egy meglévő, bizonyítottan tüzelő csatornát bővítünk,
+   nem plafont fúrunk át.**
 
 ## AMIT EZ A KÁRTYA NEM OLD MEG
 
