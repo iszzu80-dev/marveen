@@ -18,6 +18,16 @@ import { parseQualifiedId, formatQualifiedId } from '../federation/address.js'
 import { getFederationConfig } from '../federation/config.js'
 import type { RouteContext } from './types.js'
 
+/** Prefixes that mark a bus message as a NOTICE about other work, not work
+ *  itself. Neither needs a receipt: a completion report is already the answer,
+ *  and a delivery failure is addressed from `system`, which has no session and
+ *  therefore cannot receive one. */
+const NOTICE_PREFIXES = ['[Eredmény]', '[handoff-failure]'] as const
+
+export function isNoticeNotWork(content: string): boolean {
+  return NOTICE_PREFIXES.some(p => content.startsWith(p))
+}
+
 export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method, url } = ctx
 
@@ -196,7 +206,18 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       // ping-pong chains (the delegator might write back, which would trigger
       // markMessageDone on this notification; we skip creating ANOTHER notification
       // when the original content is already a completion report).
-      if (done && done.from_agent !== done.to_agent && !done.content.startsWith('[Eredmény]')) {
+      //
+      // 2026-08-15: `[Eredmény]` alone was not enough, and the gap closed a loop.
+      // A `[handoff-failure]` notice comes FROM the pseudo-agent `system`, which
+      // is never a tmux session. Marking one done produced a receipt addressed to
+      // `system`, which could not be delivered, which produced the NEXT
+      // handoff-failure — one new message per retry window, for ever. Measured on
+      // the live bus: 21086 -> 21088 -> 21089 -> 21090 -> 21091, roughly hourly.
+      //
+      // So a receipt is skipped for anything that is itself a notice rather than
+      // work: a completion report or a delivery failure. Neither is waiting for an
+      // answer, and the second one cannot receive one by construction.
+      if (done && done.from_agent !== done.to_agent && !isNoticeNotWork(done.content)) {
         const summary = result ? result.slice(0, 500) : '(nincs eredmény)'
         createAgentMessage(
           done.to_agent,
