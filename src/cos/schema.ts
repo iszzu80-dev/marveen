@@ -869,6 +869,19 @@ export function initCosSchema(db: Database.Database): void {
   ensureColumns(db, 'radar_items', {
     last_notified_offer_id: 'TEXT', last_notified_price: 'INTEGER',
     last_notified_at: 'INTEGER', notification_reason: 'TEXT',
+    // The SHAPE of the watch decides its rhythm (see radar-rhythm.ts). Default
+    // STANDING because that is what the nine existing items are: lasting
+    // wishes with no end date. Not a guess — a DEADLINE row without a date
+    // would be a contradiction, and ONE_OFF would close them all on the next
+    // tick.
+    watch_shape: "TEXT NOT NULL DEFAULT 'STANDING'",
+    // When a DEADLINE watch becomes moot. NULL for the other two shapes.
+    expires_at: 'INTEGER',
+    // How many checks this item has had. ONE_OFF is defined by having had one;
+    // without a counter "has it run?" is only answerable by joining the
+    // observations, which is the kind of derivation that silently breaks when
+    // an observation is pruned.
+    checks_count: 'INTEGER NOT NULL DEFAULT 0',
   })
   ensureColumns(db, 'radar_observations', {
     offer_id: 'TEXT', original_currency: 'TEXT', original_final_price: 'INTEGER',

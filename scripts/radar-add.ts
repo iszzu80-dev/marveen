@@ -12,12 +12,14 @@
 //
 // Usage:
 //   npx tsx scripts/radar-add.ts --id BUY-HOFF-BANKS --kind PRODUCT \
-//     --label "HOFF Banks" --target 35000 --terms "HOFF Banks cipo" [--case PRI-SHOP-2026-003]
+//     --label "HOFF Banks" --target 35000 --terms "HOFF Banks cipo" \
+//     [--shape DEADLINE|STANDING|ONE_OFF] [--expires <unix>] [--case PRI-SHOP-2026-003]
 //   npx tsx scripts/radar-add.ts --id R-VLC --kind RENTAL --label "VLC->AGP" \
 //     --target 85000 --search '{"pickup":"VLC","dropoff":"AGP"}'
 
 import { getDb, initDatabase } from '../src/db.js'
 import { addRadarItem, addRadarItemForCase, type RadarIntakeRequest } from '../src/cos/radar-intake.js'
+import { isWatchShape } from '../src/cos/radar-rhythm.js'
 
 function flag(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`)
@@ -31,6 +33,10 @@ if (!id || !kind || !label) {
 }
 
 const targetRaw = flag('target')
+const shapeRaw = flag('shape')
+if (shapeRaw != null && !isWatchShape(shapeRaw)) {
+  console.error(`--shape must be DEADLINE, STANDING or ONE_OFF (got: ${shapeRaw})`); process.exit(2)
+}
 const req: Omit<RadarIntakeRequest, 'caseId'> = {
   radarId: id, kind, label,
   // NOT defaulted. An absent --target must reach the gate as absent, so the
@@ -40,6 +46,12 @@ const req: Omit<RadarIntakeRequest, 'caseId'> = {
   search: flag('search') ? JSON.parse(flag('search')!) : undefined,
   currency: flag('currency') ?? 'HUF',
   checkIntervalSec: flag('interval') ? Number(flag('interval')) : undefined,
+  // The SHAPE is accepted; the interval it implies is not up for negotiation.
+  // An unrecognised value is rejected outright rather than silently becoming
+  // STANDING — a watch that runs on a cadence nobody chose is how a rhythm
+  // stops being explainable.
+  watchShape: shapeRaw as never,
+  expiresAt: flag('expires') ? Number(flag('expires')) : undefined,
 }
 
 initDatabase()

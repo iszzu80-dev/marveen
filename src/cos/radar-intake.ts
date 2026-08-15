@@ -30,6 +30,7 @@ import {
   type NewRadarItem, type RadarItemRow,
 } from './radar.js'
 import { getCase } from './case-store.js'
+import type { WatchShape } from './radar-rhythm.js'
 
 export interface RadarIntakeRequest {
   radarId: string
@@ -46,6 +47,11 @@ export interface RadarIntakeRequest {
   mustMatch?: string[]
   excludeTerms?: string[]
   maxResults?: number
+  /** DEADLINE | STANDING | ONE_OFF. The shape may be PROPOSED (by Istvan, or
+   *  by a model reading a case); the rhythm it implies is not negotiable. */
+  watchShape?: WatchShape
+  /** Only for DEADLINE, and required there — the gate refuses either mismatch. */
+  expiresAt?: number
 }
 
 export type RadarIntakeResult =
@@ -71,6 +77,7 @@ function toNewItem(req: RadarIntakeRequest): NewRadarItem {
     radarId: req.radarId, caseId: req.caseId, kind: req.kind, label: req.label,
     targetPrice: req.targetPrice, currency: req.currency ?? 'HUF',
     checkIntervalSec: req.checkIntervalSec, query: queryFor(req),
+    watchShape: req.watchShape, expiresAt: req.expiresAt,
   }
 }
 

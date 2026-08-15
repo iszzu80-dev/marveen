@@ -8,6 +8,7 @@
 // is driven by the scheduler and passed in as observations.
 
 import type Database from 'better-sqlite3'
+import { rhythmFor, type WatchShape, type RhythmDecision } from './radar-rhythm.js'
 
 export type RadarStatus = 'ACTIVE' | 'PAUSED' | 'HIT' | 'CLOSED'
 
@@ -20,7 +21,11 @@ export interface NewRadarItem {
   targetPrice?: number
   maxPrice?: number
   currency?: string
+  /** Ignored for the shaped path: the RHYTHM TABLE decides the interval. Kept
+   *  for the legacy fixtures that set it directly. */
   checkIntervalSec?: number
+  watchShape?: WatchShape
+  expiresAt?: number
 }
 
 export interface RadarItemRow {
@@ -40,6 +45,9 @@ export interface RadarItemRow {
   last_notified_price: number | null
   last_notified_at: number | null
   notification_reason: string | null
+  watch_shape: WatchShape
+  expires_at: number | null
+  checks_count: number
 }
 
 /** A further drop must be at least this fraction below the last notified price to
@@ -82,7 +90,17 @@ export function radarCreationRefusal(item: NewRadarItem): string | null {
       // the radar would search for the wrong thing and report honest zeroes.
       return 'nincs keresokifejezes (query.terms) -- egy ugy CIME ritkan keresokifejezes, es a rossz kereses ures eredmenye ugy nez ki, mint a nincs jo ajanlat'
     }
-  } else if (item.kind === 'RENTAL') {
+  }
+  if (item.watchShape === 'DEADLINE' && item.expiresAt == null) {
+    // Refused rather than defaulted: a deadline watch whose date is missing
+    // would run for ever under the standing rhythm, which is precisely the
+    // "created, running, never ending" shape the gate exists to prevent.
+    return 'HATARIDOS figyeles hatarido nelkul (expiresAt hianyzik) -- sosem zarulna le'
+  }
+  if (item.expiresAt != null && item.watchShape !== 'DEADLINE') {
+    return `hatarido (expiresAt) csak HATARIDOS figyeleshez tartozik, ez ${item.watchShape ?? 'STANDING'}`
+  }
+  if (item.kind === 'RENTAL') {
     if (q?.search == null) {
       return 'nincs kereses-leiro (query.search) -- egy berles atveteli/leadasi hely es datum nelkul nem kerdezheto le'
     }
@@ -95,17 +113,25 @@ export function createRadarItem(db: Database.Database, item: NewRadarItem, now: 
   // not in the callers, where the second one forgets it.
   const refusal = radarCreationRefusal(item)
   if (refusal) throw new Error(`radar item ${item.radarId} elutasitva: ${refusal}`)
-  const interval = item.checkIntervalSec ?? 86400
+  // THE TABLE DECIDES THE RHYTHM, not the caller. An explicit checkIntervalSec
+  // is honoured only when no shape was given (the pre-2026-08-15 fixtures);
+  // once a shape is stated, the interval is derived, so a model cannot talk the
+  // radar into checking hourly and nobody can explain it a fortnight later.
+  const shape: WatchShape = item.watchShape ?? 'STANDING'
+  const interval = item.watchShape
+    ? (rhythmFor(shape, item.expiresAt ?? null, now).intervalSec || 86400)
+    : (item.checkIntervalSec ?? 86400)
   db.prepare(
     `INSERT INTO radar_items (radar_id, case_id, kind, label, query, target_price, max_price, currency,
-        status, check_interval_sec, next_check_at, created_at, updated_at)
+        status, check_interval_sec, next_check_at, created_at, updated_at, watch_shape, expires_at)
      VALUES (@radarId, @caseId, @kind, @label, @query, @targetPrice, @maxPrice, @currency,
-        'ACTIVE', @interval, @nextCheck, @now, @now)`
+        'ACTIVE', @interval, @nextCheck, @now, @now, @shape, @expiresAt)`
   ).run({
     radarId: item.radarId, caseId: item.caseId ?? null, kind: item.kind, label: item.label,
     query: item.query === undefined ? null : JSON.stringify(item.query),
     targetPrice: item.targetPrice ?? null, maxPrice: item.maxPrice ?? null, currency: item.currency ?? null,
     interval, nextCheck: now + interval, now,
+    shape, expiresAt: item.expiresAt ?? null,
   })
   return getRadarItem(db, item.radarId)!
 }
@@ -178,6 +204,8 @@ export interface ObservationResult {
   priceMet: boolean
   /** What we know about delivery for this offer. */
   shippable: Shippability
+  /** The rhythm decision applied after this observation (interval / close). */
+  rhythm: RhythmDecision
   isNewLow: boolean
   status: RadarStatus
   /** The comparison-currency price recorded (= converted_final_price). */
@@ -282,11 +310,26 @@ export function recordObservation(db: Database.Database, radarId: string, obs: O
     // quietly resurrect a radar the owner switched off. `best_seen_price` keeps
     // the historical minimum — that number is still true, it just is not the
     // status.
-    const status: RadarStatus = hit ? 'HIT' : (item.status === 'HIT' ? 'ACTIVE' : item.status)
+    let status: RadarStatus = hit ? 'HIT' : (item.status === 'HIT' ? 'ACTIVE' : item.status)
     const notify = decideNotify(item, obs.bestPrice, obs.offerId ?? null, hit)
+    // THE RHYTHM IS RE-DERIVED ON EVERY OBSERVATION, not read back from the
+    // stored interval. A DEADLINE watch has to TIGHTEN by itself as the date
+    // approaches and END on the day; a stored number cannot do either, and a
+    // deadline that passes in silence is worse than never having watched.
+    const checks = (item.checks_count ?? 0) + 1
+    const rhythm = rhythmFor(item.watch_shape ?? 'STANDING', item.expires_at ?? null, now, checks)
+    // CLOSED only ever comes from the rhythm, and only from ACTIVE/HIT. PAUSED
+    // is the owner's decision about whether to watch at all, and a clock must
+    // not overrule it.
+    if (rhythm.close && (status === 'ACTIVE' || status === 'HIT')) status = 'CLOSED'
+    const nextInterval = rhythm.intervalSec > 0 ? rhythm.intervalSec : item.check_interval_sec
     db.prepare(
-      `UPDATE radar_items SET best_seen_price=@newLow, status=@status, next_check_at=@next, updated_at=@now WHERE radar_id=@radarId`
-    ).run({ newLow: newLow ?? null, status, next: now + item.check_interval_sec, radarId, now })
+      `UPDATE radar_items SET best_seen_price=@newLow, status=@status, next_check_at=@next,
+          check_interval_sec=@interval, checks_count=@checks, updated_at=@now WHERE radar_id=@radarId`
+    ).run({
+      newLow: newLow ?? null, status, next: now + nextInterval,
+      interval: nextInterval, checks, radarId, now,
+    })
     return {
       hit, isNewLow, status, bestPrice: obs.bestPrice, offerId: obs.offerId ?? null, notify,
       // priceMet and shippable travel SEPARATELY from `hit` because the daily
@@ -295,6 +338,8 @@ export function recordObservation(db: Database.Database, radarId: string, obs: O
       // caller unable to distinguish that from "nothing was cheap enough" —
       // rebuilding the exact ambiguity this change exists to remove.
       priceMet, shippable,
+      /** Why the next check is when it is — and, when the watch ended, why. */
+      rhythm,
     }
   })
   return tx()
