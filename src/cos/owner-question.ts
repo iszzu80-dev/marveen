@@ -177,6 +177,15 @@ export function buildOwnerQuestion(
   // (2) After the deadline the ORIGINAL ask is no longer the decidable thing.
   // It stays visible — he may still want to do it — but it is no longer what
   // the question is about.
+  //
+  // DELIBERATELY OUTSIDE `asks`, so it is outside the hash. Not an oversight,
+  // and not the same call as the recommendation's: this line CHANGES BY ITSELF,
+  // every midnight, because it counts days. In the hash it would re-ask the same
+  // dead question once a day forever, and `replacesOwn` would exempt every
+  // repeat from the cooldown and the outstanding ceiling — the
+  // four-questions-in-thirty-minutes failure described below, on a daily timer.
+  // The open question's stored text is refreshed in place instead, so the count
+  // he reads is today's without anything new going out.
   const expired = expiredAskPrefix(pkg?.deadline, input.now ?? Math.floor(Date.now() / 1000))
   if (expired) lines.push(expired)
   lines.push(...asks)

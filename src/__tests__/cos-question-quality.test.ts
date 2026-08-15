@@ -150,3 +150,48 @@ describe('the composed question obeys all three rules', () => {
     expect(q.text).toContain('Bizonytalanság: A státusz WAITING_EXTERNAL.')
   })
 })
+
+describe('the three rules do not disturb the ASK identity', () => {
+  const base = { caseId: 'w1', domain: 'personal', title: 'Waterpik szájzuhany', packet: PACKET, plan: PLAN, now: NOW2 }
+
+  it('the expired prefix does NOT change the hash — it counts days, and would re-ask daily', () => {
+    const before = buildOwnerQuestion({ ...base,
+      pkg: { handled: [], stoppedBecause: null, recommendation: null, options: [],
+             deadline: { at: NOW2 + 86_400, kind: 'due' } } as never })!
+    const after = buildOwnerQuestion({ ...base,
+      pkg: { handled: [], stoppedBecause: null, recommendation: null, options: [],
+             deadline: { at: NOW2 - 6 * 86_400, kind: 'due' } } as never })!
+    // The text MUST differ — otherwise this test proves nothing about rule (2).
+    expect(after.text).not.toEqual(before.text)
+    expect(after.text).toContain('ELMÚLT')
+    expect(after.hash).toEqual(before.hash)
+  })
+
+  it('and one more elapsed day does not make it a new question either', () => {
+    const day6 = buildOwnerQuestion({ ...base,
+      pkg: { handled: [], stoppedBecause: null, recommendation: null, options: [],
+             deadline: { at: NOW2 - 6 * 86_400, kind: 'due' } } as never })!
+    const day7 = buildOwnerQuestion({ ...base, now: NOW2 + 86_400,
+      pkg: { handled: [], stoppedBecause: null, recommendation: null, options: [],
+             deadline: { at: NOW2 - 6 * 86_400, kind: 'due' } } as never })!
+    expect(day7.text).toContain('7 NAPJA ELMÚLT')
+    expect(day7.hash).toEqual(day6.hash)
+  })
+
+  it('dropping an unusable recommendation does not change the hash either', () => {
+    const dropped = buildOwnerQuestion({ ...base,
+      pkg: { handled: [], stoppedBecause: null, recommendation: 'Check for external response or escalate if overdue',
+             options: ['„igen"'], deadline: null } as never })!
+    const none = buildOwnerQuestion({ ...base,
+      pkg: { handled: [], stoppedBecause: null, recommendation: null, options: [], deadline: null } as never })!
+    expect(dropped.hash).toEqual(none.hash)
+  })
+
+  it('POSITIVE CONTROL: a changed ASK still changes the hash', () => {
+    const other = buildOwnerQuestion({ ...base, packet: { ...PACKET,
+      missingRequirements: [{ what: 'valami egeszen mas', whoHasIt: 'István', why: 'mert' }],
+    } as unknown as ReaderEvidencePacket })!
+    const orig = buildOwnerQuestion(base)!
+    expect(other.hash).not.toEqual(orig.hash)
+  })
+})
