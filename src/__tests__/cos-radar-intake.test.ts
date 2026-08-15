@@ -125,3 +125,35 @@ describe('radar intake: both inputs, one creator', () => {
     expect(res.reason).toMatch(/nincs celar/)
   })
 })
+
+describe('the intake and the gate agree about every kind', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('a SERVICE_QUOTE request carries its terms through to the query', () => {
+    // The gate demands terms for SERVICE_QUOTE; queryFor only supplied them for
+    // PRODUCT, so the first real one was refused by its own gate. Found by
+    // creating an actual watch on the Groupama renewal, not by a test.
+    const res = addRadarItem(getDb(), {
+      radarId: 'sq-x', kind: 'SERVICE_QUOTE', label: 'Groupama megujulas',
+      targetPrice: 52872, terms: 'lakasbiztositas kalkulator',
+      expiresAt: NOW + 60 * 86400,
+    }, NOW)
+    expect(res.ok, res.ok ? '' : res.reason).toBe(true)
+    if (!res.ok) return
+    expect(JSON.parse(res.item.query!).terms).toBe('lakasbiztositas kalkulator')
+  })
+
+  it('STANDING: every kind the gate demands terms for actually receives them', () => {
+    // The rule, not the instance. If a future kind is added to the gate's terms
+    // requirement without being added to queryFor, this fails instead of the
+    // first real item silently being refused.
+    for (const kind of ['PRODUCT', 'SERVICE_QUOTE']) {
+      const res = addRadarItem(getDb(), {
+        radarId: `k-${kind}`, kind, label: `proba ${kind}`, targetPrice: 1000,
+        terms: 'proba keresokifejezes',
+        ...(kind === 'SERVICE_QUOTE' ? { expiresAt: NOW + 60 * 86400 } : {}),
+      }, NOW)
+      expect(res.ok, `${kind}: ${res.ok ? '' : res.reason}`).toBe(true)
+    }
+  })
+})

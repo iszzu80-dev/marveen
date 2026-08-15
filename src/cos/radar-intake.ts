@@ -60,7 +60,15 @@ export type RadarIntakeResult =
 
 /** The query shape each kind needs, assembled from the request's flat fields. */
 function queryFor(req: RadarIntakeRequest): unknown {
-  if (req.kind === 'PRODUCT') {
+  // SERVICE_QUOTE carries terms exactly like PRODUCT does — it is searched by
+  // words ("lakasbiztositas kalkulator"), not by a structured descriptor.
+  //
+  // FOUND BY DRIVING IT, not by a test: the creation gate demands terms for this
+  // kind, and this function only supplied them for PRODUCT, so the first real
+  // SERVICE_QUOTE ever created was refused by its own gate. A guard and a
+  // builder that disagree about the same field is the shape this codebase spent
+  // 2026-08-15 removing — and I built a fresh one in the same afternoon.
+  if (req.kind === 'PRODUCT' || req.kind === 'SERVICE_QUOTE') {
     return {
       terms: req.terms,
       ...(req.mustMatch ? { mustMatch: req.mustMatch } : {}),
