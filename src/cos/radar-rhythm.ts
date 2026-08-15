@@ -62,7 +62,14 @@ export function rhythmFor(
 ): RhythmDecision {
   if (shape === 'ONE_OFF') {
     return checksSoFar >= 1
-      ? { intervalSec: 0, close: true, reason: 'egyszeri kereses: lefutott, az eredmeny (talalat VAGY "nem volt olcsobb") jelentve, lezarva' }
+      // NOT "jelentve". This string said the result had been reported, and
+      // nothing consumed it: delivery hangs off notify.should, so a ONE_OFF
+      // that found nothing closed in silence while the reason claimed
+      // otherwise. A sentence asserting a delivery that does not happen is
+      // worse than no sentence — it is what a reader checks instead of the
+      // code. Reporting is now a separate, recorded step (closure_reason /
+      // closure_reported_at); this branch states only what it does.
+      ? { intervalSec: 0, close: true, reason: 'egyszeri kereses: lefutott, lezarva -- az eredmenyt (talalat VAGY "nem volt olcsobb") a napi kivonat jelenti' }
       : { intervalSec: 0, close: false, reason: 'egyszeri kereses: meg nem futott le' }
   }
   if (shape === 'STANDING') {
