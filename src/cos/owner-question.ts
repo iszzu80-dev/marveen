@@ -50,6 +50,56 @@ function ownerSteps(plan: EvidencePlan): string[] {
  * party is not a case with a question for Istvan, and asking him anyway is how
  * a notification channel becomes noise and then becomes muted.
  */
+/**
+ * Is this recommendation fit to put in front of Istvan?
+ *
+ * Measured on the live store 2026-08-16: of the two questions that carried a
+ * recommendation at all, one read
+ *
+ *     "Javaslatom: Check for external response or escalate if overdue"
+ *
+ * — an internal English phrase, offered to a Hungarian reader as advice, with
+ * "igen — csináljam így" underneath it. The options are what make this costly
+ * rather than merely ugly: "yes" to a sentence that means nothing is an answer
+ * that means nothing, and the system would have recorded it as a decision.
+ *
+ * REJECTS ON POSITIVE EVIDENCE ONLY. A Hungarian sentence without accents is
+ * still a Hungarian sentence, so the test is not "does it look Hungarian" but
+ * "does it look like machine-internal English or an enum". Better no
+ * recommendation than a meaningless one — silence is honest, a wrong
+ * recommendation is not.
+ */
+export function isUsableRecommendation(rec: string | null | undefined): boolean {
+  const t = (rec ?? '').trim()
+  if (t.length < 8) return false
+  // Raw enum / status token leaking through: WAIT_EXTERNAL, RECOVERY_REQUIRED.
+  if (/^[A-Z][A-Z0-9_]{4,}$/.test(t)) return false
+  // Internal English vocabulary. These are the words the engine's own state
+  // machine uses; a genuine Hungarian recommendation does not contain them.
+  if (/\b(check|escalate|overdue|pending|external response|follow[- ]?up|awaiting|resolve|verify|proceed with)\b/i.test(t)) return false
+  return true
+}
+
+/**
+ * The ask, rewritten when the deadline has already passed.
+ *
+ * A question that says "collect the parcel with code X" and, three lines lower,
+ * "Határidő: 2026-08-10 (6 napja lejárt)" contradicts itself in one message:
+ * the ask is written as if actionable and the date says it is not. Nothing
+ * reconciled them, and the owner had to do it in his head.
+ *
+ * After the date the decidable question is a different one — did it happen, or
+ * did we miss it — and those two answers lead to opposite places: closure, or a
+ * new task. Four such cases appeared on 2026-08-15/16 alone (EUR-váltás,
+ * Macflats check-in, Control Tower, Waterpik).
+ */
+export function expiredAskPrefix(deadline: { at: number; kind: 'due' | 'follow_up' } | null | undefined, now: number): string | null {
+  if (!deadline || deadline.at >= now) return null
+  const days = Math.max(1, Math.round((now - deadline.at) / 86_400))
+  return `• A HATÁRIDŐ ${days} NAPJA ELMÚLT. Ami most eldöntendő: megtörtént, vagy elmaradt?`
+    + ` Ha megtörtént, lezárom; ha elmaradt, ez nem lezárás, hanem új teendő.`
+}
+
 export function buildOwnerQuestion(
   input: {
     caseId: string; domain: string; title: string
@@ -124,7 +174,18 @@ export function buildOwnerQuestion(
       ? [`• döntés arról, hogyan tovább — ez akadályozza:`, ...blocked]
       : [`• döntés a következő lépésről (a rendszer nem talált konkrét hiányzó tételt)`]
   }
+  // (2) After the deadline the ORIGINAL ask is no longer the decidable thing.
+  // It stays visible — he may still want to do it — but it is no longer what
+  // the question is about.
+  const expired = expiredAskPrefix(pkg?.deadline, input.now ?? Math.floor(Date.now() / 1000))
+  if (expired) lines.push(expired)
   lines.push(...asks)
+
+  const primaryUnknown = input.packet.uncertainty[0]
+  if (primaryUnknown) {
+    lines.push('')
+    lines.push(`Amit magamtól nem tudok eldönteni: ${primaryUnknown}`)
+  }
 
   // §20.5 and §20.4 — the suggestion, and what may be answered to it.
   //
@@ -132,7 +193,10 @@ export function buildOwnerQuestion(
   // menu, and a menu is what the owner already has. The recommendation is the
   // system doing the thinking it was built to do; the options exist so he can
   // refuse it in one word.
-  if (pkg?.recommendation) {
+  // (1) NO RECOMMENDATION IS BETTER THAN A MEANINGLESS ONE. The options go with
+  // it: "igen — csináljam így" under an unusable sentence turns a non-answer
+  // into a recorded decision.
+  if (pkg?.recommendation && isUsableRecommendation(pkg.recommendation)) {
     lines.push('')
     lines.push(`Javaslatom: ${pkg.recommendation}`)
     if (pkg.options.length > 0) {
@@ -141,9 +205,15 @@ export function buildOwnerQuestion(
     }
   }
 
-  if (input.packet.uncertainty.length > 0) {
+  // (3) The first uncertainty is usually the REAL question — on the Waterpik
+  // case it was "nem ismert, hogy István már átvette-e a csomagot", filed at the
+  // bottom under a label that reads as a caveat. Lifted into the body, named as
+  // what the system could not establish, because that is precisely why it is
+  // asking instead of acting.
+  const rest = input.packet.uncertainty.slice(1, 2)
+  if (rest.length > 0) {
     lines.push('')
-    lines.push(`Bizonytalanság: ${input.packet.uncertainty.slice(0, 2).join('; ')}`)
+    lines.push(`Bizonytalanság: ${rest.join('; ')}`)
   }
 
   // §20.7 — the date. Last, and on its own line, because it is the one element
