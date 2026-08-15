@@ -28,6 +28,44 @@ export function isNoticeNotWork(content: string): boolean {
   return NOTICE_PREFIXES.some(p => content.startsWith(p))
 }
 
+/**
+ * Should closing this message send a receipt back to its sender?
+ *
+ * ONE named rule with TWO reasons to say no, both learned on 2026-08-15 from
+ * the same failure shape — a receipt addressed to something that cannot answer:
+ *
+ *   1. The message is itself a notice, not work. A completion report or a
+ *      delivery failure is not waiting for a reply; the second cannot receive
+ *      one at all. Measured: 21086 -> 21088 -> 21089 -> 21090 -> 21091, one new
+ *      message per retry window, indefinitely.
+ *
+ *   2. The sender is not a registered fleet agent. Producers like `cos-radar`
+ *      and `cos-outbound` post digests but have no session, ever, so the
+ *      receipt's failure is a structural certainty rather than an accident.
+ *      Measured after the daily radar digest shipped: 21092 -> 21093 (failed)
+ *      -> 21094. The loop stopped (guard 1 held), but the noise would repeat
+ *      every day the digest runs.
+ *
+ * A registered agent whose session is merely DOWN still gets its receipt: that
+ * failure IS an accident, and accidents are worth retrying.
+ *
+ * DERIVED, NOT LISTED: `isKnownAgent` is the same predicate the POST handler
+ * uses to reject unregistered senders, so the next producer is covered the day
+ * it appears rather than the day someone remembers to extend a constant.
+ *
+ * Extracted rather than inlined so the RULE is testable, not just its parts.
+ * Asserting that `isKnownAgent('cos-radar')` is false proves nothing about
+ * whether the route consults it.
+ */
+export function shouldSendReceipt(
+  msg: { content: string; from_agent: string; to_agent: string },
+  known: (id: string) => boolean = isKnownAgent,
+): boolean {
+  if (msg.from_agent === msg.to_agent) return false
+  if (isNoticeNotWork(msg.content)) return false
+  return known(sanitizeAgentIdent(msg.from_agent))
+}
+
 export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
   const { req, res, path, method, url } = ctx
 
@@ -217,7 +255,7 @@ export async function tryHandleMessages(ctx: RouteContext): Promise<boolean> {
       // So a receipt is skipped for anything that is itself a notice rather than
       // work: a completion report or a delivery failure. Neither is waiting for an
       // answer, and the second one cannot receive one by construction.
-      if (done && done.from_agent !== done.to_agent && !isNoticeNotWork(done.content)) {
+      if (done && shouldSendReceipt(done)) {
         const summary = result ? result.slice(0, 500) : '(nincs eredmény)'
         createAgentMessage(
           done.to_agent,
