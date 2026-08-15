@@ -3,7 +3,7 @@ import { initDatabase, getDb } from '../db.js'
 import { createCase } from '../cos/case-store.js'
 import { createRadarItem, recordObservation } from '../cos/radar.js'
 import { recordWebObservation } from '../cos/radar-web.js'
-import { buildRadarDigest, reportUnverifiedFinds, radarDigestPostedToday } from '../cos/radar-digest.js'
+import { buildRadarDigest, reportUnverifiedFinds, radarDigestPostedToday, SHIPPABLE_TEXT } from '../cos/radar-digest.js'
 
 /**
  * Acceptance criterion 2 of the 2026-08-15 card: deliverability has THREE
@@ -220,5 +220,55 @@ describe('the zero case must not claim more than it checked', () => {
     expect(digest.count).toBe(0)
     expect(digest.text).toContain('EGYALTALAN NEM adott arat')
     expect(digest.text).toContain('nem azt tudjuk hogy dragak')
+  })
+})
+
+/**
+ * STANDING rules for branch-labelled reports.
+ *
+ * These do not test the radar. They test the SHAPE that made the radar's own
+ * test lie, so the class of failure cannot come back through a reworded label.
+ *
+ * The tautology (found by Claude's mutation pass, 2026-08-15): the UNKNOWN
+ * branch's assertion was `expect(digest.text).toContain('a szallitas nem
+ * igazolt')` — and the SUMMARY sentence contains that same phrase, so the
+ * assertion held for every non-empty digest no matter what the item line said.
+ * Mutating the label to 'XXXXX' left all ten tests green.
+ *
+ * The generalisable lesson, which is bigger than this bug: a positive assertion
+ * can only prove PRESENCE, never DIFFERENCE. If two branches must be told
+ * apart, something has to assert that they ARE apart — otherwise both can
+ * collapse onto the same wording and every test stays green.
+ */
+describe('STANDING: branch labels must stay distinguishable', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('STANDING: no two shippability labels may be equal or contain one another', () => {
+    // Substring containment is what made `toContain` hold for the wrong reason,
+    // so equality alone is not a strong enough rule here.
+    const entries = Object.entries(SHIPPABLE_TEXT)
+    for (const [ka, a] of entries) {
+      for (const [kb, b] of entries) {
+        if (ka === kb) continue
+        expect(a, `${ka} and ${kb} share wording`).not.toBe(b)
+        expect(a.includes(b), `${ka} ("${a}") contains ${kb} ("${b}")`).toBe(false)
+      }
+    }
+  })
+
+  it('STANDING: no branch label may appear in the digest SUMMARY sentence', () => {
+    // The root cause, made impossible rather than merely fixed. If a label ever
+    // reappears in the summary, an assertion against the whole text silently
+    // becomes a tautology again — and this test fails first, with the reason.
+    const db = product()
+    recordWebObservation(db, { radarId: 'r1', price: 27990, shop: 'Shopsy' }, NOW + 60)
+    const summary = buildRadarDigest(db).text.split('\n')[0]!
+
+    for (const [branch, label] of Object.entries(SHIPPABLE_TEXT)) {
+      expect(
+        summary.includes(label),
+        `the summary line repeats the ${branch} label ("${label}"), so any toContain on the full text proves nothing about the item line`,
+      ).toBe(false)
+    }
   })
 })

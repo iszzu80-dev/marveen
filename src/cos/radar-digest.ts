@@ -98,10 +98,19 @@ export function unverifiedFinds(db: Database.Database, limit = 20): UnverifiedFi
   }))
 }
 
-const SHIPPABLE_TEXT: Record<Shippability, string> = {
+/**
+ * The per-branch wording. EXPORTED so a standing test can assert the property
+ * that actually matters — that the branches are TELLABLE APART — rather than
+ * only that each one appears somewhere.
+ */
+export const SHIPPABLE_TEXT: Record<Shippability, string> = {
   UNKNOWN: 'a szallitas nem igazolt',
   NO: 'nem szallit Magyarorszagra',
-  YES: 'szallit', // unreachable here; present so the map is total
+  // 'szallit' alone was a SUBSTRING of the NO wording, so a report containing
+  // "nem szallit Magyarorszagra" also technically contained the YES label. The
+  // standing test rejects that: labels a reader must tell apart cannot be
+  // nested inside one another either.
+  YES: 'igazoltan szallit', // unreachable here; present so the map is total
 }
 
 /**
@@ -151,8 +160,14 @@ export function buildRadarDigest(db: Database.Database, limit = 20): RadarDigest
     + ` (cel ${f.targetPrice.toLocaleString('hu-HU')} ${f.currency}) -- ${f.shop}, ${SHIPPABLE_TEXT[f.shippable]}`)
   return {
     count: finds.length, finds,
-    text: `${RADAR_DIGEST_HEADER}: ${finds.length} olcsobb ajanlat, de a szallitas nem igazolt.`
-      + ` Ezek NEM riasztottak -- azert latod oket, hogy a hallgatas ne legyen megkulonboztethetetlen a vaksagtol.`
+    // The summary must NOT repeat any per-branch wording. It used to end with
+    // "de a szallitas nem igazolt", which is the UNKNOWN label verbatim — so an
+    // assertion against the whole digest held for every non-empty report,
+    // whatever the item lines said. Fixing the test alone left that trap in
+    // place for the next person; the standing test below now forbids it.
+    text: `${RADAR_DIGEST_HEADER}: ${finds.length} olcsobb ajanlat NEM riasztott,`
+      + ` mert a kiszallitas Magyarorszagra nincs megerositve.`
+      + ` Azert latod oket, hogy a hallgatas ne legyen megkulonboztethetetlen a vaksagtol.`
       + `\n${lines.join('\n')}${blindLine}`,
   }
 }
