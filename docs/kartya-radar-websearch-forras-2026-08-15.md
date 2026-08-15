@@ -160,8 +160,45 @@ ajánlat"-nak olvasódik.
 
 ### A kézbesítés
 
-**Nem riasztás, hanem tulajdonosi kérdés** — a meglévő `owner-question` csatornán, ami
-már működik és amin ma 27 kérdés vár. Nem építünk hozzá új utat.
+**Nem riasztás, hanem tulajdonosi kérdés** — a meglévő `owner-question` csatornán.
+Nem építünk hozzá új utat.
+
+> **JAVÍTVA 2026-08-15, Marveen mérése után. Az eredeti mondat itt marad, mert a
+> hibája tanulságosabb, mint a javítás.**
+>
+> Az eredeti ezt állította: *„a meglévő `owner-question` csatornán, ami már működik
+> és amin ma 27 kérdés vár."* **Egyik fele sem áll.**
+>
+> A 27 Marveen ciklus-telemetriájából jött, `reader.questions.nothingToAsk=27` — ami
+> az **ellenkezőjét** jelenti: 27 ügynél **nem volt mit kérdezni**. Ő a mezőnevet a
+> jelentése nélkül közölte; én pedig egy mérőszámot beírtam egy tartós dokumentumba
+> olyan jelentéssel, amit nem ellenőriztem. **Ugyanaz a hibaosztály, mint amikor egy
+> kikeresett idézet kiszorított egy saját mérést** — most egy telemetriai mező
+> szorított ki egy lekérdezést.
+>
+> **A valódi számok** (Marveen mérése a `cos_owner_questions` táblán, 2026-08-15):
+>
+> ```
+> 40 kerdes osszesen, ebbol NYITOTT: 5
+> owner-question.ts:425   const maxOutstanding = opts.maxOutstanding ?? 5
+> owner-question.ts:551   if (!replacesOwn && outstanding + netAdded >= maxOutstanding)
+>                           { result.heldBacklogFull++; continue }
+> minden fordulo: heldBacklogFull = 19
+> ```
+>
+> **A csatorna nem „működik" — tele van.** Nyitott 5, plafon 5, és tizenkilenc ügy
+> kérdezne, de nem tud. A legrégebbi nyitott négy napja vár (08-11 Cloudflare, 08-11
+> Terna, 08-13 Garmin, 08-13 SUP pumpa, 08-13 NAV adózói rendelkezés).
+>
+> **Ez a D5-öt blokkolja:** ma egyetlen `SERVICE_QUOTE` kérdés sem jutna ki. Held
+> lenne, azaz néma — pontosan az a hibaosztály, amiért ez a kártya létezik, a kártya
+> saját kézbesítési útjában. Lásd a **9. elfogadási feltételt.**
+>
+> **Egy árnyalat a pontosság kedvéért:** az 551. sor `continue`-ja nem teljesen néma,
+> mert a `heldBacklogFull` **számlálódik** — de csak a ciklus-telemetriában. Istvanhoz
+> nem jut el. A hiba tehát nem az, hogy nincs mérve, hanem hogy **a mérés nem ér el
+> ahhoz, akit érint.** A 9. feltétel ezért a *láthatóságot* követeli meg, nem a
+> számlálást.
 
 ### Az életciklus
 
@@ -221,12 +258,26 @@ A fenti külön szakasz szerint, **utoljára**, mert más alak.
 
 1. **A kézbesítés kódban van.** RED-bizonyítás: az `alertRadarHit` hívást a sweepből
    kivéve **pontosan** a kézbesítési teszt vált pirosra.
-2. **A szállíthatóság PÁRBAN van bizonyítva** — ez a kártya legfontosabb feltétele:
-   - egy olcsóbb **és szállítható** ajánlat → **tüzel**
-   - egy olcsóbb, de **nem szállítható** ajánlat → **nem tüzel**, DE megjelenik a
-     „nem igazolt" sorban
-   A második nélkül nem lehet megkülönböztetni a **helyes hallgatást** a **vakságtól** —
-   és ez a különbség az, ami ma egy hétig nem látszott.
+2. **A szállíthatóság MIND A HÁROM ága bizonyítva van** — ez a kártya legfontosabb
+   feltétele. *(Szigorítva Marveen kérésére: az első változat csak kettőt kért, és
+   pont a leggyakoribbat hagyta ki.)*
+
+   | eset | elvárt viselkedés | assert |
+   |---|---|---|
+   | olcsóbb **és** `szállít=igen` | **tüzel** | a riasztás megszületik |
+   | olcsóbb, de `szállít=nem` | **nem tüzel** | nincs riasztás |
+   | olcsóbb, de `szállít=nem tudom` | **nem tüzel**, DE **megjelenik** | a „nem igazolt" sor tartalmazza |
+
+   **A harmadik a legfontosabb, mert a gyakorlatban ez lesz a leggyakoribb:** egy
+   websearch-találatból a Magyarországra szállítás ritkán igazolható biztosan. Ha ez
+   az ág hibás, a radar **úgy hallgat, hogy közben minden teszt zöld** — és akkor a
+   kártya saját érve bukik el egy tesztelt ág hiányán.
+
+   **RED-bizonyítás a harmadik ágra is:** a „nem igazolt" sort a kimenetből kivéve
+   **pontosan** az az assert váljon pirossá.
+
+   E nélkül a három nélkül nem lehet megkülönböztetni a **helyes hallgatást** a
+   **vakságtól** — és ez a különbség az, ami ma egy hétig nem látszott.
 3. **A napi jelzés a nulla esetet is kimondja** a „szállítás nem igazolt" sorra.
 4. **Az egyszeri keresés a „nem volt olcsóbb"-at is jelenti.**
 5. **A ritmus-tábla minden sorára van teszt**, és a modell nem írhatja felül.
@@ -236,6 +287,27 @@ A fenti külön szakasz szerint, **utoljára**, mert más alak.
 8. **Élesítve, nem csak commitolva:** build → restart → **a valódi végpont meghajtása**,
    és `scripts/running-code-check.sh` exit 0. A 2026-08-15-i lecke: egy javítás, ami
    nincs élesben, nem javítás.
+9. **A `SERVICE_QUOTE` kézbesítése TELE backlog mellett is bizonyítva van.**
+   *(Marveen kérésére, és a D5-öt ma blokkolná nélküle.)*
+
+   A `maxOutstanding = 5` plafon ma **be van töltve** (nyitott 5, `heldBacklogFull=19`).
+   Egy `SERVICE_QUOTE` kérdés tehát a mai állapotban **held lenne, azaz néma.** A teszt
+   ezt az állapotot állítsa elő — öt nyitott kérdés —, és bizonyítsa, hogy **vagy**:
+
+   - a kérdés **kimegy** (ha a fajta a plafon fölé sorolható — ez tervezési döntés,
+     lásd lent), **vagy**
+   - a held-állapot **megjelenik a napi jelzésben**, névvel: *„a Groupama-hosszabbítás
+     kérdése vár, mert a csatorna tele van."*
+
+   A csendes számlálás **nem** elfogadható kimenet. A `heldBacklogFull` ma is
+   számlálódik — a ciklus-telemetriában. Ez nem ugyanaz, mint hogy Istvan tudja.
+
+   **Nyitott tervezési kérdés Marveennek, a spec része:** kapjon-e a `SERVICE_QUOTE`
+   kivételt a plafon alól? Mellette szól, hogy határidős és nem sürgethető; ellene,
+   hogy a plafon saját indoklása (`owner-question.ts:420`) épp az, hogy *„past a
+   handful, one more question does not get answered faster, it gets the channel
+   muted"*. **A javaslatom: NE kapjon kivételt** — inkább látszódjon, hogy vár. Egy
+   kivétel az első fajta, ami átfúrja a plafont, és a második már könnyebben megy.
 
 ## AMIT EZ A KÁRTYA NEM OLD MEG
 
