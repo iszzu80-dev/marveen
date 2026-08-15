@@ -48,6 +48,9 @@ export interface RadarItemRow {
   watch_shape: WatchShape
   expires_at: number | null
   checks_count: number
+  closed_at: number | null
+  closure_reason: string | null
+  closure_reported_at: number | null
 }
 
 /** A further drop must be at least this fraction below the last notified price to
@@ -321,14 +324,25 @@ export function recordObservation(db: Database.Database, radarId: string, obs: O
     // CLOSED only ever comes from the rhythm, and only from ACTIVE/HIT. PAUSED
     // is the owner's decision about whether to watch at all, and a clock must
     // not overrule it.
-    if (rhythm.close && (status === 'ACTIVE' || status === 'HIT')) status = 'CLOSED'
+    const closing = rhythm.close && (status === 'ACTIVE' || status === 'HIT')
+    if (closing) status = 'CLOSED'
+    // The closure is WRITTEN DOWN, with the outcome folded into the reason, so
+    // the digest can say something true without re-deriving why. `hit` here is
+    // this observation's: a ONE_OFF that closes without one is exactly the
+    // "nem volt olcsobb" case that must still be reported.
+    const closureReason = closing
+      ? (hit ? `${rhythm.reason} -- talalt` : `${rhythm.reason} -- NEM volt olcsobb a celar alatt`)
+      : null
     const nextInterval = rhythm.intervalSec > 0 ? rhythm.intervalSec : item.check_interval_sec
     db.prepare(
       `UPDATE radar_items SET best_seen_price=@newLow, status=@status, next_check_at=@next,
-          check_interval_sec=@interval, checks_count=@checks, updated_at=@now WHERE radar_id=@radarId`
+          check_interval_sec=@interval, checks_count=@checks, updated_at=@now,
+          closed_at=COALESCE(@closedAt, closed_at), closure_reason=COALESCE(@closureReason, closure_reason)
+        WHERE radar_id=@radarId`
     ).run({
       newLow: newLow ?? null, status, next: now + nextInterval,
       interval: nextInterval, checks, radarId, now,
+      closedAt: closing ? now : null, closureReason,
     })
     return {
       hit, isNewLow, status, bestPrice: obs.bestPrice, offerId: obs.offerId ?? null, notify,

@@ -142,3 +142,86 @@ describe('the creation gate knows the shapes', () => {
     })).toMatch(/csak HATARIDOS/)
   })
 })
+
+/**
+ * A CLOSED watch gets a sentence — especially the one that found nothing.
+ *
+ * Acceptance criterion 4, which was NOT met until now and, worse, was CLAIMED
+ * met by a string inside the rhythm itself: the ONE_OFF reason read "az
+ * eredmeny ... jelentve" while `rhythm` had no consumer anywhere. Delivery
+ * hangs off notify.should, and a one-off that finds nothing sets that false —
+ * so it closed in silence, which from outside is indistinguishable from a radar
+ * that died.
+ *
+ * RED PROOF: remove the closure lines from buildRadarDigest and exactly the
+ * "reported" assertions here go red.
+ */
+describe('a closed watch is reported, including "nothing was cheaper"', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  const base = {
+    kind: 'PRODUCT', label: 'Van most olcsobb Garmin?', targetPrice: 120000,
+    query: { terms: 'Garmin Forerunner 255' },
+  }
+
+  it('a ONE_OFF that found NOTHING still appears in the digest', async () => {
+    const { buildRadarDigest } = await import('../cos/radar-digest.js')
+    const db = getDb()
+    createRadarItem(db, { ...base, radarId: 'one1', watchShape: 'ONE_OFF' }, NOW)
+    // Above target: no hit, notify.should is false, the alert path says nothing.
+    recordObservation(db, 'one1', { bestPrice: 149000, offerId: 'x' }, NOW + 60)
+
+    const digest = buildRadarDigest(db)
+    expect(digest.closures).toHaveLength(1)
+    expect(digest.text).toContain('LEZART FIGYELESEK')
+    expect(digest.text).toContain('Van most olcsobb Garmin?')
+    expect(digest.text).toContain('NEM volt olcsobb')
+  })
+
+  it('a ONE_OFF that DID find something says so', async () => {
+    const { buildRadarDigest } = await import('../cos/radar-digest.js')
+    const db = getDb()
+    createRadarItem(db, { ...base, radarId: 'one2', watchShape: 'ONE_OFF' }, NOW)
+    recordObservation(db, 'one2', { bestPrice: 99000, offerId: 'x', shippableHu: 'YES' }, NOW + 60)
+
+    expect(buildRadarDigest(db).text).toContain('talalt')
+  })
+
+  it('a DEADLINE that reached its day is reported too', async () => {
+    const { buildRadarDigest } = await import('../cos/radar-digest.js')
+    const db = getDb()
+    createRadarItem(db, { ...base, radarId: 'dl1', watchShape: 'DEADLINE', expiresAt: NOW + 10 * DAY }, NOW)
+    recordObservation(db, 'dl1', { bestPrice: 149000, offerId: 'x' }, NOW + 10 * DAY)
+
+    const digest = buildRadarDigest(db)
+    expect(digest.closures).toHaveLength(1)
+    expect(digest.text).toMatch(/targytalan/)
+  })
+
+  it('a closure is reported ONCE — the receipt stops the repeat', async () => {
+    const { reportUnverifiedFinds, buildRadarDigest } = await import('../cos/radar-digest.js')
+    const db = getDb()
+    createRadarItem(db, { ...base, radarId: 'one3', watchShape: 'ONE_OFF' }, NOW)
+    recordObservation(db, 'one3', { bestPrice: 149000, offerId: 'x' }, NOW + 60)
+
+    const first = reportUnverifiedFinds(db, '2026-08-15', NOW + 120)
+    expect(first.posted).toBe(true)
+    expect(first.closures).toBe(1)
+
+    // Next day: the same closure must not be announced again.
+    expect(buildRadarDigest(db).closures).toHaveLength(0)
+    const second = reportUnverifiedFinds(db, '2026-08-16', NOW + 86_400)
+    expect(second.posted).toBe(true)
+    expect(second.closures).toBe(0)
+  })
+
+  it('an OPEN watch is not reported as closed', async () => {
+    // Positive control: a rule that reported everything would pass the tests
+    // above while burying Istvan in closures that never happened.
+    const { buildRadarDigest } = await import('../cos/radar-digest.js')
+    const db = getDb()
+    createRadarItem(db, { ...base, radarId: 'st1', watchShape: 'STANDING' }, NOW)
+    recordObservation(db, 'st1', { bestPrice: 149000, offerId: 'x' }, NOW + 60)
+    expect(buildRadarDigest(db).closures).toHaveLength(0)
+  })
+})

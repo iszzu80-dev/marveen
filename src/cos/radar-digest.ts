@@ -43,10 +43,52 @@ export interface UnverifiedFind {
   observedAt: number
 }
 
+export interface ClosedWatch {
+  radarId: string
+  label: string
+  closedAt: number
+  reason: string
+}
+
 export interface RadarDigest {
   count: number
   finds: UnverifiedFind[]
+  /** Watches that ENDED since the last digest and have not been reported. */
+  closures: ClosedWatch[]
   text: string
+}
+
+/**
+ * Watches that closed and whose closure nobody has told Istvan about.
+ *
+ * This is the other half of "the zero case speaks". A ONE_OFF that ran and
+ * found nothing cheaper closes with `notify.should === false` — so the alert
+ * path, which hangs entirely off that flag, says nothing. From outside, a
+ * search that answered "no" is indistinguishable from one that never ran, and
+ * a deadline that arrived is indistinguishable from a radar that died.
+ *
+ * Measured before this existed: `rhythm.close` and its reason travelled back in
+ * the observation result and had NO consumer at all.
+ */
+export function unreportedClosures(db: Database.Database, limit = 20): ClosedWatch[] {
+  const rows = db.prepare(
+    `SELECT radar_id, label, closed_at, closure_reason
+       FROM radar_items
+      WHERE status = 'CLOSED' AND closed_at IS NOT NULL AND closure_reported_at IS NULL
+      ORDER BY closed_at ASC LIMIT ?`
+  ).all(limit) as Array<{ radar_id: string; label: string; closed_at: number; closure_reason: string | null }>
+  return rows.map(r => ({
+    radarId: r.radar_id, label: r.label, closedAt: r.closed_at,
+    reason: r.closure_reason ?? 'lezarva (indok nincs rogzitve)',
+  }))
+}
+
+/** Mark closures as told. Called AFTER the digest is posted, never before —
+ *  same ordering rule as markNotified, and for the same reason: a crash between
+ *  the two must cost a repeat, not a silence. */
+export function markClosuresReported(db: Database.Database, radarIds: string[], now: number): void {
+  const stmt = db.prepare('UPDATE radar_items SET closure_reported_at=? WHERE radar_id=?')
+  for (const id of radarIds) stmt.run(now, id)
 }
 
 /** The shop name from an offer_ref snapshot, best-effort. Never throws: an
@@ -139,10 +181,17 @@ export function pricelessProducts(db: Database.Database): number {
 
 export function buildRadarDigest(db: Database.Database, limit = 20): RadarDigest {
   const finds = unverifiedFinds(db, limit)
+  const closures = unreportedClosures(db, limit)
   const blind = pricelessProducts(db)
   // "No price at all" is its own sentence wherever it is true, zero case or not.
   const blindLine = blind > 0
     ? `\n(${blind} figyelt termekre a legutobbi ellenorzes EGYALTALAN NEM adott arat -- ezekrol nem tudunk semmit, nem azt tudjuk hogy dragak.)`
+    : ''
+  // A closed watch is reported WHETHER OR NOT it found anything. This is the
+  // line that makes "megneztuk, nem volt olcsobb" different from "a radar
+  // meghalt".
+  const closureLines = closures.length > 0
+    ? `\nLEZART FIGYELESEK:\n${closures.map(c => `- ${c.label}: ${c.reason}`).join('\n')}`
     : ''
   if (finds.length === 0) {
     // The zero case is a REPORT, not an absence — and it must not claim more
@@ -150,16 +199,16 @@ export function buildRadarDigest(db: Database.Database, limit = 20): RadarDigest
     // find's deliverability is verified", which reads as "we looked and they
     // are fine" when the truth may be that there was nothing to look at.
     return {
-      count: 0, finds,
+      count: 0, finds, closures,
       text: `${RADAR_DIGEST_HEADER}: 0 tetel. Nincs olyan celar alatti termek-talalat,`
-        + ` aminek a szallithatosaga ne lenne igazolva.${blindLine}`,
+        + ` aminek a szallithatosaga ne lenne igazolva.${blindLine}${closureLines}`,
     }
   }
   const lines = finds.map(f =>
     `- ${f.label}: ${f.bestPrice.toLocaleString('hu-HU')} ${f.currency}`
     + ` (cel ${f.targetPrice.toLocaleString('hu-HU')} ${f.currency}) -- ${f.shop}, ${SHIPPABLE_TEXT[f.shippable]}`)
   return {
-    count: finds.length, finds,
+    count: finds.length, finds, closures,
     // The summary must NOT repeat any per-branch wording. It used to end with
     // "de a szallitas nem igazolt", which is the UNKNOWN label verbatim — so an
     // assertion against the whole digest held for every non-empty report,
@@ -168,7 +217,7 @@ export function buildRadarDigest(db: Database.Database, limit = 20): RadarDigest
     text: `${RADAR_DIGEST_HEADER}: ${finds.length} olcsobb ajanlat NEM riasztott,`
       + ` mert a kiszallitas Magyarorszagra nincs megerositve.`
       + ` Azert latod oket, hogy a hallgatas ne legyen megkulonboztethetetlen a vaksagtol.`
-      + `\n${lines.join('\n')}${blindLine}`,
+      + `\n${lines.join('\n')}${blindLine}${closureLines}`,
   }
 }
 
@@ -186,17 +235,22 @@ export interface RadarDigestResult {
   posted: boolean
   alreadyToday: boolean
   count: number
+  /** How many ended watches this digest reported. */
+  closures: number
 }
 
 /** Post the radar's "not verified" digest once per Budapest calendar day. */
 export function reportUnverifiedFinds(
-  db: Database.Database, todayOverride?: string,
+  db: Database.Database, todayOverride?: string, now = Math.floor(Date.now() / 1000),
 ): RadarDigestResult {
   const digest = buildRadarDigest(db)
   if (radarDigestPostedToday(db, todayOverride)) {
-    return { posted: false, alreadyToday: true, count: digest.count }
+    return { posted: false, alreadyToday: true, count: digest.count, closures: 0 }
   }
   createAgentMessage('cos-radar', 'marveen', digest.text, 'cos-radar-digest')
   appendDailyLog('marveen', digest.text)
-  return { posted: true, alreadyToday: false, count: digest.count }
+  // AFTER the post, never before. A crash in between costs a repeated line;
+  // the other order costs the only sentence a closed watch ever gets.
+  markClosuresReported(db, digest.closures.map(c => c.radarId), now)
+  return { posted: true, alreadyToday: false, count: digest.count, closures: digest.closures.length }
 }

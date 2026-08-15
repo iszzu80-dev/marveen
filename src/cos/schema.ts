@@ -882,6 +882,18 @@ export function initCosSchema(db: Database.Database): void {
     // observations, which is the kind of derivation that silently breaks when
     // an observation is pruned.
     checks_count: 'INTEGER NOT NULL DEFAULT 0',
+    // A CLOSURE IS NEWS, AND WE HAVE TO KNOW WHETHER IT WAS TOLD.
+    //
+    // A watch that ends is the one moment the owner most needs a sentence: a
+    // ONE_OFF that found nothing, or a deadline that arrived. Both look exactly
+    // like a system that stopped working. So the closure is recorded as a fact
+    // (when, why) and separately as a receipt (was it reported) -- the same
+    // shape as last_notified_*, and for the same reason: without the receipt,
+    // "we told him" is an assumption, and the digest either repeats itself for
+    // ever or says it once into a void.
+    closed_at: 'INTEGER',
+    closure_reason: 'TEXT',
+    closure_reported_at: 'INTEGER',
   })
   ensureColumns(db, 'radar_observations', {
     offer_id: 'TEXT', original_currency: 'TEXT', original_final_price: 'INTEGER',
