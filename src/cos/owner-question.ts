@@ -422,7 +422,7 @@ export function askPendingOwnerQuestions(
   // two each, nobody answering. The thing that actually protects the channel is
   // not the rate, it is the size of the pile waiting on him — past a handful,
   // one more question does not get answered faster, it gets the channel muted.
-  const maxOutstanding = opts.maxOutstanding ?? 5
+  const maxOutstanding = opts.maxOutstanding ?? MAX_OUTSTANDING_QUESTIONS
   const now = opts.now ?? Math.floor(Date.now() / 1000)
   const result: AskResult = {
     asked: 0, alreadyAsked: 0, nothingToAsk: 0, heldBacklogFull: 0, staleReading: 0, cooldown: 0,
@@ -944,6 +944,51 @@ export function markHeldResolved(
 }
 
 /** The questions still waiting on him — so "what did it ask me?" is a query. */
+/**
+ * How many unanswered questions Istvan may have in front of him at once.
+ *
+ * Exported because a second reader now needs it — the daily digest, which has
+ * to say "the channel is full" without re-typing the number. Two copies of a
+ * limit drift, and then one surface reports a ceiling the other does not
+ * enforce.
+ */
+export const MAX_OUTSTANDING_QUESTIONS = 5
+
+export interface QuestionCapacity {
+  open: number
+  cap: number
+  /** At or above the ceiling: NEW questions are held, not asked. */
+  full: boolean
+  /** The open ones, oldest first — answering ANY of them frees a slot. */
+  questions: Array<{ caseId: string; text: string; askedAt: number }>
+}
+
+/**
+ * The state of the owner-question channel.
+ *
+ * Exists because the ceiling is invisible from Istvan's side. It is measured —
+ * `heldBacklogFull` has been counting held questions in the cycle telemetry all
+ * along — but a measurement that never reaches the person it concerns is not
+ * the same as knowing. On 2026-08-15 nineteen cases wanted to ask and could
+ * not, five questions had been open for up to four days, and nothing said so
+ * anywhere he looks.
+ *
+ * The ceiling itself is right: past a handful, one more question does not get
+ * answered faster, it gets the channel muted. So the fix is not a bigger
+ * ceiling or an exemption for one kind — it is that being full has to be
+ * VISIBLE, with the names of what is blocking it, because answering any one of
+ * them is what frees the next.
+ */
+export function ownerQuestionCapacity(db: Database.Database): QuestionCapacity {
+  const questions = outstandingOwnerQuestions(db, MAX_OUTSTANDING_QUESTIONS * 4)
+    .map(q => ({ caseId: q.caseId, text: q.text, askedAt: q.askedAt }))
+    .sort((a, b) => a.askedAt - b.askedAt)
+  return {
+    open: questions.length, cap: MAX_OUTSTANDING_QUESTIONS,
+    full: questions.length >= MAX_OUTSTANDING_QUESTIONS, questions,
+  }
+}
+
 export function outstandingOwnerQuestions(
   db: Database.Database, limit = 20,
 ): Array<{ caseId: string; domain: string; text: string; askedAt: number }> {

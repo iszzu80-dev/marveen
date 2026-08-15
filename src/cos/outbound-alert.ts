@@ -10,6 +10,7 @@
 import type Database from 'better-sqlite3'
 import { createAgentMessage, appendDailyLog } from '../db.js'
 import { APP_TZ } from '../config.js'
+import { ownerQuestionCapacity } from './owner-question.js'
 
 interface RecRow { ledger_id: string; case_id: string | null; action_type: string; last_error: string | null }
 
@@ -102,6 +103,13 @@ export interface PlannedDigest {
 
 /** The PLANNED outbound queue as a human-facing digest. Pure over the DB →
  *  testable, and callable for a read-only look without posting anything. */
+/** The question's first line — the digest names what is blocking, it does not
+ *  reprint whole questions. */
+function firstLine(text: string): string {
+  const l = text.split('\n').find(x => x.trim() !== '') ?? '(ures kerdes)'
+  return l.length > 90 ? `${l.slice(0, 90)}...` : l
+}
+
 export function buildPlannedDigest(db: Database.Database, now: number, limit = 20): PlannedDigest {
   const rows: PlannedRow[] = []
   let total = 0
@@ -125,9 +133,29 @@ export function buildPlannedDigest(db: Database.Database, now: number, limit = 2
   rows.sort((a, b) => a.created_at - b.created_at)
   rows.splice(limit)
 
+  // THE QUESTION CHANNEL'S CEILING, said out loud when it blocks.
+  //
+  // Istvan's decision 2026-08-15: no kind gets an exemption from the cap, not
+  // even SERVICE_QUOTE. The ceiling is right — past a handful, one more
+  // question does not get answered faster, it gets the channel muted. But an
+  // enforced ceiling nobody can see is a queue that silently swallows: on that
+  // day five questions had been open for up to four days, nineteen cases wanted
+  // to ask and could not, and the only trace was a counter in cycle telemetry.
+  //
+  // It rides THIS digest rather than getting its own, for the reason the whole
+  // card is about: a second daily surface is a second thing that can stop
+  // firing unnoticed. This one already speaks every day, zero case included.
+  const capacity = ownerQuestionCapacity(db)
+  const capacityLine = capacity.full
+    ? `\n\n⛔ A KERDES-CSATORNA TELE VAN (${capacity.open}/${capacity.cap}).`
+      + ` Amig egyet meg nem valaszolsz, UJ kerdes nem tud kimenni -- egyik ugyrol sem.`
+      + ` A helyet ezek foglaljak:\n`
+      + capacity.questions.map(q => `- ${q.caseId}: ${firstLine(q.text)}`).join('\n')
+    : ''
+
   if (total === 0) {
     return { count: 0, oldestAgeDays: null,
-      text: `${PLANNED_DIGEST_HEADER}: 0 sor. Nincs jovahagyasra varo megfogalmazott level.` }
+      text: `${PLANNED_DIGEST_HEADER}: 0 sor. Nincs jovahagyasra varo megfogalmazott level.${capacityLine}` }
   }
 
   // Age ROUNDED DOWN to days reported a 46-hour-old letter as "1 napja". On a
@@ -156,7 +184,7 @@ export function buildPlannedDigest(db: Database.Database, now: number, limit = 2
   return {
     count: total, oldestAgeDays: oldest,
     text: `${PLANNED_DIGEST_HEADER}: ${total} megfogalmazott level var a jovahagyasodra`
-      + ` (a legregebbi ${oldestText}). Semmi nem ment el.\n${lines.join('\n')}${more}`,
+      + ` (a legregebbi ${oldestText}). Semmi nem ment el.\n${lines.join('\n')}${more}${capacityLine}`,
   }
 }
 
