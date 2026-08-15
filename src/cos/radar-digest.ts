@@ -104,11 +104,47 @@ const SHIPPABLE_TEXT: Record<Shippability, string> = {
   YES: 'szallit', // unreachable here; present so the map is total
 }
 
+/**
+ * Watched products whose latest observation carries NO price at all.
+ *
+ * This number exists because the zero case lied without it. Today all seven
+ * shoe/shirt items return `best_price = NULL` from the eMAG adapter on every
+ * tick — so "nothing under target with unverified delivery" is true, and
+ * completely misleading: there is nothing under target because there is no
+ * price, not because prices are high. Reporting the first without the second
+ * would rebuild, inside the very digest written to prevent it, the exact
+ * misreading that hid a week of silence: absence of data read as absence of
+ * news.
+ */
+export function pricelessProducts(db: Database.Database): number {
+  return (db.prepare(
+    `SELECT COUNT(*) AS n FROM radar_items i
+      WHERE i.kind = 'PRODUCT' AND i.status IN ('ACTIVE','HIT')
+        AND NOT EXISTS (
+          SELECT 1 FROM radar_observations o
+           WHERE o.radar_id = i.radar_id
+             AND o.observed_at = (SELECT MAX(o2.observed_at) FROM radar_observations o2 WHERE o2.radar_id = i.radar_id)
+             AND o.best_price IS NOT NULL)`
+  ).get() as { n: number }).n
+}
+
 export function buildRadarDigest(db: Database.Database, limit = 20): RadarDigest {
   const finds = unverifiedFinds(db, limit)
+  const blind = pricelessProducts(db)
+  // "No price at all" is its own sentence wherever it is true, zero case or not.
+  const blindLine = blind > 0
+    ? `\n(${blind} figyelt termekre a legutobbi ellenorzes EGYALTALAN NEM adott arat -- ezekrol nem tudunk semmit, nem azt tudjuk hogy dragak.)`
+    : ''
   if (finds.length === 0) {
-    // The zero case is a REPORT, not an absence. See the file header.
-    return { count: 0, finds, text: `${RADAR_DIGEST_HEADER}: 0 tetel. Minden celar alatti talalat szallithatosaga igazolt.` }
+    // The zero case is a REPORT, not an absence — and it must not claim more
+    // than it checked. The first version of this line said "every under-target
+    // find's deliverability is verified", which reads as "we looked and they
+    // are fine" when the truth may be that there was nothing to look at.
+    return {
+      count: 0, finds,
+      text: `${RADAR_DIGEST_HEADER}: 0 tetel. Nincs olyan celar alatti termek-talalat,`
+        + ` aminek a szallithatosaga ne lenne igazolva.${blindLine}`,
+    }
   }
   const lines = finds.map(f =>
     `- ${f.label}: ${f.bestPrice.toLocaleString('hu-HU')} ${f.currency}`
@@ -116,7 +152,8 @@ export function buildRadarDigest(db: Database.Database, limit = 20): RadarDigest
   return {
     count: finds.length, finds,
     text: `${RADAR_DIGEST_HEADER}: ${finds.length} olcsobb ajanlat, de a szallitas nem igazolt.`
-      + ` Ezek NEM riasztottak -- azert latod oket, hogy a hallgatas ne legyen megkulonboztethetetlen a vaksagtol.\n${lines.join('\n')}`,
+      + ` Ezek NEM riasztottak -- azert latod oket, hogy a hallgatas ne legyen megkulonboztethetetlen a vaksagtol.`
+      + `\n${lines.join('\n')}${blindLine}`,
   }
 }
 

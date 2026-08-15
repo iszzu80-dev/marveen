@@ -163,3 +163,35 @@ describe('the radar digest speaks the zero case', () => {
     expect(buildRadarDigest(db).count).toBe(0)
   })
 })
+
+describe('the zero case must not claim more than it checked', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('says nothing was found unverified — not that everything was verified', () => {
+    // Caught by driving the live store: the first wording was "minden celar
+    // alatti talalat szallithatosaga igazolt", which reads as "we checked them
+    // and they are fine". On the live data the true reason for the zero was
+    // that there were no under-target finds at all. A zero-case sentence that
+    // over-claims is the same failure as `best_price IS NULL` read as "price
+    // above target".
+    const db = product()
+    recordWebObservation(db, { radarId: 'r1', price: 55780, shop: 'ecipo', shippableHu: 'YES' }, NOW + 60)
+
+    const text = buildRadarDigest(db).text
+    expect(text).toContain('Nincs olyan celar alatti termek-talalat')
+    expect(text).not.toContain('Minden celar alatti')
+  })
+
+  it('a watched product with NO price at all is reported as unknown, not as quiet', () => {
+    // The live state on 2026-08-15: seven products, eMAG returns best_price
+    // NULL for every one of them, every tick. "Nothing under target" is true
+    // and useless; the digest has to say we are blind, not calm.
+    const db = product()
+    recordObservation(db, 'r1', { bestPrice: null, offerId: null }, NOW + 60)
+
+    const digest = buildRadarDigest(db)
+    expect(digest.count).toBe(0)
+    expect(digest.text).toContain('EGYALTALAN NEM adott arat')
+    expect(digest.text).toContain('nem azt tudjuk hogy dragak')
+  })
+})
