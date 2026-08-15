@@ -242,13 +242,22 @@ export interface RadarDigestResult {
 /** Post the radar's "not verified" digest once per Budapest calendar day. */
 export function reportUnverifiedFinds(
   db: Database.Database, todayOverride?: string, now = Math.floor(Date.now() / 1000),
+  // The posting step is injectable for ONE reason: so a test can make it FAIL
+  // and prove the ordering below. Without that, "mark only after the post" is
+  // a comment, and a refactor that swaps the two lines stays green while the
+  // failure mode it prevents — a watch marked as told that was never told —
+  // returns in silence. The same guard exists on the notify path
+  // (cos-radar-notify-ordering: "a failing alert leaves the item UNMARKED").
+  post: (text: string) => void = (text) => {
+    createAgentMessage('cos-radar', 'marveen', text, 'cos-radar-digest')
+    appendDailyLog('marveen', text)
+  },
 ): RadarDigestResult {
   const digest = buildRadarDigest(db)
   if (radarDigestPostedToday(db, todayOverride)) {
     return { posted: false, alreadyToday: true, count: digest.count, closures: 0 }
   }
-  createAgentMessage('cos-radar', 'marveen', digest.text, 'cos-radar-digest')
-  appendDailyLog('marveen', digest.text)
+  post(digest.text)
   // AFTER the post, never before. A crash in between costs a repeated line;
   // the other order costs the only sentence a closed watch ever gets.
   markClosuresReported(db, digest.closures.map(c => c.radarId), now)

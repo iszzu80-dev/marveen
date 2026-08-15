@@ -225,3 +225,59 @@ describe('a closed watch is reported, including "nothing was cheaper"', () => {
     expect(buildRadarDigest(db).closures).toHaveLength(0)
   })
 })
+
+/**
+ * THE ORDER, proven — not asserted in a comment.
+ *
+ * Found by Claude's mutation pass 2026-08-15: moving markClosuresReported ABOVE
+ * the post left all 31 tests green, while the comment right above it said
+ * "AFTER the post, never before". The code was correct and nothing held it
+ * there. A refactor that swaps two lines — or a try/catch wrapped around the
+ * post — would keep the suite green and reintroduce the exact failure the
+ * ordering exists to prevent: a watch marked as told, whose single sentence
+ * Istvan never receives.
+ *
+ * This is the same guard the notify path already had
+ * (cos-radar-notify-ordering: "a failing alert leaves the item UNMARKED so the
+ * next tick re-offers it"). There the lesson was written as a test; here it had
+ * only been written as prose.
+ */
+describe('a closure is marked reported ONLY after the post succeeded', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('a FAILING post leaves closure_reported_at NULL, so tomorrow retries', async () => {
+    const { reportUnverifiedFinds, buildRadarDigest } = await import('../cos/radar-digest.js')
+    const db = getDb()
+    createRadarItem(db, {
+      radarId: 'ord1', kind: 'PRODUCT', label: 'Van most olcsobb?', targetPrice: 120000,
+      query: { terms: 'garmin' }, watchShape: 'ONE_OFF',
+    }, NOW)
+    recordObservation(db, 'ord1', { bestPrice: 149000, offerId: 'x' }, NOW + 60)
+    expect(buildRadarDigest(db).closures).toHaveLength(1)
+
+    const boom = () => { throw new Error('bus unavailable') }
+    expect(() => reportUnverifiedFinds(db, '2026-08-15', NOW + 120, boom)).toThrow(/bus unavailable/)
+
+    // The choice this encodes: a repeat is a nuisance, a lost sentence is
+    // permanent. So the closure stays UNREPORTED and comes back tomorrow.
+    const row = db.prepare('SELECT closure_reported_at FROM radar_items WHERE radar_id=?').get('ord1') as { closure_reported_at: number | null }
+    expect(row.closure_reported_at).toBeNull()
+    expect(buildRadarDigest(db).closures).toHaveLength(1)
+  })
+
+  it('a SUCCEEDING post marks it, so it is not repeated', async () => {
+    // Positive control: an ordering that never marks would pass the test above
+    // while announcing the same closure every day for ever.
+    const { reportUnverifiedFinds, buildRadarDigest } = await import('../cos/radar-digest.js')
+    const db = getDb()
+    createRadarItem(db, {
+      radarId: 'ord2', kind: 'PRODUCT', label: 'Van most olcsobb?', targetPrice: 120000,
+      query: { terms: 'garmin' }, watchShape: 'ONE_OFF',
+    }, NOW)
+    recordObservation(db, 'ord2', { bestPrice: 149000, offerId: 'x' }, NOW + 60)
+
+    const res = reportUnverifiedFinds(db, '2026-08-15', NOW + 120, () => { /* delivered */ })
+    expect(res.closures).toBe(1)
+    expect(buildRadarDigest(db).closures).toHaveLength(0)
+  })
+})
