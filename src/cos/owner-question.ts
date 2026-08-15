@@ -24,6 +24,7 @@ import { createAgentMessage, appendDailyLog } from '../db.js'
 import { foldName, type ReaderEvidencePacket } from './reader.js'
 import type { EvidencePlan } from './evidence-planner.js'
 import { collectDecisionPackage, formatDeadline, type DecisionPackage } from './decision-package.js'
+import { internalPlanLabels } from './progression-pipeline.js'
 
 export interface OwnerQuestion {
   caseId: string
@@ -65,17 +66,37 @@ function ownerSteps(plan: EvidencePlan): string[] {
  *
  * REJECTS ON POSITIVE EVIDENCE ONLY. A Hungarian sentence without accents is
  * still a Hungarian sentence, so the test is not "does it look Hungarian" but
- * "does it look like machine-internal English or an enum". Better no
- * recommendation than a meaningless one — silence is honest, a wrong
- * recommendation is not.
+ * "is this a string the machine wrote to itself". Better no recommendation than
+ * a meaningless one — silence is honest, a wrong recommendation is not.
+ *
+ * THE FIRST VERSION OF THIS FUNCTION WAS WRONG, AND THE LIVE STORE SAID SO.
+ *
+ * It was a regex over the English words in the one sample I had read: "check",
+ * "escalate", "overdue". Seventeen tests green, merged — and one cycle later the
+ * live question for PRI-SYS-2026-001 read "Javaslatom: Execute first recovery
+ * action". None of my words, same defect, and my own test file would have
+ * called it usable.
+ *
+ * The mistake was the instrument, not the word list. These strings are not
+ * arbitrary English: they are the plan-step labels in buildRollingPlan, a CLOSED
+ * SET of about two dozen, copied verbatim into nextBestAction.description. A set
+ * you can enumerate does not need to be guessed at. So the primary test is now
+ * exact membership in that set, derived by driving the planner — which also
+ * means a label added tomorrow is covered without anyone remembering this file.
+ *
+ * The heuristics stay UNDERNEATH as a second net, for text that reaches the
+ * recommendation from somewhere other than the planner.
  */
 export function isUsableRecommendation(rec: string | null | undefined): boolean {
   const t = (rec ?? '').trim()
   if (t.length < 8) return false
+  // PRIMARY: the machine's own vocabulary, enumerated rather than guessed.
+  if (internalPlanLabels().has(t)) return false
   // Raw enum / status token leaking through: WAIT_EXTERNAL, RECOVERY_REQUIRED.
   if (/^[A-Z][A-Z0-9_]{4,}$/.test(t)) return false
-  // Internal English vocabulary. These are the words the engine's own state
-  // machine uses; a genuine Hungarian recommendation does not contain them.
+  // Second net: internal English vocabulary, for a recommendation that did not
+  // come from the planner. Kept deliberately narrow — a false reject here is a
+  // real Hungarian recommendation silently thrown away.
   if (/\b(check|escalate|overdue|pending|external response|follow[- ]?up|awaiting|resolve|verify|proceed with)\b/i.test(t)) return false
   return true
 }

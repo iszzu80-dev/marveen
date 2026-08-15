@@ -58,6 +58,7 @@ import {
   preflight, enterWaitSystem, clearWaitSystem, type CapabilityPreflight,
 } from './capability-preflight.js'
 import { answerIntentOf, type AnswerIntent } from './answer-options.js'
+import { CASE_STATUSES } from './schema.js'
 
 // ── Valid progression decisions (plan §13) ──────────────────────────────
 
@@ -291,6 +292,37 @@ export function buildRollingPlan(
   }
 
   return plan
+}
+
+/**
+ * Every label `buildRollingPlan` can ever emit — the closed set of INTERNAL
+ * English plan-step strings.
+ *
+ * These are not only internal. `determineNextBestAction` copies the chosen
+ * step's label verbatim into `description`, the Decision Package reads that as
+ * the recommendation, and the owner question prints it as
+ * "Javaslatom: Execute first recovery action" — English machine text offered to
+ * a Hungarian reader as advice, with "igen — csináljam így" underneath.
+ *
+ * ENUMERATED BY DRIVING THE PLANNER, not by hand.
+ *
+ * The first attempt at blocking this was a regex over the English words in the
+ * ONE sample I had seen ("check", "escalate", "overdue"). It passed its tests,
+ * shipped, and let "Execute first recovery action" through on the live store an
+ * hour later — because a blocklist of yesterday's words is not a description of
+ * the class. The class is enumerable: it is exactly the labels below, and a
+ * label added to the switch is in this set the moment it exists.
+ */
+export function internalPlanLabels(): Set<string> {
+  const labels = new Set<string>()
+  const stubContract = {} as OutcomeContract
+  const stubContext = {} as ResolvedContext
+  // Plus one status the switch has never heard of, so the `default` branch's
+  // labels are in the set too.
+  for (const status of [...CASE_STATUSES, '__NO_SUCH_STATUS__']) {
+    for (const step of buildRollingPlan(stubContract, stubContext, status)) labels.add(step.label)
+  }
+  return labels
 }
 
 // ── Next Best Action ────────────────────────────────────────────────────

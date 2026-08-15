@@ -195,3 +195,46 @@ describe('the three rules do not disturb the ASK identity', () => {
     expect(other.hash).not.toEqual(orig.hash)
   })
 })
+
+// ── The class, not the sample ────────────────────────────────────────────
+//
+// The first version of rule (1) blocked the words in the one bad recommendation
+// I had read. It shipped green and let "Execute first recovery action" reach the
+// live question for PRI-SYS-2026-001 one cycle later. The words were never the
+// class; the planner's label set is.
+
+import { internalPlanLabels, buildRollingPlan } from '../cos/progression-pipeline.js'
+import { CASE_STATUSES } from '../cos/schema.js'
+
+describe('(1) EVERY label the planner can emit is refused as a recommendation', () => {
+  it('rejects all of them, and there are enough of them to matter', () => {
+    const labels = [...internalPlanLabels()]
+    // A set that came back empty would make the loop below vacuously true --
+    // the "absence claim needs an instrument" trap, inside the fix for it.
+    expect(labels.length).toBeGreaterThan(15)
+    const leaked = labels.filter(l => isUsableRecommendation(l))
+    expect(leaked).toEqual([])
+  })
+
+  it('names the two that were actually seen live', () => {
+    // Regression anchors. Both reached a real question on Istvan's channel.
+    expect(internalPlanLabels().has('Execute first recovery action')).toBe(true)
+    expect(internalPlanLabels().has('Check for external response or escalate if overdue')).toBe(true)
+    expect(isUsableRecommendation('Execute first recovery action')).toBe(false)
+  })
+
+  it('the set is derived from the planner, not copied beside it', () => {
+    // If someone adds a plan step and forgets this file, the set must still
+    // contain it. Proven by driving the planner directly and comparing.
+    const driven = new Set<string>()
+    for (const st of [...CASE_STATUSES, '__NO_SUCH_STATUS__']) {
+      for (const step of buildRollingPlan({} as never, {} as never, st)) driven.add(step.label)
+    }
+    expect([...internalPlanLabels()].sort()).toEqual([...driven].sort())
+  })
+
+  it('POSITIVE CONTROL: real Hungarian recommendations survive the set check', () => {
+    expect(isUsableRecommendation('Kérj új szállítási időpontot a boltnál, mert a csomag visszament.')).toBe(true)
+    expect(isUsableRecommendation('Zarjuk le az ugyet, mert a csomagot atvette.')).toBe(true)
+  })
+})
