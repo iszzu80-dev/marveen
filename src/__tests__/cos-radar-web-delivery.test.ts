@@ -31,8 +31,7 @@ function seed(targetPrice = 35000) {
   createCase(db, { caseId: 'c1', title: 'Cipő', caseType: 'SHOPPING' }, NOW)
   createRadarItem(db, {
     radarId: 'r1', caseId: 'c1', kind: 'PRODUCT', label: 'HOFF – hasonló stílusú modellek',
-    targetPrice, currency: 'HUF', checkIntervalSec: 86400,
-  }, NOW)
+    targetPrice, currency: 'HUF', checkIntervalSec: 86400, query: { terms: 'teszt keresokifejezes' } }, NOW)
   return db
 }
 

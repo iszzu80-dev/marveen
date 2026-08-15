@@ -38,7 +38,10 @@ describe('PRODUCT radar price-watch engine', () => {
   function makeItem(q?: ProductRadarQuery, target = 45000) {
     createRadarItem(getDb(), {
       radarId: 'BUY-TEST', kind: 'PRODUCT', label: 'On Cloud 6', currency: 'HUF',
-      targetPrice: target, checkIntervalSec: 86400, query: q,
+      // A PRODUCT must carry search TERMS. The old default was `q.terms ??
+      // item.label`, which searched for a case title when none were given; the
+      // creation gate now refuses instead, so the fixture states them.
+      targetPrice: target, checkIntervalSec: 86400, query: { terms: 'On Cloud 6 futocipo', ...q },
     }, T0)
   }
 

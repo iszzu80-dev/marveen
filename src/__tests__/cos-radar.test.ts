@@ -20,23 +20,23 @@ describe('COS price radar', () => {
 
   it('creates an ACTIVE item and schedules the next check', () => {
     const db = getDb()
-    const r = createRadarItem(db, { radarId: 'r1', caseId: 'c1', kind: 'RENTAL', label: 'VLC→AGP', targetPrice: 90000, currency: 'HUF', checkIntervalSec: 3600 }, NOW)
+    const r = createRadarItem(db, { radarId: 'r1', caseId: 'c1', kind: 'RENTAL', label: 'VLC→AGP', targetPrice: 90000, currency: 'HUF', checkIntervalSec: 3600, query: { search: { pickup: 'VLC', dropoff: 'AGP' } } }, NOW)
     expect(r.status).toBe('ACTIVE')
     expect(r.next_check_at).toBe(NOW + 3600)
   })
 
   it('dueRadarChecks returns only ACTIVE items whose check time has arrived', () => {
     const db = getDb()
-    createRadarItem(db, { radarId: 'due', kind: 'RENTAL', label: 'a', checkIntervalSec: 100 }, NOW - 200) // next = NOW-100 → due
-    createRadarItem(db, { radarId: 'future', kind: 'RENTAL', label: 'b', checkIntervalSec: 100000 }, NOW)  // next far off
-    createRadarItem(db, { radarId: 'paused', kind: 'RENTAL', label: 'c', checkIntervalSec: 100 }, NOW - 200)
+    createRadarItem(db, { radarId: 'due', kind: 'RENTAL', label: 'a', checkIntervalSec: 100, targetPrice: 50000, query: { search: { pickup: 'VLC', dropoff: 'AGP' } } }, NOW - 200) // next = NOW-100 → due
+    createRadarItem(db, { radarId: 'future', kind: 'RENTAL', label: 'b', checkIntervalSec: 100000, targetPrice: 50000, query: { search: { pickup: 'VLC', dropoff: 'AGP' } } }, NOW)  // next far off
+    createRadarItem(db, { radarId: 'paused', kind: 'RENTAL', label: 'c', checkIntervalSec: 100, targetPrice: 50000, query: { search: { pickup: 'VLC', dropoff: 'AGP' } } }, NOW - 200)
     setRadarStatus(db, 'paused', 'PAUSED', NOW)
     expect(dueRadarChecks(db, NOW).map((x) => x.radar_id)).toEqual(['due'])
   })
 
   it('records observations, tracks the new low, and does NOT hit above target', () => {
     const db = getDb()
-    createRadarItem(db, { radarId: 'r1', kind: 'RENTAL', label: 'x', targetPrice: 80000, currency: 'HUF', checkIntervalSec: 3600 }, NOW)
+    createRadarItem(db, { radarId: 'r1', kind: 'RENTAL', label: 'x', targetPrice: 80000, currency: 'HUF', checkIntervalSec: 3600, query: { search: { pickup: 'VLC', dropoff: 'AGP' } } }, NOW)
     const o1 = recordObservation(db, 'r1', { bestPrice: 95000, offerCount: 500 }, NOW + 3600)
     expect(o1).toMatchObject({ hit: false, isNewLow: true, status: 'ACTIVE' })
     const o2 = recordObservation(db, 'r1', { bestPrice: 88000 }, NOW + 7200)
@@ -49,7 +49,7 @@ describe('COS price radar', () => {
 
   it('flips to HIT when an observation meets the target', () => {
     const db = getDb()
-    createRadarItem(db, { radarId: 'r1', kind: 'RENTAL', label: 'x', targetPrice: 85000, currency: 'HUF', checkIntervalSec: 3600 }, NOW)
+    createRadarItem(db, { radarId: 'r1', kind: 'RENTAL', label: 'x', targetPrice: 85000, currency: 'HUF', checkIntervalSec: 3600, query: { search: { pickup: 'VLC', dropoff: 'AGP' } } }, NOW)
     const o = recordObservation(db, 'r1', { bestPrice: 84000, offerRef: { car: 'Hyundai i30', supplier: 'Centauro' } }, NOW + 3600)
     expect(o.hit).toBe(true)
     expect(o.status).toBe('HIT')
@@ -59,7 +59,7 @@ describe('COS price radar', () => {
   // ── P1.6 notification dedup (AC-29) ──────────────────────────────────
   it('AC-29: the FIRST hit notifies (NEW_HIT); the SAME unchanged offer does NOT re-notify', () => {
     const db = getDb()
-    createRadarItem(db, { radarId: 'r1', kind: 'RENTAL', label: 'x', targetPrice: 85000, currency: 'HUF', checkIntervalSec: 3600 }, NOW)
+    createRadarItem(db, { radarId: 'r1', kind: 'RENTAL', label: 'x', targetPrice: 85000, currency: 'HUF', checkIntervalSec: 3600, query: { search: { pickup: 'VLC', dropoff: 'AGP' } } }, NOW)
     const o1 = recordObservation(db, 'r1', { bestPrice: 84000, offerId: 'Centauro|i30' }, NOW + 3600)
     expect(o1.notify).toEqual({ should: true, reason: 'NEW_HIT' })
     // the tick persists the notification
@@ -72,7 +72,7 @@ describe('COS price radar', () => {
 
   it('AC-29: a DIFFERENT offer at/under target re-notifies (NEW_OFFER)', () => {
     const db = getDb()
-    createRadarItem(db, { radarId: 'r1', kind: 'RENTAL', label: 'x', targetPrice: 85000, currency: 'HUF', checkIntervalSec: 3600 }, NOW)
+    createRadarItem(db, { radarId: 'r1', kind: 'RENTAL', label: 'x', targetPrice: 85000, currency: 'HUF', checkIntervalSec: 3600, query: { search: { pickup: 'VLC', dropoff: 'AGP' } } }, NOW)
     const o1 = recordObservation(db, 'r1', { bestPrice: 84000, offerId: 'Centauro|i30' }, NOW + 3600)
     markNotified(db, 'r1', { offerId: o1.offerId, price: o1.bestPrice, reason: o1.notify.reason }, NOW + 3600)
     const o2 = recordObservation(db, 'r1', { bestPrice: 83500, offerId: 'Goldcar|Corsa' }, NOW + 7200)
@@ -81,7 +81,7 @@ describe('COS price radar', () => {
 
   it('AC-29: same offer, a SIGNIFICANT further drop re-notifies (PRICE_DROP); a tiny drop does not', () => {
     const db = getDb()
-    createRadarItem(db, { radarId: 'r1', kind: 'RENTAL', label: 'x', targetPrice: 85000, currency: 'HUF', checkIntervalSec: 3600 }, NOW)
+    createRadarItem(db, { radarId: 'r1', kind: 'RENTAL', label: 'x', targetPrice: 85000, currency: 'HUF', checkIntervalSec: 3600, query: { search: { pickup: 'VLC', dropoff: 'AGP' } } }, NOW)
     const o1 = recordObservation(db, 'r1', { bestPrice: 84000, offerId: 'Centauro|i30' }, NOW + 3600)
     markNotified(db, 'r1', { offerId: o1.offerId, price: o1.bestPrice, reason: o1.notify.reason }, NOW + 3600)
     // 0.5% lower → below the significance threshold → no re-notify
@@ -100,7 +100,7 @@ describe('COS price radar', () => {
   // ── P1.5 FX (currency handling) ──────────────────────────────────────
   it('P1.5: a single-currency observation records identity FX (converted == best)', () => {
     const db = getDb()
-    createRadarItem(db, { radarId: 'r1', kind: 'RENTAL', label: 'x', targetPrice: 85000, currency: 'HUF', checkIntervalSec: 3600 }, NOW)
+    createRadarItem(db, { radarId: 'r1', kind: 'RENTAL', label: 'x', targetPrice: 85000, currency: 'HUF', checkIntervalSec: 3600, query: { search: { pickup: 'VLC', dropoff: 'AGP' } } }, NOW)
     recordObservation(db, 'r1', { bestPrice: 84000, currency: 'HUF', offerId: 'a' }, NOW + 3600)
     const row = db.prepare(`SELECT * FROM radar_observations WHERE radar_id='r1' ORDER BY observed_at DESC LIMIT 1`).get() as any
     expect(row.original_currency).toBe('HUF')
@@ -114,7 +114,7 @@ describe('COS price radar', () => {
   it('P1.5: a foreign-currency merchant records the original + converted price and the rate', () => {
     const db = getDb()
     // target in HUF; merchant quotes EUR 210, converted at 400 HUF/EUR → 84000 HUF
-    createRadarItem(db, { radarId: 'r1', kind: 'RENTAL', label: 'x', targetPrice: 85000, currency: 'HUF', checkIntervalSec: 3600 }, NOW)
+    createRadarItem(db, { radarId: 'r1', kind: 'RENTAL', label: 'x', targetPrice: 85000, currency: 'HUF', checkIntervalSec: 3600, query: { search: { pickup: 'VLC', dropoff: 'AGP' } } }, NOW)
     const o = recordObservation(db, 'r1', {
       bestPrice: 84000, currency: 'HUF', offerId: 'a',
       fx: { originalPrice: 210, originalCurrency: 'EUR', rate: 400, rateSource: 'ecb', rateTimestamp: NOW + 3600 },

@@ -13,7 +13,7 @@ const NOW = 1_000_000
 function seedHit() {
   const db = getDb()
   createCase(db, { caseId: 'c1', title: 'Spain', caseType: 'TRAVEL' }, NOW)
-  createRadarItem(db, { radarId: 'r1', caseId: 'c1', kind: 'RENTAL', label: 'Valencia→Malaga', targetPrice: 85000, currency: 'HUF', checkIntervalSec: 3600 }, NOW)
+  createRadarItem(db, { radarId: 'r1', caseId: 'c1', kind: 'RENTAL', label: 'Valencia→Malaga', targetPrice: 85000, currency: 'HUF', checkIntervalSec: 3600, query: { search: { pickup: 'VLC', dropoff: 'AGP' } } }, NOW)
   recordObservation(db, 'r1', { bestPrice: 84000, offerRef: { car: 'Hyundai i30', category: 'Compact', supplier: 'Centauro' } }, NOW + 3600)
   return db
 }

@@ -25,7 +25,7 @@ describe('COS analytics (listAnalytics)', () => {
     createCase(db, { caseId: 'c1', title: 'A', caseType: 'TRAVEL', sensitivity: 'PERSONAL' }, NOW)
     createCase(db, { caseId: 'c2', title: 'B', caseType: 'ADMIN', sensitivity: 'HIGHLY_SENSITIVE' }, NOW)
     // radar with an observation that hits + a notification
-    createRadarItem(db, { radarId: 'r1', caseId: 'c1', kind: 'RENTAL', label: 'x', targetPrice: 90000, currency: 'HUF', checkIntervalSec: 3600 }, NOW)
+    createRadarItem(db, { radarId: 'r1', caseId: 'c1', kind: 'RENTAL', label: 'x', targetPrice: 90000, currency: 'HUF', checkIntervalSec: 3600, query: { search: { pickup: 'VLC', dropoff: 'AGP' } } }, NOW)
     const o = recordObservation(db, 'r1', { bestPrice: 84000, offerId: 'a' }, NOW + 10)
     markNotified(db, 'r1', { offerId: o.offerId, price: o.bestPrice, reason: o.notify.reason }, NOW + 10)
 

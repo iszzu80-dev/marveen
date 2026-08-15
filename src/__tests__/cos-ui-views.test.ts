@@ -36,7 +36,7 @@ describe('COS Mission Control view queries', () => {
 
   it('listRadarSummary includes the latest observation price', () => {
     const db = getDb()
-    createRadarItem(db, { radarId: 'r1', caseId: 'c1', kind: 'RENTAL', label: 'VLC→AGP', targetPrice: 80000, currency: 'HUF', checkIntervalSec: 3600 }, NOW)
+    createRadarItem(db, { radarId: 'r1', caseId: 'c1', kind: 'RENTAL', label: 'VLC→AGP', targetPrice: 80000, currency: 'HUF', checkIntervalSec: 3600, query: { search: { pickup: 'VLC', dropoff: 'AGP' } } }, NOW)
     recordObservation(db, 'r1', { bestPrice: 87900, offerCount: 10 }, NOW + 3600) // above target → stays ACTIVE
     const rows = listRadarSummary(db) as any[]
     expect(rows[0]).toMatchObject({ label: 'VLC→AGP', status: 'ACTIVE', target_price: 80000, latest_price: 87900 })

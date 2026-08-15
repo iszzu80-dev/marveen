@@ -21,7 +21,10 @@ const OFFER = 'Alamo|SEAT Leon'
 function newRadar() {
   createRadarItem(getDb(), {
     radarId: 'r-spain', kind: 'RENTAL', label: 'Valencia -> Malaga',
-    query: {}, targetPrice: TARGET, currency: 'HUF', checkIntervalSec: 21600,
+    // A rental needs its pickup/dropoff descriptor: since 2026-08-15 an item
+    // without one is refused at creation instead of throwing on every check.
+    query: { search: { pickup: 'VLC', dropoff: 'AGP' } },
+    targetPrice: TARGET, currency: 'HUF', checkIntervalSec: 21600,
   }, NOW)
 }
 

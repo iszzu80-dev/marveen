@@ -46,7 +46,55 @@ export interface RadarItemRow {
  *  be worth a repeat notification (P1.6) — otherwise a jittering price re-pings. */
 export const SIGNIFICANT_DROP_FRACTION = 0.03
 
+/**
+ * Why a radar item cannot be created, or null when it can.
+ *
+ * Pure, exported, and consulted by createRadarItem — so the RULE is testable
+ * and every caller inherits it, rather than each new entry point remembering to
+ * validate. Istvan's condition (2026-08-15): no target price and no search
+ * terms, no item.
+ *
+ * The reason it is a HARD REFUSAL and not a warning is measurable in this same
+ * file: `hit` requires `item.target_price != null`, so an item created without
+ * one is checked on schedule, records observations for ever, and is
+ * STRUCTURALLY INCAPABLE of ever alerting. Wired in, running, and mute — the
+ * exact shape of every failure found today. A radar item that cannot speak is
+ * worse than none, because it makes the board look attended.
+ *
+ * Kind-aware, for the same reason deliverability is: a PRODUCT is found by
+ * search terms, a RENTAL by a structured pickup/dropoff query. Demanding
+ * `terms` from a rental would reject the one radar path that demonstrably
+ * works — the mistake this codebase has now made once and must not repeat.
+ */
+export function radarCreationRefusal(item: NewRadarItem): string | null {
+  if (item.targetPrice == null) {
+    return 'nincs celar -- egy celar nelkuli tetel sosem tud talalatot adni (hit megkoveteli a target_price-t), tehat futna es nema maradna'
+  }
+  if (!Number.isFinite(item.targetPrice) || item.targetPrice <= 0) {
+    return `ervenytelen celar (${String(item.targetPrice)}) -- pozitiv szam kell`
+  }
+  const q = item.query as { terms?: unknown; search?: unknown } | undefined
+  if (item.kind === 'PRODUCT') {
+    const terms = typeof q?.terms === 'string' ? q.terms.trim() : ''
+    if (terms === '') {
+      // The fallback this replaces was `q.terms ?? item.label` in the runner: a
+      // case title ("Teraszszigeteles es beazas") is rarely a search query, so
+      // the radar would search for the wrong thing and report honest zeroes.
+      return 'nincs keresokifejezes (query.terms) -- egy ugy CIME ritkan keresokifejezes, es a rossz kereses ures eredmenye ugy nez ki, mint a nincs jo ajanlat'
+    }
+  } else if (item.kind === 'RENTAL') {
+    if (q?.search == null) {
+      return 'nincs kereses-leiro (query.search) -- egy berles atveteli/leadasi hely es datum nelkul nem kerdezheto le'
+    }
+  }
+  return null
+}
+
 export function createRadarItem(db: Database.Database, item: NewRadarItem, now: number): RadarItemRow {
+  // THE GATE IS HERE, at the single choke point every caller passes through —
+  // not in the callers, where the second one forgets it.
+  const refusal = radarCreationRefusal(item)
+  if (refusal) throw new Error(`radar item ${item.radarId} elutasitva: ${refusal}`)
   const interval = item.checkIntervalSec ?? 86400
   db.prepare(
     `INSERT INTO radar_items (radar_id, case_id, kind, label, query, target_price, max_price, currency,

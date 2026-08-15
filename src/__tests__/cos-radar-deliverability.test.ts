@@ -44,8 +44,7 @@ function product(targetPrice = 35000) {
   createCase(db, { caseId: 'c1', title: 'Cipő', caseType: 'SHOPPING' }, NOW)
   createRadarItem(db, {
     radarId: 'r1', caseId: 'c1', kind: 'PRODUCT', label: 'HOFF – hasonló stílusú modellek',
-    targetPrice, currency: 'HUF', checkIntervalSec: 86400,
-  }, NOW)
+    targetPrice, currency: 'HUF', checkIntervalSec: 86400, query: { terms: 'teszt keresokifejezes' } }, NOW)
   return db
 }
 
@@ -136,8 +135,7 @@ describe('deliverability does NOT gate rentals', () => {
     createCase(db, { caseId: 'c2', title: 'Spain', caseType: 'TRAVEL' }, NOW)
     createRadarItem(db, {
       radarId: 'r2', caseId: 'c2', kind: 'RENTAL', label: 'Valencia→Malaga',
-      targetPrice: 85000, currency: 'HUF', checkIntervalSec: 3600,
-    }, NOW)
+      targetPrice: 85000, currency: 'HUF', checkIntervalSec: 3600, query: { search: { pickup: 'VLC', dropoff: 'AGP' } } }, NOW)
 
     const res = recordObservation(db, 'r2', { bestPrice: 64471, offerId: 'Alamo|SEAT Leon' }, NOW + 60)
 
