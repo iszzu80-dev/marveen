@@ -356,6 +356,49 @@ function isHandled(db: Database.Database, caseId: string, domain: string, hash: 
 /** Seconds a stored reading may lag the case before it counts as stale. */
 export const STALE_READING_GRACE_SEC = 120
 
+/**
+ * Did the OWNER say something about this case after the reading was taken?
+ *
+ * THE GRACE WINDOW DOES NOT APPLY TO HIS OWN WORDS, and this is not a tuning
+ * choice — it is what the window is for and what it is not for.
+ *
+ * `STALE_READING_GRACE_SEC` exists because intake, reading and `updated_at` land
+ * within the same cycle in arbitrary order, seconds apart; without it a
+ * perfectly fresh question would be discarded as stale. That argument covers
+ * machine writes racing each other. It does not cover an owner answer, because
+ * an owner answer is the single event most likely to make the stored question
+ * wrong.
+ *
+ * MEASURED, 2026-08-16. Istvan answered the OneDrive question at 00:44:15
+ * ("Én voltam, rendben volt" — the deletion was intentional). At 00:44:52,
+ * thirty-seven seconds later and comfortably inside the 120s window, the sweep
+ * asked him about the SAME case from a pre-answer packet, and what it asked was:
+ *
+ *     "Istvan 'YES' döntése (event:245) kontextusa nem világos"
+ *
+ * — the exact ambiguity he had just resolved. From where he sits that is not a
+ * follow-up question, it is the system not listening. The one thing a question
+ * channel cannot afford.
+ */
+function ownerSpokeSince(db: Database.Database, domain: string, caseId: string, since: number): boolean {
+  const events = domain === 'zst' ? 'zst_case_events' : 'personal_case_events'
+  try {
+    const row = db.prepare(
+      `SELECT 1 AS x FROM ${events}
+        WHERE case_id = ?
+          AND event_type IN ('OWNER_DECISION', 'OWNER_INFORMATION', 'OWNER_CONFIRMATION')
+          AND created_at > ?
+        LIMIT 1`,
+    ).get(caseId, since) as { x: number } | undefined
+    return row !== undefined
+  } catch {
+    // No such table on this install. Absence of an events table is not
+    // evidence that he stayed silent, but it is also not something this guard
+    // can decide — the caller's existing staleness check still runs.
+    return false
+  }
+}
+
 /** How long one case must stay quiet after asking, unless the owner answers.
  *
  *  Live on 2026-08-11: ONE case produced THREE questions in twenty minutes.
@@ -584,6 +627,13 @@ export function askPendingOwnerQuestions(
     // an owner answer or a correction had landed since -- exactly the ones that
     // must NOT be asked from the old reading.
     if (row.packet_at + STALE_READING_GRACE_SEC < caseUpdatedAt(db, row.domain, row.case_id)) {
+      result.staleReading++
+      continue
+    }
+    // ...and the same check WITHOUT the grace window when the owner himself
+    // spoke. See ownerSpokeSince: the window is for machine writes racing each
+    // other inside one cycle, never for his answer.
+    if (ownerSpokeSince(db, row.domain, row.case_id, row.packet_at)) {
       result.staleReading++
       continue
     }

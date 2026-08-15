@@ -56,3 +56,72 @@ describe('a reading older than the case is not a reading of this case', () => {
     expect(outstandingOwnerQuestions(getDb(), 10)).toHaveLength(1)
   })
 })
+
+// ── The owner's own words do not get a grace window ───────────────────────
+//
+// MEASURED 2026-08-16. Istvan answered the OneDrive question at 00:44:15
+// ("Én voltam, rendben volt"). At 00:44:52 -- 37 seconds later, well inside the
+// 120s window -- the sweep asked him about the same case from a pre-answer
+// packet, and what it asked was whether his earlier YES was ambiguous. The
+// exact thing he had just cleared up.
+//
+// The jitter test above is the reason the window exists; these are the reason
+// it must not cover him.
+
+function ownerAnswer(caseId: string, at: number, eventType = 'OWNER_INFORMATION') {
+  getDb().prepare(
+    `INSERT INTO personal_case_events (case_id, case_version, actor, event_type, reason, created_at)
+     VALUES (?, 1, 'istvan', ?, 'Én voltam, rendben volt', ?)`,
+  ).run(caseId, eventType, at)
+}
+
+describe('an owner answer invalidates the reading with NO grace window', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('does not re-ask from a packet taken before he answered, even 1 second before', () => {
+    seed('c-answered', NOW, NOW)
+    ownerAnswer('c-answered', NOW + 1)              // deep inside the grace window
+    const r = askPendingOwnerQuestions(getDb(), { now: NOW + 37 })
+    expect(r.staleReading).toBe(1)
+    expect(outstandingOwnerQuestions(getDb(), 10)).toHaveLength(0)
+  })
+
+  it('the live timings, to the second', () => {
+    // packet 00:44:00, answer 00:44:15, sweep 00:44:52.
+    seed('c-onedrive', NOW, NOW)
+    ownerAnswer('c-onedrive', NOW + 15)
+    const r = askPendingOwnerQuestions(getDb(), { now: NOW + 52 })
+    expect(r.staleReading).toBe(1)
+  })
+
+  it('all three owner event types count', () => {
+    for (const [i, t] of ['OWNER_DECISION', 'OWNER_INFORMATION', 'OWNER_CONFIRMATION'].entries()) {
+      initDatabase(':memory:')
+      seed(`c-${i}`, NOW, NOW)
+      ownerAnswer(`c-${i}`, NOW + 1, t)
+      expect(askPendingOwnerQuestions(getDb(), { now: NOW + 37 }).staleReading).toBe(1)
+    }
+  })
+
+  it('POSITIVE CONTROL: an answer taken BEFORE the reading does not suppress', () => {
+    // Otherwise every case he has ever answered goes permanently silent -- a
+    // far worse failure than the one being fixed.
+    seed('c-old-answer', NOW + 100, NOW)
+    ownerAnswer('c-old-answer', NOW + 50)           // he spoke, then we re-read
+    const r = askPendingOwnerQuestions(getDb(), { now: NOW + 200 })
+    expect(r.staleReading).toBe(0)
+    expect(outstandingOwnerQuestions(getDb(), 10)).toHaveLength(1)
+  })
+
+  it('POSITIVE CONTROL: a machine event inside the window still passes', () => {
+    // The jitter tolerance must survive. Only HIS events skip the grace.
+    seed('c-machine', NOW, NOW)
+    getDb().prepare(
+      `INSERT INTO personal_case_events (case_id, case_version, actor, event_type, reason, created_at)
+       VALUES (?, 1, 'progression-engine', 'STATUS_CHANGED', 'gépi', ?)`,
+    ).run('c-machine', NOW + 1)
+    const r = askPendingOwnerQuestions(getDb(), { now: NOW + 37 })
+    expect(r.staleReading).toBe(0)
+    expect(outstandingOwnerQuestions(getDb(), 10)).toHaveLength(1)
+  })
+})
