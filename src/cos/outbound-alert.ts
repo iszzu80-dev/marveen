@@ -220,10 +220,13 @@ export function reportPlannedOutbound(
   db: Database.Database, now: number, todayOverride?: string,
 ): PlannedDigestResult {
   const digest = buildPlannedDigest(db, now)
-  if (plannedDigestPostedToday(db, todayOverride)) {
+  // Same day for the read and the write -- see reportUnverifiedFinds for what
+  // the two clocks cost across midnight.
+  const day = todayOverride ?? new Date().toLocaleDateString('en-CA', { timeZone: APP_TZ })
+  if (plannedDigestPostedToday(db, day)) {
     return { posted: false, alreadyToday: true, count: digest.count, oldestAgeDays: digest.oldestAgeDays }
   }
   createAgentMessage('cos-outbound', 'marveen', digest.text, 'cos-planned-digest')
-  appendDailyLog('marveen', digest.text)
+  appendDailyLog('marveen', digest.text, day)
   return { posted: true, alreadyToday: false, count: digest.count, oldestAgeDays: digest.oldestAgeDays }
 }

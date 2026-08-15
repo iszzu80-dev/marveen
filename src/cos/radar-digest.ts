@@ -248,16 +248,27 @@ export function reportUnverifiedFinds(
   // failure mode it prevents — a watch marked as told that was never told —
   // returns in silence. The same guard exists on the notify path
   // (cos-radar-notify-ordering: "a failing alert leaves the item UNMARKED").
-  post: (text: string) => void = (text) => {
-    createAgentMessage('cos-radar', 'marveen', text, 'cos-radar-digest')
-    appendDailyLog('marveen', text)
-  },
+  post?: (text: string) => void,
 ): RadarDigestResult {
+  // ONE day, resolved once, used by BOTH ends of the gate.
+  //
+  // Until 2026-08-16 the read side took the day it was given and the write side
+  // took its own from the process clock, so the receipt could be stamped on a
+  // different day than the decision that produced it. In production the two
+  // agreed by coincidence -- the override IS the current day -- except across
+  // midnight: a digest posted at 23:59:59 got a receipt dated the next day, and
+  // the next day's run then read its predecessor's receipt and stayed silent. A
+  // whole day of the digest lost, and nothing anywhere would have said so.
+  const day = todayOverride ?? new Date().toLocaleDateString('en-CA', { timeZone: APP_TZ })
+  const doPost = post ?? ((text: string) => {
+    createAgentMessage('cos-radar', 'marveen', text, 'cos-radar-digest')
+    appendDailyLog('marveen', text, day)
+  })
   const digest = buildRadarDigest(db)
-  if (radarDigestPostedToday(db, todayOverride)) {
+  if (radarDigestPostedToday(db, day)) {
     return { posted: false, alreadyToday: true, count: digest.count, closures: 0 }
   }
-  post(digest.text)
+  doPost(digest.text)
   // AFTER the post, never before. A crash in between costs a repeated line;
   // the other order costs the only sentence a closed watch ever gets.
   markClosuresReported(db, digest.closures.map(c => c.radarId), now)

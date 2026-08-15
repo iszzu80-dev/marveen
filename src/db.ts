@@ -1424,12 +1424,18 @@ export function updateMemory(id: number, content: string, category?: string, age
 
 // --- Daily logs ---
 
-export function appendDailyLog(agentId: string, content: string): void {
+/**
+ * `dateOverride` exists for the once-per-day gates (the radar and PLANNED
+ * digests): they DECIDE on a calendar day and then write their receipt, and if
+ * the write picks its own day from the process clock the two ends can disagree.
+ * They only ever agreed by coincidence -- see reportUnverifiedFinds.
+ */
+export function appendDailyLog(agentId: string, content: string, dateOverride?: string): void {
   const now = Math.floor(Date.now() / 1000)
   // Budapest calendar day, not UTC -- otherwise an entry written 00:00-02:00
   // local time lands on the previous day and the "ma" recall query misses it.
   // en-CA formats as YYYY-MM-DD.
-  const today = new Date().toLocaleDateString('en-CA', { timeZone: APP_TZ })
+  const today = dateOverride ?? new Date().toLocaleDateString('en-CA', { timeZone: APP_TZ })
   db.prepare('INSERT INTO daily_logs (agent_id, date, content, created_at) VALUES (?, ?, ?, ?)').run(agentId, today, content, now)
 }
 
