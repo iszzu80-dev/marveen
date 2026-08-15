@@ -22,6 +22,23 @@ import { buildRadarDigest, reportUnverifiedFinds, radarDigestPostedToday } from 
 
 const NOW = 1_000_000
 
+/**
+ * The digest line for one item — NOT the whole digest text.
+ *
+ * Asserting against the full text was a tautology, found by Claude's mutation
+ * pass 2026-08-15: the summary sentence already contains "a szallitas nem
+ * igazolt", so `toContain(...)` held no matter what label the ITEM line
+ * carried. Mutating SHIPPABLE_TEXT.UNKNOWN to 'XXXXX' — or worse, to the NO
+ * wording — left all ten tests green. The NO assertion happened to be real
+ * (that phrase appears only on item lines); the UNKNOWN one measured nothing,
+ * on the branch the code's own comment calls the typical case.
+ */
+function itemLine(text: string, label: string): string {
+  const line = text.split('\n').find(l => l.startsWith('- ') && l.includes(label))
+  if (!line) throw new Error(`no digest item line for ${label} in:\n${text}`)
+  return line
+}
+
 function product(targetPrice = 35000) {
   const db = getDb()
   createCase(db, { caseId: 'c1', title: 'Cipő', caseType: 'SHOPPING' }, NOW)
@@ -64,8 +81,11 @@ describe('deliverability gates the hit — all three branches', () => {
 
     const digest = buildRadarDigest(db)
     expect(digest.count).toBe(1)
-    expect(digest.text).toContain('nem szallit Magyarorszagra')
-    expect(digest.text).toContain('DE-Shop')
+    const line = itemLine(digest.text, 'HOFF')
+    expect(line).toContain('nem szallit Magyarorszagra')
+    expect(line).toContain('DE-Shop')
+    // The two branches must be TOLD APART, not merely both mentioned.
+    expect(line).not.toContain('a szallitas nem igazolt')
   })
 
   it('UNKNOWN: cheaper but delivery unverified → does not fire, MUST appear', () => {
@@ -83,9 +103,16 @@ describe('deliverability gates the hit — all three branches', () => {
 
     const digest = buildRadarDigest(db)
     expect(digest.count).toBe(1)
-    expect(digest.text).toContain('a szallitas nem igazolt')
-    expect(digest.text).toContain('HOFF')
-    expect(digest.text).toContain('27')
+    // On the ITEM line, not the summary — the summary says "a szallitas nem
+    // igazolt" for every non-empty digest, so asserting it there proves only
+    // that the digest is non-empty.
+    const line = itemLine(digest.text, 'HOFF')
+    expect(line).toContain('a szallitas nem igazolt')
+    expect(line).toContain('27')
+    // And it must NOT claim the stronger fact. "We did not check" is not "it
+    // does not ship here": saying the latter would assert more than we measured
+    // about the case the code calls typical.
+    expect(line).not.toContain('nem szallit Magyarorszagra')
   })
 
   it('an omitted shippability is UNKNOWN, never YES', () => {
