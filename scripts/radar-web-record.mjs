@@ -8,11 +8,24 @@
 // Usage:
 //   node scripts/radar-web-record.mjs <radar_id> <priceMajor> <shop> <url>
 // priceMajor is the price in the item's currency major unit (e.g. 60990 for HUF).
-// Prints a JSON line: {hit, isNewLow, status, bestPrice, notify, offerId}.
-// Does NOT send any alert — the caller (the daily sweep) decides that from `notify`.
-
+// Prints a JSON line: {hit, isNewLow, status, bestPrice, notify, offerId, delivered}.
+//
+// IT SENDS THE ALERT ITSELF. This line used to read "Does NOT send any alert —
+// the caller (the daily sweep) decides that from `notify`", and that caller was
+// a model reading this stdout. Measured 2026-08-15: three at-target product
+// observations were recorded here (08-07 Shopsy 27 990, 08-07 About You 11 745,
+// 08-09 ecipo.hu 34 120) and NOT ONE reached Istvan — the only radar alert ever
+// posted to the bus came from the tick's own code path. `markNotified` was never
+// called on this path either, so the per-shop dedup the sweep skill advertises
+// did not exist here at all.
+//
+// Delivery is therefore no longer the caller's to forget. The record+deliver
+// chain lives in src/cos/radar-web.ts, NOT here: this file hardwires the live
+// store path, so anything implemented in it can only be tested against the real
+// database. A step that cannot be tested is how the previous version shipped.
+// This script is now argv parsing and nothing else.
 import Database from '../node_modules/better-sqlite3/lib/index.js'
-import { recordObservation } from '../dist/cos/radar.js'
+import { recordWebObservation } from '../dist/cos/radar-web.js'
 
 const [, , radarId, priceRaw, shop = 'web', url = ''] = process.argv
 if (!radarId || priceRaw == null) {
@@ -27,14 +40,8 @@ const now = Math.floor(Date.now() / 1000)
 const item = db.prepare("SELECT radar_id, currency FROM radar_items WHERE radar_id=? AND kind='PRODUCT'").get(radarId)
 if (!item) { console.error(`no PRODUCT radar item ${radarId}`); process.exit(1) }
 
-const res = recordObservation(db, radarId, {
-  bestPrice: Math.round(price),
-  currency: (item.currency || 'HUF').toUpperCase(),
-  offerCount: 1,
-  // Stable per-shop id so the SAME shop's standing price does not re-alert daily
-  // (P1.6 dedup); a new cheaper shop is a new offer and DOES alert.
-  offerId: `websearch|${shop}`,
-  offerRef: { shop, url, price: Math.round(price) },
+const res = recordWebObservation(db, {
+  radarId, price, shop, url, currency: item.currency || 'HUF',
 }, now)
 db.close()
-console.log(JSON.stringify({ radarId, ...res }))
+console.log(JSON.stringify(res))

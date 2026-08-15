@@ -7,7 +7,7 @@
 // autonomously until a real connector + Istvan's write-scope consent are added.
 // The loop is therefore safe to run live today.
 
-import { cosTick, type CosTickDeps, type CosTickResult } from './tick.js'
+import { cosTick, type CosTickDeps, type CosTickResult, type PendingRadarNotification } from './tick.js'
 import type Database from 'better-sqlite3'
 import { DiscoverCarsAdapter } from './adapters/discovercars.js'
 import { EmagAdapter } from './adapters/emag.js'
@@ -68,14 +68,39 @@ export async function runCosTickOnce(
 export function deliverRadarNotifications(
   db: Database.Database, res: CosTickResult, now = Math.floor(Date.now() / 1000),
 ): void {
-  for (const n of res.radarNotifications) {
-    logger.warn({ radarId: n.radarId }, 'COS radar HIT — target price met')
-    try {
-      alertRadarHit(db, n.radarId)
-      markNotified(db, n.radarId, { offerId: n.offerId, price: n.price, reason: n.reason }, now)
-    } catch (err) {
-      logger.error({ err, radarId: n.radarId }, 'radar HIT alert failed — NOT marked notified, will retry next tick')
-    }
+  for (const n of res.radarNotifications) deliverRadarNotification(db, n, now)
+}
+
+/**
+ * Deliver ONE pending radar notification: alert, then mark.
+ *
+ * Extracted from the loop above so the websearch sweep is a SECOND CALLER of
+ * this exact ordering rather than a fifth copy of it. That distinction is the
+ * whole point: the ordering rule documented above (alert first, mark only on
+ * success) is the kind of rule that survives in one place and rots in five.
+ *
+ * The sweep needs it because delivery there used to be prompt-only. The
+ * recording script printed `notify` to stdout and a model was expected to read
+ * it and send the alert; on 2026-08-07 and 2026-08-09 three at-target product
+ * observations were recorded and NONE reached the owner — the only radar alert
+ * ever posted to the bus came from this code path, the rental one. Whoever
+ * calls the recorder now cannot drop the alert, because the alert is no longer
+ * theirs to forget.
+ *
+ * Returns true when the owner was told AND the item was marked; false when the
+ * alert failed (dedup state deliberately untouched, so the next run retries).
+ */
+export function deliverRadarNotification(
+  db: Database.Database, n: PendingRadarNotification, now = Math.floor(Date.now() / 1000),
+): boolean {
+  logger.warn({ radarId: n.radarId }, 'COS radar HIT — target price met')
+  try {
+    alertRadarHit(db, n.radarId)
+    markNotified(db, n.radarId, { offerId: n.offerId, price: n.price, reason: n.reason }, now)
+    return true
+  } catch (err) {
+    logger.error({ err, radarId: n.radarId }, 'radar HIT alert failed — NOT marked notified, will retry next tick')
+    return false
   }
 }
 

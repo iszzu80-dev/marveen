@@ -58,6 +58,11 @@ export interface CosTickResult {
   outboundProcessed: number
   outboundSkippedNoAdapter: number
   radarChecked: number
+  /** Due radar items the tick declined to check because no adapter handles their
+   *  kind. Counted, not silent: `radarChecked: 1` on its own cannot distinguish
+   *  "one item due" from "one checked, eight skipped", and that ambiguity fed
+   *  three wrong explanations for the radar's silence in a single evening. */
+  radarSkippedNoAdapter: number
   radarHits: string[]
   /** Hits that still owe the owner an alert. The tick does NOT call markNotified:
    *  radar.ts:markNotified's contract is "call AFTER the alert is posted", and
@@ -101,11 +106,22 @@ export async function cosTick(db: Database.Database, deps: CosTickDeps, now: num
   const radarHits: string[] = []
   const radarNotifications: PendingRadarNotification[] = []
   let radarChecked = 0
+  let radarSkippedNoAdapter = 0
   for (const item of dueRadarChecks(db, now)) {
     // Dispatch by kind to the matching adapter; skip if no adapter for this kind.
     const canRental = item.kind === 'RENTAL' && deps.rentalAdapter
     const canProduct = item.kind === 'PRODUCT' && deps.shoppingAdapter
-    if (!canRental && !canProduct) continue
+    // A SKIP IS REPORTED, NOT SWALLOWED.
+    //
+    // This `continue` was silent, and a silent skip is indistinguishable from
+    // "checked it, found nothing" in every surface downstream. It caused no
+    // outage — but on 2026-08-14/15 three separate wrong explanations for the
+    // radar's week of silence were built on top of it, and each had to be
+    // refuted by a side effect (observation rows, bus messages, task_runs)
+    // because the tick itself reported nothing about what it declined to look
+    // at. A branch that cannot be observed does not have to be wrong to be
+    // expensive; it only has to be plausible.
+    if (!canRental && !canProduct) { radarSkippedNoAdapter++; continue }
     radarChecked++
     try {
       const res = canRental
@@ -128,6 +144,7 @@ export async function cosTick(db: Database.Database, deps: CosTickDeps, now: num
     outboundProcessed,
     outboundSkippedNoAdapter,
     radarChecked,
+    radarSkippedNoAdapter,
     radarHits,
     radarNotifications,
     recoveryRequired: outboundNeedingHuman(db).map(w => w.ledger_id),
