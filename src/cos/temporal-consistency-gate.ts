@@ -43,12 +43,13 @@ export interface TemporalGateResult {
 }
 
 const DATE_TIME = /\b(20\d{2})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):([0-5]\d))?\b/g
+// Date-only claims are represented at noon UTC. Provider facts often use local
+// midnight, so allow at most 13h drift for claim-to-fact matching. This is wide
+// enough for timezone/date-only representation and far too narrow to let a
+// different day satisfy the claim.
+export const TEMPORAL_CLAIM_MATCH_TOLERANCE_SEC = 13 * 3600
 
 function utcEpoch(y: number, m: number, d: number, hh = 12, mm = 0): number | null {
-  // Text-only extraction intentionally avoids assuming local timezone. Date-only
-  // claims are represented at midday UTC so they cannot accidentally appear a
-  // day earlier because a host runs in another timezone. Provider-derived facts
-  // should carry the exact epoch and supersede this low-confidence claim.
   const ms = Date.UTC(y, m - 1, d, hh, mm, 0)
   const dt = new Date(ms)
   if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null
@@ -86,8 +87,6 @@ export function evaluateTemporalConsistency(input: TemporalGateInput): TemporalG
     if (isBindingTemporalKind(c.kind)) required.add(c.kind)
   }
 
-  // Same semantic kind with multiple active timestamps is a conflict unless the
-  // conflict has already been resolved by rejecting/superseding one fact.
   const byKind = new Map<TemporalFactKind, TemporalFactRow[]>()
   for (const f of facts) {
     const list = byKind.get(f.fact_kind) ?? []
@@ -128,15 +127,19 @@ export function evaluateTemporalConsistency(input: TemporalGateInput): TemporalG
     blockingFactIds: [...blocking], missingKinds,
   }
 
-  // If text explicitly claims a binding event, a verified fact of another kind
-  // at the same/near date does NOT satisfy it. This is the Hertz/Sixt class: a
-  // verified pickup date cannot stand in for the earlier decision deadline.
+  // Same KIND is not enough: the fact must also describe the same occurrence.
+  // Without this check, a DECISION_DUE from next week could satisfy an explicit
+  // decision deadline today merely because both are decisions.
   for (const claim of input.observedClaims ?? []) {
     if (!isBindingTemporalKind(claim.kind)) continue
     const verifiedSameKind = (byKind.get(claim.kind) ?? []).filter(r => r.verification === 'VERIFIED')
-    if (!verifiedSameKind.length) {
+    const matchingOccurrence = verifiedSameKind.filter(
+      r => Math.abs(r.occurs_at - claim.occursAt) <= TEMPORAL_CLAIM_MATCH_TOLERANCE_SEC,
+    )
+    if (!matchingOccurrence.length) {
       missingKinds.push(claim.kind)
-      reasons.push(`${claim.kind}: explicit szöveges igény (${claim.raw}) nincs verifikált azonos szemantikájú facthez kötve`)
+      verifiedSameKind.forEach(r => blocking.add(r.fact_id))
+      reasons.push(`${claim.kind}: explicit szöveges időpont (${claim.raw}) nincs verifikált, azonos esemény-időponthoz kötve`)
     }
   }
   if (missingKinds.length) return {
