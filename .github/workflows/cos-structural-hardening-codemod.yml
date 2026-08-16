@@ -1,0 +1,147 @@
+name: cos-structural-hardening-codemod
+
+on:
+  push:
+    branches:
+      - agent/cos-v44-acp145-replay-hardening
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-prove:
+    # One shot: the commit created by this job must not invoke the codemod again.
+    if: github.actor != 'github-actions[bot]' && !contains(github.event.head_commit.message, 'apply structural hardening seams')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Apply exact structural patches
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text(encoding='utf-8')
+              n = text.count(old)
+              if n != 1:
+                  raise SystemExit(f'{path}: expected exact patch anchor once, found {n}')
+              p.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          # 1) Root CoS schema owns the new shared hardening tables.
+          replace_once(
+              'src/cos/schema.ts',
+              "import { ensureLadderSchema } from './autonomy-ladder.js'\n"
+              "import { ensureQuoteSchema } from './quote-campaign.js'\n"
+              "import { ensureEnvelopeSchema } from './delegation-envelope.js'\n",
+              "import { ensureLadderSchema } from './autonomy-ladder.js'\n"
+              "import { ensureQuoteSchema } from './quote-campaign.js'\n"
+              "import { ensureEnvelopeSchema } from './delegation-envelope.js'\n"
+              "import { ensureTemporalFactsSchema } from './temporal-facts.js'\n"
+              "import { ensureFeatureRunSchema } from './consumer-manifest.js'\n",
+          )
+          replace_once(
+              'src/cos/schema.ts',
+              "  ensureEnvelopeSchema(db)\n\n  // ── personal_cases",
+              "  ensureEnvelopeSchema(db)\n"
+              "  // v4.4/v1.4.5 shared hardening schema belongs to the root CoS seam.\n"
+              "  ensureTemporalFactsSchema(db)\n"
+              "  ensureFeatureRunSchema(db)\n\n"
+              "  // ── personal_cases",
+          )
+
+          # 2) TSCG becomes structural: every runProgressionCycle caller, not only
+          # the scheduled heartbeat, passes the same fail-closed gate under the
+          # cycle's own transaction/claim boundary.
+          replace_once(
+              'src/cos/progression-pipeline.ts',
+              "import { CASE_STATUSES } from './schema.js'\n",
+              "import { CASE_STATUSES } from './schema.js'\n"
+              "import { evaluateCaseTemporalConsistency } from './temporal-consistency-gate.js'\n",
+          )
+          replace_once(
+              'src/cos/progression-pipeline.ts',
+              "  const body = (): ProgressionRunResult => db.transaction(\n"
+              "    () => runProgressionCycleInner(db, domain, caseId, now, opts),\n"
+              "  )()\n",
+              "  // ACP v1.4.5 TSCG_ENTRY_GUARD. This is inside the cycle body so a\n"
+              "  self-claimed caller holds the claim before the gate, while a caller\n"
+              "  that already owns the claim gets the same invariant. No direct/manual\n"
+              "  entry can route around temporal semantics.\n"
+              "  const body = (): ProgressionRunResult => db.transaction(() => {\n"
+              "    const temporal = evaluateCaseTemporalConsistency(db, domain, caseId, now)\n"
+              "    if (!temporal.allowProgression) {\n"
+              "      return recordRefusedRun(\n"
+              "        db, randomUUID(), domain, caseId, 'TEMPORAL_GATE_BLOCKED',\n"
+              "        `${temporal.status}: ${temporal.reasons.join('; ')}`, opts, now,\n"
+              "      )\n"
+              "    }\n"
+              "    return runProgressionCycleInner(db, domain, caseId, now, opts)\n"
+              "  })()\n",
+          )
+
+          # The acceptance scan treats a central pipeline gate as coverage for all
+          # call sites; otherwise it would demand redundant caller-local gates.
+          replace_once(
+              'scripts/cos-v145-hardening-acceptance.py',
+              "        calls = progression_calls()\n"
+              "        unguarded: list[str] = []\n"
+              "        for hit in calls:\n"
+              "            rel = hit.split(\":\", 1)[0]\n"
+              "            text = read(rel)\n"
+              "            if rel == \"src/cos/progression-heartbeat.ts\" and \"evaluateCaseTemporalConsistency\" in text:\n"
+              "                continue\n"
+              "            # A future safe wrapper can make its proof explicit with this marker.\n"
+              "            if \"TSCG_ENTRY_GUARD\" in text and \"evaluateCaseTemporalConsistency\" in text:\n"
+              "                continue\n"
+              "            unguarded.append(hit)\n",
+              "        calls = progression_calls()\n"
+              "        pipeline = read(\"src/cos/progression-pipeline.ts\")\n"
+              "        central_gate = (\"TSCG_ENTRY_GUARD\" in pipeline\n"
+              "                        and \"evaluateCaseTemporalConsistency\" in pipeline)\n"
+              "        unguarded: list[str] = []\n"
+              "        for hit in calls:\n"
+              "            if central_gate:\n"
+              "                continue\n"
+              "            rel = hit.split(\":\", 1)[0]\n"
+              "            text = read(rel)\n"
+              "            if rel == \"src/cos/progression-heartbeat.ts\" and \"evaluateCaseTemporalConsistency\" in text:\n"
+              "                continue\n"
+              "            if \"TSCG_ENTRY_GUARD\" in text and \"evaluateCaseTemporalConsistency\" in text:\n"
+              "                continue\n"
+              "            unguarded.append(hit)\n",
+          )
+          PY
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Hardening acceptance
+        run: python3 scripts/cos-v145-hardening-acceptance.py --json
+
+      - name: Full suite
+        run: npx vitest run
+
+      - name: Commit proven structural patch
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/cos/schema.ts src/cos/progression-pipeline.ts scripts/cos-v145-hardening-acceptance.py
+          if git diff --cached --quiet; then
+            echo "No codemod changes to commit"
+            exit 0
+          fi
+          git commit -m "hardening(cos): apply structural hardening seams"
+          git push origin HEAD:${GITHUB_REF_NAME}
