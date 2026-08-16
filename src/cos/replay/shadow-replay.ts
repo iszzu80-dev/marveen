@@ -42,7 +42,7 @@ export function ensureShadowReplaySchema(db: Database.Database): void {
       summary_json TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS replay_messages (
-      message_id TEXT PRIMARY KEY,
+      message_id TEXT NOT NULL,
       run_id TEXT NOT NULL,
       source_account_id TEXT NOT NULL,
       thread_id TEXT NOT NULL,
@@ -50,11 +50,12 @@ export function ensureShadowReplaySchema(db: Database.Database): void {
       occurred_at INTEGER NOT NULL,
       subject TEXT NOT NULL,
       body_hash TEXT NOT NULL,
-      attachment_manifest_hash TEXT NOT NULL
+      attachment_manifest_hash TEXT NOT NULL,
+      PRIMARY KEY(run_id, message_id)
     );
     CREATE INDEX IF NOT EXISTS idx_replay_messages_thread ON replay_messages(run_id, thread_id, occurred_at);
     CREATE TABLE IF NOT EXISTS replay_cases (
-      replay_case_id TEXT PRIMARY KEY,
+      replay_case_id TEXT NOT NULL,
       run_id TEXT NOT NULL,
       domain TEXT NOT NULL,
       thread_id TEXT NOT NULL,
@@ -72,6 +73,7 @@ export function ensureShadowReplaySchema(db: Database.Database): void {
       latest_source_at INTEGER NOT NULL,
       actionability_class TEXT NOT NULL,
       actionability_valid INTEGER NOT NULL,
+      PRIMARY KEY(run_id, replay_case_id),
       UNIQUE(run_id, domain, thread_id)
     );
     CREATE TABLE IF NOT EXISTS replay_temporal_facts (
@@ -182,7 +184,7 @@ export function runShadowReplay(
     for (const m of replayed) {
       const attachmentManifest = JSON.stringify((m.attachments ?? []).map(a => ({ filename: a.filename, mimeType: a.mimeType ?? null, sha256: a.sha256 ?? null, sizeBytes: a.sizeBytes ?? null })))
       shadowDb.prepare(`
-        INSERT OR REPLACE INTO replay_messages
+        INSERT OR IGNORE INTO replay_messages
           (message_id, run_id, source_account_id, thread_id, direction, occurred_at, subject, body_hash, attachment_manifest_hash)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(m.messageId, runId, m.sourceAccountId, m.threadId, m.direction, m.occurredAt, m.subject, sha(m.bodyText), sha(attachmentManifest))
