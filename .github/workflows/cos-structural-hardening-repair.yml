@@ -55,6 +55,57 @@ jobs:
                   raise SystemExit(f'{path}: expected exact repair anchor once, found {n}')
               p.write_text(text.replace(old, new, 1), encoding='utf-8')
 
+          # TSCG remains central and unavoidable, but domain ownership must be
+          # established first. Otherwise a Personal run aimed at a ZST case is
+          # misreported as TEMPORAL_MISSING and masks CROSS_DOMAIN_LEAKAGE.
+          generated_gate = (
+              "  // ACP v1.4.5 TSCG_ENTRY_GUARD. This is inside the cycle body so a\n"
+              "  // self-claimed caller holds the claim before the gate, while a caller\n"
+              "  // that already owns the claim gets the same invariant. No direct/manual\n"
+              "  // entry can route around temporal semantics.\n"
+              "  const body = (): ProgressionRunResult => db.transaction(() => {\n"
+              "    const temporal = evaluateCaseTemporalConsistency(db, domain, caseId, now)\n"
+              "    if (!temporal.allowProgression) {\n"
+              "      return recordRefusedRun(\n"
+              "        db, randomUUID(), domain, caseId, 'TEMPORAL_GATE_BLOCKED',\n"
+              "        `${temporal.status}: ${temporal.reasons.join('; ')}`, opts, now,\n"
+              "      )\n"
+              "    }\n"
+              "    return runProgressionCycleInner(db, domain, caseId, now, opts)\n"
+              "  })()\n"
+          )
+          plain_body = (
+              "  const body = (): ProgressionRunResult => db.transaction(\n"
+              "    () => runProgressionCycleInner(db, domain, caseId, now, opts),\n"
+              "  )()\n"
+          )
+          replace_once('src/cos/progression-pipeline.ts', generated_gate, plain_body)
+          inner_anchor = (
+              "    throw new Error(`Case not found: ${domain}/${caseId}`)\n"
+              "  }\n\n"
+              "  // 2. Outcome contract — lazy enrichment: if goal was already set by\n"
+          )
+          inner_gate = (
+              "    throw new Error(`Case not found: ${domain}/${caseId}`)\n"
+              "  }\n\n"
+              "  // ACP v1.4.5 TSCG_ENTRY_GUARD. Domain ownership is established above\n"
+              "  // before temporal semantics are evaluated, so CROSS_DOMAIN_LEAKAGE and\n"
+              "  // ordinary not-found behavior cannot be masked by TEMPORAL_MISSING. Every\n"
+              "  // public progression entry still reaches this shared inner gate before\n"
+              "  // outcome-contract, resolver, planning or policy decisions.\n"
+              "  const temporal = evaluateCaseTemporalConsistency(db, domain, caseId, now)\n"
+              "  if (!temporal.allowProgression) {\n"
+              "    return recordRefusedRun(\n"
+              "      db, runId, domain, caseId, 'TEMPORAL_GATE_BLOCKED',\n"
+              "      `${temporal.status}: ${temporal.reasons.join('; ')}`, opts, now,\n"
+              "    )\n"
+              "  }\n\n"
+              "  // 2. Outcome contract — lazy enrichment: if goal was already set by\n"
+          )
+          replace_once('src/cos/progression-pipeline.ts', inner_anchor, inner_gate)
+
+          # Authorization identity/refusal wins over evidence diagnostics when no
+          # ticket exists. A valid ticket is still consumed only after freshness.
           old = "      // ACP v1.4.5 OUTBOUND_EVIDENCE_FRESHNESS. Recovery states returned\n"
           new = (
               "      // Authorization identity is checked before evidence diagnostics. A missing\n"
@@ -133,6 +184,13 @@ jobs:
               "function ticket(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, now: number) {",
               "    domain: 'personal' as const, caseId: null, caseVersion: null, goalVersion: null,\n",
           )
+          patch_auth_fixture(
+              'src/__tests__/cos-tick.test.ts',
+              "import { createCase, transitionCase } from '../cos/case-store.js'\n",
+              "import { createCase, transitionCase, appendCaseEvent } from '../cos/case-store.js'\n",
+              "function authorized(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, now: number) {",
+              "    domain: 'personal' as const, caseId: null, caseVersion: null, goalVersion: null,\n",
+          )
           PY
 
       - run: npm ci
@@ -161,6 +219,7 @@ jobs:
             src/__tests__/cos-first-send-needs-a-decision.test.ts \
             src/__tests__/cos-outbound-claim-and-quota.test.ts \
             src/__tests__/cos-kill-switch.test.ts \
+            src/__tests__/cos-tick.test.ts \
             scripts/cos-v145-hardening-acceptance.py
           if git diff --cached --quiet; then
             echo "No hardening changes to commit"
