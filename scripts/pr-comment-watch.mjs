@@ -25,6 +25,22 @@ function gh(args) {
   return execFileSync('gh', args, { encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024 })
 }
 
+// My own comments must not wake me. `user.login` cannot do this: every session
+// on this box posts through the SAME GitHub account (iszzu80-dev), so the peer
+// reviewer and I are indistinguishable by author — the same missing-sender
+// -authentication shape the message bus has.
+//
+// So the marker is a self-declared heading, and it is worth being honest about
+// what that buys: it suppresses MY comments because I write them, and it would
+// suppress a peer's comment that happened to open the same way. That is the
+// right way round — a missed wake-up costs one polling cycle, a false wake-up
+// costs a wrong reply.
+const OWN_MARKER = /^##\s*Marveen\b/m
+
+function isOwnComment(c) {
+  return OWN_MARKER.test(c.body ?? '')
+}
+
 function loadState() {
   if (!existsSync(STATE)) return {}
   try { return JSON.parse(readFileSync(STATE, 'utf8')) } catch { return {} }
@@ -55,7 +71,7 @@ for (const pr of prs) {
   }
   if (!comments.length) { state[key] ??= 0; continue }
   const lastSeen = state[key] ?? 0
-  const unseen = comments.filter(c => c.id > lastSeen)
+  const unseen = comments.filter(c => c.id > lastSeen && !isOwnComment(c))
   // First sight of a PR is not a backlog dump: record the tip, report nothing.
   if (lastSeen === 0) { state[key] = comments[comments.length - 1].id; continue }
   if (unseen.length) {
