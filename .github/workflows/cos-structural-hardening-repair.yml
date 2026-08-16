@@ -96,26 +96,42 @@ jobs:
               "",
           ])
 
-          replace_once(
-              'src/__tests__/cos-gmail-send.test.ts',
-              "import { createCase } from '../cos/case-store.js'\n",
-              "import { createCase, appendCaseEvent } from '../cos/case-store.js'\n",
-          )
-          replace_once(
-              'src/__tests__/cos-gmail-send.test.ts',
-              "function authorized(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, actionType: string, now: number) {\n  const ctx = {\n    domain: 'personal' as const, caseId: null, caseVersion: null, goalVersion: null,\n",
-              helper + "function authorized(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, actionType: string, now: number) {\n  const evidence = ensureDraftEvidence(db, ledgerId, now)\n  const ctx = {\n    domain: 'personal' as const, caseId: evidence.caseId, caseVersion: evidence.caseVersion, goalVersion: null,\n",
-          )
+          def patch_auth_fixture(path: str, import_old: str, import_new: str, signature: str, context_line: str) -> None:
+              replace_once(path, import_old, import_new)
+              replace_once(
+                  path,
+                  signature + "\n  const ctx = {\n" + context_line,
+                  helper + signature + "\n  const evidence = ensureDraftEvidence(db, ledgerId, now)\n  const ctx = {\n"
+                  + context_line.replace("caseId: null, caseVersion: null", "caseId: evidence.caseId, caseVersion: evidence.caseVersion"),
+              )
 
-          replace_once(
+          patch_auth_fixture(
+              'src/__tests__/cos-gmail-send.test.ts',
+              "import { createCase } from '../cos/case-store.js'\n",
+              "import { createCase, appendCaseEvent } from '../cos/case-store.js'\n",
+              "function authorized(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, actionType: string, now: number) {",
+              "    domain: 'personal' as const, caseId: null, caseVersion: null, goalVersion: null,\n",
+          )
+          patch_auth_fixture(
               'src/__tests__/cos-first-send-needs-a-decision.test.ts',
               "import { createCase } from '../cos/case-store.js'\n",
               "import { createCase, appendCaseEvent } from '../cos/case-store.js'\n",
+              "function authorized(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, now: number) {",
+              "    domain: 'personal' as const, caseId: null, caseVersion: null, goalVersion: null,\n",
           )
-          replace_once(
-              'src/__tests__/cos-first-send-needs-a-decision.test.ts',
-              "function authorized(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, now: number) {\n  const ctx = {\n    domain: 'personal' as const, caseId: null, caseVersion: null, goalVersion: null,\n",
-              helper + "function authorized(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, now: number) {\n  const evidence = ensureDraftEvidence(db, ledgerId, now)\n  const ctx = {\n    domain: 'personal' as const, caseId: evidence.caseId, caseVersion: evidence.caseVersion, goalVersion: null,\n",
+          patch_auth_fixture(
+              'src/__tests__/cos-outbound-claim-and-quota.test.ts',
+              "import { createCase, acquireClaim } from '../cos/case-store.js'\n",
+              "import { createCase, acquireClaim, appendCaseEvent } from '../cos/case-store.js'\n",
+              "function authorized(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, now: number) {",
+              "    domain: 'personal' as const, caseId: null, caseVersion: null, goalVersion: null,\n",
+          )
+          patch_auth_fixture(
+              'src/__tests__/cos-kill-switch.test.ts',
+              "import { createCase } from '../cos/case-store.js'\n",
+              "import { createCase, appendCaseEvent } from '../cos/case-store.js'\n",
+              "function ticket(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, now: number) {",
+              "    domain: 'personal' as const, caseId: null, caseVersion: null, goalVersion: null,\n",
           )
           PY
 
@@ -143,6 +159,8 @@ jobs:
             src/__tests__/cos-executor.test.ts \
             src/__tests__/cos-gmail-send.test.ts \
             src/__tests__/cos-first-send-needs-a-decision.test.ts \
+            src/__tests__/cos-outbound-claim-and-quota.test.ts \
+            src/__tests__/cos-kill-switch.test.ts \
             scripts/cos-v145-hardening-acceptance.py
           if git diff --cached --quiet; then
             echo "No hardening changes to commit"
