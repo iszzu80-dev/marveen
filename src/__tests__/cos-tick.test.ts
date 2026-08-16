@@ -86,8 +86,10 @@ describe('cosTick (one full cycle)', () => {
     expect(res.errors).toEqual([])
     expect(res.radarChecked).toBe(1)
     expect(res.radarHits).toEqual(['r1'])
-    expect(res.dueCases).toBe(1)
-    expect(res.dueFollowUps).toBe(1)
+    // The ROWS, not a count: a tick that reports "1" cannot be acted on, and
+    // for months nothing did. See CosTickResult.dueCases.
+    expect(res.dueCases.map((c) => c.case_id)).toEqual(['c1'])
+    expect(res.dueFollowUps.map((c) => c.case_id)).toEqual(['c1'])
     // effects landed
     const ledger = db.prepare(`SELECT status FROM outbound_ledger WHERE ledger_id=?`).get(p.ledgerId) as any
     expect(ledger.status).toBe('VERIFIED')

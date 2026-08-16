@@ -44,6 +44,13 @@ const STEPS: Step[] = [
   // megkulonboztethetetlen lenne. Naponta egyszer, sajat nyugtaval, a nulla
   // esetet is kimondva.
   { name: 'radarDigest', args: ['scripts/cos-radar-digest.ts'] },
+  // A felebredt ugyek felszinre hozasa. A `next_wake_at`-nak volt iroja
+  // (setNextWake) es olvasoja (dueCases), a tick hivta is az olvasot -- es a
+  // sorok helyett a HOSSZUKAT tartotta meg, tehat egy ebresztesre soha semmi
+  // nem tudott cselekedni, es ezert nem is toltotte ki senki (0/61). Ez a
+  // hianyzo fogyaszto. Csendes, ha semmi nem ebredt: ez esemeny-riasztas, nem
+  // kivonat.
+  { name: 'wakeAlert', args: ['scripts/cos-wake-alert.ts'] },
   // Hatarido, ami csak PROZABAN letezik (2026-08-16, eec5ca9f). Ket
   // auto-berles ugy next_action-jeben ez allt: "DONTES 2026-08-16 10:00 elott",
   // mikozben a datum-oszlopaik a ket nappal kesobbi atvetelre mutattak -- tehat

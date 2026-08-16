@@ -29,7 +29,7 @@
 // (calling cosTick every N seconds) is the separate, owner-gated go-live step.
 
 import type Database from 'better-sqlite3'
-import { reconcileOutbound, outboundNeedingHuman, dueCases, dueFollowUps } from './scheduler.js'
+import { reconcileOutbound, outboundNeedingHuman, dueCases, dueFollowUps, type DueCase } from './scheduler.js'
 import { executeAction, type OutboundAdapter } from './executor.js'
 import { dueRadarChecks } from './radar.js'
 import { runRentalRadarCheck, runProductRadarCheck } from './radar-runner.js'
@@ -78,8 +78,17 @@ export interface CosTickResult {
   /** Outbound rows in RECOVERY_REQUIRED — provider claimed success but the marker
    *  is provably absent; a human must resolve them (never auto-resent). */
   recoveryRequired: string[]
-  dueCases: number
-  dueFollowUps: number
+  /** The cases whose wake time has arrived — the ROWS, not a count.
+   *
+   *  This used to be `dueCases(db, now).length`, and that single `.length` was
+   *  the whole bug: the write side (`setNextWake`) and the read side
+   *  (`dueCases`) both existed, the tick called the reader every cycle, and
+   *  then threw the identities away. A number cannot be acted on, so nothing
+   *  ever acted, and `next_wake_at` sat at 0 of 61 open cases because filling
+   *  it would have changed nothing. Measured 2026-08-16, after a decision
+   *  deadline stated in prose expired unnoticed. */
+  dueCases: DueCase[]
+  dueFollowUps: DueCase[]
   errors: Array<{ where: string; id: string; error: string }>
 }
 
@@ -148,8 +157,8 @@ export async function cosTick(db: Database.Database, deps: CosTickDeps, now: num
     radarHits,
     radarNotifications,
     recoveryRequired: outboundNeedingHuman(db).map(w => w.ledger_id),
-    dueCases: dueCases(db, now).length,
-    dueFollowUps: dueFollowUps(db, now).length,
+    dueCases: dueCases(db, now),
+    dueFollowUps: dueFollowUps(db, now),
     errors,
   }
 }
