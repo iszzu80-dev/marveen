@@ -196,6 +196,8 @@ function ensureColumns(db: Database.Database, table: string, defs: Record<string
 import { ensureLadderSchema } from './autonomy-ladder.js'
 import { ensureQuoteSchema } from './quote-campaign.js'
 import { ensureEnvelopeSchema } from './delegation-envelope.js'
+import { ensureTemporalFactsSchema } from './temporal-facts.js'
+import { ensureFeatureRunSchema } from './consumer-manifest.js'
 
 /**
  * E9 (review 2026-08-13). A ledger of one-time migrations that have already run.
@@ -239,6 +241,9 @@ export function initCosSchema(db: Database.Database): void {
   // §21 delegation envelope -- csak az allapot (visszavonva/visszakapcsolva);
   // maga a jogosultsag kodkonstans, mert az tulajdonosi dontes es reviewalando.
   ensureEnvelopeSchema(db)
+  // v4.4/v1.4.5 shared hardening schema belongs to the root CoS seam.
+  ensureTemporalFactsSchema(db)
+  ensureFeatureRunSchema(db)
 
   // ── personal_cases (P0.5 version; §6.1) ──────────────────────────────
   // version: optimistic concurrency. Every domain command reads the version it

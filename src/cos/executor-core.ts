@@ -12,6 +12,7 @@ import { createHash } from 'node:crypto'
 import { reserveQuota, releaseQuota } from './quota.js'
 import { consumeAuthorization, type AuthorizationContext } from './action-authorization.js'
 import { killSwitchRefusal } from './kill-switch.js'
+import { assertOutboundEvidenceFresh } from './outbound-evidence-freshness.js'
 
 /** Used when a caller supplies a ticket but no context: the hash will not match
  *  anything the gate issued, so the send is refused. Deliberately NOT a
@@ -415,6 +416,37 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
         // progress, and it must not look like progress.
         setStatus(db, ledgerId, a.status, { last_error: `refused: ${stopped}` }, now, a.status)
         return loadOrThrow(db, ledgerId)
+      }
+      // Authorization identity is checked before evidence diagnostics. A missing
+      // ticket is refused by the canonical primitive without consuming anything.
+      if (!opts.authorizationId) {
+        const missing = consumeAuthorization(
+          db, undefined,
+          opts.authorizationContext ?? { ...EMPTY_AUTH_CONTEXT, actionId: ledgerId, actionType: a.actionType },
+          now,
+        )
+        if (!missing.ok) {
+          setStatus(db, ledgerId, a.status, { last_error: `refused: ${missing.reason}` }, now, a.status)
+          return loadOrThrow(db, ledgerId)
+        }
+      }
+      // ACP v1.4.5 OUTBOUND_EVIDENCE_FRESHNESS. Recovery states returned
+      // above; this is the common Personal/ZST first-or-retry delivery door.
+      // Evidence is revalidated BEFORE the ticket is consumed, so a stale
+      // payload neither calls the provider nor burns otherwise valid authority.
+      if (a.actionType === 'EMAIL_SEND') {
+        const evidenceDomain = T === 'outbound_ledger' ? 'personal'
+          : T === 'zst_outbound_ledger' ? 'zst' : null
+        if (!evidenceDomain) {
+          setStatus(db, ledgerId, a.status, { last_error: `refused: unknown email ledger ${T}` }, now, a.status)
+          return loadOrThrow(db, ledgerId)
+        }
+        try {
+          assertOutboundEvidenceFresh(db, evidenceDomain, ledgerId)
+        } catch (err) {
+          setStatus(db, ledgerId, a.status, { last_error: `refused: ${String((err as Error)?.message ?? err)}` }, now, a.status)
+          return loadOrThrow(db, ledgerId)
+        }
       }
       // §22.2. Consumed HERE, not at the door: between the gate's decision and
       // this line the process may have been restarted, the row re-queued, or the

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import { issueAuthorization } from '../cos/action-authorization.js'
 import { mintGatePermit } from '../cos/gate-permit.js'
-import { createCase, transitionCase } from '../cos/case-store.js'
+import { createCase, transitionCase, appendCaseEvent } from '../cos/case-store.js'
 import { planAction, executeAction } from '../cos/executor.js'
 import { GmailSendAdapter, DryRunTransport } from '../cos/adapters/gmail-send.js'
 import { createRadarItem, getRadarItem } from '../cos/radar.js'
@@ -13,9 +13,28 @@ import type { RentalAdapter, RentalOffer, RentalSearchParams } from '../cos/rent
 
 // §22.2: a first send needs a gate-issued ticket, not a caller-side boolean.
 // These tests issue one exactly as production does.
+function ensureDraftEvidence(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, now: number): { caseId: string; caseVersion: number } {
+  const row = db.prepare(`SELECT case_id, status, case_version FROM outbound_ledger WHERE ledger_id=?`).get(ledgerId) as
+    { case_id: string | null; status: string; case_version: number | null } | undefined
+  if (!row?.case_id) throw new Error(`test outbound ledger has no case_id: ${ledgerId}`)
+  const c = db.prepare(`SELECT version FROM personal_cases WHERE case_id=?`).get(row.case_id) as { version: number } | undefined
+  if (!c) throw new Error(`test case missing: ${row.case_id}`)
+  if (row.case_version == null) db.prepare(`UPDATE outbound_ledger SET case_version=? WHERE ledger_id=?`).run(c.version, ledgerId)
+  if (row.status === 'PLANNED' || row.status === 'FAILED_RETRYABLE') {
+    const exists = db.prepare(`SELECT 1 FROM personal_case_events WHERE case_id=? AND event_type='OUTBOUND_DRAFTED' AND source_reference=? LIMIT 1`).get(row.case_id, ledgerId)
+    if (!exists) appendCaseEvent(db, {
+      caseId: row.case_id, caseVersion: c.version, actor: 'test', eventType: 'OUTBOUND_DRAFTED',
+      reason: 'production-equivalent draft evidence horizon for executor fixture',
+      sourceSystem: 'test:executor', sourceReference: ledgerId, payload: { ledgerId },
+    }, now)
+  }
+  return { caseId: row.case_id, caseVersion: c.version }
+}
+
 function authorized(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, now: number) {
+  const evidence = ensureDraftEvidence(db, ledgerId, now)
   const ctx = {
-    domain: 'personal' as const, caseId: null, caseVersion: null, goalVersion: null,
+    domain: 'personal' as const, caseId: evidence.caseId, caseVersion: evidence.caseVersion, goalVersion: null,
     actionId: ledgerId, actionType: 'EMAIL_SEND', intent: 'TEST', targetReference: null,
     recipient: null, payloadHash: null, approvalId: null,
   }

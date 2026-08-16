@@ -59,6 +59,7 @@ import {
 } from './capability-preflight.js'
 import { answerIntentOf, type AnswerIntent } from './answer-options.js'
 import { CASE_STATUSES } from './schema.js'
+import { evaluateCaseTemporalConsistency } from './temporal-consistency-gate.js'
 
 // ── Valid progression decisions (plan §13) ──────────────────────────────
 
@@ -1099,6 +1100,19 @@ function runProgressionCycleInner(
         canonicalTriggerType(opts.triggerType ?? 'MANUAL'), opts.triggerReference ?? 'checkpoint-b', now)
     }
     throw new Error(`Case not found: ${domain}/${caseId}`)
+  }
+
+  // ACP v1.4.5 TSCG_ENTRY_GUARD. Domain ownership is established above
+  // before temporal semantics are evaluated, so CROSS_DOMAIN_LEAKAGE and
+  // ordinary not-found behavior cannot be masked by TEMPORAL_MISSING. Every
+  // public progression entry still reaches this shared inner gate before
+  // outcome-contract, resolver, planning or policy decisions.
+  const temporal = evaluateCaseTemporalConsistency(db, domain, caseId, now)
+  if (!temporal.allowProgression) {
+    return recordRefusedRun(
+      db, runId, domain, caseId, 'TEMPORAL_GATE_BLOCKED',
+      `${temporal.status}: ${temporal.reasons.join('; ')}`, opts, now,
+    )
   }
 
   // 2. Outcome contract — lazy enrichment: if goal was already set by

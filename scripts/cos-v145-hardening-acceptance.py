@@ -160,13 +160,17 @@ def main() -> int:
     # call the same case-level TSCG before it or be moved behind a shared wrapper.
     try:
         calls = progression_calls()
+        pipeline = read("src/cos/progression-pipeline.ts")
+        central_gate = ("TSCG_ENTRY_GUARD" in pipeline
+                        and "evaluateCaseTemporalConsistency" in pipeline)
         unguarded: list[str] = []
         for hit in calls:
+            if central_gate:
+                continue
             rel = hit.split(":", 1)[0]
             text = read(rel)
             if rel == "src/cos/progression-heartbeat.ts" and "evaluateCaseTemporalConsistency" in text:
                 continue
-            # A future safe wrapper can make its proof explicit with this marker.
             if "TSCG_ENTRY_GUARD" in text and "evaluateCaseTemporalConsistency" in text:
                 continue
             unguarded.append(hit)
@@ -184,12 +188,14 @@ def main() -> int:
         auth = read("src/cos/action-authorization.ts")
         executor = read("src/cos/executor-core.ts")
         marker = "OUTBOUND_EVIDENCE_FRESHNESS"
-        covered = marker in auth and "consumeAuthorization" in auth and "consumeAuthorization" in executor
+        covered = (marker in executor and "assertOutboundEvidenceFresh" in executor
+                   and "consumeAuthorization" in executor and "adapter.send" in executor
+                   and "assertOutboundEvidenceFresh" not in auth)
         checks.append(Check(
             "EV-EXT", "PASS" if covered else "FAIL", "P1",
-            "first/retry external email delivery revalidates draft evidence at shared authorization/admission chokepoint",
-            ["src/cos/action-authorization.ts", "src/cos/executor-core.ts"] if covered
-            else [f"missing shared marker {marker} in action-authorization consume path"],
+            "first/retry external email delivery revalidates draft evidence at shared executor admission chokepoint",
+            ["src/cos/executor-core.ts", "src/cos/action-authorization.ts"] if covered
+            else [f"missing shared marker {marker} in executor or authorization is coupled to outbound evidence"],
         ))
     except Exception as exc:
         checks.append(Check("EV-EXT", "UNKNOWN", "P1", f"cannot inspect external freshness chokepoint: {exc}", []))
