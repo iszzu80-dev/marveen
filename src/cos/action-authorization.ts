@@ -34,6 +34,7 @@
 import type Database from 'better-sqlite3'
 import { gatePermitRefusal } from './gate-permit.js'
 import { randomBytes, createHash } from 'node:crypto'
+import { assertOutboundEvidenceFresh } from './outbound-evidence-freshness.js'
 
 /** Default lifetime. Short on purpose: a ticket is meant to be consumed by the
  *  send that immediately follows its issue, not carried around. */
@@ -204,6 +205,23 @@ export function consumeAuthorization(
       if (appr.stopped_reason) return { ok: false, reason: `approval ${approvalId} stopped: ${appr.stopped_reason}` }
       if (appr.valid_until !== null && appr.valid_until < now) {
         return { ok: false, reason: `approval ${approvalId} expired at ${appr.valid_until}` }
+      }
+    }
+
+    // ACP v1.4.5 OUTBOUND_EVIDENCE_FRESHNESS.
+    //
+    // The authorization ticket proves that policy allowed the action; it does
+    // not prove the evidence the payload was prepared from is still current.
+    // Both Personal and ZST bind actionId to the exact outbound ledger id, so the
+    // shared consume chokepoint can re-check plan-time case_version and the
+    // OUTBOUND_DRAFTED event horizon immediately before first/retry delivery.
+    // Recovery/settlement states are explicitly NOT_APPLICABLE in the evaluator
+    // because they create no new provider side effect and must remain recoverable.
+    if (ctx.actionType === 'EMAIL_SEND') {
+      try {
+        assertOutboundEvidenceFresh(db, ctx.domain, ctx.actionId)
+      } catch (err) {
+        return { ok: false, reason: String((err as Error)?.message ?? err) }
       }
     }
 
