@@ -74,9 +74,9 @@ jobs:
               "    () => runProgressionCycleInner(db, domain, caseId, now, opts),\n"
               "  )()\n",
               "  // ACP v1.4.5 TSCG_ENTRY_GUARD. This is inside the cycle body so a\n"
-              "  self-claimed caller holds the claim before the gate, while a caller\n"
-              "  that already owns the claim gets the same invariant. No direct/manual\n"
-              "  entry can route around temporal semantics.\n"
+              "  // self-claimed caller holds the claim before the gate, while a caller\n"
+              "  // that already owns the claim gets the same invariant. No direct/manual\n"
+              "  // entry can route around temporal semantics.\n"
               "  const body = (): ProgressionRunResult => db.transaction(() => {\n"
               "    const temporal = evaluateCaseTemporalConsistency(db, domain, caseId, now)\n"
               "    if (!temporal.allowProgression) {\n"
