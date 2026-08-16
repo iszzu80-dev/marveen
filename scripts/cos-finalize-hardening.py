@@ -33,13 +33,10 @@ def reproduce_prior_repairs() -> None:
 
 
 def apply_remaining_repairs() -> None:
-    # Security/domain ownership is a prerequisite to interpreting temporal
-    # semantics. TSCG remains central for every legitimate progression entry.
-    old_body = """  const body = (): ProgressionRunResult => db.transaction(() => {
-    const temporal = evaluateCaseTemporalConsistency(db, domain, caseId, now)
-"""
-    new_body = """  const body = (): ProgressionRunResult => db.transaction(() => {
-    // ACP v1.4.5 DOMAIN_BOUNDARY_BEFORE_TSCG. Security ownership is checked
+    # Bind to the narrow generated statement instead of the whole generated
+    # function body: the base harness owns surrounding comments/formatting.
+    temporal_anchor = "    const temporal = evaluateCaseTemporalConsistency(db, domain, caseId, now)\n"
+    domain_guard = """    // ACP v1.4.5 DOMAIN_BOUNDARY_BEFORE_TSCG. Security ownership is checked
     // before semantic temporal reasoning, so a wrong-domain read is recorded as
     // CROSS_DOMAIN_LEAKAGE rather than being masked by a temporal refusal.
     try {
@@ -54,9 +51,8 @@ def apply_remaining_repairs() -> None:
       }
       throw err
     }
-    const temporal = evaluateCaseTemporalConsistency(db, domain, caseId, now)
 """
-    replace_once("src/cos/progression-pipeline.ts", old_body, new_body)
+    replace_once("src/cos/progression-pipeline.ts", temporal_anchor, domain_guard + temporal_anchor)
 
     replace_once(
         "scripts/cos-v145-hardening-acceptance.py",
