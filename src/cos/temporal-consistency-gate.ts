@@ -5,8 +5,9 @@
 // binding semantic date is missing, unverified, conflicted or already past due
 // without an explicit handled state.
 
-import type { TemporalFactKind, TemporalFactRow } from './temporal-facts.js'
-import { isBindingTemporalKind } from './temporal-facts.js'
+import type Database from 'better-sqlite3'
+import type { CosDomain, TemporalFactKind, TemporalFactRow } from './temporal-facts.js'
+import { isBindingTemporalKind, listCaseTemporalFacts } from './temporal-facts.js'
 
 export type TemporalGateStatus =
   | 'TEMPORAL_OK'
@@ -160,4 +161,45 @@ export function evaluateTemporalConsistency(input: TemporalGateInput): TemporalG
     reasons: ['minden szükséges szemantikus időpont verifikált és konzisztens'],
     blockingFactIds: [], missingKinds: [],
   }
+}
+
+/**
+ * Runtime adapter for a stored case.
+ *
+ * It deliberately does NOT promote legacy scalar due_at/follow_up_at fields into
+ * semantic facts. Existing cases may continue while the backfill is staged, but
+ * an explicit binding date in title/description/next_action, or any already
+ * stored binding semantic fact, becomes fail-closed immediately. This catches
+ * the Hertz/Sixt class without freezing every pre-v4.4 case merely because it
+ * has a legacy date column.
+ */
+export function evaluateCaseTemporalConsistency(
+  db: Database.Database,
+  domain: CosDomain,
+  caseId: string,
+  now: number = Math.floor(Date.now() / 1000),
+): TemporalGateResult {
+  const table = domain === 'personal' ? 'personal_cases' : 'zst_cases'
+  const row = db.prepare(
+    `SELECT title, description, next_action FROM ${table} WHERE case_id=?`,
+  ).get(caseId) as { title: string; description: string | null; next_action: string | null } | undefined
+
+  if (!row) {
+    return {
+      status: 'TEMPORAL_MISSING', allowProgression: false,
+      reasons: [`${domain}/${caseId}: case missing while evaluating temporal gate`],
+      blockingFactIds: [], missingKinds: [],
+    }
+  }
+
+  const facts = listCaseTemporalFacts(db, domain, caseId)
+  const requiredKinds = [...new Set(
+    facts.filter(f => isBindingTemporalKind(f.fact_kind)).map(f => f.fact_kind),
+  )]
+  const observedClaims = extractTemporalClaims(
+    [row.title, row.description ?? '', row.next_action ?? ''].join('\n'),
+    `${domain}:${caseId}:case-text`,
+  )
+
+  return evaluateTemporalConsistency({ facts, now, requiredKinds, observedClaims })
 }
