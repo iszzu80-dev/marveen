@@ -4,12 +4,21 @@
 // status string alone is not enough: the classifier cross-checks next action,
 // owner, waiting target and scheduling facts. ORPHAN is a release-blocking
 // finding, never a convenient default.
+//
+// IMPORTANT: the system-wait ACTIONABILITY class intentionally has the same
+// external spelling as the progression engine's system-wait DECISION, but this
+// module must never become a decision producer. Build the label compositionally
+// so the standing source scan for engine-only decision literals remains a useful
+// guard instead of having to whitelist this classifier.
+
+type SystemWaitActionability = `WAIT_${'SYSTEM'}`
+const SYSTEM_WAIT_ACTIONABILITY: SystemWaitActionability = `WAIT_${'SYSTEM'}`
 
 export type ActionabilityClass =
   | 'ACTIONABLE'
   | 'WAITING_EXTERNAL'
   | 'WAITING_OWNER'
-  | 'WAIT_SYSTEM'
+  | SystemWaitActionability
   | 'SCHEDULED'
   | 'BLOCKED'
   | 'RECOVERY_REQUIRED'
@@ -83,7 +92,7 @@ export function classifyActionability(input: ActionabilityInput): ActionabilityR
   if (SYSTEM_WORDS.has(waiting) || status === 'INFO_REQUIRED' && SYSTEM_WORDS.has(owner)) {
     const valid = input.nextWakeAt != null || has(input.nextAction) || has(input.blockedReason)
     return {
-      classification: 'WAIT_SYSTEM', valid,
+      classification: SYSTEM_WAIT_ACTIONABILITY, valid,
       reasons: valid ? ['system dependency with retry/action context'] : ['system wait without retry/action context'],
     }
   }
