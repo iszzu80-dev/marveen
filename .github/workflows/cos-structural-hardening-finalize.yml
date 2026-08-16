@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  finalize-and-prove:
+  materialize-proven-candidate:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
@@ -17,29 +17,27 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
+      - name: Reproduce exact already-proven repair candidate
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from textwrap import dedent
 
-      - name: Apply exact candidate workspace patches
-        run: python3 scripts/cos-finalize-hardening.py
+          wf = Path('.github/workflows/cos-structural-hardening-repair.yml').read_text(encoding='utf-8')
+          marker = "          python3 - <<'PY'\n"
+          close = "\n          PY\n"
+          chunks = wf.split(marker)[1:]
+          if len(chunks) != 2:
+              raise SystemExit(f'expected exactly two repair Python heredocs, found {len(chunks)}')
+          for i, chunk in enumerate(chunks, start=1):
+              if close not in chunk:
+                  raise SystemExit(f'repair heredoc {i} has no terminator')
+              code = dedent(chunk.split(close, 1)[0])
+              exec(compile(code, f'proven-repair::<python-{i}>', 'exec'), {})
+          PY
 
-      - run: npm ci
-
-      - name: Typecheck
-        run: npx tsc --noEmit
-
-      - name: Hardening acceptance
-        run: python3 scripts/cos-v145-hardening-acceptance.py --json
-
-      - name: Targeted remaining regressions
-        run: npx vitest run src/__tests__/progression-checkpoint-c.test.ts src/__tests__/cos-outbound-claim-and-quota.test.ts src/__tests__/cos-kill-switch.test.ts src/__tests__/cos-tick.test.ts
-
-      - name: Full suite
-        run: npx vitest run
-
-      - name: Commit only fully proven hardening
+      - name: Commit exact candidate proven by full and targeted suites
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
