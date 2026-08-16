@@ -31,6 +31,20 @@ le, ami VAN, és külön megnevezi, ami csak papíron van.
 | **[PAPÍR]** | a v4.1/v4.2 leírja, a kód nem tartalmazza |
 | **[VISSZAVONVA]** | a v4.1/v4.2 leírta, és szándékosan másképp lett |
 
+**És egy ötödik állapot, amit a négy jelölés NEM tud kifejezni: „megépült, és
+semmi nem fogyasztja a kimenetét."** A `parent_case_id` fél éven át pontosan
+`[MEGÉPÍTVE]`-nek látszott volna — volt sémája, voltak tesztjei, és 0/79 sora.
+
+Ezért a jelölés önmagában nem elég, és **a következő szabály minden `[ÉLŐ]` és
+`[MEGÉPÍTVE]` állításra kötelező:**
+
+> **Nevezd meg a FOGYASZTÓT — vagy mondd ki, hogy nincs.**
+
+Mert az a kérdés, ami mind a kilenc leletet megtalálta (§19), nem az volt, hogy
+„megvan-e", hanem hogy **„ki olvassa?"**. (A szabályt a PR #18 társ-ágense
+javasolta, miután a jelen dokumentum §9.1-én bemutatta, hogy enélkül átcsúszik
+egy fogyasztó nélküli fél.)
+
 Ez a megkülönböztetés nem formaság. A 2026-08-04 és 08-16 közötti munka
 visszatérő lelete pontosan az volt, hogy **egy fogalom megépült, a fogyasztója
 nem, és semmi nem jelezte a különbséget** — nyolc ilyen esetet találtunk egyetlen
@@ -269,10 +283,19 @@ marad** (kártya `eec5ca9f`).
 
 # 9. Ügyek közötti kapcsolatok
 
-## 9.1 Szál-alapú összekötés **[MEGÉPÍTVE]**
+## 9.1 Szál-alapú összekötés — két fél, és csak az egyik teljes
 
 `case-link.ts`: közös entitás (foglalási szám, rendelésszám, fuvarlevél) alapján
-javasol kapcsolatot. `STRONG` / `WEAK` erősség.
+köt vagy javasol. `STRONG` / `WEAK` erősség.
+
+| fél | jelölés | fogyasztó |
+|---|---|---|
+| automatikus kötés | **[ÉLŐ]** | `related_case_ids` + `CASE_LINKED` esemény — **8 élő kötés**, köztük két Atrapalo-eset új szálból |
+| javaslat | **[MEGÉPÍTVE]** | **NINCS.** A `CASE_LINK_SUGGESTED` eseményt egyetlen helyen írjuk (`intake.ts:200`), és a kódbázisban **nulla olvasója van**. Négy ilyen esemény áll a store-ban; egyet sem látott soha senki. |
+
+Ez a dokumentum első saját esete arra, amit a bevezető megkövetel: a korábbi
+`[MEGÉPÍTVE]` jelölés a két félből csak az egyikre volt igaz, és a hiányzó felet
+láthatatlanná tette. **Ugyanaz a csend, csak a specifikációban.**
 
 ## 9.2 Szülő-ügy **[ÉLŐ, 2026-08-16]**
 
@@ -304,6 +327,12 @@ teszt-fixture), tehát döntés nem változik — de aki később elágazást te
 `calendar_event_ids`, szintén 0/79-en állt. A naptár közben a teljes utat tudta
 kezdet-vég párokkal. Megépült a `setCalendarEvents`; üres listára `[]`-t ír, nem
 `NULL`-t (a „megnéztem, nincs" és a „sose néztem" nem nézhet ki egyformán).
+
+**Fogyasztó a `develop`-on: NINCS.** Az egyetlen olvasója a `trip-timeline`
+proveniencia-ellenőrzés, ami ma a PR #18 ágán él, nem a főágon. Élesben lefutott
+és két leletet adott (a málagai és a valenciai Puerto szállásról nincs ügy), de
+amíg az ág nincs behúzva, ez az oszlop a főágon **író-olvasó nélküli** —
+ugyanaz az alak, mint a §9.1 javaslat-fele, csak fiatalabb.
 
 **A párosítás azonosítón alapul, nem néven:** a naptár-esemény leírásában és az
 ügy címében ugyanaz a Booking-foglalási szám. Egy szabály nélkül hamis lett
@@ -393,7 +422,7 @@ domain-parancsokon át történik.
 
 # 16. Mit tudunk MÉRNI a rendszerről
 
-**[ÉLŐ, 2026-08-16]** Új képesség, a PR #18-ból: `column-fill.ts` megméri,
+**[ÉLŐ mérés, de a modul a PR #18 ágán él, NEM a `develop`-on]** `column-fill.ts` megméri,
 oszloponként hány sorban van érték. Nem kódot elemez — **adatot mér**, tehát nem
 tud hamis pozitívot adni.
 
