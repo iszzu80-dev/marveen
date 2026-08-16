@@ -24,6 +24,7 @@
  * finished.
  */
 import { spawnSync } from 'node:child_process'
+import { standardFeatureResult, type FeatureRunResult } from '../src/cos/consumer-manifest.js'
 
 interface Step { name: string; args: string[] }
 
@@ -71,6 +72,80 @@ const STEPS: Step[] = [
 const problems: string[] = []
 const report: Record<string, unknown> = { at: new Date().toISOString() }
 
+/**
+ * ACP v1.4.5 CPP telemetry adapter.
+ *
+ * Legacy steps do not all expose the same counters yet. The adapter is
+ * deliberately conservative: it only uses explicitly named numeric counters.
+ * If a successful step exposes no trustworthy counters, the result is UNKNOWN —
+ * never a fabricated NO_DATA/zero. That distinction is the release invariant.
+ */
+function numeric(o: Record<string, unknown> | null, keys: string[]): number | null {
+  if (!o) return null
+  for (const key of keys) {
+    const v = o[key]
+    if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return v
+  }
+  return null
+}
+
+function arrayCount(o: Record<string, unknown> | null, key: string): number | null {
+  if (!o) return null
+  const v = o[key]
+  return Array.isArray(v) ? v.length : null
+}
+
+function progressionCount(o: Record<string, unknown> | null): number | null {
+  if (!o) return null
+  const p = typeof o.personal === 'number' ? o.personal : null
+  const z = typeof o.zst === 'number' ? o.zst : null
+  return p !== null && z !== null ? p + z : null
+}
+
+function cppResult(
+  step: string,
+  payload: Record<string, unknown> | null,
+  hardFailure: string | null,
+): FeatureRunResult {
+  const nestedHeartbeat = payload?.heartbeat && typeof payload.heartbeat === 'object'
+    ? payload.heartbeat as Record<string, unknown> : null
+  const source = nestedHeartbeat ?? payload
+
+  const failures = arrayCount(source, 'failures') ?? arrayCount(payload, 'failures') ?? 0
+  if (hardFailure || failures > 0 || source?.failed === true || payload?.failed === true) {
+    return standardFeatureResult({
+      examined: numeric(source, ['examined', 'checked', 'scanned', 'processed']) ?? progressionCount(source) ?? 0,
+      matched: numeric(source, ['matched', 'pending', 'due', 'candidates']) ?? 0,
+      acted: numeric(source, ['acted', 'sent', 'drafted', 'closed', 'cleared', 'asked']) ?? progressionCount(source) ?? 0,
+      failed: Math.max(1, failures),
+      outcome: 'FAILED',
+      reason: hardFailure ?? `${step} reported ${Math.max(1, failures)} failure(s)`,
+    })
+  }
+
+  const examined = numeric(source, ['examined', 'checked', 'scanned', 'processed', 'read'])
+    ?? progressionCount(source)
+  const matched = numeric(source, ['matched', 'pending', 'due', 'candidates'])
+  const acted = numeric(source, ['acted', 'sent', 'drafted', 'closed', 'cleared', 'asked'])
+    ?? progressionCount(source)
+
+  // No counters means absence of evidence, not evidence of zero work.
+  if (examined === null && matched === null && acted === null) {
+    return {
+      examined: 0, matched: 0, acted: 0, failed: 0, outcome: 'UNKNOWN',
+      reason: `${step}: successful exit but payload exposes no CPP counters`,
+    }
+  }
+
+  const e = examined ?? Math.max(matched ?? 0, acted ?? 0)
+  const m = matched ?? Math.min(e, acted ?? 0)
+  const a = acted ?? 0
+  return standardFeatureResult({
+    examined: e, matched: m, acted: a, failed: 0,
+    reason: `${step}: normalized from explicit step counters`,
+  })
+}
+
 for (const s of STEPS) {
   const r = spawnSync('npx', ['tsx', ...s.args], {
     encoding: 'utf8',
@@ -83,7 +158,10 @@ for (const s of STEPS) {
   const err = (r.stderr ?? '').trim()
   if (r.status !== 0 || r.error) {
     const why = r.error ? String(r.error.message) : `exit ${r.status}`
-    report[s.name] = { failed: true, error: why, stderr: err.slice(-500) }
+    report[s.name] = {
+      failed: true, error: why, stderr: err.slice(-500),
+      cpp: cppResult(s.name, null, why),
+    }
     problems.push(`${s.name}: ${why}`)
     continue
   }
@@ -103,7 +181,10 @@ for (const s of STEPS) {
       parsed = { ...(parsed ?? {}), ...obj }
     } catch { /* not this line */ }
   }
-  report[s.name] = parsed ?? { raw: out.slice(-500) }
+
+  const stepReport: Record<string, unknown> = parsed ? { ...parsed } : { raw: out.slice(-500) }
+  stepReport.cpp = cppResult(s.name, parsed, null)
+  report[s.name] = stepReport
 
   // A step can exit 0 and still say it failed. The progression runner does
   // exactly this when no interpreter is configured: it prints
