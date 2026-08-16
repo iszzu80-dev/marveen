@@ -157,6 +157,16 @@ export interface CaseEngine {
   listActiveCases(db: Database.Database): CaseListItem[]
   listTodayCases(db: Database.Database, horizonSec: number): CaseListItem[]
   transitionCase(db: Database.Database, input: TransitionInput, now: number): number
+  attachToParent(
+    db: Database.Database,
+    input: { caseId: string; parentCaseId: string; seenVersion: number; actor: string; reason?: string },
+    now: number,
+  ): number
+  setCalendarEvents(
+    db: Database.Database,
+    input: { caseId: string; eventIds: string[]; seenVersion: number; actor: string; reason?: string },
+    now: number,
+  ): number
   acquireClaim(db: Database.Database, args: { claimKey: string; ownerRunId: string; ttlSeconds: number }, now: number): ClaimResult
   releaseClaim(db: Database.Database, args: { claimKey: string; ownerRunId: string; fence: number }): boolean
   readonly tables: CaseTables
@@ -265,6 +275,128 @@ export function makeCaseEngine(
     ).all(...TERMINAL_STATUSES, horizonSec, horizonSec, horizonSec, ...ATTENTION_STATUSES) as CaseListItem[]
   }
 
+  /**
+   * Hang a case under a parent case.
+   *
+   * `parent_case_id` has existed as a column since the schema was written and
+   * nothing has ever written it: 0 of 79 personal cases, 0 of 42 ZST ones. The
+   * READ side, by contrast, is fully built — progression-resolver selects it,
+   * counts children, and puts `hasParent`/`hasChildren` into ResolvedContext,
+   * which the pipeline carries. No interpreter branch reads those two flags
+   * today, so THIS FUNCTION'S FIRST CALL CHANGES ResolvedContext ON EVERY
+   * AFFECTED CASE without changing any decision. The day someone branches on
+   * them, they inherit whatever we linked here.
+   *
+   * Two guards, both because a wrong link is worse than no link:
+   *
+   * - The parent must EXIST. An empty column knows it is empty; a pointer to a
+   *   case that was never created is a lie that reads like data.
+   * - No cycles. A child cannot be its own ancestor. `hasChildren` is a COUNT
+   *   over one level so a loop would not hang it, but a trip that contains
+   *   itself is not a fact about any trip.
+   *
+   * Re-linking to the SAME parent is a no-op returning the unchanged version:
+   * a second sweep over the same cluster must not manufacture events.
+   */
+  function attachToParent(
+    db: Database.Database,
+    input: { caseId: string; parentCaseId: string; seenVersion: number; actor: string; reason?: string },
+    now: number,
+  ): number {
+    const tx = db.transaction(() => {
+      const current = db.prepare(`SELECT version, parent_case_id FROM ${T.cases} WHERE case_id = ?`)
+        .get(input.caseId) as { version: number; parent_case_id: string | null } | undefined
+      if (!current) throw new Error(`case ${input.caseId} does not exist`)
+      if (current.parent_case_id === input.parentCaseId) return current.version
+
+      if (input.parentCaseId === input.caseId) {
+        throw new Error(`case ${input.caseId} cannot be its own parent`)
+      }
+      const parent = db.prepare(`SELECT case_id FROM ${T.cases} WHERE case_id = ?`)
+        .get(input.parentCaseId) as { case_id: string } | undefined
+      if (!parent) {
+        throw new Error(
+          `parent case ${input.parentCaseId} does not exist — refusing to write a dangling parent_case_id`
+        )
+      }
+      // Walk up from the proposed parent. Reaching the child means the link
+      // would close a loop. Bounded by the walk itself: an already-cyclic table
+      // would spin here, so the seen-set stops it.
+      const seen = new Set<string>([input.caseId])
+      let cursor: string | null = input.parentCaseId
+      while (cursor) {
+        if (seen.has(cursor)) throw new Error(`linking ${input.caseId} to ${input.parentCaseId} would create a cycle`)
+        seen.add(cursor)
+        const up = db.prepare(`SELECT parent_case_id FROM ${T.cases} WHERE case_id = ?`)
+          .get(cursor) as { parent_case_id: string | null } | undefined
+        cursor = up?.parent_case_id ?? null
+      }
+
+      const info = db.prepare(
+        `UPDATE ${T.cases} SET parent_case_id = @parentCaseId, version = version + 1, updated_at = @now
+         WHERE case_id = @caseId AND version = @seenVersion`
+      ).run({ caseId: input.caseId, parentCaseId: input.parentCaseId, now, seenVersion: input.seenVersion })
+      if (info.changes === 0) throw new CaseConcurrencyError(input.caseId, input.seenVersion)
+
+      const newVersion = input.seenVersion + 1
+      appendCaseEvent(db, {
+        caseId: input.caseId,
+        caseVersion: newVersion,
+        actor: input.actor,
+        eventType: 'PARENT_LINKED',
+        reason: input.reason ?? null,
+        payload: { parentCaseId: input.parentCaseId, previousParentCaseId: current.parent_case_id },
+      }, now)
+      return newVersion
+    })
+    return tx()
+  }
+
+  /**
+   * Record which calendar events describe this case.
+   *
+   * Same shape as the parent column and found the same way: `calendar_event_ids`
+   * is 0 of 79 filled while the owner's calendar holds the whole trip as real
+   * start/end pairs. The case store could not see what the calendar knew,
+   * because nothing ever joined them.
+   *
+   * Stored as a JSON array, deduplicated and ordered as given. An empty list
+   * writes `[]`, not NULL — "checked, none" and "never looked" must not read
+   * the same, which is the failure this whole thread keeps finding.
+   */
+  function setCalendarEvents(
+    db: Database.Database,
+    input: { caseId: string; eventIds: string[]; seenVersion: number; actor: string; reason?: string },
+    now: number,
+  ): number {
+    const unique = [...new Set(input.eventIds.map(s => s.trim()).filter(Boolean))]
+    const tx = db.transaction(() => {
+      const current = db.prepare(`SELECT version, calendar_event_ids FROM ${T.cases} WHERE case_id = ?`)
+        .get(input.caseId) as { version: number; calendar_event_ids: string | null } | undefined
+      if (!current) throw new Error(`case ${input.caseId} does not exist`)
+      const next = JSON.stringify(unique)
+      if (current.calendar_event_ids === next) return current.version
+
+      const info = db.prepare(
+        `UPDATE ${T.cases} SET calendar_event_ids = @ids, version = version + 1, updated_at = @now
+         WHERE case_id = @caseId AND version = @seenVersion`
+      ).run({ caseId: input.caseId, ids: next, now, seenVersion: input.seenVersion })
+      if (info.changes === 0) throw new CaseConcurrencyError(input.caseId, input.seenVersion)
+
+      const newVersion = input.seenVersion + 1
+      appendCaseEvent(db, {
+        caseId: input.caseId,
+        caseVersion: newVersion,
+        actor: input.actor,
+        eventType: 'CALENDAR_EVENTS_LINKED',
+        reason: input.reason ?? null,
+        payload: { eventIds: unique, previous: current.calendar_event_ids },
+      }, now)
+      return newVersion
+    })
+    return tx()
+  }
+
   function transitionCase(db: Database.Database, input: TransitionInput, now: number): number {
     const tx = db.transaction(() => {
       const current = db.prepare(`SELECT version, status FROM ${T.cases} WHERE case_id = ?`)
@@ -350,6 +482,6 @@ export function makeCaseEngine(
 
   return {
     appendCaseEvent, createCase, getCase, listActiveCases, listTodayCases,
-    transitionCase, acquireClaim, releaseClaim, tables, defaults,
+    transitionCase, attachToParent, setCalendarEvents, acquireClaim, releaseClaim, tables, defaults,
   }
 }

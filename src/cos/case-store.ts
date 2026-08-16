@@ -72,6 +72,23 @@ export function transitionCase(db: Database.Database, input: TransitionInput, no
   }
   return engine.transitionCase(db, input, now)
 }
+/** Link a case under a parent case. See the core for the two guards and for
+ *  what the first write does to ResolvedContext. */
+export function attachToParent(
+  db: Database.Database,
+  input: { caseId: string; parentCaseId: string; seenVersion: number; actor: string; reason?: string },
+  now: number,
+): number {
+  return engine.attachToParent(db, input, now)
+}
+/** Record which calendar events describe this case. */
+export function setCalendarEvents(
+  db: Database.Database,
+  input: { caseId: string; eventIds: string[]; seenVersion: number; actor: string; reason?: string },
+  now: number,
+): number {
+  return engine.setCalendarEvents(db, input, now)
+}
 export function acquireClaim(
   db: Database.Database,
   args: { claimKey: string; ownerRunId: string; ttlSeconds: number },

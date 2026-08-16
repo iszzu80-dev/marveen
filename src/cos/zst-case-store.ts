@@ -89,6 +89,24 @@ export function transitionZstCase(db: Database.Database, input: TransitionInput,
   }
   return engine.transitionCase(db, input, now)
 }
+/** Link a ZST case under a parent ZST case. The guards live in the core; the
+ *  namespace boundary holds here as everywhere: a personal case can never be
+ *  the parent of a company one, because each store is bound to its own tables. */
+export function attachZstCaseToParent(
+  db: Database.Database,
+  input: { caseId: string; parentCaseId: string; seenVersion: number; actor: string; reason?: string },
+  now: number,
+): number {
+  return engine.attachToParent(db, input, now)
+}
+/** Record which calendar events describe this ZST case. */
+export function setZstCalendarEvents(
+  db: Database.Database,
+  input: { caseId: string; eventIds: string[]; seenVersion: number; actor: string; reason?: string },
+  now: number,
+): number {
+  return engine.setCalendarEvents(db, input, now)
+}
 export function acquireZstClaim(
   db: Database.Database,
   args: { claimKey: string; ownerRunId: string; ttlSeconds: number },
