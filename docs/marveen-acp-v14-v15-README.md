@@ -2,6 +2,17 @@
 
 **Dátum:** 2026-08-13. Ez a mappa a v1.4 és v1.5 normatív dokumentumkészletét tartja.
 
+## Frissítés — 2026-08-16
+
+A `v1.4-proactive-core` fájl belső spec-verziója **v1.4.4**, és a státusza
+`proposed implementation baseline` helyett **`implemented baseline`**. A napló
+(`§32`) megnevezi, mi MÉRT és mi MEGÉPÍTETT.
+
+A v1.5 **változatlan és továbbra sem megépített** — a v1.4.4 nem lép a helyébe,
+és nem is közelít hozzá: külső kutatás, böngésző és adatkiadás nem történt.
+
+A COS-oldali párja: `marveen-personal-chief-of-staff-v4.3.md` (állapot-specifikáció).
+
 ## A jelenlegi készlet
 
 | Fájl | Mi ez |

@@ -2,9 +2,9 @@
 ## Proactive Core
 ### Brownfield proactive detection, qualification and internal preparation — zero new external execution surface
 
-**Spec verzió:** v1.4.3 — lásd a **§32. Amendment log**-ot  
-**Státusz:** proposed implementation baseline — review-integrated revision  
-**Dátum:** 2026-08-13  
+**Spec verzió:** v1.4.4 — lásd a **§32. Amendment log**-ot  
+**Státusz:** **implemented baseline** — a v1.4.4 kör óta nem javaslat: a lenti szakaszok élesben futnak, és a §32 megnevezi, melyik mit jelent  
+**Dátum:** 2026-08-16 (v1.4.3: 2026-08-13)  
 **Előző baseline:** `marveen-autonomous-case-progression-spec-v1.3.1.md`  
 **Felváltott revízió:** `marveen-autonomous-case-progression-spec-v1.4.1-superseded.md`  
 **Leválasztott következő release:** `marveen-autonomous-case-progression-spec-v1.5-external-research-browser-autonomy.md`  
@@ -1926,6 +1926,152 @@ Ez a specifikáció a korábbi `marveen-autonomous-case-progression-spec-v1.4` �
 A spec saját szabálya szerint (`§22`) PASS-feltételt gyengíteni verzió-bump nélkül tilos. Ez a napló
 a fordítottját is rögzíti: azokat a módosításokat, amelyek egy feltételt **szigorítottak vagy
 pontosítottak**, mert a laza megfogalmazás egy mérést tett volna érvénytelenné.
+
+## v1.4.4 — 2026-08-16 — a fogyasztó-hiány mint rendszerhiba, és négy megépített fogyasztó
+
+**Érintett szakaszok:** §8 (Initiative → Case wiring), §10 (Deadline Engine), §11 (Sweep),
+§14 (Resolve-before-ask), §19 (capability preflight), §26 (instrumentáció).
+
+**Státusz-váltás.** A v1.4.3-ig a dokumentum fejléce `proposed implementation baseline` volt.
+A v1.4.4-től `implemented baseline`: az itt leírt gépezet nagy része élesben fut a valódi
+store-on. Ez nem minőségi állítás, hanem ténymegállapítás — és éppen ezért a napló minden
+tétele mellett ott van, hogy MÉRVE vagy MEGÉPÍTVE.
+
+### 1. A visszatérő hibaalak megnevezve: a fogalom nincs kész a fogyasztójáig
+
+2026-08-16-án egyetlen nap alatt **nyolc** eset került elő ugyanabból a családból, és ezek
+nem véletlenek: ez ennek a kódbázisnak a jellemző hibája.
+
+```text
+link-javaslat                     olvasó nélkül
+parent_case_id                    olvasólánc a ResolvedContext-ig, fogyasztó nélkül
+parent_case_id                    0 / 79 személyes, 0 / 42 céges — soha nem írt oszlop
+calendar_event_ids                0 / 79 — miközben a naptár a teljes utat tudta
+trip-timeline                     ellenőrző nulla adaton
+next_wake_at                      0 / 61 — író ÉS olvasó megvan, a fogyasztó a .length-et kérte
+határidő prózában                 az adat megvan, ROSSZ TÍPUSBAN
+ZST 7 oszlop                      a motor megy, a névtér nem használja
+```
+
+**A spec szintű következmény, és ez PASS-feltétel-szigorítás, nem stílus:** egy §11 sweep, egy
+§12 stall-detektor vagy egy §13 anomália-detektor **nincs kész**, amíg nincs megnevezett
+fogyasztója, aki a kimenetére CSELEKSZIK. A „kiszámoltuk és eltettük" állapot ezentúl nem
+teljesítés, hanem a nyolc eset kilencedike.
+
+### 2. `next_wake_at` — a gépezet, ami mindkét végén kész volt és középen halott
+
+**MÉRVE.** `setNextWake` ír, `dueCases` olvas, és a tick minden ciklusban hívta is az olvasót:
+
+```ts
+dueCases: dueCases(db, now).length
+```
+
+Az ügy-azonosítók eldobva. Egy számra nem lehet cselekedni, tehát soha semmi nem cselekedett,
+tehát senki nem töltötte ki az oszlopot — és az olvasó mindig ürességet adott vissza. A
+körkörösség önfenntartó: **egy mezőt, aminek a kitöltése semmit nem változtat, senki nem tölt ki.**
+
+Javítva: a tick a SOROKAT adja vissza, és van fogyasztó (`wake-alert`), ami kiposztolja őket,
+majd **törli** az ébresztőt. A törlés két dolog egyszerre: (a) egy ébresztés időpont, nem
+tulajdonság; (b) ez a dedup — nélküle tíz percenként ismételné magát, és így némul el egy
+valódi jelzés. **Sorrend: előbb posztol, aztán töröl.** Egy összeomlás a kettő között
+újra-riaszt (helyrehozható); fordítva a jelzés némán veszne el. Külön teszt állítja.
+
+Élő kör-próba után az oszlop `0 / 61` → `1` — az első valódi használata, mióta létezik.
+
+### 3. Határidő-ontológia (§10) kiegészítés: a prózában élő határidő
+
+**MÉRVE, valódi eset.** Két autóbérlés ügy `next_action` mezőjében ez állt szó szerint:
+*„DÖNTÉS 2026-08-16 10:00 előtt: Hertz VAGY Sixt"*. A `due_at` a két nappal későbbi
+ÁTVÉTELRE mutatott, a `follow_up_at` tegnapi volt. A §10.2 derivált index tehát a rossz
+dátumot indexelte, és a határidő lejárt, mielőtt bárki szólt volna.
+
+A §10.1 normalizáció kiegészül egy **detektorral, ami szándékosan nem elemző**:
+soha nem szed ki dátumot a mondatból (az „egy mintából osztályra következtetés" ugyanaz a
+hiba lenne, mint amit a §14-ben tiltunk). Egyetlen kérdést tesz fel: *beszél-e az ügy
+határidőről ÚGY, hogy közben egyetlen dátum-mezője sincs kitöltve?*
+
+**Amit szándékosan NEM fed le, és ezt a spec kimondja:** a „van dátuma, de ROSSZ" esetet —
+azaz pontosan a fenti párt. Hat nyitott ügy szólalna meg tíz percenként, és egy detektor,
+ami folyton sír, egy héten belül némítva lesz. A hiányzó fél **nyitott spec-rés**, nem
+elintézett tétel.
+
+### 4. §8 kiegészítés: a szülő-ügy írás-oldala és a ResolvedContext-hatás
+
+**MÉRVE.** A `parent_case_id` olvasó oldala a `progression-resolver`-től a
+`progression-pipeline`-ig ki volt építve (`hasParent` / `hasChildren` a `ResolvedContext`-ben),
+és MA egyetlen produkciós ág sem ágazik el rajta — az összes további előfordulás teszt-fixture.
+
+Az író oldal megépült, két őrrel: **a szülőnek léteznie kell** (egy nem létező ügyre mutató
+azonosító hazugság, ami adatnak olvasódik — rosszabb az üres oszlopnál, ami tudja magáról,
+hogy üres), és **nincs kör**.
+
+**Spec-szintű figyelmeztetés, ami nem a diffből olvasandó ki:** az ELSŐ írás minden érintett
+ügyön megváltoztatja a `ResolvedContext`-et anélkül, hogy bármely döntés változna. Aki később
+elágazást tesz a két flagre, az örökli a korábban meghúzott kapcsolatokat. Ezért a §8.2
+Case explosion guard mellé bekerül: **a szülő-ügynek nincs `next_action`-je** (különben
+versenyezne a gyerekeivel), és **a progresszió ki van kapcsolva rajta** (`progression-migrate`
+egyébként MINDEN nem-terminális ügyet beléptet `enabled=1`-gyel, tehát egy ernyő kérdezni
+kezdene).
+
+### 5. §14 (resolve-before-ask) három új szabálya, mind valódi rossz kérdésből
+
+**MÉRVE.**
+
+1. **Olvasható javaslat vagy semmi.** Ha a javaslat a tervező saját, beégetett címke-halmazából
+   való gépi szöveg, kiesik — és vele az opciók is. Egy „igen" egy semmit sem jelentő mondatra
+   rögzített döntés lenne. *Az első megoldás regex volt az egyetlen látott rossz mondatra;
+   egy ciklussal később átcsúszott rajta egy másik. A javítás nem hosszabb szólista: a
+   tervező SAJÁT címke-halmaza a helyes osztály.*
+2. **A lejárt határidő után más a kérdés.** Nem „csináljam?", hanem „megtörtént vagy elmaradt?".
+   Az „elmaradt" nem lezárás, hanem új teendő. A sor a kérdés-hash-en KÍVÜL van — különben
+   naponta újrakérdezne.
+3. **A valódi ismeretlen a törzsbe.** 202 tárolt beolvasáson mérve: a törzsbe emelt sor
+   168-szor valódi (83%), 34-szer belső könyvelés.
+
+### 6. §14 kiegészítés: a tulajdonos szavára NINCS türelmi ablak
+
+**MÉRVE, valódi eset.** Istvan `00:44:15`-kor megválaszolt egy kérdést; a rendszer
+`00:44:52`-kor — **37 másodperccel később** — ugyanarról az ügyről kérdezett újra, épp azt a
+kétértelműséget, amit akkor tisztázott.
+
+Ok: 120 másodperces türelmi ablak az elavultság-ellenőrzésben, gépi versenyhelyzetre méretezve
+(a beolvasás, a bevitel és az ügy frissítése egy cikluson belül tetszőleges sorrendben landol).
+**Az érvelés gépi írásokra szól; a tulajdonos válaszára nem** — és pont azt engedte át, ami a
+legnagyobb eséllyel teszi értelmetlenné a tárolt kérdést.
+
+Szabály: **ha a tulajdonostól jött esemény a beolvasás óta, a kérdés elavult, türelmi ablak
+nélkül.** A gépi jitter-tűrés megmarad, két pozitív kontrollal: egy régi válasz NEM némít el
+örökre egy ügyet, és egy gépi esemény az ablakon belül továbbra is átmegy.
+
+### 7. §26 kiegészítés: mérni a spec-megfelelést ADATBÓL, nem kódból
+
+**MÉRVE.** Új instrumentáció (`column-fill`): oszloponként hány sorban van érték. Nem statikus
+elemzés — egy statikus szkenner ebben a kódbázisban **négy hamis pozitívot** adott, mert az
+írások legalább három metaprogramozott úton mennek (futásidőben összeállított `SET`,
+patch-objektum kulcsokkal, oszlopnév-lista a motorban).
+
+Az értelmezés kulcsa, hogy a két ügy-tábla ugyanazt a motort használja: **egy oszlop, ami a
+személyes oldalon ki van töltve, BIZONYÍTJA, hogy létezik írója.** Ugyanaz üresen a másik
+névtérben nem hiányzó gépezet, hanem soha elő nem állt helyzet. Ez kontrollcsoport ingyen.
+
+A ciklusba kötött változata a VÁLTOZÁST jelenti, nem az állapotot (tizenkét álló hiány tíz
+percenként = egy héten belül némítva), és a csendjét megnevezi: `COMPARED` / `NO_PREVIOUS` /
+`EMPTY_STORE`. **Az utolsó nem elmélet:** az első kontroll-futás egy worktree-ből saját, üres
+adatbázist hozott létre, a diff helyesen hallgatott, és ez majdnem „a detektor néma"-ként lett
+elkönyvelve.
+
+### 8. Bizonyítási standard — kötelező minden további PASS-állításra
+
+- **A zöld nem bizonyíték.** Bizonyíték az, ha a PIROS a NEVESÍTETT teszten jelenik meg.
+- **Mutáció előtt commitolj**, különben a `git checkout` magát a javítást törli, és három
+  egymás utáni „piros" ugyanazt az állapotot méri: azt, hogy nincs javítás.
+- **Minden mutáció assertelje, hogy a horgonya illeszkedett** — egy csendes no-op `replace`
+  érintetlen forráson fut le, a teszt átmegy, és a pozitív kontroll látszik hibásnak.
+- **Ekvivalens mutáns semmit nem bizonyít** (élő eset: `if (x) y = true` →
+  `y = x || y` — ugyanaz a viselkedés más alakban, 17 zöld teszt mellett).
+- **Egy teszt, ami nem különböztet, ugyanígy semmit** (élő eset: `Math.max(1, keep)` → `keep`
+  zöld maradt, mert `slice(-0)` a JS-ben `slice(0)`, és egyetlen elemmel a „hossza 1" mindkét
+  viselkedésre igaz).
 
 ## v1.4.3 — 2026-08-13 — a kalibrációs ablak három szabálya
 
