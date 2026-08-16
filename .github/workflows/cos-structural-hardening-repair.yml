@@ -55,10 +55,6 @@ jobs:
                   raise SystemExit(f'{path}: expected exact repair anchor once, found {n}')
               p.write_text(text.replace(old, new, 1), encoding='utf-8')
 
-          # Authorization refusal must win over evidence diagnostics when no
-          # ticket was supplied. This calls the canonical primitive, which is
-          # non-mutating on the missing-ticket path; freshness still runs before
-          # any valid ticket can be consumed.
           old = "      // ACP v1.4.5 OUTBOUND_EVIDENCE_FRESHNESS. Recovery states returned\n"
           new = (
               "      // Authorization identity is checked before evidence diagnostics. A missing\n"
@@ -78,27 +74,28 @@ jobs:
           )
           replace_once('src/cos/executor-core.ts', old, new)
 
-          helper = '''function ensureDraftEvidence(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, now: number): { caseId: string; caseVersion: number } {
-  const row = db.prepare(`SELECT case_id, status, case_version FROM outbound_ledger WHERE ledger_id=?`).get(ledgerId) as
-    { case_id: string | null; status: string; case_version: number | null } | undefined
-  if (!row?.case_id) throw new Error(`test outbound ledger has no case_id: ${ledgerId}`)
-  const c = db.prepare(`SELECT version FROM personal_cases WHERE case_id=?`).get(row.case_id) as { version: number } | undefined
-  if (!c) throw new Error(`test case missing: ${row.case_id}`)
-  if (row.case_version == null) db.prepare(`UPDATE outbound_ledger SET case_version=? WHERE ledger_id=?`).run(c.version, ledgerId)
-  if (row.status === 'PLANNED' || row.status === 'FAILED_RETRYABLE') {
-    const exists = db.prepare(`SELECT 1 FROM personal_case_events WHERE case_id=? AND event_type='OUTBOUND_DRAFTED' AND source_reference=? LIMIT 1`).get(row.case_id, ledgerId)
-    if (!exists) appendCaseEvent(db, {
-      caseId: row.case_id, caseVersion: c.version, actor: 'test', eventType: 'OUTBOUND_DRAFTED',
-      reason: 'production-equivalent draft evidence horizon for executor fixture',
-      sourceSystem: 'test:executor', sourceReference: ledgerId, payload: { ledgerId },
-    }, now)
-  }
-  return { caseId: row.case_id, caseVersion: c.version }
-}
+          helper = "\n".join([
+              "function ensureDraftEvidence(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, now: number): { caseId: string; caseVersion: number } {",
+              "  const row = db.prepare(`SELECT case_id, status, case_version FROM outbound_ledger WHERE ledger_id=?`).get(ledgerId) as",
+              "    { case_id: string | null; status: string; case_version: number | null } | undefined",
+              "  if (!row?.case_id) throw new Error(`test outbound ledger has no case_id: ${ledgerId}`)",
+              "  const c = db.prepare(`SELECT version FROM personal_cases WHERE case_id=?`).get(row.case_id) as { version: number } | undefined",
+              "  if (!c) throw new Error(`test case missing: ${row.case_id}`)",
+              "  if (row.case_version == null) db.prepare(`UPDATE outbound_ledger SET case_version=? WHERE ledger_id=?`).run(c.version, ledgerId)",
+              "  if (row.status === 'PLANNED' || row.status === 'FAILED_RETRYABLE') {",
+              "    const exists = db.prepare(`SELECT 1 FROM personal_case_events WHERE case_id=? AND event_type='OUTBOUND_DRAFTED' AND source_reference=? LIMIT 1`).get(row.case_id, ledgerId)",
+              "    if (!exists) appendCaseEvent(db, {",
+              "      caseId: row.case_id, caseVersion: c.version, actor: 'test', eventType: 'OUTBOUND_DRAFTED',",
+              "      reason: 'production-equivalent draft evidence horizon for executor fixture',",
+              "      sourceSystem: 'test:executor', sourceReference: ledgerId, payload: { ledgerId },",
+              "    }, now)",
+              "  }",
+              "  return { caseId: row.case_id, caseVersion: c.version }",
+              "}",
+              "",
+              "",
+          ])
 
-'''
-
-          # Gmail executor fixture: production-like case/version + draft event.
           replace_once(
               'src/__tests__/cos-gmail-send.test.ts',
               "import { createCase } from '../cos/case-store.js'\n",
@@ -110,9 +107,6 @@ jobs:
               helper + "function authorized(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, actionType: string, now: number) {\n  const evidence = ensureDraftEvidence(db, ledgerId, now)\n  const ctx = {\n    domain: 'personal' as const, caseId: evidence.caseId, caseVersion: evidence.caseVersion, goalVersion: null,\n",
           )
 
-          # First-send guard fixture: same production evidence for authorised
-          # sends; the no-ticket test deliberately creates none, proving auth
-          # refusal precedes freshness and no provider call occurs.
           replace_once(
               'src/__tests__/cos-first-send-needs-a-decision.test.ts',
               "import { createCase } from '../cos/case-store.js'\n",
