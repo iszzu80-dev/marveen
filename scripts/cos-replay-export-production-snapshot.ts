@@ -1,5 +1,5 @@
 #!/usr/bin/env npx tsx
-// Clean Replay v1.0 — READ-ONLY Marveen SQLite snapshot exporter.
+// Clean Replay v1.0 — READ-ONLY / read-only Marveen SQLite snapshot exporter.
 //
 // Run this on the Marveen host against the live DB path or, preferably, a
 // filesystem snapshot/copy. better-sqlite3 is opened readonly+fileMustExist and
