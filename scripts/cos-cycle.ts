@@ -44,6 +44,14 @@ const STEPS: Step[] = [
   // megkulonboztethetetlen lenne. Naponta egyszer, sajat nyugtaval, a nulla
   // esetet is kimondva.
   { name: 'radarDigest', args: ['scripts/cos-radar-digest.ts'] },
+  // Hatarido, ami csak PROZABAN letezik (2026-08-16, eec5ca9f). Ket
+  // auto-berles ugy next_action-jeben ez allt: "DONTES 2026-08-16 10:00 elott",
+  // mikozben a datum-oszlopaik a ket nappal kesobbi atvetelre mutattak -- tehat
+  // egyetlen datum-vezerelt felulet sem latta a hataridot, es a napi kivonat
+  // sem emlitette. A lepes NEM elemez datumot: azt kerdezi, hogy egy ugy
+  // beszel-e hataridorol UGY, hogy kozben EGYETLEN datum-mezoje sincs kitoltve.
+  // Mindket nevterre fut, es a nullat is kimondja.
+  { name: 'deadlineAudit', args: ['scripts/cos-deadline-audit.ts'] },
   // A kerdes megirasa es a KIKULDESE ket kulon lepes: ha egybe lennenek, egy
   // kezbesitesi hiba ugy nezne ki, mint "nincs mit kerdezni".
   { name: 'channel', args: ['scripts/cos-channel-send.ts'] },
