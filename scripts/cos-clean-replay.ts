@@ -22,6 +22,33 @@ function required(name: string): string {
 }
 function json<T>(path: string): T { return JSON.parse(readFileSync(path, 'utf8')) as T }
 
+type ExportEvidence = {
+  readOnly?: boolean
+  fullThreadExpansion?: boolean
+  accounts?: Array<{ account?: string; detailTool?: string; touchedThreads?: number; expandedMessages?: number }>
+}
+type ProvenReplayCorpus = ReplayCorpus & { exportEvidence?: ExportEvidence }
+
+function assertCompleteSource(corpus: ProvenReplayCorpus): void {
+  const ev = corpus.exportEvidence
+  if (!ev || ev.readOnly !== true || ev.fullThreadExpansion !== true) {
+    throw new Error('SOURCE_COMPLETENESS_UNKNOWN: replay corpus lacks read-only full-thread export evidence')
+  }
+  const accounts = ev.accounts ?? []
+  for (const requiredAccount of ['private', 'zst']) {
+    const a = accounts.find(x => x.account === requiredAccount)
+    if (!a) throw new Error(`SOURCE_COMPLETENESS_UNKNOWN: ${requiredAccount} account export evidence missing`)
+    // A single-message reader cannot prove full thread history. The exporter may
+    // discover one for diagnostics, but the replay gate deliberately refuses it.
+    if (!a.detailTool || !a.detailTool.toLowerCase().includes('thread')) {
+      throw new Error(`SOURCE_COMPLETENESS_UNKNOWN: ${requiredAccount} did not use a full-thread read tool`)
+    }
+    if ((a.touchedThreads ?? -1) < 0 || (a.expandedMessages ?? -1) < 0) {
+      throw new Error(`SOURCE_COMPLETENESS_UNKNOWN: ${requiredAccount} export counts missing`)
+    }
+  }
+}
+
 const sourcePath = required('--source')
 const shadowPath = required('--shadow')
 const reportPath = required('--report')
@@ -32,7 +59,8 @@ if (shadowPath === sourcePath || shadowPath === prodSnapshotPath || shadowPath =
   throw new Error('shadow path must be a distinct output; refusing to overwrite an input')
 }
 
-const corpus = json<ReplayCorpus>(sourcePath)
+const corpus = json<ProvenReplayCorpus>(sourcePath)
+assertCompleteSource(corpus)
 const shadow = new Database(shadowPath)
 try {
   shadow.pragma('journal_mode = WAL')
@@ -60,6 +88,7 @@ try {
 
   const report = {
     generatedAt: Math.floor(Date.now() / 1000),
+    sourceEvidence: corpus.exportEvidence,
     safety: {
       shadowOnly: true, productionWrites: false, externalWrites: false,
       autoApplyAllowed: false, note: 'All repairs and migration proposals require explicit review.',
