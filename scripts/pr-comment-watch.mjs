@@ -37,8 +37,21 @@ function gh(args) {
 // costs a wrong reply.
 const OWN_MARKER = /^##\s*Marveen\b/m
 
+// The marker only works when I remember to use it, and on 2026-08-16 I did not:
+// a comment of mine on PR #20 opened with "## A tesztek ZÖLDEK" and woke me up
+// about my own text. One spurious wake-up, self-correcting — but a rule that
+// depends on remembering is the weakest kind, so ids posted through
+// `scripts/pr-comment.sh` are recorded here and suppressed deterministically.
+const MINE_PATH = join(ROOT, 'store', '.pr-comment-mine.json')
+
+function ownIds() {
+  if (!existsSync(MINE_PATH)) return new Set()
+  try { return new Set(JSON.parse(readFileSync(MINE_PATH, 'utf8')).ids ?? []) } catch { return new Set() }
+}
+const MINE = ownIds()
+
 function isOwnComment(c) {
-  return OWN_MARKER.test(c.body ?? '')
+  return MINE.has(c.id) || OWN_MARKER.test(c.body ?? '')
 }
 
 function loadState() {
