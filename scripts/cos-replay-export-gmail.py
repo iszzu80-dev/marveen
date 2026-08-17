@@ -70,7 +70,11 @@ SECRET_PATTERNS = (
     (re.compile(r"[A-Za-z0-9_\-]{40,}"), "<redacted-long-token>"),
     (re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"), "<redacted-address>"),
 )
-STATUS_RE = re.compile(r"(?<![\w.])([1-5]\d\d)(?![\w.])")
+# A status is only a status when something SAYS so. A bare three-digit number
+# is not: `[Errno 101] Network is unreachable` read as "status=101" invited the
+# reader to debug an HTTP 101 that never happened (measured 2026-08-17).
+STATUS_RE = re.compile(r'(?i)(?:"?error"?|http|status|code)\s*[:=]?\s*([1-5]\d\d)(?![\w.])')
+ERRNO_RE = re.compile(r"\[Errno (\d+)\]")
 CLASS_RE = re.compile(r"(?i)\b(rate\s?limit|rateLimitExceeded|quota|timeout|timed out|unauthoriz\w+|"
                       r"invalid[_ ]grant|forbidden|not\s?found|backend\s?error|internal\s?error|"
                       r"unavailable|permission|invalid[_ ]credentials)\b")
@@ -89,9 +93,11 @@ def _sanitize_error(text: str) -> str:
         s = pat.sub(repl, s)
     s = re.sub(r"\s+", " ", s).strip()
     status = STATUS_RE.search(s)
+    errno = ERRNO_RE.search(s)
     klass = CLASS_RE.search(s)
     head = []
-    if status: head.append(f"status={status.group(1)}")
+    if status: head.append(f"httpStatus={status.group(1)}")
+    if errno: head.append(f"errno={errno.group(1)}")
     if klass: head.append(f"class={klass.group(1).lower().replace(' ', '_')}")
     head.append(f"message={s[:200] or '<empty>'}")
     return "; ".join(head)

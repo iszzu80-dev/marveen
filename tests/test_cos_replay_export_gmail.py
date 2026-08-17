@@ -147,28 +147,48 @@ class AttachmentManifest(unittest.TestCase):
 
 class ProviderErrors(unittest.TestCase):
     def test_rate_limit_is_named_not_just_flagged(self):
+        """The connector's HTTP failure shape: {"error": <code>, "detail": ...}."""
         with self.assertRaises(RuntimeError) as e:
             X._tool_text({"isError": True, "content": [
-                {"type": "text", "text": "error: 429 rateLimitExceeded for user"}]})
+                {"type": "text", "text": '{"error": 429, "detail": "rateLimitExceeded for user"}'}]})
         m = str(e.exception)
-        self.assertIn("status=429", m)
+        self.assertIn("httpStatus=429", m)
         self.assertIn("class=ratelimitexceeded", m)
 
     def test_auth_failure_is_distinguishable_from_rate_limit(self):
         with self.assertRaises(RuntimeError) as e:
             X._tool_text({"isError": True, "content": [
-                {"type": "text", "text": "error: 401 invalid_grant: token expired"}]})
+                {"type": "text", "text": '{"error": 401, "detail": "invalid_grant: token expired"}'}]})
         m = str(e.exception)
-        self.assertIn("status=401", m)
+        self.assertIn("httpStatus=401", m)
         self.assertIn("invalid_grant", m)
 
+    def test_network_outage_is_not_dressed_up_as_an_http_status(self):
+        """MEASURED 2026-08-17: the Personal export died here, and the first
+        sanitiser called errno 101 `status=101` -- a number that looks exactly
+        like a valid HTTP code and sends the reader after the wrong fault."""
+        with self.assertRaises(RuntimeError) as e:
+            X._tool_text({"isError": True, "content": [
+                {"type": "text",
+                 "text": "error: <urlopen error [Errno 101] Network is unreachable>"}]})
+        m = str(e.exception)
+        self.assertNotIn("httpStatus", m)
+        self.assertIn("errno=101", m)
+        self.assertIn("Network is unreachable", m)
+
+    def test_explicit_http_marker_still_yields_a_status(self):
+        with self.assertRaises(RuntimeError) as e:
+            X._tool_text({"isError": True, "content": [
+                {"type": "text", "text": "HTTP 503 backend error, try later"}]})
+        self.assertIn("httpStatus=503", str(e.exception))
+
     def test_credentials_never_reach_the_message(self):
-        leaky = ('error: 403 {"Authorization": "Bearer ya29.A0ARrdaM-VERYLONGTOKENVALUE12345", '
+        leaky = ('{"error": 403, "detail": {"Authorization": "Bearer ya29.A0ARrdaM-VERYLONGTOKENVALUE12345", '
                  '"refresh_token": "1//04abcdefghijklmnop", "user": "iszzu80@gmail.com"}')
         with self.assertRaises(RuntimeError) as e:
             X._tool_text({"isError": True, "content": [{"type": "text", "text": leaky}]})
         m = str(e.exception)
-        self.assertIn("status=403", m)
+        self.assertIn("httpStatus=403", m)
         for secret in ("ya29.A0ARrdaM", "VERYLONGTOKENVALUE12345", "1//04abcdefghijklmnop",
                        "iszzu80@gmail.com"):
             self.assertNotIn(secret, m)
@@ -179,9 +199,9 @@ class ProviderErrors(unittest.TestCase):
         raw = "ANGjdJ8jW1gwXAGbu9Y8cjMcCpRLuxgA1o8DKddXAldpc5dAoiNgFWtAH6gfOZJBqd4vEz"
         with self.assertRaises(RuntimeError) as e:
             X._tool_text({"isError": True, "content": [
-                {"type": "text", "text": f"error: 404 not found while fetching {raw}"}]})
+                {"type": "text", "text": f'{{"error": 404, "detail": "not found while fetching {raw}"}}'}]})
         m = str(e.exception)
-        self.assertIn("status=404", m)
+        self.assertIn("httpStatus=404", m)
         self.assertNotIn(raw, m)
         self.assertIn("redacted", m)
 
