@@ -11,6 +11,22 @@ This runbook executes the three runtime artifacts in a controlled order on the M
 3. `mcp-servers/google-private-mcp.py` and `mcp-servers/google-zst-mcp.py` exist and both expose:
    - `gmail_search`;
    - a read-only **full-thread** Gmail read tool.
+
+   **The connector contract is a precondition, and it is NOT in this PR.** The
+   `mcp-servers/` directory is deliberately untracked (owner-scoped), so the diff
+   that satisfies the two requirements below cannot appear in PR #20 and must be
+   verified on the host before a run. Both are load-bearing for a corpus that can
+   be audited, and both were added on 2026-08-17:
+
+   - **`attachments`** per message: the declared `filename`, `mimeType`,
+     `sizeBytes`, plus `sha256` when the tool is called with `attachment_sha256`.
+     A reader that omits this field aborts the export — a manifest that was never
+     asked for looks exactly like a mail with no attachments.
+   - **`bodyEvidence`** per message: `textPartsUnreadable` and `textless`. Without
+     it an empty body cannot be told apart from a body we failed to read, and the
+     exporter refuses the corpus rather than guess. Hashing and text extraction
+     both stay inside the already granted `gmail.readonly` scope; no consent and
+     no new capability were added.
 4. A filesystem snapshot/copy of the live Marveen SQLite is preferred. If the live file is used, the exporter still opens it `readonly` and asserts `PRAGMA query_only=ON`.
 5. Output directory is local, encrypted/restricted as appropriate, and never committed to git.
 
