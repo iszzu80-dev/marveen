@@ -75,15 +75,29 @@ def _live_parts(mod, message_id: str) -> list[dict[str, Any]]:
     return [p for p in parts if (p.get("filename") or "") and (p.get("body") or {}).get("attachmentId")]
 
 
-def _fetch_bytes(mod, account: str, message_id: str, attachment_id: str) -> bytes:
+def _fetch_bytes(mod, account: str, message_id: str, attachment_id: str,
+                 label: str, declared: int | None) -> bytes:
+    """Retrieve one attachment's bytes.
+
+    An empty answer means two different things, and they must not be confused.
+    If the provider ALSO declares `size: 0`, the attachment really is zero bytes
+    (measured 2026-08-17: a 0-byte `25169.jpg` sent from a phone) -- an empty
+    file is content, and its sha256 is well defined. If the provider declares
+    bytes and hands back none, that is a failed read and the run stops.
+    """
     def call():
         a = mod._get(f"https://gmail.googleapis.com/gmail/v1/users/me/"
                      f"messages/{message_id}/attachments/{attachment_id}")
         if a.get("error"):
-            raise RuntimeError(f"attachment read failed: {EX._sanitize_error(str(a))}")
+            raise RuntimeError(f"attachment read failed for {label}: {EX._sanitize_error(str(a))}")
         data = a.get("data")
         if not data:
-            raise RuntimeError("attachment read returned no data field")
+            provider_size = a.get("size")
+            if provider_size == 0 and (declared in (0, None)):
+                return b""
+            raise RuntimeError(
+                f"attachment read returned no data for {label}: provider declares "
+                f"size={provider_size!r}, corpus declares sizeBytes={declared!r}")
         return base64.urlsafe_b64decode(data + "===")
     return EX._with_transport_retry(account, f"attachments.get/{message_id}", call)
 
@@ -158,7 +172,8 @@ def main() -> None:
                                 "sha256": None, "retrievalStatus": "NO_MATCHING_PART"})
                 continue
             pool.remove(hit)
-            raw = _fetch_bytes(mod, acct, mid, (hit.get("body") or {})["attachmentId"])
+            raw = _fetch_bytes(mod, acct, mid, (hit.get("body") or {})["attachmentId"],
+                               f"{acct}/{mid}/{a['filename']}", a.get("sizeBytes"))
             sha = hashlib.sha256(raw).hexdigest()
             rel, fresh = _store(out_dir, sha, raw)
             blobs[sha] = len(raw)
@@ -169,7 +184,9 @@ def main() -> None:
                 "filename": a["filename"], "mimeType": a["mimeType"],
                 "sizeBytes": declared, "retrievedBytes": len(raw),
                 "sha256": sha, "blobPath": rel,
-                "retrievalStatus": "RETRIEVED" if declared in (None, len(raw)) else "RETRIEVED_SIZE_MISMATCH",
+                "retrievalStatus": ("RETRIEVED_EMPTY" if not raw and declared in (0, None)
+                                    else "RETRIEVED" if declared in (None, len(raw))
+                                    else "RETRIEVED_SIZE_MISMATCH"),
                 "blobNewlyStored": fresh,
             })
             if declared not in (None, len(raw)):
