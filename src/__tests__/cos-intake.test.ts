@@ -20,12 +20,17 @@ const ACC = 'iszzu80', NOW = 1_000_000
 // same receipt first. The gate itself is proven separately in
 // cos-triage-provenance.test.ts; shadowing it here would hide it.
 function ingestEmail(db: any, input: any, now: number) {
+  // The receipt must describe the SAME verdict the intake will re-derive, or the
+  // exact-fingerprint gate rejects it — which is the point of the gate.
+  const withProvenance = { ...input, triageActor: 'test' }
   recordTriageReceipt(db, {
     accountId: input.accountId, messageId: input.messageId, threadId: input.threadId ?? null,
+    sourceManifestHash: null,
     actionable: input.actionable, caseType: input.caseType ?? null, title: input.title ?? null,
-    declaredSensitivity: input.declaredSensitivity ?? null, actor: 'test',
+    workspace: null, priority: null, declaredSensitivity: input.declaredSensitivity ?? null,
+    actor: 'test', model: null, promptFingerprint: null,
   }, now)
-  return ingestEmailRaw(db, input, now)
+  return ingestEmailRaw(db, withProvenance, now)
 }
 
 function discover(messageId: string, threadId?: string) {

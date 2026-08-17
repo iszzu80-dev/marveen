@@ -15,7 +15,7 @@ import { seedCaseProgressionState } from './case-progression-seed.js'
 import { projectZstOperationalIntake } from './zst-operational-projector.js'
 import { recordTemporalFact } from './temporal-facts.js'
 import { classifyActionability } from './actionability.js'
-import { recordTriageReceipt, requireTriageReceipt } from './triage-provenance.js'
+import { recordTriageReceipt, requireExactTriageReceipt } from './triage-provenance.js'
 
 const INVOICE_CASE_TYPES = new Set(['INVOICE_INCOMING', 'INVOICE_OUTGOING'])
 const CONTRACT_CASE_TYPES = new Set(['CONTRACT', 'LICENSE_SUBSCRIPTION'])
@@ -57,11 +57,11 @@ export interface ZstIntakeResult {
   extractionState?: 'NOT_ATTEMPTED' | 'ATTEMPTED' | 'FAILED'
 }
 
-function recordLedger(db: Database.Database, input: ZstTriagedEmail, status: string, caseId: string | null, now: number): void {
+function recordLedger(db: Database.Database, input: ZstTriagedEmail, status: string, caseId: string | null, now: number, receiptId?: string): void {
   db.prepare(
-    `INSERT INTO zst_email_processing (gmail_account_id, message_id, thread_id, case_id, status, created_at)
-     VALUES (@acc, @mid, @tid, @cid, @status, @now)`
-  ).run({ acc: input.accountId, mid: input.messageId, tid: input.threadId ?? null, cid: caseId, status, now })
+    `INSERT INTO zst_email_processing (gmail_account_id, message_id, thread_id, case_id, status, triage_receipt_id, created_at)
+     VALUES (@acc, @mid, @tid, @cid, @status, @rid, @now)`
+  ).run({ acc: input.accountId, mid: input.messageId, tid: input.threadId ?? null, cid: caseId, status, rid: receiptId ?? null, now })
 }
 
 function findActiveZstCaseByThread(db: Database.Database, threadId: string): { case_id: string } | undefined {
@@ -112,9 +112,17 @@ export function ingestTriagedZstEmail(db: Database.Database, input: ZstTriagedEm
     promptFingerprint: input.triagePromptFingerprint ?? null,
     decidedAt: input.triageDecidedAt ?? now,
   }, now)
-  requireTriageReceipt(db, input.accountId, input.messageId)
+  const triageReceiptId = requireExactTriageReceipt(db, {
+    accountId: input.accountId, messageId: input.messageId, threadId: input.threadId ?? null,
+    sourceManifestHash: input.sourceManifestHash ?? null,
+    actionable: input.actionable, caseType: input.caseType ?? null, title: input.title ?? null,
+    workspace: input.workspace ?? null, priority: input.priority ?? null,
+    declaredSensitivity: input.declaredSensitivity ?? null,
+    actor: input.triageActor ?? null, model: input.triageModel ?? null,
+    promptFingerprint: input.triagePromptFingerprint ?? null,
+  })
   if (!input.actionable) {
-    recordLedger(db, input, 'EXCLUDED', null, now)
+    recordLedger(db, input, 'EXCLUDED', null, now, triageReceiptId)
     return { outcome: 'EXCLUDED', messageStatus: 'EXCLUDED' }
   }
 
@@ -130,7 +138,7 @@ export function ingestTriagedZstEmail(db: Database.Database, input: ZstTriagedEm
     if (input.threadId) {
       const existingCase = findActiveZstCaseByThread(db, input.threadId)
       if (existingCase) {
-        recordLedger(db, input, 'DUPLICATE', existingCase.case_id, now)
+        recordLedger(db, input, 'DUPLICATE', existingCase.case_id, now, triageReceiptId)
         return { outcome: 'LINKED_DUPLICATE', caseId: existingCase.case_id, messageStatus: 'DUPLICATE' }
       }
     }
@@ -151,6 +159,7 @@ export function ingestTriagedZstEmail(db: Database.Database, input: ZstTriagedEm
       priority: input.priority ?? 'P2',
       sourceSystem: 'gmail-zst',
       sourceReference: input.messageId,
+      triageReceiptId,
     }, now)
 
     const patch: Record<string, unknown> = {
@@ -211,7 +220,7 @@ export function ingestTriagedZstEmail(db: Database.Database, input: ZstTriagedEm
       throw new Error(`ZST_INTAKE_ORPHAN: ${actionability.reasons.join('; ')}`)
     }
 
-    recordLedger(db, input, 'LOCAL_APPLIED', caseId, now)
+    recordLedger(db, input, 'LOCAL_APPLIED', caseId, now, triageReceiptId)
     seedCaseProgressionState(db, 'zst', caseId, now)
     return {
       outcome: 'CASE_CREATED', caseId, messageStatus: 'LOCAL_APPLIED', sensitivity: tier,

@@ -616,6 +616,10 @@ export function initCosSchema(db: Database.Database): void {
   // wide key never enters the rebuild, so it needs the ALTER; a fresh one gets
   // the column from EPROC_A3_DDL and this is a no-op.
   ensureColumns(db, 'email_processing', { thread_id_derived: 'INTEGER NOT NULL DEFAULT 0' })
+  // Stage 2G (2026-08-17): which triage receipt opened this case. Nullable on
+  // purpose — rows written before the gate existed have no receipt, and a
+  // back-filled default would invent provenance that never existed.
+  ensureColumns(db, 'email_processing', { triage_receipt_id: 'TEXT' })
   // F-8: an existing database that did NOT go through the A.3 rebuild still has
   // the narrow CHECK. Widen it here, where the surviving definition is known.
   widenCheckConstraint(db, 'email_processing', 'SOURCE_COMMIT_SKIPPED', EPROC_A3_DDL)
@@ -1246,6 +1250,7 @@ export function initZstSchema(db: Database.Database): void {
       CHECK (status IN ('LOCAL_APPLIED','EXCLUDED','DUPLICATE','EXCLUDED_SELF_SEND'))
     )
   `)
+  ensureColumns(db, 'zst_email_processing', { triage_receipt_id: 'TEXT' })
   db.exec(`CREATE INDEX IF NOT EXISTS idx_zeproc_case ON zst_email_processing(case_id)`)
 
   initZstSendSchema(db)         // Slice 1 write-half

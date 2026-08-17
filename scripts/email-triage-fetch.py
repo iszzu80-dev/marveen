@@ -8,7 +8,7 @@ Stdlib only. Never prints credentials. Read-only.
 Usage: python3 scripts/email-triage-fetch.py [--window 4d] [--mark id1,id2,...]
   --mark  record ids as reported (called AFTER a Telegram notification goes out)
 """
-import json, subprocess, sys, os, re, time
+import hashlib, json, subprocess, sys, os, re, time
 
 REPO = os.environ.get("MARVEEN_REPO_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATE = os.path.join(REPO, "store", "email-triage-state.json")
@@ -202,6 +202,46 @@ def save_state(ids, prev):
         json.dump(prev, f)
 
 
+# --- Stage 2G provenance -----------------------------------------------------
+
+SOURCE_MANIFEST_FIELDS = ("account", "id", "threadId", "direction", "from", "subject", "date", "snippet", "to")
+
+
+def _source_manifest_hash(cand: dict) -> str:
+    """Canonical fingerprint of one triage input.
+
+    Canonical means order- and formatting-independent: the same letter always
+    hashes the same way, and a changed snippet changes the hash. A receipt that
+    carried a looser digest (a corpus hash, a message id) would say WHICH mail
+    was judged but not WHAT the judge could see, and the difference matters the
+    day a body is truncated or re-fetched differently.
+    """
+    payload = {k: cand.get(k) for k in SOURCE_MANIFEST_FIELDS if cand.get(k) is not None}
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _prompt_fingerprint() -> str:
+    """Fingerprint of the RULES this triage runs under, read from disk.
+
+    A hand-written version string is a promise; this is a measurement. If the
+    heartbeat's SKILL.md or the triage skill changes by one character, the
+    fingerprint moves, and every receipt written afterwards says so.
+    """
+    parts = []
+    for path in (
+        os.path.expanduser("~/.claude/scheduled-tasks/personal-gmail-delta/SKILL.md"),
+        os.path.expanduser("~/.claude/skills/gmail-personal-action-triage/SKILL.md"),
+        os.path.abspath(__file__),
+    ):
+        try:
+            with open(path, "rb") as fh:
+                parts.append(f"{os.path.basename(path)}:{hashlib.sha256(fh.read()).hexdigest()}")
+        except OSError:
+            parts.append(f"{os.path.basename(path)}:MISSING")
+    return "rules:" + hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:32]
+
+
 def main():
     args = sys.argv[1:]
     if "--selftest" in args:
@@ -271,10 +311,16 @@ def main():
                     # recipient of his sent mail (may be absent if the MCP omits it;
                     # then the triage fills it after gmail_read)
                     cand["to"] = m.get("to")
+                # Stage 2G (2026-08-17): the canonical hash of EXACTLY what the
+                # triaging agent will see. Not a corpus-wide digest and not the
+                # raw mailbox: the fields below ARE the decision's input, so the
+                # receipt can later prove what was judged, not merely when.
+                cand["sourceManifestHash"] = _source_manifest_hash(cand)
                 out["candidates"].append(cand)
         if not errored:
             out["accounts"][name] = f"ok:{total}_fetched:{kept}_candidates"
 
+    out["triagePromptFingerprint"] = _prompt_fingerprint()
     print(json.dumps(out, ensure_ascii=False, indent=1))
 
 

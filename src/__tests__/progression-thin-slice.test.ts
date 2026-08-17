@@ -31,12 +31,17 @@ import { runProgressionHeartbeat } from '../cos/progression-heartbeat.js'
 // its own tests in cos-stage2-semantics.test.ts — this wrapper must not be the
 // only place it is exercised, or it would hide what it satisfies.
 function ingestEmail(db: any, input: any, now: number) {
+  // The receipt must describe the SAME verdict the intake will re-derive, or the
+  // exact-fingerprint gate rejects it — which is the point of the gate.
+  const withProvenance = { ...input, triageActor: 'test' }
   recordTriageReceipt(db, {
     accountId: input.accountId, messageId: input.messageId, threadId: input.threadId ?? null,
+    sourceManifestHash: null,
     actionable: input.actionable, caseType: input.caseType ?? null, title: input.title ?? null,
-    declaredSensitivity: input.declaredSensitivity ?? null, actor: 'test',
+    workspace: null, priority: null, declaredSensitivity: input.declaredSensitivity ?? null,
+    actor: 'test', model: null, promptFingerprint: null,
   }, now)
-  return ingestEmailRaw(db, input, now)
+  return ingestEmailRaw(db, withProvenance, now)
 }
 
 

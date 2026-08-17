@@ -21,9 +21,15 @@ import { effectiveSensitivity } from './sensitivity.js'
 import { suggestLinks, linkCases } from './case-link.js'
 import { IDEMPOTENCY_HEADER } from './adapters/gmail-send.js'
 import type { CaseSensitivity } from './schema.js'
-import { requireTriageReceipt } from './triage-provenance.js'
+import { requireExactTriageReceipt } from './triage-provenance.js'
 
 export interface EmailIntakeInput {
+  /** Stage 2G provenance, forwarded from the bridge so the gate can re-derive
+   *  the exact receipt fingerprint from the verdict being applied. */
+  sourceManifestHash?: string
+  triageActor?: string
+  triageModel?: string
+  triagePromptFingerprint?: string
   accountId: string
   /** Must already exist as DISCOVERED (via openBatch). */
   messageId: string
@@ -90,7 +96,16 @@ export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now:
   // without a durable record of the judgement that opened it. The gate lives
   // HERE, at the point the case is created, not at the caller: the 2026-08-17
   // audit exists because the only record of a triage verdict was its effect.
-  requireTriageReceipt(db, input.accountId, input.messageId)
+  // The receipt is re-derived from the verdict being applied, so a case can
+  // only be opened by the judgement that actually decided it.
+  const triageReceiptId = requireExactTriageReceipt(db, {
+    accountId: input.accountId, messageId: input.messageId, threadId: input.threadId ?? null,
+    sourceManifestHash: input.sourceManifestHash ?? null,
+    actionable: input.actionable, caseType: input.caseType ?? null, title: input.title ?? null,
+    workspace: null, priority: null, declaredSensitivity: input.declaredSensitivity ?? null,
+    actor: input.triageActor ?? null, model: input.triageModel ?? null,
+    promptFingerprint: input.triagePromptFingerprint ?? null,
+  })
   // Self-event filter: a message carrying our own idempotency marker is a send
   // the COS executor made — never re-ingest it as new work.
   if (input.headers && input.headers[IDEMPOTENCY_HEADER]) {
@@ -112,8 +127,8 @@ export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now:
   ).get(input.messageId) as { case_id: string | null } | undefined
   if (ownSend?.case_id) {
     markDuplicate(db, input.accountId, input.messageId, now)
-    db.prepare(`UPDATE email_processing SET case_id=@c WHERE gmail_account_id=@a AND message_id=@m`)
-      .run({ c: ownSend.case_id, a: input.accountId, m: input.messageId })
+    db.prepare(`UPDATE email_processing SET case_id=@c, triage_receipt_id=@r WHERE gmail_account_id=@a AND message_id=@m`)
+      .run({ c: ownSend.case_id, r: triageReceiptId, a: input.accountId, m: input.messageId })
     return { outcome: 'LINKED_DUPLICATE', caseId: ownSend.case_id, messageStatus: 'DUPLICATE' }
   }
 
@@ -131,8 +146,8 @@ export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now:
       if (existing) {
         markDuplicate(db, input.accountId, input.messageId, now)
         // record which case it belongs to even though it's a duplicate message
-        db.prepare(`UPDATE email_processing SET case_id=@caseId WHERE gmail_account_id=@acc AND message_id=@mid`)
-          .run({ caseId: existing.case_id, acc: input.accountId, mid: input.messageId })
+        db.prepare(`UPDATE email_processing SET case_id=@caseId, triage_receipt_id=@r WHERE gmail_account_id=@acc AND message_id=@mid`)
+          .run({ caseId: existing.case_id, r: triageReceiptId, acc: input.accountId, mid: input.messageId })
         return { outcome: 'LINKED_DUPLICATE', caseId: existing.case_id, messageStatus: 'DUPLICATE' }
       }
     }
@@ -150,7 +165,10 @@ export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now:
       priority: input.priority ?? 'P2',
       sourceSystem: 'gmail',
       sourceReference: input.messageId,
+      triageReceiptId,
     }, now)
+    db.prepare(`UPDATE email_processing SET triage_receipt_id=@r WHERE gmail_account_id=@a AND message_id=@m`)
+      .run({ r: triageReceiptId, a: input.accountId, m: input.messageId })
     const patch: Record<string, unknown> = {}
     if (input.threadId) patch.gmail_thread_ids = JSON.stringify([input.threadId])
     // An outgoing email should be watched for a reply; default a follow-up.

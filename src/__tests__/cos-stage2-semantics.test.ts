@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import Database from 'better-sqlite3'
 import { reconcileReplay, classifyField, replayReadyForStability } from '../cos/replay/reconcile.js'
 import {
-  recordTriageReceipt, requireTriageReceipt, triageReceiptId, triageReceiptsFor,
-  triageProvenanceCoverage, UNDECLARED,
+  recordTriageReceipt, requireExactTriageReceipt, triageReceiptId, triageReceiptsFor,
+  triageProvenanceCoverage, goForwardProvenanceStatus, UNDECLARED,
 } from '../cos/triage-provenance.js'
 import type { ProductionCaseSnapshot, ReplayCaseProjection } from '../cos/replay/types.js'
 
@@ -138,10 +138,57 @@ describe('Stage 2G — triage provenance receipts', () => {
     expect(cov.withPromptFingerprint).toBe(0)
   })
 
-  it('the gate refuses a case with no receipt, and passes once there is one', () => {
-    expect(() => requireTriageReceipt(db, 'zst', 'ghost')).toThrow(/TRIAGE_PROVENANCE_MISSING/)
-    recordTriageReceipt(db, base, 500)
-    expect(() => requireTriageReceipt(db, 'zst', 'm1')).not.toThrow()
+  it('the gate refuses a case with no receipt, and returns the id once there is one', () => {
+    expect(() => requireExactTriageReceipt(db, { ...base, messageId: 'ghost' }))
+      .toThrow(/TRIAGE_PROVENANCE_MISSING/)
+    const rec = recordTriageReceipt(db, base, 500)
+    expect(requireExactTriageReceipt(db, base)).toBe(rec.receiptId)
+  })
+
+  it('a receipt for a DIFFERENT verdict on the same message does not open the case', () => {
+    recordTriageReceipt(db, base, 500)   // verdict A
+    expect(() => requireExactTriageReceipt(db, { ...base, caseType: 'CONTRACT' }))
+      .toThrow(/TRIAGE_PROVENANCE_VERDICT_MISMATCH/)
+    // and the message DOES have a receipt — that is exactly what makes the weak
+    // check ("any receipt for this message") insufficient.
+    expect(triageReceiptsFor(db, 'zst', 'm1')).toHaveLength(1)
+  })
+
+  it('after a second verdict, the case binds to the receipt that decided it', () => {
+    const a = recordTriageReceipt(db, base, 500)
+    const b = recordTriageReceipt(db, { ...base, caseType: 'CONTRACT' }, 900)
+    expect(requireExactTriageReceipt(db, { ...base, caseType: 'CONTRACT' })).toBe(b.receiptId)
+    expect(requireExactTriageReceipt(db, base)).toBe(a.receiptId)
+    expect(a.receiptId).not.toBe(b.receiptId)
+  })
+
+  it('a retry of the same verdict resolves to the same receipt id', () => {
+    const a = recordTriageReceipt(db, base, 500)
+    const again = recordTriageReceipt(db, base, 1200)
+    expect(again.receiptId).toBe(a.receiptId)
+    expect(requireExactTriageReceipt(db, base)).toBe(a.receiptId)
+    expect(triageReceiptsFor(db, 'zst', 'm1')).toHaveLength(1)
+  })
+
+  it('go-forward readiness fails on any UNDECLARED field after the cutoff', () => {
+    recordTriageReceipt(db, { ...base, messageId: 'complete' }, 1000)
+    expect(goForwardProvenanceStatus(db, 900).status).toBe('PASS')
+
+    recordTriageReceipt(db, { ...base, messageId: 'no-model', model: null }, 1000)
+    const bad = goForwardProvenanceStatus(db, 900)
+    expect(bad.status).toBe('GO_FORWARD_PROVENANCE_INCOMPLETE')
+    expect(bad.offenders[0].missing).toContain('model')
+
+    // A receipt written BEFORE the cutoff is history: left alone, never back-filled.
+    expect(goForwardProvenanceStatus(db, 2000).status).toBe('PASS')
+    expect(goForwardProvenanceStatus(db, 2000).examined).toBe(0)
+  })
+
+  it('go-forward readiness also fails on a missing source manifest hash', () => {
+    recordTriageReceipt(db, { ...base, sourceManifestHash: null }, 1000)
+    const r = goForwardProvenanceStatus(db, 900)
+    expect(r.status).toBe('GO_FORWARD_PROVENANCE_INCOMPLETE')
+    expect(r.offenders[0].missing).toContain('sourceManifestHash')
   })
 
   it('the receipt id is the verdict fingerprint, so two stores agree without coordination', () => {

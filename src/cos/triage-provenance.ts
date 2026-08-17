@@ -132,20 +132,69 @@ export function recordTriageReceipt(
   return { receiptId, created: true }
 }
 
-/** The Stage 2G gate. Throws unless a receipt exists for this message.
+/** The Stage 2G gate, bound to the EXACT verdict (Istvan, 2026-08-17, second pass).
  *
- *  It is deliberately a THROW and not a boolean: a case that silently opens with
- *  a missing receipt is exactly the state the 2026-08-17 audit had to reconstruct
- *  from absence, and one that never opens is trivially diagnosable. */
-export function requireTriageReceipt(db: Database.Database, accountId: string, messageId: string): void {
+ *  "Some receipt exists for this message" was too weak, and the weakness was
+ *  precise: once a message has two verdicts, that check proves only that a
+ *  judgement was made at some point — not that THIS case came from THIS one.
+ *  So the gate re-derives the fingerprint from the verdict the intake is acting
+ *  on and demands that exact row. A stale or foreign receipt cannot satisfy it,
+ *  because a different verdict simply hashes elsewhere.
+ *
+ *  Returns the receipt id, so the caller can record what opened the case rather
+ *  than assert it. */
+export function requireExactTriageReceipt(db: Database.Database, verdict: TriageReceiptInput): string {
   initTriageProvenanceSchema(db)
+  const receiptId = triageReceiptId(verdict)
   const row = db.prepare(
-    'SELECT receipt_id FROM cos_triage_provenance WHERE account_id=? AND message_id=? LIMIT 1'
-  ).get(accountId, messageId) as { receipt_id: string } | undefined
-  if (!row) {
+    'SELECT receipt_id FROM cos_triage_provenance WHERE receipt_id=?'
+  ).get(receiptId) as { receipt_id: string } | undefined
+  if (row) return receiptId
+
+  const anyForMessage = db.prepare(
+    'SELECT COUNT(*) AS n FROM cos_triage_provenance WHERE account_id=? AND message_id=?'
+  ).get(verdict.accountId, verdict.messageId) as { n: number }
+  if (anyForMessage.n > 0) {
+    // The interesting failure: receipts exist, but none of them is this verdict.
     throw new Error(
-      `TRIAGE_PROVENANCE_MISSING: no triage receipt for ${accountId}/${messageId}; `
-      + 'an email-derived case may not be created without one (Stage 2G)')
+      `TRIAGE_PROVENANCE_VERDICT_MISMATCH: ${verdict.accountId}/${verdict.messageId} has `
+      + `${anyForMessage.n} receipt(s), none matching the verdict now being applied `
+      + `(expected ${receiptId}); a case may only be opened by the receipt that decided it`)
+  }
+  throw new Error(
+    `TRIAGE_PROVENANCE_MISSING: no triage receipt for ${verdict.accountId}/${verdict.messageId}; `
+    + 'an email-derived case may not be created without one (Stage 2G)')
+}
+
+/** Go-forward readiness (Stage 2G). After the activation cutoff every heartbeat
+ *  receipt must name its actor, model, prompt fingerprint and the exact input it
+ *  judged. Receipts written BEFORE the cutoff are left alone on purpose: history
+ *  is NOT_REPLAYABLE, and back-filling it would manufacture provenance that never
+ *  existed — the precise failure this whole stage exists to avoid. */
+export function goForwardProvenanceStatus(db: Database.Database, cutoff: number): {
+  status: 'PASS' | 'GO_FORWARD_PROVENANCE_INCOMPLETE'
+  cutoff: number
+  examined: number
+  incomplete: number
+  offenders: Array<{ receiptId: string; missing: string[] }>
+} {
+  initTriageProvenanceSchema(db)
+  const rows = db.prepare(
+    `SELECT receipt_id, actor, model, prompt_fingerprint, source_manifest_hash
+     FROM cos_triage_provenance WHERE decided_at >= ? ORDER BY decided_at, receipt_id`
+  ).all(cutoff) as Array<Record<string, string | null>>
+  const offenders: Array<{ receiptId: string; missing: string[] }> = []
+  for (const r of rows) {
+    const missing: string[] = []
+    if (!r.actor || r.actor === UNDECLARED) missing.push('actor')
+    if (!r.model || r.model === UNDECLARED) missing.push('model')
+    if (!r.prompt_fingerprint || r.prompt_fingerprint === UNDECLARED) missing.push('promptFingerprint')
+    if (!r.source_manifest_hash) missing.push('sourceManifestHash')
+    if (missing.length) offenders.push({ receiptId: String(r.receipt_id), missing })
+  }
+  return {
+    status: offenders.length ? 'GO_FORWARD_PROVENANCE_INCOMPLETE' : 'PASS',
+    cutoff, examined: rows.length, incomplete: offenders.length, offenders,
   }
 }
 

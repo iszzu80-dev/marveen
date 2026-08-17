@@ -110,6 +110,14 @@ export function toZstTriagedEmail(input: TriagedEmail): ZstTriagedEmail {
     followUpAt: input.followUpAt,
     headers: input.headers,
     caseType: input.caseType ? PERSONAL_TO_ZST_CASE_TYPE[input.caseType] : undefined,
+    // Stage 2G: provenance crosses the boundary unchanged. Mapping it would
+    // change the verdict fingerprint, and the gate would then reject the very
+    // receipt the caller wrote.
+    sourceManifestHash: input.sourceManifestHash,
+    triageActor: input.triageActor,
+    triageModel: input.triageModel,
+    triagePromptFingerprint: input.triagePromptFingerprint,
+    triageDecidedAt: input.triageDecidedAt,
     declaredSensitivity: input.declaredSensitivity
       ? PERSONAL_TO_ZST_SENSITIVITY[input.declaredSensitivity]
       : undefined,

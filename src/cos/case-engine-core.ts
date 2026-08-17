@@ -64,6 +64,8 @@ export class CaseConcurrencyError extends Error {
 }
 
 export interface NewCaseInput {
+  /** Stage 2G: the triage receipt this case was opened by. */
+  triageReceiptId?: string
   caseId: string
   title: string
   caseType: string
@@ -244,6 +246,10 @@ export function makeCaseEngine(
         newStatus: status,
         sourceSystem: input.sourceSystem ?? null,
         sourceReference: input.sourceReference ?? null,
+        // Stage 2G: the CREATED event names the receipt that opened the case.
+        // Until 2026-08-17 this payload was NULL for every email-derived case,
+        // which is why the judgement had to be reconstructed from its effect.
+        payload: input.triageReceiptId ? { triageReceiptId: input.triageReceiptId } : undefined,
       }, now)
     })
     tx()
