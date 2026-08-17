@@ -102,7 +102,7 @@ export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now:
     accountId: input.accountId, messageId: input.messageId, threadId: input.threadId ?? null,
     sourceManifestHash: input.sourceManifestHash ?? null,
     actionable: input.actionable, caseType: input.caseType ?? null, title: input.title ?? null,
-    workspace: null, priority: null, declaredSensitivity: input.declaredSensitivity ?? null,
+    workspace: null, priority: input.priority ?? null, declaredSensitivity: input.declaredSensitivity ?? null,
     actor: input.triageActor ?? null, model: input.triageModel ?? null,
     promptFingerprint: input.triagePromptFingerprint ?? null,
   })

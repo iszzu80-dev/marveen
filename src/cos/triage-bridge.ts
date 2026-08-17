@@ -37,6 +37,9 @@ export interface TriagedEmail {
   declaredSensitivity?: CaseSensitivity
   followUpAt?: number
   headers?: Record<string, string>
+  /** Verdict priority. It reaches the CASE, so it must reach the RECEIPT too:
+   *  a receipt that omits part of the verdict cannot prove what opened the case. */
+  priority?: string
   /** Stage 2G provenance (all optional; absence is recorded as UNDECLARED). */
   sourceManifestHash?: string
   triageActor?: string
@@ -79,7 +82,7 @@ export function ingestTriagedEmail(db: Database.Database, input: TriagedEmail, n
     accountId: input.accountId, messageId: input.messageId, threadId: input.threadId ?? null,
     sourceManifestHash: input.sourceManifestHash ?? null,
     actionable: input.actionable, caseType: input.caseType ?? null, title: input.title ?? null,
-    workspace: null, priority: null, declaredSensitivity: input.declaredSensitivity ?? null,
+    workspace: null, priority: input.priority ?? null, declaredSensitivity: input.declaredSensitivity ?? null,
     actor: input.triageActor ?? null, model: input.triageModel ?? null,
     promptFingerprint: input.triagePromptFingerprint ?? null,
     decidedAt: input.triageDecidedAt ?? now,
@@ -97,6 +100,16 @@ export function ingestTriagedEmail(db: Database.Database, input: TriagedEmail, n
     actionable: input.actionable, caseType: input.caseType, title: input.title,
     declaredSensitivity: input.declaredSensitivity, direction: input.direction,
     followUpAt: input.followUpAt, headers: input.headers,
+    priority: input.priority,
+    // Stage 2G: forwarded VERBATIM. The receipt above was written from these
+    // values, and the intake re-derives the fingerprint from what it receives —
+    // so dropping them here would make the gate reject the very receipt this
+    // function just wrote, and only after activation, when the fields stop
+    // being UNDECLARED on both sides at once.
+    sourceManifestHash: input.sourceManifestHash,
+    triageActor: input.triageActor,
+    triageModel: input.triageModel,
+    triagePromptFingerprint: input.triagePromptFingerprint,
   }
   const res = ingestEmail(db, intakeInput, now)
   return { outcome: res.outcome, caseId: res.caseId, messageStatus: res.messageStatus }
