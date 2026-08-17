@@ -33,7 +33,13 @@ DETAIL_PREFERRED = (
 )
 
 
-def _rpc(server: str, method: str, params: dict[str, Any], timeout: int = 120) -> dict[str, Any]:
+# 900s, not 120s: a single anchor day is one gmail_search call, and the busiest
+# day measured in the 61-day window (2026-08-16, private inbox) held 249 messages.
+# The MCP's gmail_search issues one per-hit lookup to return sender and subject,
+# so that day cannot finish inside 120s -- it is the one day that always fails.
+# This is patience only: no retry, no pagination change, no weakened completeness
+# check (a day hitting --max-results still raises).
+def _rpc(server: str, method: str, params: dict[str, Any], timeout: int = 900) -> dict[str, Any]:
     init = {"jsonrpc":"2.0","id":1,"method":"initialize","params":{
         "protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"cos-replay-export","version":"1"}}}
     req = {"jsonrpc":"2.0","id":2,"method":method,"params":params}
