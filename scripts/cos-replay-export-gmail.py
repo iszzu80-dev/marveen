@@ -65,7 +65,13 @@ def _rpc(server: str, method: str, params: dict[str, Any], timeout: int = 900) -
 
 def _tool_text(result: dict[str, Any]) -> Any:
     if result.get("isError"):
-        raise RuntimeError("MCP tool reported isError=true")
+        # The provider's own words, not just the flag. A bare "isError=true"
+        # cost a whole diagnostic run on 2026-08-17: a rate limit, an expired
+        # token and a deleted thread were indistinguishable from each other.
+        detail = " | ".join(
+            str(c.get("text", "")) for c in result.get("content", [])
+            if isinstance(c, dict) and c.get("text"))
+        raise RuntimeError(f"MCP tool reported isError=true: {detail[:400] or '<no detail returned>'}")
     chunks = result.get("content", [])
     texts = [c.get("text", "") for c in chunks if isinstance(c, dict) and c.get("type", "text") == "text"]
     if not texts:
@@ -112,14 +118,24 @@ def _schema_props(tool: dict[str, Any]) -> dict[str, Any]:
     return schema.get("properties", {}) if isinstance(schema, dict) else {}
 
 
-def _detail_args(tool: dict[str, Any], message_id: str, thread_id: str) -> dict[str, Any]:
+SHA256_ARGS = ("attachment_sha256", "attachmentSha256")
+
+
+def _detail_args(tool: dict[str, Any], message_id: str, thread_id: str,
+                 want_sha256: bool = False) -> dict[str, Any]:
     props = _schema_props(tool)
+    extra: dict[str, Any] = {}
+    if want_sha256:
+        for key in SHA256_ARGS:
+            if key in props:
+                extra[key] = True
+                break
     for key in ("thread_id", "threadId"):
         if key in props:
-            return {key: thread_id}
+            return {key: thread_id, **extra}
     for key in ("message_id", "messageId", "id"):
         if key in props:
-            return {key: message_id}
+            return {key: message_id, **extra}
     raise RuntimeError(f"detail tool {tool.get('name')} has no recognizable id argument: {list(props)}")
 
 
@@ -209,21 +225,73 @@ def _epoch(obj: dict[str, Any]) -> int:
     raise RuntimeError("full message has no parseable timestamp")
 
 
-def _body(obj: dict[str, Any]) -> str:
-    for k in ("body_text", "body", "text", "plain_text", "content", "snippet"):
+def _body(obj: dict[str, Any]) -> tuple[str, str]:
+    """Return (bodyText, bodyPresence).
+
+    An empty body has two causes that must never be confused: the letter HAS
+    no text (an attachment-only DMARC report, a photo sent with no caption),
+    or we FAILED to read the text it has. Only the first may enter a replay
+    corpus, and only against evidence the reader produced -- never against a
+    subject line or a snippet, which are not the body.
+    """
+    for k in ("body_text", "body", "text", "plain_text", "content"):
         v = obj.get(k)
-        if isinstance(v, str) and v.strip(): return v
+        if isinstance(v, str) and v.strip(): return v, "TEXT"
     payload = obj.get("payload")
     if isinstance(payload, dict):
         for k in ("body_text", "text", "decoded_text", "content"):
             v = payload.get(k)
-            if isinstance(v, str) and v.strip(): return v
-    raise RuntimeError("full-message read returned no readable body text; refusing snippet-only replay")
+            if isinstance(v, str) and v.strip(): return v, "TEXT"
+
+    ev = obj.get("bodyEvidence")
+    if not isinstance(ev, dict):
+        raise RuntimeError(
+            "full-message read returned no readable body text and no bodyEvidence; "
+            "refusing snippet-only replay (the read tool cannot tell 'has no text' "
+            "from 'we failed to read the text')")
+    unreadable = ev.get("textPartsUnreadable")
+    if ev.get("textless") is True and unreadable == 0:
+        return "", "TEXTLESS_PROVEN"
+    raise RuntimeError(
+        f"full-message read returned no body text and textlessness is NOT proven "
+        f"(bodyEvidence={json.dumps(ev, ensure_ascii=False)}); refusing the corpus")
 
 
 def _labels(obj: dict[str, Any]) -> list[str]:
     v = obj.get("labelIds") or obj.get("label_ids") or obj.get("labels") or []
     return [str(x).upper() for x in v] if isinstance(v, list) else []
+
+
+def _attachments(obj: dict[str, Any]) -> list[dict[str, Any]]:
+    """The manifest the Clean Replay hashes. `attachments: []` used to be
+    hard-coded here, so a mail carrying a 2 MB photo exported as if it carried
+    nothing -- an absence nobody could distinguish from a real absence.
+
+    `attachmentId` is deliberately NOT carried over: Gmail rotates it between
+    calls, so it identifies nothing in a stored corpus.
+    """
+    raw = obj.get("attachments")
+    if raw is None:
+        raise RuntimeError(
+            "full-message read exposes no attachment metadata; refusing a corpus whose "
+            "attachment manifest would be an unasked-for empty list")
+    if not isinstance(raw, list):
+        raise RuntimeError(f"attachment metadata has unsupported shape: {type(raw).__name__}")
+    out = []
+    for a in raw:
+        if not isinstance(a, dict):
+            raise RuntimeError("attachment entry is not an object")
+        name = a.get("filename") or a.get("name")
+        if not name:
+            raise RuntimeError("attachment entry has no filename")
+        out.append({
+            "filename": str(name),
+            "mimeType": a.get("mimeType") or a.get("mime") or None,
+            "sizeBytes": a.get("sizeBytes") if a.get("sizeBytes") is not None else a.get("size"),
+            "sha256": a.get("sha256"),
+            "sha256Status": a.get("sha256Status") or ("COMPUTED" if a.get("sha256") else "NOT_REQUESTED"),
+        })
+    return out
 
 
 def _normalize(account: str, obj: dict[str, Any]) -> dict[str, Any]:
@@ -234,6 +302,7 @@ def _normalize(account: str, obj: dict[str, Any]) -> dict[str, Any]:
     direction = "SENT" if "SENT" in labels else "INBOUND"
     to = _header(obj, "To")
     tos = [x.strip() for x in str(to).split(",") if x.strip()] if to else []
+    body, presence = _body(obj)
     return {
         "sourceAccountId": account,
         "messageId": mid,
@@ -241,14 +310,16 @@ def _normalize(account: str, obj: dict[str, Any]) -> dict[str, Any]:
         "direction": direction,
         "occurredAt": _epoch(obj),
         "subject": str(_header(obj, "Subject") or obj.get("subject") or ""),
-        "bodyText": _body(obj),
+        "bodyText": body,
+        "bodyPresence": presence,
         "from": str(_header(obj, "From") or obj.get("from") or "") or None,
         "to": tos,
-        "attachments": [],
+        "attachments": _attachments(obj),
     }
 
 
-def export_account(account: str, server: str, start: dt.date, end: dt.date, maximum: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def export_account(account: str, server: str, start: dt.date, end: dt.date, maximum: int,
+                   want_sha256: bool = True) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not os.path.exists(server): raise RuntimeError(f"{account} MCP server missing: {server}")
     tools = _list_tools(server)
     names = {str(t.get("name")) for t in tools}
@@ -265,9 +336,16 @@ def export_account(account: str, server: str, start: dt.date, end: dt.date, maxi
         if not tid: raise RuntimeError(f"{account}: anchor result missing thread id for {mid}")
         touched.setdefault(tid, (mid, tid))
 
+    sha256_supported = any(k in _schema_props(detail) for k in SHA256_ARGS)
+    if want_sha256 and not sha256_supported:
+        raise RuntimeError(
+            f"{account}: attachment sha256 was requested but {detail.get('name')} does not "
+            "accept it; run with --no-attachment-sha256 to export a manifest without hashes "
+            "instead of silently exporting one")
+
     messages: dict[str, dict[str, Any]] = {}
     for mid, tid in touched.values():
-        raw = _call_tool(server, str(detail["name"]), _detail_args(detail, mid, tid))
+        raw = _call_tool(server, str(detail["name"]), _detail_args(detail, mid, tid, want_sha256))
         found = _walk_messages(raw)
         if not found: raise RuntimeError(f"{account}: detail tool returned no messages for thread {tid}")
         for m in found:
@@ -276,9 +354,18 @@ def export_account(account: str, server: str, start: dt.date, end: dt.date, maxi
         if not any(n["threadId"] == tid for n in messages.values()):
             raise RuntimeError(f"{account}: detail read did not include requested thread {tid}")
 
-    return list(messages.values()), {
+    msgs = list(messages.values())
+    atts = [a for m in msgs for a in m["attachments"]]
+    return msgs, {
         "account": account, "anchorMessages": len(anchor), "touchedThreads": len(touched),
         "expandedMessages": len(messages), "detailTool": detail.get("name"),
+        "textlessProven": sum(1 for m in msgs if m["bodyPresence"] == "TEXTLESS_PROVEN"),
+        "attachments": len(atts),
+        "attachmentBytes": sum(a["sizeBytes"] or 0 for a in atts),
+        "attachmentsHashed": sum(1 for a in atts if a["sha256"]),
+        "attachmentsHashUnavailable": sorted({a["sha256Status"] for a in atts
+                                              if not a["sha256"] and a["sha256Status"] != "NOT_REQUESTED"}),
+        "attachmentSha256Requested": want_sha256,
     }
 
 
@@ -288,7 +375,11 @@ def main() -> None:
     ap.add_argument("--end", required=True, help="exclusive YYYY-MM-DD")
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-results", type=int, default=500)
+    ap.add_argument("--no-attachment-sha256", action="store_true",
+                    help="export the attachment manifest without hashes (filename/type/size only). "
+                         "Hashing reads attachment bytes read-only; it needs no extra scope.")
     args = ap.parse_args()
+    want_sha256 = not args.no_attachment_sha256
     start, end = _date(args.start), _date(args.end)
     if end <= start: raise SystemExit("--end must be after --start")
     if (end - start).days < 45: raise SystemExit("Clean Replay requires at least a 45-day anchor; 60 days is the default")
@@ -297,7 +388,7 @@ def main() -> None:
     all_messages: dict[tuple[str,str], dict[str, Any]] = {}
     reports = []
     for account, server in SERVERS.items():
-        msgs, report = export_account(account, server, start, end, args.max_results)
+        msgs, report = export_account(account, server, start, end, args.max_results, want_sha256)
         reports.append(report)
         for m in msgs: all_messages[(account, m["messageId"])] = m
 
@@ -307,7 +398,14 @@ def main() -> None:
         "anchorStart": int(dt.datetime.combine(start, dt.time.min, tzinfo=dt.timezone.utc).timestamp()),
         "anchorEnd": int(dt.datetime.combine(end, dt.time.min, tzinfo=dt.timezone.utc).timestamp()),
         "messages": messages,
-        "exportEvidence": {"accounts": reports, "fullThreadExpansion": True, "readOnly": True},
+        "exportEvidence": {
+            "accounts": reports, "fullThreadExpansion": True, "readOnly": True,
+            "bodyPresencePolicy": "empty bodyText only with bodyPresence=TEXTLESS_PROVEN; "
+                                  "unproven emptiness aborts the export",
+            "attachmentManifest": "declared filename/mimeType/sizeBytes from the provider; "
+                                  "sha256 computed from read-only attachment bytes when requested",
+            "attachmentSha256Requested": want_sha256,
+        },
     }
 
     out = os.path.abspath(args.out)
