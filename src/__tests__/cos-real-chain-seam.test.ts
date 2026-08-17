@@ -20,7 +20,7 @@ function ingestEmail(db: any, input: any, now: number) {
     accountId: input.accountId, messageId: input.messageId, threadId: input.threadId ?? null,
     sourceManifestHash: null,
     actionable: input.actionable, caseType: input.caseType ?? null, title: input.title ?? null,
-    workspace: null, priority: null, declaredSensitivity: input.declaredSensitivity ?? null,
+    workspace: null, priority: input.priority ?? null, declaredSensitivity: input.declaredSensitivity ?? null,
     actor: 'test', model: null, promptFingerprint: null,
   }, now)
   return ingestEmailRaw(db, withProvenance, now)
