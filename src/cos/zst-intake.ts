@@ -15,6 +15,7 @@ import { seedCaseProgressionState } from './case-progression-seed.js'
 import { projectZstOperationalIntake } from './zst-operational-projector.js'
 import { recordTemporalFact } from './temporal-facts.js'
 import { classifyActionability } from './actionability.js'
+import { recordTriageReceipt, requireTriageReceipt } from './triage-provenance.js'
 
 const INVOICE_CASE_TYPES = new Set(['INVOICE_INCOMING', 'INVOICE_OUTGOING'])
 const CONTRACT_CASE_TYPES = new Set(['CONTRACT', 'LICENSE_SUBSCRIPTION'])
@@ -36,7 +37,12 @@ export interface ZstTriagedEmail {
   priority?: string
   followUpAt?: number
   headers?: Record<string, string>
-  body?: string
+  body?: string  /** Stage 2G provenance (all optional; absence is recorded as UNDECLARED). */
+  sourceManifestHash?: string
+  triageActor?: string
+  triageModel?: string
+  triagePromptFingerprint?: string
+  triageDecidedAt?: number
 }
 
 export type ZstIntakeOutcome =
@@ -96,6 +102,17 @@ export function ingestTriagedZstEmail(db: Database.Database, input: ZstTriagedEm
     return { outcome: 'LINKED_DUPLICATE', caseId: ownSend.case_id, messageStatus: 'DUPLICATE' }
   }
 
+  recordTriageReceipt(db, {
+    accountId: input.accountId, messageId: input.messageId, threadId: input.threadId ?? null,
+    sourceManifestHash: input.sourceManifestHash ?? null,
+    actionable: input.actionable, caseType: input.caseType ?? null, title: input.title ?? null,
+    workspace: input.workspace ?? null, priority: input.priority ?? null,
+    declaredSensitivity: input.declaredSensitivity ?? null,
+    actor: input.triageActor ?? null, model: input.triageModel ?? null,
+    promptFingerprint: input.triagePromptFingerprint ?? null,
+    decidedAt: input.triageDecidedAt ?? now,
+  }, now)
+  requireTriageReceipt(db, input.accountId, input.messageId)
   if (!input.actionable) {
     recordLedger(db, input, 'EXCLUDED', null, now)
     return { outcome: 'EXCLUDED', messageStatus: 'EXCLUDED' }

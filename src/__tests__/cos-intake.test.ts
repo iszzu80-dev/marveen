@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import { getCase, createCase } from '../cos/case-store.js'
 import { openBatch } from '../cos/email-ingest.js'
-import { ingestEmail } from '../cos/intake.js'
+import { ingestEmail as ingestEmailRaw } from '../cos/intake.js'
+import { recordTriageReceipt } from '../cos/triage-provenance.js'
 import { IDEMPOTENCY_HEADER } from '../cos/adapters/gmail-send.js'
 import { linkedCases } from '../cos/case-link.js'
 
@@ -12,6 +13,20 @@ import { linkedCases } from '../cos/case-link.js'
 // links to the existing case as a DUPLICATE.
 
 const ACC = 'iszzu80', NOW = 1_000_000
+
+// Stage 2G (2026-08-17): `ingestEmail` now refuses to open a case without a
+// durable triage receipt. Production always has one — the bridge writes it
+// before calling in — so these tests, which call the layer directly, write the
+// same receipt first. The gate itself is proven separately in
+// cos-triage-provenance.test.ts; shadowing it here would hide it.
+function ingestEmail(db: any, input: any, now: number) {
+  recordTriageReceipt(db, {
+    accountId: input.accountId, messageId: input.messageId, threadId: input.threadId ?? null,
+    actionable: input.actionable, caseType: input.caseType ?? null, title: input.title ?? null,
+    declaredSensitivity: input.declaredSensitivity ?? null, actor: 'test',
+  }, now)
+  return ingestEmailRaw(db, input, now)
+}
 
 function discover(messageId: string, threadId?: string) {
   openBatch(getDb(), { batchId: `b-${messageId}`, accountId: ACC, cursorBefore: '1', cursorAfter: '2', messages: [{ messageId, threadId }] }, NOW)

@@ -21,6 +21,7 @@ import { effectiveSensitivity } from './sensitivity.js'
 import { suggestLinks, linkCases } from './case-link.js'
 import { IDEMPOTENCY_HEADER } from './adapters/gmail-send.js'
 import type { CaseSensitivity } from './schema.js'
+import { requireTriageReceipt } from './triage-provenance.js'
 
 export interface EmailIntakeInput {
   accountId: string
@@ -85,6 +86,11 @@ function findActiveCaseByThread(db: Database.Database, threadId: string): { case
 }
 
 export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now: number): IntakeResult {
+  // Stage 2G gate (Istvan, 2026-08-17). An email-derived case may not exist
+  // without a durable record of the judgement that opened it. The gate lives
+  // HERE, at the point the case is created, not at the caller: the 2026-08-17
+  // audit exists because the only record of a triage verdict was its effect.
+  requireTriageReceipt(db, input.accountId, input.messageId)
   // Self-event filter: a message carrying our own idempotency marker is a send
   // the COS executor made — never re-ingest it as new work.
   if (input.headers && input.headers[IDEMPOTENCY_HEADER]) {

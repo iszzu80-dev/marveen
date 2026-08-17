@@ -15,6 +15,7 @@ import type Database from 'better-sqlite3'
 import { openBatch, TRIAGE_BATCH_PREFIX } from './email-ingest.js'
 import { ingestEmail, type EmailIntakeInput, type IntakeOutcome } from './intake.js'
 import type { CaseSensitivity } from './schema.js'
+import { recordTriageReceipt } from './triage-provenance.js'
 
 export interface TriagedEmail {
   accountId: string
@@ -36,6 +37,12 @@ export interface TriagedEmail {
   declaredSensitivity?: CaseSensitivity
   followUpAt?: number
   headers?: Record<string, string>
+  /** Stage 2G provenance (all optional; absence is recorded as UNDECLARED). */
+  sourceManifestHash?: string
+  triageActor?: string
+  triageModel?: string
+  triagePromptFingerprint?: string
+  triageDecidedAt?: number
 }
 
 export type BridgeOutcome = IntakeOutcome | 'ALREADY_PROCESSED'
@@ -65,6 +72,19 @@ export function ingestTriagedEmail(db: Database.Database, input: TriagedEmail, n
   // into email_source_checkpoints for the real account id, filling the P0.2
   // cursor the whole state machine reads with a string no history poller can
   // start from.
+  // Stage 2G: the judgement becomes durable BEFORE the case it authorises.
+  // Undeclared actor/model/prompt fields are recorded as UNDECLARED rather than
+  // dropped, so the gap stays countable instead of looking like a decision.
+  recordTriageReceipt(db, {
+    accountId: input.accountId, messageId: input.messageId, threadId: input.threadId ?? null,
+    sourceManifestHash: input.sourceManifestHash ?? null,
+    actionable: input.actionable, caseType: input.caseType ?? null, title: input.title ?? null,
+    workspace: null, priority: null, declaredSensitivity: input.declaredSensitivity ?? null,
+    actor: input.triageActor ?? null, model: input.triageModel ?? null,
+    promptFingerprint: input.triagePromptFingerprint ?? null,
+    decidedAt: input.triageDecidedAt ?? now,
+  }, now)
+
   const batchId = `${TRIAGE_BATCH_PREFIX}${input.accountId}-${input.messageId}`
   openBatch(db, {
     batchId, accountId: input.accountId, cursorBefore: null, cursorAfter: `${TRIAGE_BATCH_PREFIX}${now}`,

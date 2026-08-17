@@ -57,7 +57,24 @@ export interface ReplayTemporalProjection {
   verification: 'UNVERIFIED'
 }
 
-export type ReconciliationAuthority = 'SOURCE_DERIVED' | 'PRODUCTION_AUTHORITATIVE' | 'CONFLICT_REVIEW'
+/** Stage 2H (Istvan, 2026-08-17). The audit of the same day measured that the
+ *  triage judgement behind caseType/title/priority/workspace/sensitivity is
+ *  persisted NOWHERE and has no deterministic production classifier to re-run,
+ *  so a replay cannot derive those from source. Two authorities exist to stop a
+ *  reconciliation from calling that agreement OR disagreement:
+ *
+ *  - NOT_REPLAYABLE               the field cannot be produced from source at
+ *                                 all; it is coverage, never a match or a miss.
+ *  - CONDITIONAL_ON_PRODUCTION_TYPE  the field WAS produced, but only because the
+ *                                 production caseType was fed in as an external
+ *                                 input (PRODUCTION_AUTHORITY_OVERLAY). It may be
+ *                                 measured; it may not be called source-derived. */
+export type ReconciliationAuthority =
+  | 'SOURCE_DERIVED'
+  | 'PRODUCTION_AUTHORITATIVE'
+  | 'CONFLICT_REVIEW'
+  | 'NOT_REPLAYABLE'
+  | 'CONDITIONAL_ON_PRODUCTION_TYPE'
 export type ReconciliationSeverity = 'P0' | 'P1' | 'P2' | 'P3'
 
 export interface ProductionCaseSnapshot {
@@ -107,6 +124,23 @@ export interface CorrectionManifest {
     p2: number
     p3: number
     unclassified: number
+  }
+  /** Stage 2H coverage. Deliberately NOT a single agreement percentage: mixing a
+   *  field we re-derived with one we could never derive produces a number whose
+   *  own author cannot say what it measured. */
+  coverage: {
+    /** field comparisons the replay was in a position to attempt at all */
+    eligible: number
+    /** of those, actually compared (source-derived or conditional) */
+    compared: number
+    matched: number
+    mismatched: number
+    /** compared only because production supplied the caseType */
+    conditional: number
+    /** fields excluded from match/mismatch by construction */
+    notReplayable: number
+    /** eligible, not compared, and not classifiable as either */
+    unknown: number
   }
 }
 
