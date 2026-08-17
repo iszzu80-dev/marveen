@@ -17,7 +17,7 @@ Usage:
 so messages older than --start are included when they belong to a touched thread.
 """
 from __future__ import annotations
-import argparse, datetime as dt, json, os, re, stat, subprocess, sys, tempfile
+import argparse, datetime as dt, json, os, re, stat, subprocess, sys, tempfile, time
 from typing import Any
 
 REPO = os.environ.get("MARVEEN_REPO_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -125,17 +125,67 @@ def _tool_text(result: dict[str, Any]) -> Any:
 
 
 def _list_tools(server: str) -> list[dict[str, Any]]:
-    res = _rpc(server, "tools/list", {})
+    res = _with_transport_retry(_account_of(server), "tools/list",
+                                lambda: _rpc(server, "tools/list", {}))
     tools = res.get("tools", [])
     if not isinstance(tools, list):
         raise RuntimeError("tools/list did not return a list")
     return tools
 
 
+# ---- transport resilience (Istvan's GO, 2026-08-17) ------------------------
+# TWO measured failures, 09:41:40 and 10:19:43, both ~35 minutes into a run,
+# both `[Errno 101] Network is unreachable`, and both with the network healthy
+# again within twenty seconds. A 40-minute single-shot export cannot survive a
+# host that blinks every half hour, so this retries THAT fault and nothing else.
+#
+# Deliberately absent: retry on HTTP/provider errors, auth, permission, rate
+# limit, completeness or MIME faults. Those are answers, not dropped calls --
+# repeating them would only turn a clear stop into a slow one.
+TRANSPORT_RETRY_WAITS = (5, 15, 30)
+TRANSPORT_FAULT_RE = re.compile(r"(?i)\[Errno 101\]|errno=101|Network is unreachable")
+RETRY_EVENTS: list[dict[str, Any]] = []
+_SLEEP = time.sleep  # injection point: tests must not really wait 50 seconds
+
+
+def _is_transport_fault(err: BaseException) -> bool:
+    return bool(TRANSPORT_FAULT_RE.search(str(err)))
+
+
+def _now_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _with_transport_retry(account: str, operation: str, fn):
+    """Run one read-only MCP call, retrying ONLY a proven transient network fault."""
+    for attempt in range(1, len(TRANSPORT_RETRY_WAITS) + 2):
+        try:
+            return fn()
+        except Exception as e:
+            if not _is_transport_fault(e) or attempt > len(TRANSPORT_RETRY_WAITS):
+                raise
+            wait = TRANSPORT_RETRY_WAITS[attempt - 1]
+            RETRY_EVENTS.append({
+                "at": _now_iso(), "account": account, "operation": operation,
+                "attempt": attempt, "errno": 101, "waitSeconds": wait,
+                "error": str(e)[:200],
+            })
+            _SLEEP(wait)
+
+
+def _account_of(server: str) -> str:
+    for name, path in SERVERS.items():
+        if path == server:
+            return name
+    return os.path.basename(server)
+
+
 def _call_tool(server: str, name: str, args: dict[str, Any]) -> Any:
     if any(p in name.lower() for p in FORBIDDEN_NAME_PARTS):
         raise RuntimeError(f"refusing non-read MCP tool: {name}")
-    return _tool_text(_rpc(server, "tools/call", {"name": name, "arguments": args}))
+    return _with_transport_retry(
+        _account_of(server), name,
+        lambda: _tool_text(_rpc(server, "tools/call", {"name": name, "arguments": args})))
 
 
 def _choose_detail_tool(tools: list[dict[str, Any]]) -> dict[str, Any]:
@@ -365,6 +415,17 @@ def _normalize(account: str, obj: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _merge_messages(messages: dict[str, dict[str, Any]], account: str,
+                    found: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Keyed by messageId, so a retried call that re-delivers a thread adds
+    nothing twice. The retry above makes this property load-bearing, not
+    incidental."""
+    for m in found:
+        n = _normalize(account, m)
+        messages[n["messageId"]] = n
+    return messages
+
+
 def export_account(account: str, server: str, start: dt.date, end: dt.date, maximum: int,
                    want_sha256: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not os.path.exists(server): raise RuntimeError(f"{account} MCP server missing: {server}")
@@ -395,9 +456,7 @@ def export_account(account: str, server: str, start: dt.date, end: dt.date, maxi
         raw = _call_tool(server, str(detail["name"]), _detail_args(detail, mid, tid, want_sha256))
         found = _walk_messages(raw)
         if not found: raise RuntimeError(f"{account}: detail tool returned no messages for thread {tid}")
-        for m in found:
-            n = _normalize(account, m)
-            messages[n["messageId"]] = n
+        _merge_messages(messages, account, found)
         if not any(n["threadId"] == tid for n in messages.values()):
             raise RuntimeError(f"{account}: detail read did not include requested thread {tid}")
 
@@ -483,6 +542,10 @@ def main() -> None:
             "attachmentSha256Requested": want_sha256,
             "sourceCompletenessGate": "empty bodyText requires TEXTLESS_PROVEN; attachment metadata "
                                       "must be complete; both checked again over the finished corpus",
+            "transportRetryPolicy": f"only [Errno 101] / Network is unreachable, at most "
+                                    f"{len(TRANSPORT_RETRY_WAITS)} retries per call, waits "
+                                    f"{list(TRANSPORT_RETRY_WAITS)}s; every other fault stops the export",
+            "transportRetries": RETRY_EVENTS,
         },
     }
 

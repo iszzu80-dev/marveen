@@ -235,3 +235,82 @@ class DetailArgs(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TransportRetry(unittest.TestCase):
+    """Istvan's GO of 2026-08-17: retry the proven transient network fault, and
+    only that one. Waits are captured, never actually slept through."""
+
+    def setUp(self):
+        X.RETRY_EVENTS.clear()
+        self.slept = []
+        self._real_sleep = X._SLEEP
+        X._SLEEP = self.slept.append
+
+    def tearDown(self):
+        X._SLEEP = self._real_sleep
+        X.RETRY_EVENTS.clear()
+
+    @staticmethod
+    def _network_error():
+        return RuntimeError("MCP tool reported isError=true: errno=101; message=error: "
+                            "<urlopen error [Errno 101] Network is unreachable>")
+
+    def test_one_failure_then_success_costs_exactly_one_retry(self):
+        calls = []
+
+        def fn():
+            calls.append(1)
+            if len(calls) == 1:
+                raise self._network_error()
+            return {"ok": True}
+
+        self.assertEqual(X._with_transport_retry("private", "gmail_get_thread", fn), {"ok": True})
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(X.RETRY_EVENTS), 1)
+        self.assertEqual(self.slept, [5])
+        ev = X.RETRY_EVENTS[0]
+        self.assertEqual((ev["account"], ev["operation"], ev["attempt"], ev["errno"]),
+                         ("private", "gmail_get_thread", 1, 101))
+        self.assertTrue(ev["at"].endswith("+00:00"), "evidence needs a timestamp")
+
+    def test_three_consecutive_network_failures_fail_closed(self):
+        calls = []
+
+        def fn():
+            calls.append(1)
+            raise self._network_error()
+
+        with self.assertRaises(RuntimeError):
+            X._with_transport_retry("zst", "gmail_search", fn)
+        self.assertEqual(len(calls), 4, "one original attempt plus three retries")
+        self.assertEqual(len(X.RETRY_EVENTS), 3)
+        self.assertEqual(self.slept, [5, 15, 30])
+
+    def test_auth_http_and_rate_limit_get_no_retry(self):
+        for msg in ("MCP tool reported isError=true: httpStatus=401; message=invalid_grant",
+                    "MCP tool reported isError=true: httpStatus=429; message=rateLimitExceeded",
+                    "MCP tool reported isError=true: httpStatus=403; message=permission denied",
+                    "source completeness gate: empty bodyText without TEXTLESS_PROVEN"):
+            X.RETRY_EVENTS.clear(); self.slept.clear()
+            calls = []
+
+            def fn(_m=msg):
+                calls.append(1)
+                raise RuntimeError(_m)
+
+            with self.assertRaises(RuntimeError):
+                X._with_transport_retry("private", "gmail_get_thread", fn)
+            self.assertEqual(len(calls), 1, f"must not retry: {msg}")
+            self.assertEqual(X.RETRY_EVENTS, [])
+            self.assertEqual(self.slept, [])
+
+    def test_retry_does_not_duplicate_message_or_thread_data(self):
+        """A retried thread read re-delivers the same messages; the corpus keys
+        them by messageId, so the second delivery adds nothing."""
+        thread = [dict(msg(), id="m1"), dict(msg(), id="m2")]
+        messages = {}
+        X._merge_messages(messages, "private", thread)
+        X._merge_messages(messages, "private", thread)  # the retry
+        self.assertEqual(sorted(messages), ["m1", "m2"])
+        self.assertEqual(len({m["threadId"] for m in messages.values()}), 1)
