@@ -173,6 +173,18 @@ class ProviderErrors(unittest.TestCase):
                        "iszzu80@gmail.com"):
             self.assertNotIn(secret, m)
 
+    def test_bare_opaque_token_is_redacted_without_a_naming_key(self):
+        """A secret does not have to be labelled to be a secret: Gmail echoes raw
+        attachment/page tokens into error text with no key in front of them."""
+        raw = "ANGjdJ8jW1gwXAGbu9Y8cjMcCpRLuxgA1o8DKddXAldpc5dAoiNgFWtAH6gfOZJBqd4vEz"
+        with self.assertRaises(RuntimeError) as e:
+            X._tool_text({"isError": True, "content": [
+                {"type": "text", "text": f"error: 404 not found while fetching {raw}"}]})
+        m = str(e.exception)
+        self.assertIn("status=404", m)
+        self.assertNotIn(raw, m)
+        self.assertIn("redacted", m)
+
     def test_body_text_is_not_carried_into_the_error(self):
         body = "Kedves Istvan, a szamla osszege 240000 Ft, kerlek utald at"
         with self.assertRaises(RuntimeError) as e:
