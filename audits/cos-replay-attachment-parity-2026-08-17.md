@@ -85,3 +85,36 @@ schema invention, no change to the extractors themselves.
 Until at least (1)+(2) land, any Clean Replay reconciliation figure covering
 invoices, contracts or documents is an artefact of the shadow's silence, not
 evidence of agreement.
+
+---
+
+## Addendum — where the 41 overlapping hashes came from (read-only, same day)
+
+Istvan asked for this before any shadow ingest, and the answer changes what a
+document-parity figure may claim.
+
+Of the **257 distinct attachment hashes** in the sidecar corpus, **41** exist in
+production `cos_documents` (42 rows — one hash is stored twice):
+
+| route into production | distinct hashes |
+|---|---|
+| Gmail attachment path (`source='email'`, `source_ref` = a Gmail messageId) | **27** |
+| Drive migration path (`source='drive'`, `source_ref='chatgpt-cos-drive'`) | **14** |
+| reached the store by both routes | **0** |
+| **never ingested at all** | **216** |
+
+Row-level breakdown of the 42: zst/email/other 13, zst/email/photo 7,
+zst/email/invoice 4, personal/email/other 3, personal/email/photo 1 (=28 via the
+Gmail script) and personal/drive/photo 7, personal/drive/other 4,
+personal/drive/invoice 3 (=14 via the Drive migration), across 20 distinct cases.
+
+Two consequences:
+
+1. **Fourteen of the forty-one never came through the attachment pipeline at
+   all.** They are the same bytes arriving by a different road (the ChatGPT-side
+   Drive migration). A replay of the *email* path can neither produce nor take
+   credit for them.
+2. **216 attachments were never ingested, and that is production's actual
+   behaviour**, not a defect to be repaired by the shadow. Ingesting all 638 into
+   the shadow would manufacture a state production never had — which is the same
+   error as the shadow's silence, only pointed the other way.

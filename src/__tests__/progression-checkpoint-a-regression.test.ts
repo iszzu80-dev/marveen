@@ -23,9 +23,25 @@ import Database from 'better-sqlite3'
 import { initCosSchema } from '../cos/schema.js'
 import { createCase, transitionCase, listActiveCases, listTodayCases } from '../cos/case-store.js'
 import { createZstCase, transitionZstCase, listActiveZstCases, listTodayZstCases } from '../cos/zst-case-store.js'
-import { ingestEmail, type EmailIntakeInput } from '../cos/intake.js'
+import { ingestEmail as ingestEmailRaw, type EmailIntakeInput } from '../cos/intake.js'
+import { recordTriageReceipt } from '../cos/triage-provenance.js'
 import { ingestTriagedZstEmail, type ZstTriagedEmail } from '../cos/zst-intake.js'
 import { openBatch } from '../cos/email-ingest.js'
+
+// Stage 2G (2026-08-17): `ingestEmail` refuses to open a case without a durable
+// triage receipt. Production writes one in the bridge before calling in; these
+// tests call the layer directly, so they write the same receipt. The gate has
+// its own tests in cos-stage2-semantics.test.ts — this wrapper must not be the
+// only place it is exercised, or it would hide what it satisfies.
+function ingestEmail(db: any, input: any, now: number) {
+  recordTriageReceipt(db, {
+    accountId: input.accountId, messageId: input.messageId, threadId: input.threadId ?? null,
+    actionable: input.actionable, caseType: input.caseType ?? null, title: input.title ?? null,
+    declaredSensitivity: input.declaredSensitivity ?? null, actor: 'test',
+  }, now)
+  return ingestEmailRaw(db, input, now)
+}
+
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
