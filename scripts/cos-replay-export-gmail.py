@@ -17,7 +17,7 @@ Usage:
 so messages older than --start are included when they belong to a touched thread.
 """
 from __future__ import annotations
-import argparse, datetime as dt, json, os, stat, subprocess, sys, tempfile
+import argparse, datetime as dt, json, os, re, stat, subprocess, sys, tempfile
 from typing import Any
 
 REPO = os.environ.get("MARVEEN_REPO_ROOT") or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -63,15 +63,52 @@ def _rpc(server: str, method: str, params: dict[str, Any], timeout: int = 900) -
     return result.get("result", {})
 
 
+SECRET_PATTERNS = (
+    (re.compile(r"(?i)bearer\s+[A-Za-z0-9._\-]+"), "Bearer <redacted>"),
+    (re.compile(r"(?i)\"?(access_token|refresh_token|client_secret|client_id|id_token|api[_-]?key)\"?\s*[:=]\s*\"?[^\s\",}]+"),
+     r"\1=<redacted>"),
+    (re.compile(r"[A-Za-z0-9_\-]{40,}"), "<redacted-long-token>"),
+    (re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+"), "<redacted-address>"),
+)
+STATUS_RE = re.compile(r"(?<![\w.])([1-5]\d\d)(?![\w.])")
+CLASS_RE = re.compile(r"(?i)\b(rate\s?limit|rateLimitExceeded|quota|timeout|timed out|unauthoriz\w+|"
+                      r"invalid[_ ]grant|forbidden|not\s?found|backend\s?error|internal\s?error|"
+                      r"unavailable|permission|invalid[_ ]credentials)\b")
+
+
+def _sanitize_error(text: str) -> str:
+    """Keep the diagnosis, drop the secrets.
+
+    What survives: HTTP status, a recognised error class, and a short trimmed
+    message. What never survives: bearer tokens, OAuth fields, any long opaque
+    string, and addresses -- an error body can quote the request that caused it,
+    and a replay log is not the place to learn what that request contained.
+    """
+    s = text or ""
+    for pat, repl in SECRET_PATTERNS:
+        s = pat.sub(repl, s)
+    s = re.sub(r"\s+", " ", s).strip()
+    status = STATUS_RE.search(s)
+    klass = CLASS_RE.search(s)
+    head = []
+    if status: head.append(f"status={status.group(1)}")
+    if klass: head.append(f"class={klass.group(1).lower().replace(' ', '_')}")
+    head.append(f"message={s[:200] or '<empty>'}")
+    return "; ".join(head)
+
+
 def _tool_text(result: dict[str, Any]) -> Any:
     if result.get("isError"):
-        # The provider's own words, not just the flag. A bare "isError=true"
-        # cost a whole diagnostic run on 2026-08-17: a rate limit, an expired
-        # token and a deleted thread were indistinguishable from each other.
+        # The provider's own diagnosis, sanitised -- not just the flag. A bare
+        # "isError=true" cost a whole diagnostic run on 2026-08-17: a rate
+        # limit, an expired token and a deleted thread all looked the same.
         detail = " | ".join(
             str(c.get("text", "")) for c in result.get("content", [])
             if isinstance(c, dict) and c.get("text"))
-        raise RuntimeError(f"MCP tool reported isError=true: {detail[:400] or '<no detail returned>'}")
+        if not detail.strip():
+            raise RuntimeError("MCP tool reported isError=true; provider returned NO detail "
+                               "(cannot tell rate limit from auth failure)")
+        raise RuntimeError(f"MCP tool reported isError=true: {_sanitize_error(detail)}")
     chunks = result.get("content", [])
     texts = [c.get("text", "") for c in chunks if isinstance(c, dict) and c.get("type", "text") == "text"]
     if not texts:
@@ -250,6 +287,10 @@ def _body(obj: dict[str, Any]) -> tuple[str, str]:
             "refusing snippet-only replay (the read tool cannot tell 'has no text' "
             "from 'we failed to read the text')")
     unreadable = ev.get("textPartsUnreadable")
+    if ev.get("mimeTreeFullyWalked") is not True:
+        raise RuntimeError(
+            "empty bodyText and the reader does not claim a complete MIME walk; "
+            "textlessness cannot be proven from a partial tree")
     if ev.get("textless") is True and unreadable == 0:
         return "", "TEXTLESS_PROVEN"
     raise RuntimeError(
@@ -319,7 +360,7 @@ def _normalize(account: str, obj: dict[str, Any]) -> dict[str, Any]:
 
 
 def export_account(account: str, server: str, start: dt.date, end: dt.date, maximum: int,
-                   want_sha256: bool = True) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+                   want_sha256: bool = False) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not os.path.exists(server): raise RuntimeError(f"{account} MCP server missing: {server}")
     tools = _list_tools(server)
     names = {str(t.get("name")) for t in tools}
@@ -356,16 +397,27 @@ def export_account(account: str, server: str, start: dt.date, end: dt.date, maxi
 
     msgs = list(messages.values())
     atts = [a for m in msgs for a in m["attachments"]]
+    total_bytes = sum(a["sizeBytes"] or 0 for a in atts)
+    hashed = [a for a in atts if a["sha256"]]
     return msgs, {
         "account": account, "anchorMessages": len(anchor), "touchedThreads": len(touched),
         "expandedMessages": len(messages), "detailTool": detail.get("name"),
         "textlessProven": sum(1 for m in msgs if m["bodyPresence"] == "TEXTLESS_PROVEN"),
-        "attachments": len(atts),
-        "attachmentBytes": sum(a["sizeBytes"] or 0 for a in atts),
-        "attachmentsHashed": sum(1 for a in atts if a["sha256"]),
-        "attachmentsHashUnavailable": sorted({a["sha256Status"] for a in atts
-                                              if not a["sha256"] and a["sha256Status"] != "NOT_REQUESTED"}),
-        "attachmentSha256Requested": want_sha256,
+        # The metadata manifest is complete by construction (a missing field
+        # aborts). Hash coverage is a separate, explicitly reported number --
+        # never implied by the manifest being present.
+        "attachmentManifest": {
+            "count": len(atts),
+            "totalBytes": total_bytes,
+            "metadataComplete": all(a["filename"] and a["mimeType"] is not None
+                                    and a["sizeBytes"] is not None for a in atts),
+            "sha256Requested": want_sha256,
+            "sha256Count": len(hashed),
+            "sha256Bytes": sum(a["sizeBytes"] or 0 for a in hashed),
+            "sha256Coverage": (round(len(hashed) / len(atts), 4) if atts else 1.0),
+            "sha256Unavailable": sorted({a["sha256Status"] for a in atts
+                                         if not a["sha256"] and a["sha256Status"] != "NOT_REQUESTED"}),
+        },
     }
 
 
@@ -375,11 +427,13 @@ def main() -> None:
     ap.add_argument("--end", required=True, help="exclusive YYYY-MM-DD")
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-results", type=int, default=500)
-    ap.add_argument("--no-attachment-sha256", action="store_true",
-                    help="export the attachment manifest without hashes (filename/type/size only). "
-                         "Hashing reads attachment bytes read-only; it needs no extra scope.")
+    ap.add_argument("--attachment-sha256", action="store_true",
+                    help="ALSO hash every attachment. Off by default on purpose: hashing downloads "
+                         "every attachment's bytes, so measure the manifest's count and total size "
+                         "first and turn this on knowing what it will pull. Metadata (filename, "
+                         "mimeType, sizeBytes) is always exported and always complete.")
     args = ap.parse_args()
-    want_sha256 = not args.no_attachment_sha256
+    want_sha256 = args.attachment_sha256
     start, end = _date(args.start), _date(args.end)
     if end <= start: raise SystemExit("--end must be after --start")
     if (end - start).days < 45: raise SystemExit("Clean Replay requires at least a 45-day anchor; 60 days is the default")
@@ -393,6 +447,21 @@ def main() -> None:
         for m in msgs: all_messages[(account, m["messageId"])] = m
 
     messages = sorted(all_messages.values(), key=lambda m: (m["occurredAt"], m["sourceAccountId"], m["messageId"]))
+
+    # Source-completeness gate. _normalize already refuses an unproven empty
+    # body one message at a time; this asserts the same rule over the finished
+    # corpus, because that is the artifact the replay actually reads.
+    unproven = [f'{m["sourceAccountId"]}/{m["messageId"]}' for m in messages
+                if not m["bodyText"].strip() and m["bodyPresence"] != "TEXTLESS_PROVEN"]
+    if unproven:
+        raise SystemExit("source completeness gate: empty bodyText without TEXTLESS_PROVEN in "
+                         f"{len(unproven)} message(s): {', '.join(unproven[:10])}")
+    bad_manifest = [f'{m["sourceAccountId"]}/{m["messageId"]}' for m in messages
+                    for a in m["attachments"]
+                    if not a["filename"] or a["mimeType"] is None or a["sizeBytes"] is None]
+    if bad_manifest:
+        raise SystemExit("source completeness gate: incomplete attachment metadata in "
+                         f"{len(bad_manifest)} message(s): {', '.join(bad_manifest[:10])}")
     corpus = {
         "generatedAt": int(dt.datetime.now(dt.timezone.utc).timestamp()),
         "anchorStart": int(dt.datetime.combine(start, dt.time.min, tzinfo=dt.timezone.utc).timestamp()),
@@ -402,9 +471,12 @@ def main() -> None:
             "accounts": reports, "fullThreadExpansion": True, "readOnly": True,
             "bodyPresencePolicy": "empty bodyText only with bodyPresence=TEXTLESS_PROVEN; "
                                   "unproven emptiness aborts the export",
-            "attachmentManifest": "declared filename/mimeType/sizeBytes from the provider; "
-                                  "sha256 computed from read-only attachment bytes when requested",
+            "attachmentManifestPolicy": "declared filename/mimeType/sizeBytes from the provider, "
+                                        "complete or the export aborts; sha256 only when explicitly "
+                                        "requested, and its coverage is reported per account",
             "attachmentSha256Requested": want_sha256,
+            "sourceCompletenessGate": "empty bodyText requires TEXTLESS_PROVEN; attachment metadata "
+                                      "must be complete; both checked again over the finished corpus",
         },
     }
 
