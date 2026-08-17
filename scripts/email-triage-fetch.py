@@ -33,6 +33,19 @@ NOISE_SENDERS = [
     "@my.", "@news.", "@lc.", "ajanlo.", "temu", "info@info.",
     "noreply-", "dmarc", "@bk.", "bizalomkartya",
 ]
+# OWN traffic: our own products and test harnesses mailing us. These are noise
+# by ORIGIN, and the origin outranks the words -- a QuickQuote test quote reads
+# exactly like a real quote request, which is how the 2026-08-17 retrospective
+# sweep first reported Istvan's own test traffic as "open quote threads". The
+# exclusion lives HERE, in the normative filter the live heartbeat runs, not in
+# the sweep: a rule that only exists in the analysis tool protects the analysis
+# and nothing else.
+OWN_TRAFFIC_SENDERS = [
+    "no-reply@mail.zstradio.com", "ajanlat@mondigo.eu", "hello@vidamo.eu",
+    "@quickquote.", "quickquote@",
+]
+OWN_TRAFFIC_SUBJECTS = ["[teszt]", "[test]", "complaint test", "webhook test"]
+
 NOISE_SUBJECTS = [
     "sale", "% off", "welcome to", "verify your email", "confirm your email",
     "unsubscribe", "newsletter", "webinar", "black friday", "deal",
@@ -125,6 +138,11 @@ def is_noise(m):
     frm = _norm(m.get("from"))
     subj = _norm(m.get("subject"))
     snip = _norm(m.get("snippet"))
+    # Origin first: our own product/test mail is noise whatever it says, and it
+    # must be decided BEFORE the transactional override, which would otherwise
+    # rescue a test invoice for looking like an invoice.
+    if any(x in frm for x in OWN_TRAFFIC_SENDERS) or any(x in subj for x in OWN_TRAFFIC_SUBJECTS):
+        return True
     if any(k in frm + " " + subj + " " + snip for k in ALWAYS_KEEP):
         return False
     # Marketing shapes in the SUBJECT still drop, whoever sent them.

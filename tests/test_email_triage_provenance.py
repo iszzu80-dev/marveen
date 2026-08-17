@@ -68,3 +68,53 @@ class PromptFingerprint(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OwnTrafficIsNoiseByOrigin(unittest.TestCase):
+    """Regression fixture for the rule-order defect found by the 2026-08-17
+    retrospective sweep. It lives against the NORMATIVE filter the live heartbeat
+    runs — not against the sweep's own judgement file — because a rule that only
+    exists in the analysis tool protects the analysis and nothing else."""
+
+    def test_own_product_mail_is_noise_however_it_reads(self):
+        for sender, subject in (
+            ("QuickQuote <no-reply@mail.zstradio.com>", "Árajánlat #7AF26D83: Burkolás"),
+            ("Mondigo <ajanlat@mondigo.eu>", "Árajánlat: Konnektor csere és további munkák"),
+            ("hello@vidamo.eu", "Új Vidamo előregisztráció: valaki@example.com"),
+        ):
+            self.assertTrue(F.is_noise({"from": sender, "subject": subject, "snippet": "x"}),
+                            f"own traffic must be noise: {sender}")
+
+    def test_own_test_harness_mail_is_noise(self):
+        self.assertTrue(F.is_noise({
+            "from": "QuickQuote <no-reply@mail.zstradio.com>",
+            "subject": "[TESZT] Árajánlat: Villanyszerelés", "snippet": "x"}))
+
+    def test_a_real_quote_still_survives(self):
+        """The exclusion must not eat the thing it sits next to."""
+        self.assertFalse(F.is_noise({
+            "from": "info@pellerburkolas.hu", "subject": "Árajánlat, terasz burkolat",
+            "snippet": "kuldjuk az arajanlatot a teraszra"}))
+
+    def test_authority_mail_still_survives(self):
+        self.assertFalse(F.is_noise({
+            "from": "ertesites@tarhely.gov.hu",
+            "subject": "Átvételi értesítő (Feladó: NAV, Dokumentum: Végrehajtás)",
+            "snippet": "kuldemeny erkezett a tarhelyere"}))
+
+    def test_the_rule_is_covered_by_the_prompt_fingerprint(self):
+        """The fingerprint hashes the feeder's own bytes, so this rule moves it.
+        Without that, a silently edited filter would keep an old fingerprint."""
+        before = F._prompt_fingerprint()
+        original = open(FETCH, "rb").read()
+        try:
+            text = original.decode()
+            mutated = text.replace('"ajanlat@mondigo.eu",', "")
+            self.assertNotEqual(text, mutated, "the rule must be present to be mutated")
+            with open(FETCH, "wb") as fh:
+                fh.write(mutated.encode())
+            self.assertNotEqual(before, F._prompt_fingerprint())
+        finally:
+            with open(FETCH, "wb") as fh:
+                fh.write(original)
+        self.assertEqual(before, F._prompt_fingerprint())
