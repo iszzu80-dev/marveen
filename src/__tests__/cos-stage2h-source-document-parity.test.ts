@@ -56,16 +56,48 @@ describe('Stage 2H-D — one docKind rule, read by both languages', () => {
   it('the Python ingest reads the same ruleset and agrees on every case', () => {
     const script = join(process.cwd(), 'scripts', 'cos-attachment-ingest.py')
     const py = `
-import importlib.util, sys, json
-sys.argv = ['x', 'zst', 'dummy']
+import importlib.util, json
 spec = importlib.util.spec_from_file_location('ing', ${JSON.stringify(script)})
-m = importlib.util.module_from_spec(spec)
-try: spec.loader.exec_module(m)
-except SystemExit: pass
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 print(json.dumps([m.classify_document_kind(f) for f in ${JSON.stringify(TABLE.map(t => t[0]))}]))
 `
-    const out = execFileSync('python3', ['-c', py], { encoding: 'utf8' })
+    // HOME is redirected so the run cannot reach this machine's credentials.
+    // The first version of this test imported the script with a real HOME, and
+    // the script read the dashboard token AT IMPORT TIME: it passed here and
+    // failed in CI. The evidence that two languages agree must not depend on a
+    // secret being present.
+    const out = execFileSync('python3', ['-c', py], {
+      encoding: 'utf8', env: { ...process.env, HOME: join(tmpdir(), 'cos-no-home') },
+    })
     expect(JSON.parse(out.trim())).toEqual(TABLE.map(t => t[1]))
+  })
+
+  it('the Python ingest is importable with NO credentials on the machine', () => {
+    const script = join(process.cwd(), 'scripts', 'cos-attachment-ingest.py')
+    const py = `
+import importlib.util
+spec = importlib.util.spec_from_file_location('ing', ${JSON.stringify(script)})
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+assert m.TOKEN is None, 'importing the module read a credential'
+assert m.g is None, 'importing the module loaded the Gmail transport'
+print('IMPORT_CLEAN')
+`
+    const out = execFileSync('python3', ['-c', py], {
+      encoding: 'utf8', env: { ...process.env, HOME: join(tmpdir(), 'cos-no-home') },
+    })
+    expect(out.trim()).toBe('IMPORT_CLEAN')
+  })
+
+  it('the CLI still refuses to run without its arguments', () => {
+    const script = join(process.cwd(), 'scripts', 'cos-attachment-ingest.py')
+    let code = 0, stdout = ''
+    try {
+      stdout = execFileSync('python3', [script], { encoding: 'utf8', env: { ...process.env, HOME: join(tmpdir(), 'cos-no-home') } })
+    } catch (e: any) {
+      code = e.status; stdout = String(e.stdout ?? '')
+    }
+    expect(code).toBe(2)
+    expect(stdout).toContain('usage: cos-attachment-ingest.py')
   })
 
   it('neither reader restates the literals — a shadow copy would go red here', () => {
