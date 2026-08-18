@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto'
-import type { CorrectionManifest, ProductionCaseSnapshot, ReconciliationAuthority, ReconciliationFinding, ReconciliationSeverity, ReplayCaseProjection } from './types.js'
+import type {
+  CorrectionManifest, ExtractorParityReport, ParitySurfaceStatus, ProductionCaseSnapshot,
+  ReconciliationAuthority, ReconciliationFinding, ReconciliationSeverity, ReplayCaseProjection,
+  ReplayReadiness,
+} from './types.js'
 
 const h = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 20)
 const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
@@ -60,6 +64,10 @@ const REASONS: Record<ReconciliationAuthority, string> = {
   CONFLICT_REVIEW: 'source alone cannot resolve this difference safely',
 }
 
+const NOT_ATTEMPTED_REASON =
+  'conditional on a production caseType, and no PRODUCTION_AUTHORITY_OVERLAY lent one to this thread in '
+  + 'this run; the replay produced nothing to compare, which is neither a match nor a mismatch'
+
 export function reconcileReplay(
   replayRunId: string,
   replayCases: readonly ReplayCaseProjection[],
@@ -73,6 +81,7 @@ export function reconcileReplay(
   for (const p of productionCases) for (const t of p.threadIds) { const x = ps.get(t) ?? []; x.push(p); ps.set(t, x) }
 
   let eligible = 0, compared = 0, matched = 0, mismatched = 0, conditional = 0
+  let conditionalMismatched = 0, conditionalNotAttempted = 0
   let notReplayable = 0, unknown = 0
 
   for (const threadId of new Set([...rs.keys(), ...ps.keys()])) {
@@ -91,6 +100,7 @@ export function reconcileReplay(
       continue
     }
     const r = rr[0]; const p = pp[0]
+    const overlaid = r.projectionAuthority === 'CONDITIONAL_ON_PRODUCTION_TYPE'
     const pairs: Array<[string, unknown, unknown]> = [
       ['domain', p.domain, r.domain], ['title', p.title, r.title], ['caseType', p.caseType, r.caseType],
       ['status', p.status, r.status], ['nextAction', p.nextAction, r.nextAction],
@@ -114,10 +124,25 @@ export function reconcileReplay(
         continue
       }
 
+      if (a === 'CONDITIONAL_ON_PRODUCTION_TYPE' && !overlaid) {
+        // The replay held no type for this thread, so it produced no operational
+        // projection. Comparing production's value against that absence would
+        // manufacture a mismatch out of a run that was never asked to try.
+        conditionalNotAttempted += 1
+        findings.push({
+          findingId: `recon:${h(`${replayRunId}:${p.caseId}:${field}:notattempted`)}`,
+          domain: r.domain, threadId, productionCaseId: p.caseId, replayCaseId: r.replayCaseId,
+          field, productionValue: pv, replayValue: null,
+          authority: a, severity: severity(field, a), reason: NOT_ATTEMPTED_REASON, autoApplyAllowed: false,
+        })
+        continue
+      }
+
       compared += 1
       if (a === 'CONDITIONAL_ON_PRODUCTION_TYPE') conditional += 1
       if (same(pv, rv)) { matched += 1; continue }
       mismatched += 1
+      if (a === 'CONDITIONAL_ON_PRODUCTION_TYPE') conditionalMismatched += 1
       findings.push({
         findingId: `recon:${h(`${replayRunId}:${p.caseId}:${r.replayCaseId}:${field}:${JSON.stringify(pv)}:${JSON.stringify(rv)}`)}`,
         domain: r.domain, threadId, productionCaseId: p.caseId, replayCaseId: r.replayCaseId,
@@ -131,12 +156,88 @@ export function reconcileReplay(
   return {
     generatedAt, replayRunId, autoApplyAllowed: false, findings,
     summary: { total: findings.length, p0: n('P0'), p1: n('P1'), p2: n('P2'), p3: n('P3'), unclassified: 0 },
-    coverage: { eligible, compared, matched, mismatched, conditional, notReplayable, unknown },
+    coverage: {
+      eligible, compared, matched, mismatched, conditional, conditionalMismatched,
+      notReplayable, conditionalNotAttempted, unknown,
+    },
   }
 }
 
+/** Stage 2H (Istvan, 2026-08-18). This used to return true while a conditional
+ *  field disagreed, because a conditional mismatch is P2 and the gate only read
+ *  P0/P1. That is the shape of a gate reporting the severity of the finding
+ *  instead of the fact that a finding exists: the one surface where the replay
+ *  actually produced a comparable value could disagree on every thread and the
+ *  gate would stay green. An unresolved conditional mismatch now blocks. */
 export function replayReadyForStability(m: CorrectionManifest): boolean {
   return m.summary.unclassified === 0 && m.summary.p0 === 0 && m.summary.p1 === 0
     // Stage 2H: an unresolved mapping is not a quiet zero.
     && m.coverage.unknown === 0
+    // Stage 2H: neither is a conditional field the replay compared and lost.
+    && m.coverage.conditionalMismatched === 0
+}
+
+export interface ReplayReadinessInput {
+  manifest: CorrectionManifest
+  /** null => the conditional extractor replay has not been run */
+  extractorParity: ExtractorParityReport | null
+  /** null => document/attachment parity has not been run */
+  documentParity: { pass: boolean; reasons?: string[] } | null
+}
+
+function extractorSurfaceStatus(r: ExtractorParityReport | null): { status: ParitySurfaceStatus; reasons: string[] } {
+  if (!r) return { status: 'NOT_RUN', reasons: ['conditional extractor parity has not been run'] }
+  if (r.summary.targets === 0) {
+    return { status: 'NOT_RUN', reasons: ['conditional extractor parity ran with zero targets; an empty surface is not a passing one'] }
+  }
+  const reasons: string[] = []
+  if (r.summary.mismatch > 0) reasons.push(`${r.summary.mismatch} extractor target(s) mismatch production`)
+  if (r.summary.fieldsMismatched > 0) reasons.push(`${r.summary.fieldsMismatched} extractor field(s) mismatch production`)
+  if (r.summary.seamBlocked > 0) reasons.push(`${r.summary.seamBlocked} target(s) blocked at a production seam`)
+  if (r.summary.inputNotEquivalent > 0) reasons.push(`${r.summary.inputNotEquivalent} target(s) RETRIAGE_INPUT_NOT_EQUIVALENT and are not comparable`)
+  if (r.summary.fieldsCompared === 0) reasons.push('no extractor field was actually compared')
+  return { status: reasons.length ? 'FAIL' : 'PASS', reasons }
+}
+
+/** Stage 2H readiness (Istvan, 2026-08-18): four named surfaces, not one boolean.
+ *  A single verdict could and did go green while the surface that mattered had
+ *  never been run — NOT_RUN and PASS are different words here on purpose. */
+export function evaluateReplayReadiness(input: ReplayReadinessInput): ReplayReadiness {
+  const reasons: string[] = []
+
+  const historicalOk = replayReadyForStability(input.manifest)
+  const historicalSourceReplayStatus: ParitySurfaceStatus = historicalOk ? 'PASS' : 'FAIL'
+  if (!historicalOk) {
+    if (input.manifest.summary.p0 > 0) reasons.push(`${input.manifest.summary.p0} P0 finding(s)`)
+    if (input.manifest.summary.p1 > 0) reasons.push(`${input.manifest.summary.p1} P1 finding(s)`)
+    if (input.manifest.coverage.unknown > 0) reasons.push(`${input.manifest.coverage.unknown} unmapped thread(s)`)
+    if (input.manifest.coverage.conditionalMismatched > 0) {
+      reasons.push(`${input.manifest.coverage.conditionalMismatched} unresolved conditional mismatch(es)`)
+    }
+    if (input.manifest.summary.unclassified > 0) reasons.push(`${input.manifest.summary.unclassified} unclassified finding(s)`)
+  }
+
+  const ext = extractorSurfaceStatus(input.extractorParity)
+  reasons.push(...ext.reasons)
+
+  const documentParityStatus: ParitySurfaceStatus = input.documentParity == null
+    ? 'NOT_RUN'
+    : input.documentParity.pass ? 'PASS' : 'FAIL'
+  if (documentParityStatus === 'NOT_RUN') reasons.push('document parity has not been run')
+  if (documentParityStatus === 'FAIL') reasons.push(...(input.documentParity?.reasons ?? ['document parity failed']))
+
+  const stable = historicalSourceReplayStatus === 'PASS'
+    && ext.status === 'PASS'
+    && documentParityStatus === 'PASS'
+
+  return {
+    historicalSourceReplayStatus,
+    conditionalExtractorParityStatus: ext.status,
+    documentParityStatus,
+    // Structural, and it never becomes PASS. It is an accepted coverage
+    // limitation, which is a different thing from a surface that passed.
+    historicalTriageReplayStatus: 'NOT_REPLAYABLE',
+    stable,
+    reasons,
+  }
 }

@@ -30,13 +30,37 @@ export interface ReplayCorpus {
   messages: ReplayMessage[]
 }
 
+/** Stage 2H (Istvan, 2026-08-18). The ONLY way a replay may hold a caseType: a
+ *  named production case lends it as an external input. There is no source path
+ *  to a caseType — the audit of 2026-08-17 measured that the triage verdict is
+ *  persisted nowhere and no production text->type classifier exists — so a
+ *  replay that produces one from content is producing a guess, not a replay. */
+export interface ProductionAuthorityOverlay {
+  threadId: string
+  productionCaseId: string
+  caseType: string
+}
+
+/** Which of the two things a projection is. They are not degrees of the same
+ *  measurement: the first re-derives from source, the second borrows the type
+ *  and may therefore never be quoted as classification evidence. */
+export type ReplayProjectionAuthority =
+  | 'HISTORICAL_SOURCE_REPLAY'
+  | 'CONDITIONAL_ON_PRODUCTION_TYPE'
+
 export interface ReplayCaseProjection {
   replayCaseId: string
   domain: CosDomain
   threadId: string
-  title: string
-  caseType: string
-  status: string
+  projectionAuthority: ReplayProjectionAuthority
+  /** The production case that lent the caseType; null in a historical replay. */
+  productionCaseId: string | null
+  /** null under HISTORICAL_SOURCE_REPLAY: NOT_REPLAYABLE, never a guessed value.
+   *  `title` stays null even under an overlay — production's title is a triage
+   *  judgement, and the overlay lends the type only. */
+  title: string | null
+  caseType: string | null
+  status: string | null
   nextAction: string | null
   nextActionOwner: string | null
   waitingOn: string | null
@@ -91,6 +115,12 @@ export interface ProductionCaseSnapshot {
   followUpAt?: number | null
   nextWakeAt?: number | null
   closureReason?: string | null
+  /** The exact production input message (`source_reference`). The extractor
+   *  parity feeds THIS message, not a reconstructed thread digest: production
+   *  extracted from one mail, so a replay that extracts from another is
+   *  measuring a different input and may not report the difference as a
+   *  mismatch. Absent => the input is not reproducible for that case. */
+  sourceReference?: string | null
   /** True when a human/manual event is the authority for current state. */
   hasHumanAuthorityEvent?: boolean
   /** True when an outbound provider receipt exists and must never be replay-overwritten. */
@@ -137,10 +167,106 @@ export interface CorrectionManifest {
     mismatched: number
     /** compared only because production supplied the caseType */
     conditional: number
+    /** of the conditional comparisons, the ones that differ */
+    conditionalMismatched: number
     /** fields excluded from match/mismatch by construction */
     notReplayable: number
+    /** conditional fields left unattempted because no overlay lent the type in
+     *  THIS run. Not a match, not a mismatch, and not the same thing as a field
+     *  that can never be replayed. */
+    conditionalNotAttempted: number
     /** eligible, not compared, and not classifiable as either */
     unknown: number
+  }
+}
+
+// ── Stage 2H parity surfaces (Istvan, 2026-08-18) ──────────────────────────
+// Four separate statuses, because one boolean could go green while the surface
+// that matters was never run. NOT_RUN is not PASS and NOT_REPLAYABLE is not PASS.
+
+export type ParitySurfaceStatus = 'PASS' | 'FAIL' | 'NOT_RUN' | 'NOT_REPLAYABLE'
+
+export interface ReplayReadiness {
+  /** connector/thread/message identity, provider time, direction, digests */
+  historicalSourceReplayStatus: ParitySurfaceStatus
+  /** the real production extractors, under a production type overlay */
+  conditionalExtractorParityStatus: ParitySurfaceStatus
+  /** document/attachment ingest parity */
+  documentParityStatus: ParitySurfaceStatus
+  /** structurally fixed: there is no persisted verdict and no classifier */
+  historicalTriageReplayStatus: 'NOT_REPLAYABLE'
+  /** true only when every mandatory surface PASSed and no conditional
+   *  mismatch is left unresolved. An accepted coverage limitation
+   *  (historicalTriageReplayStatus) does not make it true and does not block it. */
+  stable: boolean
+  reasons: string[]
+}
+
+export type ExtractorRoute = 'INVOICE' | 'CONTRACT'
+
+export type ExtractorParityVerdict =
+  | 'PASS'
+  | 'MISMATCH'
+  /** the production input shape could not be reproduced; never mixed with PASS */
+  | 'RETRIAGE_INPUT_NOT_EQUIVALENT'
+  /** the production gate does not route this type to an extractor at all */
+  | 'NOT_ROUTED'
+  /** the seam cannot be crossed without copying production logic */
+  | 'SEAM_BLOCKED'
+
+export type FieldParityVerdict =
+  | 'PASS'
+  | 'MISMATCH'
+  | 'BOTH_ABSENT'
+  | 'PRODUCTION_ABSENT'
+  | 'REPLAY_ABSENT'
+  /** production never persisted this observation, so there is nothing to compare */
+  | 'PRODUCTION_NOT_PERSISTED'
+
+export interface FieldParity {
+  field: string
+  productionValue: unknown
+  replayValue: unknown
+  verdict: FieldParityVerdict
+}
+
+export interface ExtractorParityRow {
+  threadId: string
+  productionCaseId: string
+  /** external input, never a classification result */
+  caseType: string
+  route: ExtractorRoute | null
+  sourceMessageId: string | null
+  extractionSource: 'FULL_BODY' | null
+  authority: 'CONDITIONAL_ON_PRODUCTION_TYPE'
+  /** always false: an overlay-fed run can never prove the classification */
+  classificationProof: false
+  /** what the replay-side extractor itself reported */
+  replayExtractionStatus: 'EXTRACTED' | 'NOT_AN_INVOICE_OR_CONTRACT' | 'THREW' | 'NOT_ATTEMPTED'
+  replayConfidence: string | null
+  replayExtractedFields: string[]
+  comparisons: FieldParity[]
+  verdict: ExtractorParityVerdict
+  reasons: string[]
+}
+
+export interface ExtractorParityReport {
+  generatedAt: number
+  authority: 'CONDITIONAL_ON_PRODUCTION_TYPE'
+  classificationProof: false
+  rows: ExtractorParityRow[]
+  summary: {
+    targets: number
+    pass: number
+    mismatch: number
+    inputNotEquivalent: number
+    notRouted: number
+    seamBlocked: number
+    /** field-level, across every comparable row */
+    fieldsCompared: number
+    fieldsMatched: number
+    fieldsMismatched: number
+    fieldsNotPersistedByProduction: number
   }
 }
 

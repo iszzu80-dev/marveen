@@ -17,8 +17,24 @@ import { recordTemporalFact } from './temporal-facts.js'
 import { classifyActionability } from './actionability.js'
 import { recordTriageReceipt, requireExactTriageReceipt } from './triage-provenance.js'
 
-const INVOICE_CASE_TYPES = new Set(['INVOICE_INCOMING', 'INVOICE_OUTGOING'])
-const CONTRACT_CASE_TYPES = new Set(['CONTRACT', 'LICENSE_SUBSCRIPTION'])
+export const INVOICE_CASE_TYPES = new Set(['INVOICE_INCOMING', 'INVOICE_OUTGOING'])
+export const CONTRACT_CASE_TYPES = new Set(['CONTRACT', 'LICENSE_SUBSCRIPTION'])
+
+export type ZstExtractorRoute = 'INVOICE' | 'CONTRACT'
+
+/** Which production extractor a caseType routes to, or null for none.
+ *
+ *  Exported and used by `ingestTriagedZstEmail` itself so there is exactly ONE
+ *  copy of this gate. The Clean Replay extractor-parity surface imports it: a
+ *  replay that re-declared the same two sets would fire on its own set of
+ *  threads the moment either side drifted, and would then report the resulting
+ *  silence as agreement. That is the failure this rebuild removes, so the gate
+ *  is a single function and the replay measures the one production runs. */
+export function routeZstExtractor(caseType: string): ZstExtractorRoute | null {
+  if (INVOICE_CASE_TYPES.has(caseType)) return 'INVOICE'
+  if (CONTRACT_CASE_TYPES.has(caseType)) return 'CONTRACT'
+  return null
+}
 
 export interface ZstTriagedEmail {
   accountId: string
@@ -188,24 +204,16 @@ export function ingestTriagedZstEmail(db: Database.Database, input: ZstTriagedEm
     }
 
     let extractionState: ZstIntakeResult['extractionState'] = 'NOT_ATTEMPTED'
-    if (INVOICE_CASE_TYPES.has(caseType)) {
+    const route = routeZstExtractor(caseType)
+    if (route) {
       extractionState = 'ATTEMPTED'
-      try {
-        ingestZstInvoiceEmail(db, {
-          caseId, from: input.from, subject: input.subject, body: fullText,
-          extractionSource: input.body ? 'FULL_BODY' : 'SNIPPET',
-        }, now)
-      } catch {
-        extractionState = 'FAILED'
+      const src = {
+        caseId, from: input.from, subject: input.subject, body: fullText,
+        extractionSource: (input.body ? 'FULL_BODY' : 'SNIPPET') as 'FULL_BODY' | 'SNIPPET',
       }
-    }
-    if (CONTRACT_CASE_TYPES.has(caseType)) {
-      extractionState = 'ATTEMPTED'
       try {
-        ingestZstContractEmail(db, {
-          caseId, from: input.from, subject: input.subject, body: fullText,
-          extractionSource: input.body ? 'FULL_BODY' : 'SNIPPET',
-        }, now)
+        if (route === 'INVOICE') ingestZstInvoiceEmail(db, src, now)
+        else ingestZstContractEmail(db, src, now)
       } catch {
         extractionState = 'FAILED'
       }

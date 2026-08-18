@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3'
 import { describe, it, expect } from 'vitest'
-import { expandTouchedThreads, runShadowReplay } from '../cos/replay/shadow-replay.js'
+import { expandTouchedThreads, runShadowReplay, readReplayProjections } from '../cos/replay/shadow-replay.js'
 import { reconcileReplay, replayReadyForStability } from '../cos/replay/reconcile.js'
 import { buildZstMigrationBatches, buildZstMigrationCandidates } from '../cos/replay/zst-migration-plan.js'
 import type { ReplayCorpus } from '../cos/replay/types.js'
@@ -47,13 +47,7 @@ describe('Clean Replay & Reconciliation Gate v1.0', () => {
   it('all reconciliation findings are explicitly non-auto-applicable', () => {
     const db = new Database(':memory:')
     const r = runShadowReplay(db, corpus(), 'run-2')
-    const rows = db.prepare('SELECT * FROM replay_cases WHERE run_id=? ORDER BY thread_id').all(r.runId) as any[]
-    const projections = rows.map(x => ({
-      replayCaseId: x.replay_case_id, domain: x.domain, threadId: x.thread_id, title: x.title,
-      caseType: x.case_type, status: x.status, nextAction: x.next_action, nextActionOwner: x.next_action_owner,
-      waitingOn: x.waiting_on, dueAt: x.due_at, followUpAt: x.follow_up_at, nextWakeAt: x.next_wake_at,
-      scopeNeedsReview: !!x.scope_needs_review, sourceMessageIds: JSON.parse(x.source_message_ids_json), latestSourceAt: x.latest_source_at,
-    }))
+    const projections = readReplayProjections(db, r.runId)
     const m = reconcileReplay('run-2', projections, [{
       caseId: 'prod-A', domain: 'personal', threadIds: ['A'], title: 'Different title', status: 'READY',
       nextAction: null, nextActionOwner: null, hasHumanAuthorityEvent: false, hasExternalReceipt: false,

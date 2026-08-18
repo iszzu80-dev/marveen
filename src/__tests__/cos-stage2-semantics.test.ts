@@ -18,12 +18,23 @@ const prod = (over: Partial<ProductionCaseSnapshot> = {}): ProductionCaseSnapsho
   hasHumanAuthorityEvent: false, hasExternalReceipt: false, ...over,
 } as ProductionCaseSnapshot)
 
+// An OVERLAID projection: production lent the type, so the conditional fields
+// exist and may be compared. Without the overlay they would not exist at all.
 const replay = (over: Partial<ReplayCaseProjection> = {}): ReplayCaseProjection => ({
-  replayCaseId: 'r1', domain: 'zst', threadId: 't1', title: 'valami mas',
-  caseType: 'ADMIN', status: 'NEW', nextAction: 'fizetes ellenorzese',
+  replayCaseId: 'r1', domain: 'zst', threadId: 't1', title: null,
+  projectionAuthority: 'CONDITIONAL_ON_PRODUCTION_TYPE', productionCaseId: 'zst-zst-m1',
+  caseType: 'INVOICE_INCOMING', status: 'NEW', nextAction: 'fizetes ellenorzese',
   nextActionOwner: 'istvan', waitingOn: null, dueAt: null, followUpAt: 100, nextWakeAt: null,
   ...over,
 } as ReplayCaseProjection)
+
+/** A historical source replay: no overlay, so nothing downstream of the triage
+ *  verdict was produced. Every judgement field is absent, on purpose. */
+const historical = (over: Partial<ReplayCaseProjection> = {}): ReplayCaseProjection => replay({
+  projectionAuthority: 'HISTORICAL_SOURCE_REPLAY', productionCaseId: null,
+  caseType: null, title: null, status: null, nextAction: null, nextActionOwner: null,
+  waitingOn: null, dueAt: null, followUpAt: null, nextWakeAt: null, ...over,
+})
 
 describe('Stage 2H — what a replay may claim', () => {
   it('never labels the triage-derived fields SOURCE_DERIVED', () => {
@@ -33,7 +44,7 @@ describe('Stage 2H — what a replay may claim', () => {
   })
 
   it('counts a differing caseType as coverage, not as a mismatch', () => {
-    const m = reconcileReplay('run1', [replay()], [prod()])
+    const m = reconcileReplay('run1', [replay({ caseType: 'ADMIN' })], [prod()])
     const ct = m.findings.filter(f => f.field === 'caseType')
     expect(ct).toHaveLength(1)
     expect(ct[0].authority).toBe('NOT_REPLAYABLE')
@@ -44,7 +55,7 @@ describe('Stage 2H — what a replay may claim', () => {
   })
 
   it('counts an IDENTICAL caseType as coverage too — a coincidence is not evidence', () => {
-    const m = reconcileReplay('run1', [replay({ caseType: 'INVOICE_INCOMING', title: 'Szamla erkezett' })], [prod()])
+    const m = reconcileReplay('run1', [replay({ title: 'Szamla erkezett' })], [prod()])
     const ct = m.findings.find(f => f.field === 'caseType')
     expect(ct?.authority).toBe('NOT_REPLAYABLE')
     expect(m.coverage.matched).toBe(m.coverage.compared - m.coverage.mismatched)
@@ -73,11 +84,13 @@ describe('Stage 2H — what a replay may claim', () => {
     expect(classifyField('status', prod({ hasHumanAuthorityEvent: true }))).toBe('PRODUCTION_AUTHORITATIVE')
   })
 
-  it('reports the seven Stage 2H counters and no aggregate agreement figure', () => {
+  it('reports the Stage 2H counters and no aggregate agreement figure', () => {
     const m = reconcileReplay('run1', [replay()], [prod()])
-    expect(Object.keys(m.coverage).sort()).toEqual(
-      ['compared', 'conditional', 'eligible', 'matched', 'mismatched', 'notReplayable', 'unknown'])
-    expect(m.coverage.eligible).toBe(m.coverage.compared + m.coverage.notReplayable)
+    expect(Object.keys(m.coverage).sort()).toEqual([
+      'compared', 'conditional', 'conditionalMismatched', 'conditionalNotAttempted',
+      'eligible', 'matched', 'mismatched', 'notReplayable', 'unknown'])
+    expect(m.coverage.eligible).toBe(
+      m.coverage.compared + m.coverage.notReplayable + m.coverage.conditionalNotAttempted)
     expect(JSON.stringify(m)).not.toMatch(/agreementPercent|agreementRate|"agreement"/)
   })
 
