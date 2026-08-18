@@ -184,7 +184,16 @@ export interface CorrectionManifest {
 // Four separate statuses, because one boolean could go green while the surface
 // that matters was never run. NOT_RUN is not PASS and NOT_REPLAYABLE is not PASS.
 
-export type ParitySurfaceStatus = 'PASS' | 'FAIL' | 'NOT_RUN' | 'NOT_REPLAYABLE'
+export type ParitySurfaceStatus =
+  | 'PASS'
+  | 'FAIL'
+  | 'NOT_RUN'
+  | 'NOT_REPLAYABLE'
+  /** The surface ran and found nothing it is entitled to measure. Retired
+   *  2026-08-18 for FULL_BODY: production extracted from the ~200-char provider
+   *  snippet in all 15 cases, so a full-body replay has zero historical targets.
+   *  Not FAIL (nothing failed) and not NOT_RUN (it ran). */
+  | 'NO_ELIGIBLE_HISTORICAL_INPUT'
 
 export interface ReplayReadiness {
   /** connector/thread/message identity, provider time, direction, digests */
@@ -204,9 +213,25 @@ export interface ReplayReadiness {
 
 export type ExtractorRoute = 'INVOICE' | 'CONTRACT'
 
+/** What input the extractor was fed, and therefore what the result may be called.
+ *  Measured by the 2026-08-18 provenance audit, never inferred here. */
+export type InputBasis =
+  /** the provider snippet plus the real From/Subject: what production received */
+  | 'HISTORICAL_PROVIDER_SNIPPET_WITH_HEADERS'
+  /** the production input cannot be reproduced for this thread */
+  | 'HISTORICAL_INPUT_NOT_EQUIVALENT'
+  /** full body: a current-extractor evaluation, NEVER historical parity */
+  | 'CURRENT_FULL_BODY'
+
+/** The two outcomes an extractor run can have. "No row" is one of them, and it is
+ *  a result, not a silence: it counts only when the extractor demonstrably ran. */
+export type ExtractionOutcome = 'STRUCTURED_ROW' | 'NO_EXTRACTION'
+
 export type ExtractorParityVerdict =
   | 'PASS'
   | 'MISMATCH'
+  /** the thread's input basis excludes it from the parity denominator */
+  | 'NOT_IN_DENOMINATOR'
   /** the replay extracted a row production holds none of. Not a mismatch between
    *  two answers — production has no answer here — and never a pass either. */
   | 'PRODUCTION_HAS_NO_ROW'
@@ -240,12 +265,22 @@ export interface ExtractorParityRow {
   caseType: string
   route: ExtractorRoute | null
   sourceMessageId: string | null
-  extractionSource: 'FULL_BODY' | null
+  inputBasis: InputBasis
+  /** sha256 over the exact bytes handed to the extractor. Two runs that disagree
+   *  here were not comparing the same thing, whatever their verdicts say. */
+  inputDigest: string | null
   authority: 'CONDITIONAL_ON_PRODUCTION_TYPE'
   /** always false: an overlay-fed run can never prove the classification */
   classificationProof: false
-  /** what the replay-side extractor itself reported */
-  replayExtractionStatus: 'EXTRACTED' | 'NOT_AN_INVOICE_OR_CONTRACT' | 'THREW' | 'NOT_ATTEMPTED'
+  /** false when the row was excluded before any extractor was called */
+  extractorAttempted: boolean
+  /** what production's stored state says the historical outcome was */
+  expectedHistorical: ExtractionOutcome | null
+  /** what this replay produced */
+  replayResult: ExtractionOutcome | null
+  /** duplicate fingerprints of both sides, when a row exists */
+  productionFingerprint: string | null
+  replayFingerprint: string | null
   replayConfidence: string | null
   replayExtractedFields: string[]
   comparisons: FieldParity[]
@@ -257,15 +292,26 @@ export interface ExtractorParityReport {
   generatedAt: number
   authority: 'CONDITIONAL_ON_PRODUCTION_TYPE'
   classificationProof: false
+  /** CURRENT_FULL_BODY runs are diagnostics and are marked as such here too. */
+  basis: 'HISTORICAL' | 'CURRENT_ONLY'
   rows: ExtractorParityRow[]
+  /** sha256 over the deterministic projection of every row: result kinds,
+   *  structured output, fingerprints, input digests. Carries no timestamp, so
+   *  two runs on the same immutable input must produce the same value. */
+  parityDigest: string
   summary: {
     targets: number
+    /** targets whose input basis lets them be compared at all */
+    eligible: number
+    /** of the eligible, the ones actually compared */
+    compared: number
     pass: number
     mismatch: number
     productionHasNoRow: number
     inputNotEquivalent: number
     notRouted: number
     seamBlocked: number
+    unknown: number
     /** field-level, across every comparable row */
     fieldsCompared: number
     fieldsMatched: number

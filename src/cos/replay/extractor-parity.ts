@@ -2,19 +2,28 @@
 //
 // What this measures: given the production caseType as an EXTERNAL INPUT
 // (PRODUCTION_AUTHORITY_OVERLAY), does the real production extractor, fed the
-// real production input message at FULL_BODY, produce the structured rows
-// production holds?
+// input production actually received, reproduce the structured state production
+// holds?
 //
 // What this does NOT measure, ever: whether the classification was right. The
 // type was borrowed, so `classificationProof` is a literal false on every row.
 //
+// The input basis is the whole argument. The 2026-08-18 provenance audit measured
+// that production extracted from the ~200-character provider snippet in all 15
+// cases, and that the 2026-08-07 batch reached the extractor with no From and no
+// Subject at all. So:
+//   - a FULL_BODY replay has ZERO historical targets. It is a current-extractor
+//     evaluation, never historical parity;
+//   - only threads whose production input is reproducible per thread may enter
+//     the denominator, and that judgement is EVIDENCE supplied by the caller,
+//     not something this module infers.
+//
 // Everything below runs the production modules themselves — the schema
-// initializer, the scope gate, the extractor route, and the two extractors. A
-// reimplementation would be a second answer, and the report would be measuring
-// the second answer rather than the shipped one. The only thing this file owns
-// is the comparison.
+// initializer, the scope gate, the extractor route, and the two extractors. The
+// only thing this file owns is the comparison.
 
 import type Database from 'better-sqlite3'
+import { createHash } from 'node:crypto'
 import { initCosSchema } from '../schema.js'
 import { classifyScope } from '../scope-gate.js'
 import { routeZstExtractor } from '../zst-intake.js'
@@ -22,8 +31,8 @@ import { ingestZstInvoiceEmail, SNIPPET_EXTRACTION_NOTE } from '../zst-invoice-e
 import { ingestZstContractEmail } from '../zst-contract-extract.js'
 import { normaliseSourceReference } from './source-reference.js'
 import type {
-  ExtractorParityReport, ExtractorParityRow, ExtractorParityVerdict, FieldParity, FieldParityVerdict,
-  ProductionAuthorityOverlay, ProductionCaseSnapshot, ReplayMessage,
+  ExtractionOutcome, ExtractorParityReport, ExtractorParityRow, ExtractorParityVerdict,
+  FieldParity, FieldParityVerdict, InputBasis, ProductionAuthorityOverlay, ProductionCaseSnapshot,
 } from './types.js'
 
 /** The production `zst_invoices` row, as exported read-only from the live store. */
@@ -54,17 +63,28 @@ export interface ProductionContractRow {
   currency: string | null
 }
 
+/** The exact input production is known to have received for one message. */
+export interface HistoricalInput {
+  subject: string
+  from: string
+  /** the provider snippet: what production passed as the extractor body */
+  snippet: string
+}
+
 export interface ConditionalExtractorParityInput {
   overlays: readonly ProductionAuthorityOverlay[]
-  /** the immutable corpus messages for the target threads */
-  messages: readonly ReplayMessage[]
-  /** production cases, read for `sourceReference`: the exact input message */
   productionCases: readonly ProductionCaseSnapshot[]
   productionInvoices: readonly ProductionInvoiceRow[]
   productionContracts: readonly ProductionContractRow[]
+  /** keyed by production caseId. A target with no entry is refused, never
+   *  defaulted to eligible: an undeclared basis is an unknown one. */
+  inputBasisByCase: Readonly<Record<string, InputBasis>>
+  /** keyed by messageId (the production `source_reference`) */
+  historicalInputByMessage: Readonly<Record<string, HistoricalInput>>
 }
 
 const NOT_PERSISTED = 'PRODUCTION_NOT_PERSISTED' as const
+const sha = (s: string) => createHash('sha256').update(s).digest('hex')
 
 function cmp(field: string, productionValue: unknown, replayValue: unknown): FieldParity {
   const p = productionValue ?? null
@@ -76,272 +96,275 @@ function cmp(field: string, productionValue: unknown, replayValue: unknown): Fie
   else verdict = JSON.stringify(p) === JSON.stringify(r) ? 'PASS' : 'MISMATCH'
   return { field, productionValue: p, replayValue: r, verdict }
 }
-
 function notPersisted(field: string, replayValue: unknown): FieldParity {
   return { field, productionValue: NOT_PERSISTED, replayValue: replayValue ?? null, verdict: NOT_PERSISTED }
 }
-
 const DIFFERING: ReadonlySet<FieldParityVerdict> = new Set(['MISMATCH', 'PRODUCTION_ABSENT', 'REPLAY_ABSENT'])
 
-/** Run the production extractors on a shadow SQLite for every overlaid thread,
- *  and compare the structured result field by field against production.
- *
- *  `shadowDb` MUST be a shadow handle. This function calls `initCosSchema` on it
- *  and writes extractor rows into it. It never opens, reads or writes the live
- *  store, and it creates no case: the extractors are called with production's
- *  own caseId exactly as production calls them. */
+/** Deterministic projection of a run. Deliberately excludes every timestamp and
+ *  every free-text reason: two runs on the same immutable input must hash the
+ *  same, and a digest that moved because a clock moved proves nothing. */
+export function parityDigestOf(rows: readonly ExtractorParityRow[]): string {
+  const projection = rows
+    .map(r => ({
+      threadId: r.threadId, productionCaseId: r.productionCaseId, caseType: r.caseType,
+      route: r.route, sourceMessageId: r.sourceMessageId, inputBasis: r.inputBasis,
+      inputDigest: r.inputDigest, extractorAttempted: r.extractorAttempted,
+      expectedHistorical: r.expectedHistorical, replayResult: r.replayResult,
+      productionFingerprint: r.productionFingerprint, replayFingerprint: r.replayFingerprint,
+      replayConfidence: r.replayConfidence, replayExtractedFields: [...r.replayExtractedFields].sort(),
+      comparisons: r.comparisons.map(c => [c.field, c.verdict, JSON.stringify(c.productionValue ?? null), JSON.stringify(c.replayValue ?? null)]),
+      verdict: r.verdict,
+    }))
+    .sort((a, b) => a.productionCaseId.localeCompare(b.productionCaseId))
+  return sha(JSON.stringify(projection))
+}
+
+interface RunOptions {
+  /** CURRENT_FULL_BODY diagnostics: bodies keyed by messageId. When present the
+   *  run is a current-extractor evaluation and every row is stamped as such. */
+  currentFullBodyByMessage?: Readonly<Record<string, string>>
+}
+
 export function runConditionalExtractorParity(
   shadowDb: Database.Database,
   input: ConditionalExtractorParityInput,
   now: number,
+  options: RunOptions = {},
 ): ExtractorParityReport {
-  // The real production schema initializer, on the shadow database only. This is
-  // the whole point of the fix: the shadow used to hold four private tables and
-  // therefore had no row an invoice or a contract could differ in, so the
-  // comparison reported agreement out of its own silence.
+  // The real production schema initializer, on the shadow database only.
   initCosSchema(shadowDb)
 
-  // The shadow deliberately holds no zst_cases rows — creating one would need a
-  // triage verdict, which is exactly the NOT_REPLAYABLE thing. zst_invoices.case_id
-  // references zst_cases (and better-sqlite3 enforces foreign keys by default), so
-  // the referent is missing by design.
-  //
-  // The choice here is between changing the CALL and changing the DATABASE. Passing
-  // a null caseId would make the extractor input differ from production's, and an
-  // input difference is precisely what this surface must not introduce. So the call
-  // stays byte-identical to production's and the shadow drops FK enforcement for the
-  // duration — the referent is absent, not the argument.
+  // The shadow deliberately holds no zst_cases rows, and zst_invoices.case_id
+  // references them. The call stays byte-identical to production's; the shadow
+  // drops FK enforcement instead, so the referent is absent, not the argument.
   const priorFk = Number(shadowDb.pragma('foreign_keys', { simple: true })) === 1
   shadowDb.pragma('foreign_keys = OFF')
   if (Number(shadowDb.pragma('foreign_keys', { simple: true })) === 1) {
     throw new Error(
       'SEAM_BLOCKED: foreign_keys could not be turned off for this shadow handle (a pragma inside an open '
-      + 'transaction is a silent no-op). The extractor insert would fail on the missing case_id referent and '
-      + 'the failure would be misread as an extraction difference.')
+      + 'transaction is a silent no-op).')
   }
   try {
-    return parityRuns()
+    return run()
   } finally {
     if (priorFk) shadowDb.pragma('foreign_keys = ON')
   }
 
-  function parityRuns(): ExtractorParityReport {
+  function run(): ExtractorParityReport {
+    const currentOnly = options.currentFullBodyByMessage != null
+    const caseById = new Map<string, ProductionCaseSnapshot>()
+    for (const c of input.productionCases) caseById.set(c.caseId, c)
+    const invoiceByCase = new Map<string, ProductionInvoiceRow>()
+    for (const i of input.productionInvoices) if (i.caseId) invoiceByCase.set(i.caseId, i)
+    const contractByCase = new Map<string, ProductionContractRow>()
+    for (const c of input.productionContracts) if (c.caseId) contractByCase.set(c.caseId, c)
 
-  const messagesById = new Map<string, ReplayMessage>()
-  for (const m of input.messages) messagesById.set(m.messageId, m)
-  const caseById = new Map<string, ProductionCaseSnapshot>()
-  for (const c of input.productionCases) caseById.set(c.caseId, c)
-  const invoiceByCase = new Map<string, ProductionInvoiceRow>()
-  for (const i of input.productionInvoices) if (i.caseId) invoiceByCase.set(i.caseId, i)
-  const contractByCase = new Map<string, ProductionContractRow>()
-  for (const c of input.productionContracts) if (c.caseId) contractByCase.set(c.caseId, c)
+    const rows: ExtractorParityRow[] = []
 
-  const rows: ExtractorParityRow[] = []
-
-  for (const overlay of input.overlays) {
-    const reasons: string[] = []
-    const base = {
-      threadId: overlay.threadId,
-      productionCaseId: overlay.productionCaseId,
-      caseType: overlay.caseType,
-      authority: 'CONDITIONAL_ON_PRODUCTION_TYPE' as const,
-      classificationProof: false as const,
-    }
-
-    const route = routeZstExtractor(overlay.caseType)
-    if (!route) {
-      rows.push({
-        ...base, route: null, sourceMessageId: null, extractionSource: null,
-        replayExtractionStatus: 'NOT_ATTEMPTED', replayConfidence: null, replayExtractedFields: [],
-        comparisons: [], verdict: 'NOT_ROUTED',
-        reasons: [`the production gate (routeZstExtractor) routes '${overlay.caseType}' to no extractor`],
-      })
-      continue
-    }
-
-    const prodCase = caseById.get(overlay.productionCaseId)
-    const sourceMessageId = prodCase?.sourceReference ?? null
-    const msg = sourceMessageId ? messagesById.get(sourceMessageId) ?? null : null
-    if (!msg) {
-      rows.push({
-        ...base, route, sourceMessageId, extractionSource: null,
-        replayExtractionStatus: 'NOT_ATTEMPTED', replayConfidence: null, replayExtractedFields: [],
-        comparisons: [], verdict: 'RETRIAGE_INPUT_NOT_EQUIVALENT',
-        reasons: [sourceMessageId
-          ? `production input message ${sourceMessageId} is not in the corpus; the replay would extract from a different mail`
-          : `production case ${overlay.productionCaseId} has no source_reference; the exact production input is unknown`],
-      })
-      continue
-    }
-
-    // The production gate, run rather than assumed.
-    const scope = classifyScope({
-      text: `${msg.subject}\n${msg.bodyText}`, accountId: msg.sourceAccountId, corporateAccounts: ['zst'],
-    })
-    if (scope.target !== 'zst') {
-      rows.push({
-        ...base, route, sourceMessageId, extractionSource: null,
-        replayExtractionStatus: 'NOT_ATTEMPTED', replayConfidence: null, replayExtractedFields: [],
-        comparisons: [], verdict: 'SEAM_BLOCKED',
-        reasons: [`the production scope gate resolves this message to '${scope.target ?? 'SECURITY_BLOCKED'}', not zst; `
-          + 'the ZST extractors are not the production path for it'],
-      })
-      continue
-    }
-    if (scope.needsReview) reasons.push('the production scope gate flagged this message for review')
-
-    const src = {
-      caseId: overlay.productionCaseId,
-      from: msg.from ?? '',
-      subject: msg.subject,
-      body: msg.bodyText,
-      extractionSource: 'FULL_BODY' as const,
-    }
-
-    let replayConfidence: string | null = null
-    let replayExtractedFields: string[] = []
-    let replayExtractionStatus: ExtractorParityRow['replayExtractionStatus'] = 'NOT_ATTEMPTED'
-    let comparisons: FieldParity[] = []
-    let verdict: ExtractorParityVerdict = 'PASS'
-    let productionRowMissing = false
-
-    try {
-      if (route === 'INVOICE') {
-        const prod = invoiceByCase.get(overlay.productionCaseId) ?? null
-        if (prod?.notes?.includes(SNIPPET_EXTRACTION_NOTE)) {
-          // Production extracted from a 300-character snippet. A FULL_BODY replay
-          // is a different input, and every field it finds past character 300 is
-          // a difference in the INPUT, not in the extractor.
-          rows.push({
-            ...base, route, sourceMessageId, extractionSource: null,
-            replayExtractionStatus: 'NOT_ATTEMPTED', replayConfidence: null, replayExtractedFields: [],
-            comparisons: [], verdict: 'RETRIAGE_INPUT_NOT_EQUIVALENT',
-            reasons: [...reasons, `production stored ${SNIPPET_EXTRACTION_NOTE}: it extracted from the snippet, `
-              + 'so a FULL_BODY replay is not the same input and its differences are not extractor differences'],
-          })
-          continue
-        }
-        const out = ingestZstInvoiceEmail(shadowDb, src, now)
-        if (!out) {
-          replayExtractionStatus = 'NOT_AN_INVOICE_OR_CONTRACT'
-        } else {
-          replayExtractionStatus = 'EXTRACTED'
-          replayConfidence = out.confidence
-          replayExtractedFields = out.extracted
-          const r = shadowDb.prepare(
-            `SELECT invoice_number, supplier_id, gross_amount, currency, issue_date, due_date, notes
-               FROM zst_invoices WHERE invoice_id = ?`
-          ).get(out.invoiceId) as Record<string, unknown> | undefined
-          comparisons = [
-            cmp('invoiceNumber', prod?.invoiceNumber ?? null, r?.invoice_number ?? null),
-            cmp('supplierId', prod?.supplierId ?? null, r?.supplier_id ?? null),
-            cmp('grossAmount', prod?.grossAmount ?? null, r?.gross_amount ?? null),
-            cmp('currency', prod?.currency ?? null, r?.currency ?? null),
-            cmp('issueDate', prod?.issueDate ?? null, r?.issue_date ?? null),
-            cmp('dueDate', prod?.dueDate ?? null, r?.due_date ?? null),
-            // Confidence and the extracted-field list are the extractor's own
-            // evidence about its read. Production keeps neither, so they are
-            // reported, never scored.
-            notPersisted('extractionConfidence', out.confidence),
-            notPersisted('extractedFields', out.extracted),
-          ]
-        }
-        if (!prod && replayExtractionStatus === 'EXTRACTED') {
-          productionRowMissing = true
-          reasons.push('production holds no zst_invoices row for this case: production routed the type to the '
-            + 'extractor and stored nothing, while the replay extracted a row from the same mail')
-        }
-      } else {
-        const prod = contractByCase.get(overlay.productionCaseId) ?? null
-        const out = ingestZstContractEmail(shadowDb, src, now)
-        if (!out) {
-          replayExtractionStatus = 'NOT_AN_INVOICE_OR_CONTRACT'
-        } else {
-          replayExtractionStatus = 'EXTRACTED'
-          replayConfidence = out.confidence
-          replayExtractedFields = out.extracted
-          const r = shadowDb.prepare(
-            `SELECT title, contract_type, counterparty_id, effective_date, expiry_date, renewal_type,
-                    notice_period_days, termination_deadline, financial_commitment, currency
-               FROM zst_contracts WHERE contract_id = ?`
-          ).get(out.contractId) as Record<string, unknown> | undefined
-          comparisons = [
-            cmp('title', prod?.title ?? null, r?.title ?? null),
-            cmp('contractType', prod?.contractType ?? null, r?.contract_type ?? null),
-            cmp('counterpartyId', prod?.counterpartyId ?? null, r?.counterparty_id ?? null),
-            cmp('effectiveDate', prod?.effectiveDate ?? null, r?.effective_date ?? null),
-            cmp('expiryDate', prod?.expiryDate ?? null, r?.expiry_date ?? null),
-            cmp('renewalType', prod?.renewalType ?? null, r?.renewal_type ?? null),
-            cmp('noticePeriodDays', prod?.noticePeriodDays ?? null, r?.notice_period_days ?? null),
-            cmp('terminationDeadline', prod?.terminationDeadline ?? null, r?.termination_deadline ?? null),
-            cmp('financialCommitment', prod?.financialCommitment ?? null, r?.financial_commitment ?? null),
-            cmp('currency', prod?.currency ?? null, r?.currency ?? null),
-            notPersisted('extractionConfidence', out.confidence),
-            notPersisted('extractedFields', out.extracted),
-          ]
-        }
-        // zst_contracts has no notes column, so production keeps no record of
-        // whether IT read a snippet or a full body. Stated, not assumed away.
-        reasons.push('contract input equivalence cannot be confirmed from the store: zst_contracts persists no extraction-source marker')
-        if (!prod && replayExtractionStatus === 'EXTRACTED') {
-          productionRowMissing = true
-          reasons.push('production holds no zst_contracts row for this case: production routed the type to the '
-            + 'extractor and stored nothing, while the replay extracted a row from the same mail')
-        }
+    for (const overlay of input.overlays) {
+      const reasons: string[] = []
+      const declared = input.inputBasisByCase[overlay.productionCaseId]
+      const basis: InputBasis = currentOnly ? 'CURRENT_FULL_BODY' : declared ?? 'HISTORICAL_INPUT_NOT_EQUIVALENT'
+      if (!currentOnly && !declared) {
+        reasons.push('no input basis was declared for this case; an undeclared basis is treated as not equivalent, '
+          + 'never as eligible')
       }
-    } catch (err) {
-      replayExtractionStatus = 'THREW'
-      reasons.push(`the production extractor threw: ${err instanceof Error ? err.message : String(err)}`)
+      const route = routeZstExtractor(overlay.caseType)
+      const prodCase = caseById.get(overlay.productionCaseId)
+      const sourceMessageId = normaliseSourceReference(prodCase?.sourceReference)
+      const prodInvoice = invoiceByCase.get(overlay.productionCaseId) ?? null
+      const prodContract = contractByCase.get(overlay.productionCaseId) ?? null
+      const productionHasRow = route === 'INVOICE' ? prodInvoice != null : prodContract != null
+      // Production's own stored state is the expectation. It is read, not guessed.
+      const expectedHistorical: ExtractionOutcome = productionHasRow ? 'STRUCTURED_ROW' : 'NO_EXTRACTION'
+      const productionFingerprint = route === 'INVOICE'
+        ? (prodInvoice ? invoiceFingerprint(prodInvoice) : null)
+        : (prodContract ? contractFingerprint(prodContract) : null)
+
+      const base = {
+        threadId: overlay.threadId, productionCaseId: overlay.productionCaseId, caseType: overlay.caseType,
+        route, sourceMessageId, inputBasis: basis,
+        authority: 'CONDITIONAL_ON_PRODUCTION_TYPE' as const, classificationProof: false as const,
+        expectedHistorical, productionFingerprint,
+      }
+      const excluded = (verdict: ExtractorParityVerdict, why: string): ExtractorParityRow => ({
+        ...base, inputDigest: null, extractorAttempted: false, replayResult: null,
+        replayFingerprint: null, replayConfidence: null, replayExtractedFields: [], comparisons: [],
+        verdict, reasons: [...reasons, why],
+      })
+
+      if (!route) { rows.push(excluded('NOT_ROUTED', `the production gate routes '${overlay.caseType}' to no extractor`)); continue }
+      if (basis === 'HISTORICAL_INPUT_NOT_EQUIVALENT') {
+        rows.push(excluded('NOT_IN_DENOMINATOR',
+          'the production input for this thread is not reproducible; it is excluded from the parity denominator '
+          + 'rather than compared against a substitute')); continue
+      }
+      if (!sourceMessageId) {
+        rows.push(excluded('RETRIAGE_INPUT_NOT_EQUIVALENT',
+          `production case ${overlay.productionCaseId} names no single source message`)); continue
+      }
+
+      // Assemble the exact input.
+      let subject: string, from: string, body: string
+      if (currentOnly) {
+        const hist = input.historicalInputByMessage[sourceMessageId]
+        const full = options.currentFullBodyByMessage![sourceMessageId]
+        if (!hist || full == null) { rows.push(excluded('RETRIAGE_INPUT_NOT_EQUIVALENT', 'no full body available for this message')); continue }
+        subject = hist.subject; from = hist.from; body = full
+      } else {
+        const hist = input.historicalInputByMessage[sourceMessageId]
+        if (!hist) { rows.push(excluded('RETRIAGE_INPUT_NOT_EQUIVALENT', `no historical input recorded for message ${sourceMessageId}`)); continue }
+        subject = hist.subject; from = hist.from; body = hist.snippet
+      }
+
+      if (route === 'INVOICE' && prodInvoice?.notes?.includes(SNIPPET_EXTRACTION_NOTE) && currentOnly) {
+        rows.push(excluded('RETRIAGE_INPUT_NOT_EQUIVALENT',
+          `production stored ${SNIPPET_EXTRACTION_NOTE}: a full-body run is a different input`)); continue
+      }
+
+      // The production gate, run rather than assumed.
+      const scope = classifyScope({ text: `${subject}\n${body}`, accountId: 'zst', corporateAccounts: ['zst'] })
+      if (scope.target !== 'zst') {
+        rows.push(excluded('SEAM_BLOCKED',
+          `the production scope gate resolves this message to '${scope.target ?? 'SECURITY_BLOCKED'}', not zst`)); continue
+      }
+      if (scope.needsReview) reasons.push('the production scope gate flagged this message for review')
+
+      const src = {
+        caseId: overlay.productionCaseId, from, subject, body,
+        extractionSource: (currentOnly ? 'FULL_BODY' : 'SNIPPET') as 'FULL_BODY' | 'SNIPPET',
+      }
+      const inputDigest = sha(JSON.stringify([src.caseId, src.from, src.subject, src.body, src.extractionSource]))
+
+      let replayResult: ExtractionOutcome
+      let replayFingerprint: string | null = null
+      let replayConfidence: string | null = null
+      let replayExtractedFields: string[] = []
+      let comparisons: FieldParity[] = []
+
+      try {
+        if (route === 'INVOICE') {
+          const out = ingestZstInvoiceEmail(shadowDb, src, now)
+          if (!out) replayResult = 'NO_EXTRACTION'
+          else {
+            replayResult = 'STRUCTURED_ROW'
+            replayConfidence = out.confidence; replayExtractedFields = out.extracted
+            const r = shadowDb.prepare(
+              `SELECT invoice_number, supplier_id, gross_amount, currency, issue_date, due_date, duplicate_hash
+                 FROM zst_invoices WHERE invoice_id = ?`).get(out.invoiceId) as Record<string, unknown> | undefined
+            replayFingerprint = r?.duplicate_hash == null ? null : String(r.duplicate_hash)
+            comparisons = [
+              cmp('invoiceNumber', prodInvoice?.invoiceNumber ?? null, r?.invoice_number ?? null),
+              cmp('supplierId', prodInvoice?.supplierId ?? null, r?.supplier_id ?? null),
+              cmp('grossAmount', prodInvoice?.grossAmount ?? null, r?.gross_amount ?? null),
+              cmp('currency', prodInvoice?.currency ?? null, r?.currency ?? null),
+              cmp('issueDate', prodInvoice?.issueDate ?? null, r?.issue_date ?? null),
+              cmp('dueDate', prodInvoice?.dueDate ?? null, r?.due_date ?? null),
+              notPersisted('extractionConfidence', out.confidence),
+              notPersisted('extractedFields', out.extracted),
+            ]
+          }
+        } else {
+          const out = ingestZstContractEmail(shadowDb, src, now)
+          if (!out) replayResult = 'NO_EXTRACTION'
+          else {
+            replayResult = 'STRUCTURED_ROW'
+            replayConfidence = out.confidence; replayExtractedFields = out.extracted
+            const r = shadowDb.prepare(
+              `SELECT title, contract_type, counterparty_id, effective_date, expiry_date, renewal_type,
+                      notice_period_days, termination_deadline, financial_commitment, currency
+                 FROM zst_contracts WHERE contract_id = ?`).get(out.contractId) as Record<string, unknown> | undefined
+            replayFingerprint = out.contractId
+            comparisons = [
+              cmp('title', prodContract?.title ?? null, r?.title ?? null),
+              cmp('contractType', prodContract?.contractType ?? null, r?.contract_type ?? null),
+              cmp('counterpartyId', prodContract?.counterpartyId ?? null, r?.counterparty_id ?? null),
+              cmp('effectiveDate', prodContract?.effectiveDate ?? null, r?.effective_date ?? null),
+              cmp('expiryDate', prodContract?.expiryDate ?? null, r?.expiry_date ?? null),
+              cmp('renewalType', prodContract?.renewalType ?? null, r?.renewal_type ?? null),
+              cmp('noticePeriodDays', prodContract?.noticePeriodDays ?? null, r?.notice_period_days ?? null),
+              cmp('terminationDeadline', prodContract?.terminationDeadline ?? null, r?.termination_deadline ?? null),
+              cmp('financialCommitment', prodContract?.financialCommitment ?? null, r?.financial_commitment ?? null),
+              cmp('currency', prodContract?.currency ?? null, r?.currency ?? null),
+              notPersisted('extractionConfidence', out.confidence),
+              notPersisted('extractedFields', out.extracted),
+            ]
+          }
+        }
+      } catch (err) {
+        rows.push({
+          ...base, inputDigest, extractorAttempted: true, replayResult: null,
+          replayFingerprint: null, replayConfidence: null, replayExtractedFields: [], comparisons: [],
+          verdict: 'MISMATCH', reasons: [...reasons, `the production extractor threw: ${err instanceof Error ? err.message : String(err)}`],
+        })
+        continue
+      }
+
+      // A missing row passes ONLY as a demonstrated NO_EXTRACTION that matches
+      // production's own outcome. "Neither side has a row" is not agreement
+      // unless the replay actually ran and declined.
+      let verdict: ExtractorParityVerdict
+      if (replayResult !== expectedHistorical) {
+        verdict = expectedHistorical === 'STRUCTURED_ROW' ? 'MISMATCH' : 'PRODUCTION_HAS_NO_ROW'
+        reasons.push(expectedHistorical === 'STRUCTURED_ROW'
+          ? 'production holds a structured row and the replay extracted none from the same input'
+          : 'the replay extracted a row production holds none of')
+      } else if (replayResult === 'NO_EXTRACTION') {
+        verdict = 'PASS'
+        reasons.push('the extractor ran on the historical input and declined it, matching production')
+      } else if (comparisons.some(c => DIFFERING.has(c.verdict))) {
+        verdict = 'MISMATCH'
+      } else {
+        verdict = 'PASS'
+      }
+
+      rows.push({
+        ...base, inputDigest, extractorAttempted: true, replayResult,
+        replayFingerprint, replayConfidence, replayExtractedFields, comparisons, verdict, reasons,
+      })
     }
 
-    if (replayExtractionStatus === 'THREW') verdict = 'MISMATCH'
-    else if (replayExtractionStatus === 'NOT_AN_INVOICE_OR_CONTRACT') {
-      // Production routed this type to the extractor and holds a row; the replay
-      // read the same mail and did not recognise it. That is a difference.
-      const prodHasRow = route === 'INVOICE'
-        ? invoiceByCase.has(overlay.productionCaseId)
-        : contractByCase.has(overlay.productionCaseId)
-      verdict = prodHasRow ? 'MISMATCH' : 'PASS'
-      reasons.push(prodHasRow
-        ? 'the production extractor returned nothing for a mail production holds an extracted row for'
-        : 'neither side extracted a row from this mail')
-    } else if (productionRowMissing) verdict = 'PRODUCTION_HAS_NO_ROW'
-    else if (comparisons.some(c => DIFFERING.has(c.verdict))) verdict = 'MISMATCH'
+    const fields = rows.flatMap(r => r.comparisons)
+    const eligible = rows.filter(r => r.inputBasis === 'HISTORICAL_PROVIDER_SNIPPET_WITH_HEADERS').length
+    const compared = rows.filter(r => r.extractorAttempted && r.inputBasis !== 'HISTORICAL_INPUT_NOT_EQUIVALENT').length
+    return {
+      generatedAt: now,
+      authority: 'CONDITIONAL_ON_PRODUCTION_TYPE',
+      classificationProof: false,
+      basis: currentOnly ? 'CURRENT_ONLY' : 'HISTORICAL',
+      rows,
+      parityDigest: parityDigestOf(rows),
+      summary: {
+        targets: rows.length,
+        eligible,
+        compared,
+        pass: rows.filter(r => r.verdict === 'PASS').length,
+        mismatch: rows.filter(r => r.verdict === 'MISMATCH').length,
+        productionHasNoRow: rows.filter(r => r.verdict === 'PRODUCTION_HAS_NO_ROW').length,
+        inputNotEquivalent: rows.filter(r => r.verdict === 'NOT_IN_DENOMINATOR' || r.verdict === 'RETRIAGE_INPUT_NOT_EQUIVALENT').length,
+        notRouted: rows.filter(r => r.verdict === 'NOT_ROUTED').length,
+        seamBlocked: rows.filter(r => r.verdict === 'SEAM_BLOCKED').length,
+        unknown: rows.filter(r => r.extractorAttempted && r.replayResult == null).length,
+        fieldsCompared: fields.filter(f => f.verdict === 'PASS' || DIFFERING.has(f.verdict)).length,
+        fieldsMatched: fields.filter(f => f.verdict === 'PASS').length,
+        fieldsMismatched: fields.filter(f => DIFFERING.has(f.verdict)).length,
+        fieldsNotPersistedByProduction: fields.filter(f => f.verdict === NOT_PERSISTED).length,
+      },
+    }
+  }
+}
 
-    rows.push({
-      ...base, route, sourceMessageId, extractionSource: 'FULL_BODY',
-      replayExtractionStatus, replayConfidence, replayExtractedFields, comparisons, verdict, reasons,
-    })
-  }
-
-  const fields = rows.flatMap(r => r.comparisons)
-  return {
-    generatedAt: now,
-    authority: 'CONDITIONAL_ON_PRODUCTION_TYPE',
-    classificationProof: false,
-    rows,
-    summary: {
-      targets: rows.length,
-      pass: rows.filter(r => r.verdict === 'PASS').length,
-      mismatch: rows.filter(r => r.verdict === 'MISMATCH').length,
-      productionHasNoRow: rows.filter(r => r.verdict === 'PRODUCTION_HAS_NO_ROW').length,
-      inputNotEquivalent: rows.filter(r => r.verdict === 'RETRIAGE_INPUT_NOT_EQUIVALENT').length,
-      notRouted: rows.filter(r => r.verdict === 'NOT_ROUTED').length,
-      seamBlocked: rows.filter(r => r.verdict === 'SEAM_BLOCKED').length,
-      fieldsCompared: fields.filter(f => f.verdict === 'PASS' || DIFFERING.has(f.verdict)).length,
-      fieldsMatched: fields.filter(f => f.verdict === 'PASS').length,
-      fieldsMismatched: fields.filter(f => DIFFERING.has(f.verdict)).length,
-      fieldsNotPersistedByProduction: fields.filter(f => f.verdict === NOT_PERSISTED).length,
-    },
-  }
-  }
+function invoiceFingerprint(i: ProductionInvoiceRow): string {
+  return sha([i.supplierId ?? '', i.invoiceNumber ?? '', i.grossAmount ?? '', i.issueDate ?? ''].join('|')).slice(0, 32)
+}
+function contractFingerprint(c: ProductionContractRow): string {
+  return 'zst-ctr-' + sha([c.counterpartyId ?? '', c.title ?? '', c.expiryDate ?? ''].join('|')).slice(0, 12)
 }
 
 /** Build the overlays for the threads a production case actually claims, limited
  *  to the corpus. Derived at runtime from the snapshot — never from parsing an
- *  identifier: `zst-zst-<messageId>` looks like it carries the input message, and
- *  reading it that way would silently produce a wrong input the day the id shape
- *  changes. */
+ *  identifier. */
 export function buildProductionAuthorityOverlays(
   productionCases: readonly ProductionCaseSnapshot[],
   corpusThreadIds: ReadonlySet<string>,
@@ -358,6 +381,4 @@ export function buildProductionAuthorityOverlays(
   return overlays
 }
 
-// Re-exported so a caller that already imports the parity surface does not need
-// a second import path for the same concept.
 export { normaliseSourceReference }

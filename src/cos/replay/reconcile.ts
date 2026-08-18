@@ -181,24 +181,74 @@ export interface ReplayReadinessInput {
   manifest: CorrectionManifest
   /** null => the conditional extractor replay has not been run */
   extractorParity: ExtractorParityReport | null
+  /** the two digests of the mandatory double run on the same immutable input.
+   *  Absent => determinism was not demonstrated, which is not the same as passing. */
+  doubleRun?: { digestA: string; digestB: string }
+  /** the denominator the run is expected to have, asserted rather than assumed */
+  expectedDenominator?: { eligible: number; inputNotEquivalent: number }
   /** null => document/attachment parity has not been run */
   documentParity: { pass: boolean; reasons?: string[] } | null
 }
 
-function extractorSurfaceStatus(r: ExtractorParityReport | null): { status: ParitySurfaceStatus; reasons: string[] } {
+function extractorSurfaceStatus(
+  r: ExtractorParityReport | null,
+  doubleRun: ReplayReadinessInput['doubleRun'],
+  expected: ReplayReadinessInput['expectedDenominator'],
+): { status: ParitySurfaceStatus; reasons: string[] } {
   if (!r) return { status: 'NOT_RUN', reasons: ['conditional extractor parity has not been run'] }
-  if (r.summary.targets === 0) {
-    return { status: 'NOT_RUN', reasons: ['conditional extractor parity ran with zero targets; an empty surface is not a passing one'] }
+  if (r.basis === 'CURRENT_ONLY') {
+    return {
+      status: 'NOT_RUN',
+      reasons: ['this report is a CURRENT_FULL_BODY evaluation; a current-extractor run is never historical parity'],
+    }
+  }
+  // Retired 2026-08-18: production extracted from the provider snippet in every
+  // case, so a full-body historical surface has nothing it is entitled to
+  // measure. Saying FAIL would blame the code; saying NOT_RUN would hide that it
+  // ran. It found no eligible input, and that is its own answer.
+  if (r.summary.eligible === 0) {
+    return {
+      status: 'NO_ELIGIBLE_HISTORICAL_INPUT',
+      reasons: ['no thread has a reproducible historical input; nothing was eligible to compare'],
+    }
   }
   const reasons: string[] = []
+  if (r.summary.compared !== r.summary.eligible) {
+    reasons.push(`${r.summary.eligible} eligible target(s) but ${r.summary.compared} compared`)
+  }
+  if (r.summary.pass !== r.summary.eligible) {
+    reasons.push(`${r.summary.pass} of ${r.summary.eligible} eligible target(s) passed`)
+  }
   if (r.summary.mismatch > 0) reasons.push(`${r.summary.mismatch} extractor target(s) mismatch production`)
   if (r.summary.productionHasNoRow > 0) {
     reasons.push(`${r.summary.productionHasNoRow} target(s) where the replay extracted a row production holds none of`)
   }
-  if (r.summary.fieldsMismatched > 0) reasons.push(`${r.summary.fieldsMismatched} extractor field(s) mismatch production`)
   if (r.summary.seamBlocked > 0) reasons.push(`${r.summary.seamBlocked} target(s) blocked at a production seam`)
-  if (r.summary.inputNotEquivalent > 0) reasons.push(`${r.summary.inputNotEquivalent} target(s) RETRIAGE_INPUT_NOT_EQUIVALENT and are not comparable`)
-  if (r.summary.fieldsCompared === 0) reasons.push('no extractor field was actually compared')
+  if (r.summary.unknown > 0) reasons.push(`${r.summary.unknown} target(s) with no determined result`)
+  if (r.summary.fieldsMismatched > 0) reasons.push(`${r.summary.fieldsMismatched} extractor field(s) mismatch production`)
+  // Every eligible row must carry a demonstrated outcome on both sides. A missing
+  // row is a pass only as a proven NO_EXTRACTION, never as mutual silence.
+  for (const row of r.rows) {
+    if (row.inputBasis !== 'HISTORICAL_PROVIDER_SNIPPET_WITH_HEADERS') continue
+    if (!row.extractorAttempted) reasons.push(`${row.productionCaseId}: eligible but the extractor was never run`)
+    else if (row.replayResult == null) reasons.push(`${row.productionCaseId}: no replay result recorded`)
+    else if (row.expectedHistorical == null) reasons.push(`${row.productionCaseId}: no historical expectation recorded`)
+    else if (row.replayResult !== row.expectedHistorical) {
+      reasons.push(`${row.productionCaseId}: expected ${row.expectedHistorical}, replay produced ${row.replayResult}`)
+    }
+  }
+  if (expected) {
+    if (r.summary.eligible !== expected.eligible) {
+      reasons.push(`expected ${expected.eligible} eligible target(s), report has ${r.summary.eligible}`)
+    }
+    if (r.summary.inputNotEquivalent !== expected.inputNotEquivalent) {
+      reasons.push(`expected ${expected.inputNotEquivalent} not-equivalent target(s), report has ${r.summary.inputNotEquivalent}`)
+    }
+  }
+  if (!doubleRun) reasons.push('no double run was supplied; determinism on the same immutable input is not demonstrated')
+  else if (doubleRun.digestA !== doubleRun.digestB) reasons.push('the two runs produced different parity digests')
+  else if (doubleRun.digestA !== r.parityDigest) reasons.push('the reported run does not match the double-run digest')
+
   return { status: reasons.length ? 'FAIL' : 'PASS', reasons }
 }
 
@@ -220,7 +270,7 @@ export function evaluateReplayReadiness(input: ReplayReadinessInput): ReplayRead
     if (input.manifest.summary.unclassified > 0) reasons.push(`${input.manifest.summary.unclassified} unclassified finding(s)`)
   }
 
-  const ext = extractorSurfaceStatus(input.extractorParity)
+  const ext = extractorSurfaceStatus(input.extractorParity, input.doubleRun, input.expectedDenominator)
   reasons.push(...ext.reasons)
 
   const documentParityStatus: ParitySurfaceStatus = input.documentParity == null

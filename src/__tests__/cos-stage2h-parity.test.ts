@@ -5,14 +5,14 @@ import {
   runShadowReplay, readReplayProjections, ensureShadowReplaySchema,
 } from '../cos/replay/shadow-replay.js'
 import {
-  runConditionalExtractorParity, buildProductionAuthorityOverlays, normaliseSourceReference,
-  type ProductionInvoiceRow, type ProductionContractRow,
+  runConditionalExtractorParity, buildProductionAuthorityOverlays, normaliseSourceReference, parityDigestOf,
+  type ProductionInvoiceRow, type ProductionContractRow, type ConditionalExtractorParityInput,
 } from '../cos/replay/extractor-parity.js'
 import { evaluateReplayReadiness, reconcileReplay, replayReadyForStability } from '../cos/replay/reconcile.js'
 import { projectZstOperationalIntake } from '../cos/zst-operational-projector.js'
 import { routeZstExtractor } from '../cos/zst-intake.js'
 import type {
-  CorrectionManifest, ExtractorParityReport, ProductionAuthorityOverlay, ProductionCaseSnapshot,
+  CorrectionManifest, ExtractorParityReport, InputBasis, ProductionAuthorityOverlay, ProductionCaseSnapshot,
   ReplayCorpus, ReplayMessage,
 } from '../cos/replay/types.js'
 
@@ -152,28 +152,21 @@ describe('Stage 2H point 2 — the overlay feeds the production projector', () =
   })
 })
 
-// ── Point 3: the parity surface measures the real extractors ───────────────
+// ── Point 3: the parity surface measures the real extractors, on the input
+//    production actually received ────────────────────────────────────────────
 
-const INVOICE_BODY = 'Tisztelt Szabo Istvan!\nSzámlaszám: 2026/0042\nBrutto osszeg: 15 484 Ft\n'
-  + 'Kelt: 2026-07-22\nFizetesi hatarido: 2026-08-05\n'
-const CONTRACT_BODY = 'A szerzodes lejarati datuma 2026-09-30. Felmondasi ido 30 nap. Eves dij 120 000 Ft.\n'
-
-const invoiceMsg = msg({
-  messageId: 'inv-1', threadId: 'ti', subject: 'Ertesito: szamla erkezett',
-  from: '"Relacio KFT." <relacio.kft@szamlazz.hu>', bodyText: INVOICE_BODY,
-})
-const contractMsg = msg({
-  messageId: 'ctr-1', threadId: 'tc', subject: 'Elofizetes megujitas ertesito',
-  from: '"Google Workspace" <billing@google.com>', bodyText: CONTRACT_BODY,
-})
+const INVOICE_SNIPPET = 'Tisztelt Szabo Istvan! Számlaszám: 2026/0042 Brutto osszeg: 15 484 Ft '
+  + 'Kelt: 2026-07-22 Fizetesi hatarido: 2026-08-05'
+const CONTRACT_SNIPPET = 'A szerzodes lejarati datuma 2026-09-30. Felmondasi ido 30 nap. Eves dij 120 000 Ft.'
+const PLAIN_SNIPPET = 'Koszonjuk a regisztraciot, jo szorakozast kivanunk.'
 
 const prodCase = (over: Partial<ProductionCaseSnapshot> & Pick<ProductionCaseSnapshot, 'caseId'>): ProductionCaseSnapshot => ({
   domain: 'zst', threadIds: [], title: 'Cim', status: 'NEW', ...over,
 })
 
 /** Known outcome, measured from the shipped extractors before it was written
- *  down. A parity fixture whose expected values were produced by the code under
- *  test would only prove the code equals itself. */
+ *  down. A fixture whose expected values came from the code under test would
+ *  only prove the code equals itself. */
 const PROD_INVOICE: ProductionInvoiceRow = {
   caseId: 'zst-zst-inv-1', invoiceNumber: '2026/0042', supplierId: 'Relacio KFT.',
   grossAmount: 15484, currency: 'HUF', issueDate: '2026-07-22', dueDate: '2026-08-05', notes: null,
@@ -185,59 +178,141 @@ const PROD_CONTRACT: ProductionContractRow = {
   financialCommitment: 120000, currency: 'HUF',
 }
 
-function parity(over: Partial<Parameters<typeof runConditionalExtractorParity>[1]> = {}): ExtractorParityReport {
-  const db = new Database(':memory:')
-  try {
-    return runConditionalExtractorParity(db, {
-      overlays: [
-        { threadId: 'ti', productionCaseId: 'zst-zst-inv-1', caseType: 'INVOICE_INCOMING' },
-        { threadId: 'tc', productionCaseId: 'zst-zst-ctr-1', caseType: 'CONTRACT' },
-      ],
-      messages: [invoiceMsg, contractMsg],
-      productionCases: [
-        prodCase({ caseId: 'zst-zst-inv-1', threadIds: ['ti'], caseType: 'INVOICE_INCOMING', sourceReference: 'inv-1' }),
-        prodCase({ caseId: 'zst-zst-ctr-1', threadIds: ['tc'], caseType: 'CONTRACT', sourceReference: 'ctr-1' }),
-      ],
-      productionInvoices: [PROD_INVOICE],
-      productionContracts: [PROD_CONTRACT],
-      ...over,
-    }, T)
-  } finally { db.close() }
+const EQUIV: InputBasis = 'HISTORICAL_PROVIDER_SNIPPET_WITH_HEADERS'
+const NOT_EQUIV: InputBasis = 'HISTORICAL_INPUT_NOT_EQUIVALENT'
+
+function baseInput(over: Partial<ConditionalExtractorParityInput> = {}): ConditionalExtractorParityInput {
+  return {
+    overlays: [
+      { threadId: 'ti', productionCaseId: 'zst-zst-inv-1', caseType: 'INVOICE_INCOMING' },
+      { threadId: 'tc', productionCaseId: 'zst-zst-ctr-1', caseType: 'CONTRACT' },
+    ],
+    productionCases: [
+      prodCase({ caseId: 'zst-zst-inv-1', threadIds: ['ti'], caseType: 'INVOICE_INCOMING', sourceReference: 'inv-1' }),
+      prodCase({ caseId: 'zst-zst-ctr-1', threadIds: ['tc'], caseType: 'CONTRACT', sourceReference: 'ctr-1' }),
+    ],
+    productionInvoices: [PROD_INVOICE],
+    productionContracts: [PROD_CONTRACT],
+    inputBasisByCase: { 'zst-zst-inv-1': EQUIV, 'zst-zst-ctr-1': EQUIV },
+    historicalInputByMessage: {
+      'inv-1': { subject: 'Ertesito: szamla erkezett', from: '"Relacio KFT." <relacio.kft@szamlazz.hu>', snippet: INVOICE_SNIPPET },
+      'ctr-1': { subject: 'Elofizetes megujitas ertesito', from: '"Google Workspace" <billing@google.com>', snippet: CONTRACT_SNIPPET },
+    },
+    ...over,
+  }
 }
 
-describe('Stage 2H point 3 — conditional extractor parity', () => {
-  it('runs the real extractors on the real schema and passes on agreement', () => {
+function parity(over: Partial<ConditionalExtractorParityInput> = {}, opts?: { currentFullBodyByMessage?: Record<string, string> }): ExtractorParityReport {
+  const db = new Database(':memory:')
+  try { return runConditionalExtractorParity(db, baseInput(over), T, opts ?? {}) } finally { db.close() }
+}
+
+describe('Stage 2H point 1/3 — input basis decides the denominator', () => {
+  it('compares only threads whose production input is reproducible', () => {
     const r = parity()
-    expect(r.summary.targets).toBe(2)
+    expect(r.basis).toBe('HISTORICAL')
+    expect(r.summary.eligible).toBe(2)
+    expect(r.summary.compared).toBe(2)
     expect(r.summary.pass).toBe(2)
-    expect(r.summary.mismatch).toBe(0)
-    expect(r.summary.fieldsMismatched).toBe(0)
-    expect(r.summary.fieldsCompared).toBeGreaterThan(10)
     for (const row of r.rows) {
-      expect(row.authority).toBe('CONDITIONAL_ON_PRODUCTION_TYPE')
+      expect(row.inputBasis).toBe(EQUIV)
+      expect(row.extractorAttempted).toBe(true)
+      expect(row.inputDigest).toMatch(/^[0-9a-f]{64}$/)
       expect(row.classificationProof).toBe(false)
-      expect(row.extractionSource).toBe('FULL_BODY')
-      expect(row.replayExtractionStatus).toBe('EXTRACTED')
     }
-    expect(r.classificationProof).toBe(false)
   })
 
-  it('compares the extractor result, not the case status', () => {
+  it('keeps a not-equivalent thread out of the denominator instead of comparing it', () => {
+    const r = parity({ inputBasisByCase: { 'zst-zst-inv-1': NOT_EQUIV, 'zst-zst-ctr-1': EQUIV } })
+    const inv = r.rows.find(x => x.productionCaseId === 'zst-zst-inv-1')!
+    expect(inv.verdict).toBe('NOT_IN_DENOMINATOR')
+    expect(inv.extractorAttempted).toBe(false)
+    expect(inv.inputDigest).toBeNull()
+    expect(r.summary.eligible).toBe(1)
+    expect(r.summary.compared).toBe(1)
+    expect(r.summary.inputNotEquivalent).toBe(1)
+  })
+
+  it('treats an UNDECLARED basis as not equivalent, never as eligible', () => {
+    const r = parity({ inputBasisByCase: { 'zst-zst-ctr-1': EQUIV } })
+    const inv = r.rows.find(x => x.productionCaseId === 'zst-zst-inv-1')!
+    expect(inv.inputBasis).toBe(NOT_EQUIV)
+    expect(inv.verdict).toBe('NOT_IN_DENOMINATOR')
+    expect(inv.reasons.join(' ')).toMatch(/no input basis was declared/)
+    expect(r.summary.eligible).toBe(1)
+  })
+
+  it('a full-body run is stamped CURRENT_FULL_BODY and is never historical parity', () => {
+    const r = parity({}, { currentFullBodyByMessage: { 'inv-1': INVOICE_SNIPPET, 'ctr-1': CONTRACT_SNIPPET } })
+    expect(r.basis).toBe('CURRENT_ONLY')
+    expect(r.rows.every(x => x.inputBasis === 'CURRENT_FULL_BODY')).toBe(true)
+    expect(r.summary.eligible).toBe(0)
+  })
+})
+
+describe('Stage 2H point 2 — "no row" is a result, not a silence', () => {
+  it('passes a demonstrated NO_EXTRACTION that matches production', () => {
+    const r = parity({
+      productionContracts: [],
+      historicalInputByMessage: {
+        ...baseInput().historicalInputByMessage,
+        'ctr-1': { subject: 'Koszonjuk', from: '"Valaki" <a@b.hu>', snippet: PLAIN_SNIPPET },
+      },
+    })
+    const ctr = r.rows.find(x => x.route === 'CONTRACT')!
+    expect(ctr.expectedHistorical).toBe('NO_EXTRACTION')
+    expect(ctr.replayResult).toBe('NO_EXTRACTION')
+    expect(ctr.extractorAttempted).toBe(true)
+    expect(ctr.verdict).toBe('PASS')
+    expect(ctr.reasons.join(' ')).toMatch(/ran on the historical input and declined it/)
+  })
+
+  it('does not let mutual silence pass when the extractor was never run', () => {
+    const r = parity({
+      productionContracts: [],
+      inputBasisByCase: { 'zst-zst-inv-1': EQUIV, 'zst-zst-ctr-1': NOT_EQUIV },
+    })
+    const ctr = r.rows.find(x => x.route === 'CONTRACT')!
+    // production has no row and the replay produced none either -- and it is
+    // still NOT a pass, because nothing was demonstrated.
+    expect(ctr.expectedHistorical).toBe('NO_EXTRACTION')
+    expect(ctr.replayResult).toBeNull()
+    expect(ctr.extractorAttempted).toBe(false)
+    expect(ctr.verdict).not.toBe('PASS')
+  })
+
+  it('records production expectation, fingerprints and full field set on a structured row', () => {
     const r = parity()
     const inv = r.rows.find(x => x.route === 'INVOICE')!
-    const fields = inv.comparisons.map(c => c.field)
-    for (const required of ['invoiceNumber', 'supplierId', 'grossAmount', 'currency', 'dueDate']) {
-      expect(fields, `invoice parity must compare ${required}`).toContain(required)
+    expect(inv.expectedHistorical).toBe('STRUCTURED_ROW')
+    expect(inv.replayResult).toBe('STRUCTURED_ROW')
+    expect(inv.productionFingerprint).toMatch(/^[0-9a-f]{32}$/)
+    expect(inv.replayFingerprint).toMatch(/^[0-9a-f]{32}$/)
+    for (const f of ['invoiceNumber', 'supplierId', 'grossAmount', 'currency', 'issueDate', 'dueDate']) {
+      expect(inv.comparisons.map(c => c.field)).toContain(f)
     }
-    expect(fields).toContain('extractionConfidence')
     expect(inv.comparisons.find(c => c.field === 'extractionConfidence')?.verdict).toBe('PRODUCTION_NOT_PERSISTED')
-    expect(inv.replayConfidence).toBe('HIGH')
-    expect(inv.replayExtractedFields).toContain('invoice_number')
+  })
 
-    const ctr = r.rows.find(x => x.route === 'CONTRACT')!
-    for (const required of ['counterpartyId', 'expiryDate', 'noticePeriodDays', 'financialCommitment', 'currency']) {
-      expect(ctr.comparisons.map(c => c.field), `contract parity must compare ${required}`).toContain(required)
-    }
+  it('flags production-has-row / replay-none as a mismatch, not a pass', () => {
+    const r = parity({
+      historicalInputByMessage: {
+        ...baseInput().historicalInputByMessage,
+        'inv-1': { subject: 'Semmi', from: '"X" <x@y.hu>', snippet: 'Nincs itt semmi erdekes.' },
+      },
+    })
+    const inv = r.rows.find(x => x.route === 'INVOICE')!
+    expect(inv.expectedHistorical).toBe('STRUCTURED_ROW')
+    expect(inv.replayResult).toBe('NO_EXTRACTION')
+    expect(inv.verdict).toBe('MISMATCH')
+  })
+
+  it('flags replay-row / production-none separately from a value mismatch', () => {
+    const r = parity({ productionInvoices: [] })
+    const inv = r.rows.find(x => x.route === 'INVOICE')!
+    expect(inv.verdict).toBe('PRODUCTION_HAS_NO_ROW')
+    expect(r.summary.mismatch).toBe(0)
+    expect(r.summary.productionHasNoRow).toBe(1)
   })
 
   it('goes red when a production amount differs', () => {
@@ -245,86 +320,14 @@ describe('Stage 2H point 3 — conditional extractor parity', () => {
     const inv = r.rows.find(x => x.route === 'INVOICE')!
     expect(inv.verdict).toBe('MISMATCH')
     expect(inv.comparisons.find(c => c.field === 'grossAmount')?.verdict).toBe('MISMATCH')
-    expect(r.summary.mismatch).toBe(1)
-    expect(r.summary.fieldsMismatched).toBeGreaterThan(0)
-  })
-
-  it('separates "production stored nothing" from "production stored something else"', () => {
-    // Measured on the live store 2026-08-18: 13 of the 15 overlay-eligible ZST
-    // threads have NO production zst_invoices/zst_contracts row at all. Calling
-    // that a MISMATCH would report a disagreement between two answers where
-    // production never produced one -- and calling it a PASS would be the
-    // shadow-silence defect pointed the other way.
-    const r = parity({ productionInvoices: [] })
-    const inv = r.rows.find(x => x.route === 'INVOICE')!
-    expect(inv.verdict).toBe('PRODUCTION_HAS_NO_ROW')
-    expect(r.summary.productionHasNoRow).toBe(1)
-    expect(r.summary.mismatch).toBe(0)
-    expect(r.summary.pass).toBe(1)
-    expect(inv.reasons.join(' ')).toMatch(/production routed the type to the extractor and stored nothing/)
-    // and it still blocks: it is not a pass
-    const readiness = evaluateReplayReadiness({ manifest: cleanManifest(), extractorParity: r, documentParity: { pass: true } })
-    expect(readiness.conditionalExtractorParityStatus).toBe('FAIL')
-    expect(readiness.stable).toBe(false)
-  })
-
-  it('does not mix a snippet-extracted production row into the pass count', () => {
-    const r = parity({ productionInvoices: [{ ...PROD_INVOICE, notes: 'extraction_source=SNIPPET' }] })
-    const inv = r.rows.find(x => x.productionCaseId === 'zst-zst-inv-1')!
-    expect(inv.verdict).toBe('RETRIAGE_INPUT_NOT_EQUIVALENT')
-    expect(inv.comparisons).toHaveLength(0)
-    expect(r.summary.pass).toBe(1)
-    expect(r.summary.inputNotEquivalent).toBe(1)
-  })
-
-  it('marks a thread whose production input message is not in the corpus', () => {
-    const r = parity({
-      productionCases: [
-        prodCase({ caseId: 'zst-zst-inv-1', threadIds: ['ti'], caseType: 'INVOICE_INCOMING', sourceReference: 'gone' }),
-        prodCase({ caseId: 'zst-zst-ctr-1', threadIds: ['tc'], caseType: 'CONTRACT', sourceReference: 'ctr-1' }),
-      ],
-    })
-    const inv = r.rows.find(x => x.productionCaseId === 'zst-zst-inv-1')!
-    expect(inv.verdict).toBe('RETRIAGE_INPUT_NOT_EQUIVALENT')
-    expect(inv.reasons.join(' ')).toMatch(/not in the corpus/)
-  })
-
-  it('reports a type the production gate routes nowhere as NOT_ROUTED', () => {
-    const r = parity({
-      overlays: [{ threadId: 'ti', productionCaseId: 'zst-zst-inv-1', caseType: 'GENERAL_OPERATION' }],
-    })
-    expect(r.rows[0].verdict).toBe('NOT_ROUTED')
-    expect(r.rows[0].route).toBeNull()
-    expect(routeZstExtractor('GENERAL_OPERATION')).toBeNull()
   })
 
   it('writes the extracted rows into the shadow store, so silence cannot pass as agreement', () => {
     const db = new Database(':memory:')
-    runConditionalExtractorParity(db, {
-      overlays: [{ threadId: 'ti', productionCaseId: 'zst-zst-inv-1', caseType: 'INVOICE_INCOMING' }],
-      messages: [invoiceMsg],
-      productionCases: [prodCase({ caseId: 'zst-zst-inv-1', threadIds: ['ti'], caseType: 'INVOICE_INCOMING', sourceReference: 'inv-1' })],
-      productionInvoices: [PROD_INVOICE], productionContracts: [],
-    }, T)
-    const n = (db.prepare(`SELECT COUNT(*) n FROM zst_invoices`).get() as { n: number }).n
-    expect(n).toBe(1)
-    // the real production schema, not four private replay tables
+    runConditionalExtractorParity(db, baseInput(), T)
+    expect((db.prepare(`SELECT COUNT(*) n FROM zst_invoices`).get() as { n: number }).n).toBe(1)
     expect(db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='zst_contracts'`).get()).toBeDefined()
     db.close()
-  })
-
-  it('reads the production input id from source_references, in either stored shape', () => {
-    // measured against the live schema on 2026-08-18: the column is plural and
-    // holds a bare message id. A singular guess returns NULL for every case and
-    // turns the whole surface into RETRIAGE_INPUT_NOT_EQUIVALENT while looking careful.
-    expect(normaliseSourceReference('19edae46460029b4')).toBe('19edae46460029b4')
-    expect(normaliseSourceReference('["19edae46460029b4"]')).toBe('19edae46460029b4')
-    // more than one reference is an ambiguity, not an input
-    expect(normaliseSourceReference('["a","b"]')).toBeNull()
-    expect(normaliseSourceReference('[]')).toBeNull()
-    expect(normaliseSourceReference(null)).toBeNull()
-    expect(normaliseSourceReference('  ')).toBeNull()
-    expect(normaliseSourceReference('[not json')).toBeNull()
   })
 
   it('builds overlays only for threads the production gate would route, inside the corpus', () => {
@@ -335,10 +338,47 @@ describe('Stage 2H point 3 — conditional extractor parity', () => {
       prodCase({ caseId: 'd', threadIds: ['tc'], caseType: null }),
     ], new Set(['ti', 'tc']))
     expect(overlays).toEqual([{ threadId: 'ti', productionCaseId: 'a', caseType: 'INVOICE_INCOMING' }])
+    expect(routeZstExtractor('GENERAL_OPERATION')).toBeNull()
+  })
+
+  it('reads the production input id from source_references, in either stored shape', () => {
+    expect(normaliseSourceReference('19edae46460029b4')).toBe('19edae46460029b4')
+    expect(normaliseSourceReference('["19edae46460029b4"]')).toBe('19edae46460029b4')
+    expect(normaliseSourceReference('["a","b"]')).toBeNull()
+    expect(normaliseSourceReference('[]')).toBeNull()
+    expect(normaliseSourceReference(null)).toBeNull()
+    expect(normaliseSourceReference('  ')).toBeNull()
+    expect(normaliseSourceReference('[not json')).toBeNull()
   })
 })
 
-// ── Point 4: readiness is four named surfaces, not one boolean ─────────────
+describe('Stage 2H point 3 — determinism on the same immutable input', () => {
+  it('two pristine shadow databases produce the same parity digest', () => {
+    const a = parity()
+    const b = parity()
+    expect(a.parityDigest).toBe(b.parityDigest)
+    expect(a.rows.map(r => r.verdict)).toEqual(b.rows.map(r => r.verdict))
+    expect(a.rows.map(r => r.replayResult)).toEqual(b.rows.map(r => r.replayResult))
+  })
+
+  it('the digest carries no timestamp, so a later run still matches', () => {
+    const db1 = new Database(':memory:'); const db2 = new Database(':memory:')
+    const a = runConditionalExtractorParity(db1, baseInput(), T)
+    const b = runConditionalExtractorParity(db2, baseInput(), T + 99_999)
+    db1.close(); db2.close()
+    expect(a.generatedAt).not.toBe(b.generatedAt)
+    expect(a.parityDigest).toBe(b.parityDigest)
+  })
+
+  it('a changed input changes the digest', () => {
+    const a = parity()
+    const b = parity({ productionInvoices: [{ ...PROD_INVOICE, grossAmount: 1 }] })
+    expect(a.parityDigest).not.toBe(b.parityDigest)
+    expect(parityDigestOf(a.rows)).toBe(a.parityDigest)
+  })
+})
+
+// ── Point 4: readiness ─────────────────────────────────────────────────────
 
 function manifestWithConditionalMismatch(): CorrectionManifest {
   return reconcileReplay('run', [{
@@ -366,15 +406,21 @@ function cleanManifest(): CorrectionManifest {
   })])
 }
 
+const goodRun = () => {
+  const r = parity()
+  return { extractorParity: r, doubleRun: { digestA: r.parityDigest, digestB: r.parityDigest },
+    expectedDenominator: { eligible: 2, inputNotEquivalent: 0 } }
+}
+
 describe('Stage 2H point 4 — readiness semantics', () => {
   it('a P2 conditional mismatch no longer passes as green', () => {
     const m = manifestWithConditionalMismatch()
     expect(m.coverage.conditionalMismatched).toBeGreaterThan(0)
-    expect(m.summary.p0 + m.summary.p1).toBe(0)   // the old gate saw only these
+    expect(m.summary.p0 + m.summary.p1).toBe(0)
     expect(replayReadyForStability(m)).toBe(false)
   })
 
-  it('a conditional field is not counted as a mismatch when no overlay lent a type', () => {
+  it('a conditional field is not a mismatch when no overlay lent a type', () => {
     const m = reconcileReplay('run', [{
       replayCaseId: 'r1', domain: 'zst', threadId: 't1',
       projectionAuthority: 'HISTORICAL_SOURCE_REPLAY', productionCaseId: null,
@@ -394,29 +440,60 @@ describe('Stage 2H point 4 — readiness semantics', () => {
     expect(r.documentParityStatus).toBe('NOT_RUN')
     expect(r.historicalTriageReplayStatus).toBe('NOT_REPLAYABLE')
     expect(r.stable).toBe(false)
-    expect(r.reasons.join(' ')).toMatch(/conditional extractor parity has not been run/)
   })
 
-  it('an extractor parity report with zero targets is NOT_RUN, not PASS', () => {
-    const empty = parity({ overlays: [] })
-    const r = evaluateReplayReadiness({ manifest: cleanManifest(), extractorParity: empty, documentParity: { pass: true } })
-    expect(empty.summary.targets).toBe(0)
+  it('a run with no eligible historical input is NO_ELIGIBLE_HISTORICAL_INPUT, not FAIL and not NOT_RUN', () => {
+    const none = parity({ inputBasisByCase: { 'zst-zst-inv-1': NOT_EQUIV, 'zst-zst-ctr-1': NOT_EQUIV } })
+    expect(none.summary.eligible).toBe(0)
+    const r = evaluateReplayReadiness({
+      manifest: cleanManifest(), extractorParity: none, documentParity: { pass: true },
+      doubleRun: { digestA: none.parityDigest, digestB: none.parityDigest },
+    })
+    expect(r.conditionalExtractorParityStatus).toBe('NO_ELIGIBLE_HISTORICAL_INPUT')
+    // it found nothing it may measure, so it is not a pass either
+    expect(r.stable).toBe(false)
+  })
+
+  it('a CURRENT_FULL_BODY report can never satisfy the historical surface', () => {
+    const cur = parity({}, { currentFullBodyByMessage: { 'inv-1': INVOICE_SNIPPET, 'ctr-1': CONTRACT_SNIPPET } })
+    const r = evaluateReplayReadiness({
+      manifest: cleanManifest(), extractorParity: cur, documentParity: { pass: true },
+      doubleRun: { digestA: cur.parityDigest, digestB: cur.parityDigest },
+    })
     expect(r.conditionalExtractorParityStatus).toBe('NOT_RUN')
+    expect(r.reasons.join(' ')).toMatch(/never historical parity/)
     expect(r.stable).toBe(false)
   })
 
-  it('an extractor mismatch fails the surface even though the historical one passed', () => {
-    const bad = parity({ productionInvoices: [{ ...PROD_INVOICE, grossAmount: 1 }] })
-    const r = evaluateReplayReadiness({ manifest: cleanManifest(), extractorParity: bad, documentParity: { pass: true } })
-    expect(r.historicalSourceReplayStatus).toBe('PASS')
+  it('refuses to pass without a demonstrated double run', () => {
+    const r = evaluateReplayReadiness({
+      manifest: cleanManifest(), extractorParity: parity(), documentParity: { pass: true },
+      expectedDenominator: { eligible: 2, inputNotEquivalent: 0 },
+    })
     expect(r.conditionalExtractorParityStatus).toBe('FAIL')
-    expect(r.stable).toBe(false)
+    expect(r.reasons.join(' ')).toMatch(/determinism on the same immutable input is not demonstrated/)
+  })
+
+  it('refuses to pass when the two runs disagree', () => {
+    const r = evaluateReplayReadiness({
+      manifest: cleanManifest(), extractorParity: parity(), documentParity: { pass: true },
+      doubleRun: { digestA: 'a'.repeat(64), digestB: 'b'.repeat(64) },
+    })
+    expect(r.conditionalExtractorParityStatus).toBe('FAIL')
+    expect(r.reasons.join(' ')).toMatch(/different parity digests/)
+  })
+
+  it('refuses to pass when the denominator is not what the audit said', () => {
+    const r = evaluateReplayReadiness({
+      manifest: cleanManifest(), documentParity: { pass: true }, ...goodRun(),
+      expectedDenominator: { eligible: 3, inputNotEquivalent: 12 },
+    })
+    expect(r.conditionalExtractorParityStatus).toBe('FAIL')
+    expect(r.reasons.join(' ')).toMatch(/expected 3 eligible/)
   })
 
   it('is stable only when every mandatory surface passed; the triage limitation stays NOT_REPLAYABLE', () => {
-    const r = evaluateReplayReadiness({
-      manifest: cleanManifest(), extractorParity: parity(), documentParity: { pass: true },
-    })
+    const r = evaluateReplayReadiness({ manifest: cleanManifest(), documentParity: { pass: true }, ...goodRun() })
     expect(r.historicalSourceReplayStatus).toBe('PASS')
     expect(r.conditionalExtractorParityStatus).toBe('PASS')
     expect(r.documentParityStatus).toBe('PASS')
@@ -425,11 +502,13 @@ describe('Stage 2H point 4 — readiness semantics', () => {
   })
 
   it('an unresolved conditional mismatch blocks stability on its own', () => {
-    const r = evaluateReplayReadiness({
-      manifest: manifestWithConditionalMismatch(), extractorParity: parity(), documentParity: { pass: true },
-    })
+    const r = evaluateReplayReadiness({ manifest: manifestWithConditionalMismatch(), documentParity: { pass: true }, ...goodRun() })
     expect(r.historicalSourceReplayStatus).toBe('FAIL')
     expect(r.stable).toBe(false)
     expect(r.reasons.join(' ')).toMatch(/unresolved conditional mismatch/)
+  })
+
+  it('rejects an aggregate accuracy figure in the report shape', () => {
+    expect(JSON.stringify(parity())).not.toMatch(/accuracy|agreementPercent|agreementRate/)
   })
 })
