@@ -30,6 +30,27 @@ g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
 
 SKIP_MIME_PREFIX = ("text/",)  # inline text bodies, not real attachments
 
+# Stage 2H-D (2026-08-18): the docKind rule used to be a ternary chain right
+# here, and it was the ONLY place it existed -- the TypeScript side received
+# docKind as a finished value. That made the rule unreplayable without writing a
+# second copy. The literals now live in src/cos/document-kind-rules.json and both
+# this script and src/cos/document-kind.ts READ them. Do not restate them here.
+_RULES_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "src", "cos", "document-kind-rules.json")
+with open(_RULES_PATH, encoding="utf-8") as _f:
+    _KIND_RULES = json.load(_f)
+
+
+def classify_document_kind(filename):
+    """Normative docKind. Rules are evaluated in array order; first match wins."""
+    name = (filename or "").lower()
+    for rule in _KIND_RULES["rules"]:
+        if any(k in name for k in rule.get("filenameContains", [])):
+            return rule["kind"]
+        if any(name.endswith(k) for k in rule.get("filenameEndsWith", [])):
+            return rule["kind"]
+    return _KIND_RULES["fallback"]
+
 
 def walk_parts(part, out):
     """Collect (filename, mimeType, attachmentId) for parts that are real files."""
@@ -56,10 +77,7 @@ def main():
             result["skipped"] += 1; continue
         raw = base64.urlsafe_b64decode(a["data"] + "===")  # Gmail returns base64url
         std_b64 = base64.b64encode(raw).decode()
-        kind = ("invoice" if any(k in filename.lower() for k in ("szaml", "invoice", "dmrv", "gm-", "receipt"))
-                else "photo" if filename.lower().endswith((".jpg", ".jpeg", ".png"))
-                else "contract" if "szerzod" in filename.lower() or "contract" in filename.lower()
-                else "other")
+        kind = classify_document_kind(filename)
         payload = {"namespace": namespace, "source": "email", "sourceRef": message_id,
                    "filename": filename, "mimeType": mime, "contentBase64": std_b64, "docKind": kind}
         if case_id:

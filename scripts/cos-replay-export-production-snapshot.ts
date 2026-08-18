@@ -30,7 +30,12 @@ const zstOut = required('--zst-out')
 // and would report agreement out of its own silence -- the exact defect the
 // 2026-08-17 attachment-parity audit named.
 const financeOut = required('--finance-out')
-if (new Set([dbPath, productionOut, zstOut, financeOut]).size !== 4) throw new Error('input and output paths must be distinct')
+// Stage 2H-B: the document surface compares production document rows, and a
+// snapshot without an explicit capture time cannot be aligned against a corpus
+// cutoff -- the two would be silently conflated.
+const documentsOut = required('--documents-out')
+if (new Set([dbPath, productionOut, zstOut, financeOut, documentsOut]).size !== 5) throw new Error('input and output paths must be distinct')
+const capturedAt = Math.floor(Date.now() / 1000)
 
 const db = new Database(dbPath, { readonly: true, fileMustExist: true })
 try {
@@ -133,15 +138,79 @@ try {
     }))
     : []
 
+  // Cross-domain moves, taken from the EVENT LEDGER rather than guessed from an
+  // id prefix. A case that was moved between namespaces no longer carries its
+  // connector-derived domain, so comparing the two compares different things --
+  // but that exclusion has to rest on recorded evidence, not on a string that
+  // happens to start with "zst-moved".
+  const crossDomainMoves: Array<{ caseId: string; domain: string; evidence: string; movedAt: number | null }> = []
+  for (const [t, ev, dom] of [['personal_cases', 'personal_case_events', 'personal'], ['zst_cases', 'zst_case_events', 'zst']] as const) {
+    if (!tableExists(ev)) continue
+    const rows = db.prepare(
+      `SELECT e.case_id, e.reason, e.created_at FROM ${ev} e
+        WHERE e.reason IS NOT NULL AND (e.reason LIKE '%thelyezve%' OR e.reason LIKE '%moved from%')`
+    ).all() as Array<Record<string, unknown>>
+    for (const r of rows) {
+      if (!db.prepare(`SELECT 1 FROM ${t} WHERE case_id = ?`).get(r.case_id)) continue
+      crossDomainMoves.push({
+        caseId: String(r.case_id), domain: dom, evidence: String(r.reason).slice(0, 200),
+        movedAt: r.created_at == null ? null : Number(r.created_at),
+      })
+    }
+  }
+  const documentsPresent = tableExists('cos_documents')
+  // The case<->document link is NOT a join table: `linkDocumentToCase` appends to
+  // `{personal,zst}_cases.related_document_ids`. Exporting a join table that the
+  // linker never writes would have made every link comparison read as absent.
+  const caseDocumentLinks: Record<string, string[]> = {}
+  for (const t of ['personal_cases', 'zst_cases']) {
+    if (!columns(t).has('related_document_ids')) continue
+    for (const r of db.prepare(`SELECT case_id, related_document_ids FROM ${t}`).all() as Array<Record<string, unknown>>) {
+      let ids: string[] = []
+      try { const p = JSON.parse(String(r.related_document_ids ?? '[]')); if (Array.isArray(p)) ids = p.map(String) } catch { /* malformed */ }
+      if (ids.length) caseDocumentLinks[String(r.case_id)] = ids
+    }
+  }
+  const documents = documentsPresent
+    ? (db.prepare(`SELECT document_id, namespace, case_id, source, source_ref, filename, mime_type,
+                          byte_size, sha256, doc_kind, sensitivity, external_share_allowed,
+                          received_at, created_at, updated_at
+                     FROM cos_documents ORDER BY document_id`).all() as Array<Record<string, unknown>>).map(r => ({
+      documentId: String(r.document_id), namespace: String(r.namespace),
+      caseId: r.case_id == null ? null : String(r.case_id), source: String(r.source),
+      sourceRef: r.source_ref == null ? null : String(r.source_ref),
+      filename: r.filename == null ? null : String(r.filename),
+      mimeType: r.mime_type == null ? null : String(r.mime_type),
+      byteSize: r.byte_size == null ? null : Number(r.byte_size),
+      sha256: r.sha256 == null ? null : String(r.sha256),
+      docKind: r.doc_kind == null ? null : String(r.doc_kind),
+      sensitivity: r.sensitivity == null ? null : String(r.sensitivity),
+      externalShareAllowed: r.external_share_allowed === 1,
+      receivedAt: r.received_at == null ? null : Number(r.received_at),
+      createdAt: r.created_at == null ? null : Number(r.created_at),
+      updatedAt: r.updated_at == null ? null : Number(r.updated_at),
+    }))
+    : []
+  writeFileSync(documentsOut, JSON.stringify({
+    capturedAt,
+    documentsTable: documentsPresent ? 'PRESENT' : 'TABLE_ABSENT',
+    crossDomainMoves,
+    caseDocumentLinks,
+    documents,
+  }, null, 2) + '\n', { mode: 0o600 })
+
   writeFileSync(financeOut, JSON.stringify({
+    capturedAt,
     invoicesTable: financeTables.invoices ? 'PRESENT' : 'TABLE_ABSENT',
     contractsTable: financeTables.contracts ? 'PRESENT' : 'TABLE_ABSENT',
     invoices, contracts,
   }, null, 2) + '\n', { mode: 0o600 })
-  writeFileSync(productionOut, JSON.stringify(production, null, 2) + '\n', { mode: 0o600 })
+  writeFileSync(productionOut, JSON.stringify({ capturedAt, cases: production }, null, 2) + '\n', { mode: 0o600 })
   writeFileSync(zstOut, JSON.stringify(zstLegacy, null, 2) + '\n', { mode: 0o600 })
   process.stdout.write(JSON.stringify({
-    queryOnly: true, personalCases: production.filter(x => x.domain === 'personal').length,
+    queryOnly: true, capturedAt, documents: documents.length, crossDomainMoves: crossDomainMoves.length,
+    documentsTable: documentsPresent ? 'PRESENT' : 'TABLE_ABSENT', documentsOut,
+    personalCases: production.filter(x => x.domain === 'personal').length,
     zstCases: zstLegacy.length,
     casesWithSourceReference: production.filter(x => x.sourceReference != null).length,
     invoices: invoices.length, contracts: contracts.length,
