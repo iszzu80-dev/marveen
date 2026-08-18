@@ -20,6 +20,7 @@ import { classifyScope } from '../scope-gate.js'
 import { routeZstExtractor } from '../zst-intake.js'
 import { ingestZstInvoiceEmail, SNIPPET_EXTRACTION_NOTE } from '../zst-invoice-extract.js'
 import { ingestZstContractEmail } from '../zst-contract-extract.js'
+import { normaliseSourceReference } from './source-reference.js'
 import type {
   ExtractorParityReport, ExtractorParityRow, ExtractorParityVerdict, FieldParity, FieldParityVerdict,
   ProductionAuthorityOverlay, ProductionCaseSnapshot, ReplayMessage,
@@ -202,6 +203,7 @@ export function runConditionalExtractorParity(
     let replayExtractionStatus: ExtractorParityRow['replayExtractionStatus'] = 'NOT_ATTEMPTED'
     let comparisons: FieldParity[] = []
     let verdict: ExtractorParityVerdict = 'PASS'
+    let productionRowMissing = false
 
     try {
       if (route === 'INVOICE') {
@@ -245,7 +247,9 @@ export function runConditionalExtractorParity(
           ]
         }
         if (!prod && replayExtractionStatus === 'EXTRACTED') {
-          reasons.push('production holds no zst_invoices row for this case, so every extracted field is PRODUCTION_ABSENT')
+          productionRowMissing = true
+          reasons.push('production holds no zst_invoices row for this case: production routed the type to the '
+            + 'extractor and stored nothing, while the replay extracted a row from the same mail')
         }
       } else {
         const prod = contractByCase.get(overlay.productionCaseId) ?? null
@@ -280,7 +284,9 @@ export function runConditionalExtractorParity(
         // whether IT read a snippet or a full body. Stated, not assumed away.
         reasons.push('contract input equivalence cannot be confirmed from the store: zst_contracts persists no extraction-source marker')
         if (!prod && replayExtractionStatus === 'EXTRACTED') {
-          reasons.push('production holds no zst_contracts row for this case, so every extracted field is PRODUCTION_ABSENT')
+          productionRowMissing = true
+          reasons.push('production holds no zst_contracts row for this case: production routed the type to the '
+            + 'extractor and stored nothing, while the replay extracted a row from the same mail')
         }
       }
     } catch (err) {
@@ -299,7 +305,8 @@ export function runConditionalExtractorParity(
       reasons.push(prodHasRow
         ? 'the production extractor returned nothing for a mail production holds an extracted row for'
         : 'neither side extracted a row from this mail')
-    } else if (comparisons.some(c => DIFFERING.has(c.verdict))) verdict = 'MISMATCH'
+    } else if (productionRowMissing) verdict = 'PRODUCTION_HAS_NO_ROW'
+    else if (comparisons.some(c => DIFFERING.has(c.verdict))) verdict = 'MISMATCH'
 
     rows.push({
       ...base, route, sourceMessageId, extractionSource: 'FULL_BODY',
@@ -317,6 +324,7 @@ export function runConditionalExtractorParity(
       targets: rows.length,
       pass: rows.filter(r => r.verdict === 'PASS').length,
       mismatch: rows.filter(r => r.verdict === 'MISMATCH').length,
+      productionHasNoRow: rows.filter(r => r.verdict === 'PRODUCTION_HAS_NO_ROW').length,
       inputNotEquivalent: rows.filter(r => r.verdict === 'RETRIAGE_INPUT_NOT_EQUIVALENT').length,
       notRouted: rows.filter(r => r.verdict === 'NOT_ROUTED').length,
       seamBlocked: rows.filter(r => r.verdict === 'SEAM_BLOCKED').length,
@@ -349,3 +357,7 @@ export function buildProductionAuthorityOverlays(
   }
   return overlays
 }
+
+// Re-exported so a caller that already imports the parity surface does not need
+// a second import path for the same concept.
+export { normaliseSourceReference }

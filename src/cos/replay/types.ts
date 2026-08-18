@@ -207,6 +207,9 @@ export type ExtractorRoute = 'INVOICE' | 'CONTRACT'
 export type ExtractorParityVerdict =
   | 'PASS'
   | 'MISMATCH'
+  /** the replay extracted a row production holds none of. Not a mismatch between
+   *  two answers — production has no answer here — and never a pass either. */
+  | 'PRODUCTION_HAS_NO_ROW'
   /** the production input shape could not be reproduced; never mixed with PASS */
   | 'RETRIAGE_INPUT_NOT_EQUIVALENT'
   /** the production gate does not route this type to an extractor at all */
@@ -259,6 +262,7 @@ export interface ExtractorParityReport {
     targets: number
     pass: number
     mismatch: number
+    productionHasNoRow: number
     inputNotEquivalent: number
     notRouted: number
     seamBlocked: number

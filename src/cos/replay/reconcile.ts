@@ -192,6 +192,9 @@ function extractorSurfaceStatus(r: ExtractorParityReport | null): { status: Pari
   }
   const reasons: string[] = []
   if (r.summary.mismatch > 0) reasons.push(`${r.summary.mismatch} extractor target(s) mismatch production`)
+  if (r.summary.productionHasNoRow > 0) {
+    reasons.push(`${r.summary.productionHasNoRow} target(s) where the replay extracted a row production holds none of`)
+  }
   if (r.summary.fieldsMismatched > 0) reasons.push(`${r.summary.fieldsMismatched} extractor field(s) mismatch production`)
   if (r.summary.seamBlocked > 0) reasons.push(`${r.summary.seamBlocked} target(s) blocked at a production seam`)
   if (r.summary.inputNotEquivalent > 0) reasons.push(`${r.summary.inputNotEquivalent} target(s) RETRIAGE_INPUT_NOT_EQUIVALENT and are not comparable`)

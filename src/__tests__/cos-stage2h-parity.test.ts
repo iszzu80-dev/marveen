@@ -5,7 +5,7 @@ import {
   runShadowReplay, readReplayProjections, ensureShadowReplaySchema,
 } from '../cos/replay/shadow-replay.js'
 import {
-  runConditionalExtractorParity, buildProductionAuthorityOverlays,
+  runConditionalExtractorParity, buildProductionAuthorityOverlays, normaliseSourceReference,
   type ProductionInvoiceRow, type ProductionContractRow,
 } from '../cos/replay/extractor-parity.js'
 import { evaluateReplayReadiness, reconcileReplay, replayReadyForStability } from '../cos/replay/reconcile.js'
@@ -249,6 +249,25 @@ describe('Stage 2H point 3 — conditional extractor parity', () => {
     expect(r.summary.fieldsMismatched).toBeGreaterThan(0)
   })
 
+  it('separates "production stored nothing" from "production stored something else"', () => {
+    // Measured on the live store 2026-08-18: 13 of the 15 overlay-eligible ZST
+    // threads have NO production zst_invoices/zst_contracts row at all. Calling
+    // that a MISMATCH would report a disagreement between two answers where
+    // production never produced one -- and calling it a PASS would be the
+    // shadow-silence defect pointed the other way.
+    const r = parity({ productionInvoices: [] })
+    const inv = r.rows.find(x => x.route === 'INVOICE')!
+    expect(inv.verdict).toBe('PRODUCTION_HAS_NO_ROW')
+    expect(r.summary.productionHasNoRow).toBe(1)
+    expect(r.summary.mismatch).toBe(0)
+    expect(r.summary.pass).toBe(1)
+    expect(inv.reasons.join(' ')).toMatch(/production routed the type to the extractor and stored nothing/)
+    // and it still blocks: it is not a pass
+    const readiness = evaluateReplayReadiness({ manifest: cleanManifest(), extractorParity: r, documentParity: { pass: true } })
+    expect(readiness.conditionalExtractorParityStatus).toBe('FAIL')
+    expect(readiness.stable).toBe(false)
+  })
+
   it('does not mix a snippet-extracted production row into the pass count', () => {
     const r = parity({ productionInvoices: [{ ...PROD_INVOICE, notes: 'extraction_source=SNIPPET' }] })
     const inv = r.rows.find(x => x.productionCaseId === 'zst-zst-inv-1')!
@@ -292,6 +311,20 @@ describe('Stage 2H point 3 — conditional extractor parity', () => {
     // the real production schema, not four private replay tables
     expect(db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='zst_contracts'`).get()).toBeDefined()
     db.close()
+  })
+
+  it('reads the production input id from source_references, in either stored shape', () => {
+    // measured against the live schema on 2026-08-18: the column is plural and
+    // holds a bare message id. A singular guess returns NULL for every case and
+    // turns the whole surface into RETRIAGE_INPUT_NOT_EQUIVALENT while looking careful.
+    expect(normaliseSourceReference('19edae46460029b4')).toBe('19edae46460029b4')
+    expect(normaliseSourceReference('["19edae46460029b4"]')).toBe('19edae46460029b4')
+    // more than one reference is an ambiguity, not an input
+    expect(normaliseSourceReference('["a","b"]')).toBeNull()
+    expect(normaliseSourceReference('[]')).toBeNull()
+    expect(normaliseSourceReference(null)).toBeNull()
+    expect(normaliseSourceReference('  ')).toBeNull()
+    expect(normaliseSourceReference('[not json')).toBeNull()
   })
 
   it('builds overlays only for threads the production gate would route, inside the corpus', () => {

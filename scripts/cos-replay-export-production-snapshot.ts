@@ -10,6 +10,7 @@ import Database from 'better-sqlite3'
 import { writeFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import type { ProductionCaseSnapshot, ZstLegacyCaseInput } from '../src/cos/replay/types.js'
+import { normaliseSourceReference } from '../src/cos/replay/source-reference.js'
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(name)
@@ -51,7 +52,11 @@ try {
     const fields = [
       'case_id', 'title', col(c, 'case_type'), 'status', col(c, 'next_action'), col(c, 'next_action_owner'),
       col(c, 'waiting_on'), col(c, 'due_at'), col(c, 'follow_up_at'), col(c, 'next_wake_at'),
-      col(c, 'closure_reason'), col(c, 'gmail_thread_ids', "'[]'"), col(c, 'source_reference'),
+      col(c, 'closure_reason'), col(c, 'gmail_thread_ids', "'[]'"),
+      // The column is `source_references` (plural) in both case tables. Reading
+      // the singular name would fall back to NULL for every row and quietly
+      // make every parity target "not equivalent" instead of measured.
+      c.has('source_references') ? 'source_references' : col(c, 'source_reference', 'NULL') + ' AS source_references',
     ]
     const rows = db.prepare(`SELECT ${fields.join(', ')} FROM ${table} ORDER BY case_id`).all() as Array<Record<string, unknown>>
     const events = domain === 'personal' ? 'personal_case_events' : 'zst_case_events'
@@ -79,7 +84,7 @@ try {
         dueAt: r.due_at == null ? null : Number(r.due_at), followUpAt: r.follow_up_at == null ? null : Number(r.follow_up_at),
         nextWakeAt: r.next_wake_at == null ? null : Number(r.next_wake_at),
         closureReason: r.closure_reason == null ? null : String(r.closure_reason),
-        sourceReference: r.source_reference == null ? null : String(r.source_reference),
+        sourceReference: normaliseSourceReference(r.source_references),
         hasHumanAuthorityEvent: !!humanStmt?.get(r.case_id), hasExternalReceipt: !!receiptStmt?.get(r.case_id),
       }
     })
