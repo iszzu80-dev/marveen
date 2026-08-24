@@ -104,3 +104,7 @@ store/.github-classic-token
 # nezi, nem tud kulonbseget tenni "megneztem" es "vegiggorgettem" kozott.
 # (review #3, U-2). A fajlok a lemezen maradnak, csak nincsenek kovetve.
 dist.bak-*/
+
+# ChatGPT-CoS baseline snapshot: personal case data, frozen for one import.
+# Read-only evidence, never distributed.
+store/chatgpt-baseline-2026-08-24/
