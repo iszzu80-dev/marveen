@@ -41,7 +41,11 @@ export interface GateResult {
 // Default patterns shipped in code so the gate has teeth even before
 // store/data-sensitivity-gate.json is provisioned. Site operators can
 // override via the store file; these are the factory defaults.
-const DEFAULT_RESTRICTED: SensitivityPattern[] = [
+// Exported (W10) so the identity boundary can reuse THIS list rather than
+// re-spelling the same regexes somewhere else. A second copy of a credential
+// pattern set is a set that drifts, and the half that drifts is the half that
+// stops matching.
+export const DEFAULT_RESTRICTED: SensitivityPattern[] = [
   { name: 'email', pattern: '[\\w.+-]+@[\\w.-]+\\.[\\w]{2,}', description: 'Email address' },
   { name: 'api_key_header', pattern: '(?:Authorization|X-API-?Key|Bearer)[:\\s]+\\s*[A-Za-z0-9_\\-]{20,}', description: 'API key or bearer token in header format' },
   { name: 'jwt_token', pattern: 'eyJ[A-Za-z0-9_\\-]{20,}\\.[A-Za-z0-9_\\-]{20,}\\.[A-Za-z0-9_\\-]{10,}', description: 'JWT token (base64url-encoded header.payload.signature)' },
@@ -54,7 +58,7 @@ const DEFAULT_RESTRICTED: SensitivityPattern[] = [
   { name: 'hungarian_tax_id', pattern: '\\b\\d{10}\\b', context: 'adószám|tax.id|adó|NAV|tax.number|tax_?id', description: 'Hungarian tax ID (10-digit number near tax context)' },
 ];
 
-const DEFAULT_INTERNAL: SensitivityPattern[] = [
+export const DEFAULT_INTERNAL: SensitivityPattern[] = [
   { name: 'prod_db_name', pattern: 'suite-postgres-08wb|suite-postgres|production\\s+(?:db|database|postgres)', description: 'Production database name references' },
   { name: 'secret_key_name', pattern: 'DEEPSEEK_API_KEY|RENDER_API_KEY|DATABASE_URL_RUNTIME|ANTHROPIC_AUTH_TOKEN', description: 'Secret env-var or credential key name references' },
   { name: 'vault_path', pattern: 'store/vault\\.json|store/\\.dashboard-token|secrets\\.token_hex', description: 'Vault or secret-store path references' },

@@ -7,6 +7,10 @@ import { runLsof } from './lsof.js'
 import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL, DASHBOARD_ALLOWED_ORIGINS, MAIN_AGENT_ID } from './config.js'
 import { loadOrCreateDashboardToken } from './web/dashboard-auth.js'
 import { resolveAuth, requiresAuth, isFederationWireEndpoint, type AuthResult } from './web/auth-gate.js'
+import { resolveApgPrincipal } from './web/apg-principal.js'
+import { identityFromPrincipal } from './identity/principal-adapter.js'
+import { bumpPolicyCounter } from './identity/policy-metrics.js'
+import { getDb } from './db.js'
 import { sweepExpiredSessions } from './web/auth-sessions.js'
 import { sweepExpiredDeviceKeys } from './web/auth-device-keys.js'
 import { isBlockedCrossOriginWrite, originMatchesServedHost } from './web/csrf-origin.js'
@@ -175,7 +179,38 @@ export function startWebServer(port = 3420): http.Server {
     }
 
     try {
-      const routeCtx: RouteContext = { req, res, path, method, url, fedPeer: fedPeerForCtx, auth: ctxAuth }
+      // W10 §4.3: identity is resolved ONCE, here, before any handler runs --
+      // the same place the auth principal is already decided. Deriving it in
+      // each route would be the "each tool checks in the good case" pattern the
+      // contract rules out, and a new route would simply forget.
+      //
+      // The derivation reuses `resolveApgPrincipal`, which already answers WHICH
+      // CREDENTIAL authenticated the request and is careful about what that does
+      // not prove. This adds no authority: the adapter can only produce a scope
+      // narrower than or equal to what the credential already permits.
+      const routeIdentity = identityFromPrincipal(resolveApgPrincipal(ctxAuth))
+      const routeCtx: RouteContext = {
+        req, res, path, method, url, fedPeer: fedPeerForCtx, auth: ctxAuth,
+        identity: routeIdentity,
+      }
+
+      // Count MUTATING api requests only. A counter on every GET would swamp the
+      // signal with dashboard polling, and the surface Istvan named is
+      // "dashboard API writes". The count is what proves this boundary is
+      // actually on the live path -- a boundary nobody can show running is
+      // indistinguishable from one nobody wired.
+      if (path.startsWith('/api/') && method !== 'GET' && method !== 'HEAD') {
+        try {
+          const nowSec = Math.floor(Date.now() / 1000)
+          bumpPolicyCounter(getDb(), 'dashboard_api_write',
+            routeIdentity ? 'policy_allow' : 'policy_deny', nowSec)
+          if (!routeIdentity) {
+            bumpPolicyCounter(getDb(), 'dashboard_api_write', 'identity_resolution_failure', nowSec)
+          }
+        } catch {
+          // Metrics never change request handling.
+        }
+      }
 
       if (await tryHandleAuth(routeCtx)) return
       if (await tryHandleSecurity(routeCtx)) return

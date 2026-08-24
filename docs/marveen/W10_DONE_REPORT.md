@@ -2,8 +2,15 @@
 
 ```text
 PACKET: W10 — Identity, Actor & Data Sensitivity Boundary
-Status: PARTIAL
+Status: PARTIAL  (coverage pass 2 of 2 landed; two named gaps remain)
 ```
+
+> **Update 2026-08-24, after Istvan's `DECISION: APPROVED – narrow enforcement`.**
+> Coverage work landed on three more surfaces and the no-regression claim is now
+> proven against a measured baseline. Enforcement has **not** been switched on,
+> because Istvan's own condition for activating it — coverage complete and proven
+> on the relevant execution paths — is not yet met. §8 below is the current,
+> honest scorecard against his six VERIFIED_DONE criteria.
 
 **Status is PARTIAL, not DONE, and the reason is a single unmet acceptance
 criterion**, stated plainly in §5 below. Per §1.5 Step 7 a PARTIAL packet does
@@ -215,3 +222,143 @@ is what shipped: **nothing in production changed behaviour.**
   previously named: a live Ollama plus a hardcoded 100 ms per row against a 5 s
   vitest timeout, so it fails under load. Not touched, per the standing backlog
   instruction.
+
+
+---
+
+# 7. Coverage pass 2 — what landed after the decision
+
+| Surface | Before | Now | Evidence |
+|---|---|---|---|
+| Fleet inter-agent dispatch | counted, identity optional | unchanged | `policy_decision_counters` surface `fleet_dispatch` |
+| **COS send gate** (`evaluateDispatch`) | not consulted | **fourth independent veto**, ANDed with the existing three | `w10-cos-gate-boundary.test.ts`, 10 tests, 4 mutations RED |
+| **COS send flow** (`dispatchApprovedSend`) | no identity | threads `identity` / `principal` to the gate | `cos-send-flow.test.ts` green |
+| **Dashboard API writes** | no boundary | identity resolved **once** in the dispatcher, before any handler; mutating `/api/` requests counted | `src/web.ts` route-context construction |
+| Scheduled tasks | none | `scheduledTaskIdentity()` built and tested; **not yet threaded** into the cycle steps | `w10-principal-adapter.test.ts` |
+| MCP / agent tool calls | none | **architecturally out of reach** — see §9 | — |
+
+## The migration rule, and why it is asymmetric
+
+A caller that **supplies** an identity is **BOUND** by the verdict. A caller that
+does not gets an **ADVISORY** verdict: recorded, surfaced on the decision, and
+counted — but not vetoing.
+
+The alternative was to make identity mandatory today, which would have vetoed
+every send in the system until the last call site was migrated. That is not
+caution, it is an outage in the shape of a principle.
+
+**What stops this from becoming a permanent bypass:** the advisory path is
+counted (`identity_resolution_failure`, per surface). "How much of this gate is
+still advisory" is therefore a number anyone can read, and W10 cannot be reported
+VERIFIED_DONE while it is above zero on a live path. An unmeasured exemption
+rots; a measured one is a work item.
+
+**The exception to the exception:** a never-external tag (CREDENTIAL /
+AUTH_TOKEN) vetoes **even without an identity**. "We do not know who you are" is
+not a reason to let a secret leave. Asserted directly, and mutation-proven.
+
+## Reusing rather than rebuilding, again
+
+The dashboard identity is derived from `resolveApgPrincipal`, which already
+answers *which credential authenticated this request* and is unusually careful
+about what that does not prove ("'operator' is not proof of a human" — its own
+header). A second resolver for the same requests would be a second answer to one
+question, and the two would disagree the first time either changed.
+
+The adapter **adds no authority**. Asserted: no principal class can reach
+`EXTERNAL_EFFECT` through it, the shared fleet token gets neither `ADMIN` nor
+`EXTERNAL_EFFECT`, and it never invents an `onBehalfOf`.
+
+---
+
+# 8. Against Istvan's six VERIFIED_DONE criteria
+
+| # | Criterion | Verdict | Evidence / what is missing |
+|---|---|---|---|
+| 1 | Every in-scope action passes the central boundary | **NOT MET** | 4 of 5 surfaces wired. Scheduled-task identity is built but not threaded; MCP tool calls are outside the process (§9) |
+| 2 | Actor identity / capability context actually propagates | **PARTIAL** | Dashboard: yes, resolved once at the dispatcher. COS send: yes when the caller passes it. Scheduled: not yet |
+| 3 | Restricted credential / auth-token case fail-closed | **MET** | Vetoes on the real gate with a full capability scope, and **without any identity**. Mutation RED |
+| 4 | Unknown / high-risk classification fail-closed | **MET** | `UNKNOWN_LEVEL = SECRET`; unrecognised level re-derived **inside** the boundary; `HIGHLY_SENSITIVE` cannot leave. Mutation: 9 tests RED |
+| 5 | Runtime decision counters prove the gate works | **MET** | Three surfaces counting (`fleet_dispatch`, `cos_send`, `dashboard_api_write`); liveness is now a presence claim that can be false |
+| 6 | No W10-caused regression | **MET, measured** | See §10 |
+
+**Therefore W10 is not VERIFIED_DONE, and narrow enforcement is not activated.**
+Istvan's condition was explicit: enforcement may be switched on only once coverage
+is complete and proven. Flipping it now would satisfy the letter of the approval
+while breaking the condition attached to it.
+
+---
+
+# 9. The gap I cannot close from here, stated plainly
+
+**MCP / agent tool calls are outside any in-process boundary.**
+
+The dashboard is a Node process. MCP tool calls — `calendar_create_event`,
+`gmail_read`, a Telegram reply — are made by the *agent*, in a different process,
+through servers the dashboard neither hosts nor proxies. No function in this
+repository sits between the agent and those tools, so no code I write here can
+gate them. Claiming otherwise would be the worst kind of false green: a
+"boundary" with a documented scope that quietly excludes the surface with the
+most real-world reach.
+
+What actually constrains them today: the scheduled-task SKILL rules (read-only
+Gmail, never send, the three calendar rules), the agent's own discipline, and the
+approval ladder for sends that go through the COS. Those are real, and none of
+them is an enforced boundary.
+
+Closing it properly needs one of:
+
+1. **an MCP proxy** the agent is configured to use, which applies
+   `authorizeAction` before forwarding — real enforcement, new moving part;
+2. **capability narrowing at the credential** — e.g. an OAuth token without
+   `calendar.events` — which is enforcement by the provider and needs no trust in
+   our code at all (and is the direction the W13 least-privilege work points);
+3. **accepting it as out of scope for W10** and carding it, with the boundary
+   covering everything in-process.
+
+I recommend **2 for writes and 1 for the rest**, but this is an architecture
+decision with a cost, so it is not mine to take unilaterally. It is the one thing
+between the current state and criterion 1.
+
+---
+
+# 10. No-regression proof (criterion 6)
+
+Measured, not asserted. `git diff --name-only` first: W10 touched **none** of
+`memory-performance.test.ts`, `db.ts` or `memory.ts`.
+
+Then the full suite at the pre-W10 baseline `0011de92`, W10 absent:
+
+```
+BASELINE (0011de92)   Test Files  1 failed | 553 passed (554)
+                      Tests       2 failed | 7426 passed | 4 skipped (7432)
+                      × backfillEmbeddings > returns 0 when ... Ollama is unreachable  → Test timed out in 5000ms
+                      × backfillEmbeddings > processes rows without embeddings ...      → Test timed out in 5000ms
+```
+
+And with W10 present:
+
+```
+WITH W10              Test Files  1 failed | 557 passed (558)
+                      Tests       1 failed | 7486 passed | 4 skipped (7491)
+                      same file, same test, same cause
+```
+
+Same failing file, same tests, same cause (`Test timed out in 5000ms` — a live
+Ollama plus a hardcoded 100 ms per row against a 5 s vitest timeout, so it is
+load-dependent and has flipped between 1 and 2 failures across runs all evening).
+
+**+4 test files, +60 tests, zero new failures.** The failure is pre-existing and
+not a W10 regression.
+
+---
+
+# 11. Updated next-packet readiness
+
+Still **not ready**, and now for exactly two reasons, both named above:
+
+- **mine:** thread the scheduled-task identity into the cycle steps;
+- **yours:** the MCP decision in §9.
+
+Nothing in production changed behaviour in this pass either. The fleet gate is
+still `observe-only`; narrow enforcement is built but **not switched on**.

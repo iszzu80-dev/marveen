@@ -22,6 +22,16 @@ export interface RouteContext {
    *  `device` is the key name for the 'device' kind. Lets routes distinguish
    *  a human session from a token/fleet caller or an enrolled device. */
   auth?: { kind: 'token' | 'session' | 'federation' | 'device'; user?: string; peer?: string; device?: string }
+  /**
+   * W10: the execution identity for this request, derived from `auth` by the
+   * dispatcher via the principal adapter. Null means no credential authenticated
+   * the request, which is a resolution FAILURE rather than an empty-scoped
+   * identity -- handlers that act on it must fail closed.
+   *
+   * Present on every RouteContext the dispatcher builds; optional only so that
+   * hand-built test contexts keep compiling.
+   */
+  identity?: import('../../identity/execution-identity.js').ExecutionIdentity | null
 }
 
 export type RouteHandler = (ctx: RouteContext) => Promise<boolean>

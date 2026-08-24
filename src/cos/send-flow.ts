@@ -290,6 +290,16 @@ export interface DispatchSendInput {
   /** F-2 / AC-21: which run drove this send. Optional because a send triggered
    *  by the owner from the UI belongs to no run. */
   runId?: string
+  /**
+   * W10: who is causing this send, threaded to the gate's policy boundary.
+   *
+   * Optional so every existing caller compiles, and its absence is COUNTED as an
+   * identity-resolution failure rather than waved through -- see the migration
+   * note in dispatch-gate.ts. When present, the boundary's verdict BINDS.
+   */
+  identity?: import('../identity/execution-identity.js').ExecutionIdentity | null
+  /** The principal this send is made for, when one exists. */
+  principal?: import('../identity/execution-identity.js').ExecutionIdentity | null
   /** E13: the template variable names the rendered payload used, when the caller
    *  rendered from a template and knows them. Absent for a hand-composed mail —
    *  and absent means the variable checks have nothing to check, not that they
@@ -354,6 +364,8 @@ export async function dispatchApprovedSend(
   db: Database.Database, adapter: OutboundAdapter, input: DispatchSendInput, now: number, opts: ExecuteOpts = {},
 ): Promise<DispatchSendResult> {
   const decision = evaluateDispatch(db, {
+    identity: input.identity ?? null,
+    principal: input.principal ?? null,
     connectorId: input.connectorId, requireWrite: true,
     declaredSensitivity: input.declaredSensitivity,
     content: `${input.email.subject}\n${input.email.body}`,
