@@ -32,16 +32,59 @@ fields do not exist — a switch that reports success and changes nothing.
    ```
    "sourceManifestHash":"<candidate.sourceManifestHash — verbatim from the fetch output>",
    "triageActor":"marveen",
-   "triageModel":"<the model id actually deciding, e.g. claude-opus-5>",
+   "triageModel":"<the CANONICAL model id, resolved from raw argv -- see below>",
    "triagePromptFingerprint":"<triagePromptFingerprint from the fetch output>",
    "triageDecidedAt":<unix seconds at the moment of the verdict>
    ```
 
    Pass the hash and the fingerprint **through unchanged**. Recomputing either in
    the prompt would fingerprint what the agent retyped, not what it read.
-3. Record the activation cutoff (unix seconds) wherever the readiness gate is
-   evaluated, and from that moment `GO_FORWARD_PROVENANCE_INCOMPLETE` is a
-   failure, not a warning.
+3. Open a provenance epoch (`openProvenanceEpoch`, `src/cos/provenance-epoch.ts`)
+   with the activation cutoff in unix seconds. From that moment
+   `GO_FORWARD_PROVENANCE_INCOMPLETE` is a failure, not a warning, and **the
+   cutoff is immutable** -- see the rollback plan for why moving it forward, not
+   backward, is the direction that hides failures.
+
+## Where `triageModel` comes from
+
+It is resolved, never typed. `resolveRuntimeModelIdentity`
+(`src/cos/model-identity.ts`) walks the process ancestry from the running agent,
+stops at the NEAREST `claude` process, and reads `--model` out of
+`/proc/<pid>/cmdline`: raw, NUL-separated argv, not a `ps` rendering and not
+anything the terminal drew.
+
+Four rules, none of them cosmetic:
+
+- **No cleaning.** A value that is not already canonical FAILS. A resolver that
+  strips a character it did not expect reports a model no process was launched
+  with, and the receipt then attests to something that did not happen.
+- **Control and ANSI bytes are rejected outright** as
+  `MODEL_IDENTITY_CONTROL_CHARACTERS`, never stripped.
+- **Only the nearest claude is authoritative.** A non-claude ancestor whose
+  command line merely contains `--model` is never consulted at all, and if the
+  nearest claude carries no `--model`, the answer is `MODEL_IDENTITY_UNRESOLVED`
+  rather than a value borrowed from an outer session.
+- **Unprovable is a state, not a default.** `MODEL_IDENTITY_UNRESOLVED` is what
+  gets recorded when nothing can be proven, and `goForwardProvenanceStatus`
+  treats it as an incomplete receipt.
+
+The canonical grammar (`CANONICAL_MODEL_ID_RE`) is deliberately NARROWER than
+`MODEL_ID_RE` in `src/model-id.ts`. That one is a shell-injection allowlist for a
+value heading to a command line and admits `[` and `]` so the fleet's `[1m]`
+context-window suffix can be launched. This one answers a different question --
+may we attest to this identity? -- and a bracketed suffix does not survive it.
+The two must not be merged: one protects a sink, the other protects a claim.
+
+## Gmail scopes actually granted (2026-08-18 least-privilege audit)
+
+Recorded here because an earlier note in this area claimed the ZST token carried
+only `gmail.send`. It does not.
+
+- **Personal**: reviewed, least-privilege, accepted.
+- **ZST**: `gmail.modify` is granted with **no caller in the codebase**. Not an
+  activation blocker precisely because nothing invokes it, but an unused write
+  scope is a standing capability nobody is watching. Tracked as a P1 hardening
+  item to be removed before the 7-day unattended stability window.
 
 ## What activation explicitly does NOT do
 
