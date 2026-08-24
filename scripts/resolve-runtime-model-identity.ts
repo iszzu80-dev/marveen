@@ -21,7 +21,9 @@ const res = resolveRuntimeModelIdentity(process.pid, procfsReader())
 const out = {
   resolvedAt: new Date().toISOString(),
   ok: res.ok,
-  canonicalModelId: res.model,
+  modelId: res.modelId,
+  canonicalBaseModelId: res.model,
+  modelVariant: res.modelVariant,
   reason: res.reason,
   detail: res.detail,
   rawValueAsRead: res.raw === null ? null : visible(res.raw),
@@ -44,7 +46,9 @@ if (!res.ok) {
   process.exit(1)
 }
 console.error(
-  `\nMODEL IDENTITY PROVEN: ${res.model}\n`
+  `\nMODEL IDENTITY PROVEN: ${res.modelId}\n`
+  + `  base id   : ${res.model}\n`
+  + `  variant   : ${res.modelVariant ?? '(none)'}\n`
   + `  read from : ${res.source!.path} (argv[${res.source!.argvIndex}], ${res.source!.form})\n`
   + `  argv[0]   : ${res.source!.argv0}\n`
   + `  exe       : ${res.source!.exe ?? '(unreadable)'}`,

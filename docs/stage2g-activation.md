@@ -68,12 +68,42 @@ Four rules, none of them cosmetic:
   gets recorded when nothing can be proven, and `goForwardProvenanceStatus`
   treats it as an incomplete receipt.
 
-The canonical grammar (`CANONICAL_MODEL_ID_RE`) is deliberately NARROWER than
-`MODEL_ID_RE` in `src/model-id.ts`. That one is a shell-injection allowlist for a
-value heading to a command line and admits `[` and `]` so the fleet's `[1m]`
-context-window suffix can be launched. This one answers a different question --
-may we attest to this identity? -- and a bracketed suffix does not survive it.
-The two must not be merged: one protects a sink, the other protects a claim.
+### The `[1m]` suffix: decomposed, not discarded (Istvan, 2026-08-24, decision C)
+
+The first cut of this resolver rejected `claude-opus-5[1m]` outright, on the
+premise that the brackets were ANSI decoration from a terminal rendering. Running
+the resolver against the live process disproved that premise:
+`/proc/18442/cmdline` carries `claude-opus-5[1m]` as a literal 17-byte argv
+element with zero control bytes. It is not decoration, it is the identity of the
+build that is running, and `[1m]` is what selects the 1M-context variant.
+
+Rejecting it would therefore have made provenance permanently unprovable on this
+fleet. Changing the launcher to pass `claude-opus-5` would have been worse: it
+would change which build runs, to buy a prettier receipt.
+
+So the value is DECOMPOSED and both halves are validated:
+
+| field | value | meaning |
+|---|---|---|
+| `modelId` | `claude-opus-5[1m]` | what the receipt records: the identity as launched |
+| `model` | `claude-opus-5` | canonical base id, for grouping across variants |
+| `modelVariant` | `1m` | the declared variant token |
+
+`MODEL_VARIANT_RE` admits exactly one bracketed lowercase alphanumeric token as a
+SUFFIX. `claude-opus-5[1M]`, `claude-opus-5[]`, `claude-opus-5[1m]x` and
+`claude[1m]-opus-5` all fail, and an ANSI escape still fails on the control-byte
+check before the grammar is even consulted.
+
+What keeps this a parse and not a sanitize is that `modelId` **is** the raw
+string, by construction. `model` and `modelVariant` are derived views for
+grouping and reporting; the recorded value is never rebuilt from them, so no
+parsing slip can hand back a different identity than the one that was read.
+
+`CANONICAL_MODEL_ID_RE` still governs the base id alone, and is deliberately
+narrower than `MODEL_ID_RE` in `src/model-id.ts`. That one is a shell-injection
+allowlist for a value heading to a command line. This one answers a different
+question: may we attest to this identity? The two must not be merged -- one
+protects a sink, the other protects a claim.
 
 ## Gmail scopes actually granted (2026-08-18 least-privilege audit)
 

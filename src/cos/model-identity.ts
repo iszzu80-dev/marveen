@@ -55,6 +55,28 @@ export const MODEL_ID_MAX_LENGTH = 128
 export const CANONICAL_MODEL_ID_RE =
   /^[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*(?:\/[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*)*$/
 
+/**
+ * A DECLARED variant suffix, bracketed, as the launcher actually passes it:
+ * `claude-opus-5[1m]` selects the 1M-context build of `claude-opus-5`.
+ *
+ * WHY THIS EXISTS AT ALL (Istvan, 2026-08-24, decision C). The first cut of this
+ * module rejected the whole value, on the premise that `[1m]` was ANSI decoration
+ * leaking in from a terminal rendering. Running the resolver against the live
+ * process disproved that: `/proc/18442/cmdline` carries `claude-opus-5[1m]` as a
+ * literal 17-byte argv element, zero control bytes. It is not decoration, it is
+ * the identity of the build that is running.
+ *
+ * So the value is DECOMPOSED, not discarded and not silently cleaned. Both halves
+ * are validated, both are reported, and the recomposed string is asserted to be
+ * byte-identical to what was read. That is the difference between parsing a value
+ * and sanitizing one: nothing here can turn a model id into a different model id.
+ *
+ * The suffix is not free-form. It matches one bracketed lowercase alphanumeric
+ * token, which admits `[1m]` and still refuses the shapes a stray escape sequence
+ * would produce.
+ */
+export const MODEL_VARIANT_RE = /^\[[a-z0-9]{1,16}\]$/
+
 /** Recorded in a receipt's `model` field when no model could be PROVEN. */
 export const MODEL_IDENTITY_UNRESOLVED = 'MODEL_IDENTITY_UNRESOLVED'
 
@@ -84,8 +106,13 @@ export interface ModelIdentitySource {
 
 export interface ModelIdentityResolution {
   ok: boolean
-  /** The canonical id. Non-null ONLY when ok. Byte-identical to `raw`. */
+  /** The full validated identity, byte-identical to `raw`. Non-null ONLY when ok.
+   *  This is what a receipt records: what the process was actually launched with. */
+  modelId: string | null
+  /** The canonical BASE id, variant suffix removed (`claude-opus-5`). */
   model: string | null
+  /** The declared variant token without brackets (`1m`), or null if none. */
+  modelVariant: string | null
   /** Exactly what was read, uncleaned, for diagnosis. Null when nothing was read. */
   raw: string | null
   reason: ModelIdentityFailure | null
@@ -160,11 +187,18 @@ function readModelArg(
   return null
 }
 
-/** Validate an already-read value. Exported so a test can drive the decision
- *  table without constructing a process tree. */
+/**
+ * Validate an already-read value and split it into base id + declared variant.
+ *
+ * Exported so a test can drive the decision table without constructing a process
+ * tree. Returns the parts on success; on failure it returns WHY, and never a
+ * repaired value.
+ */
 export function validateCanonicalModelId(
   raw: string,
-): { ok: true } | { ok: false; reason: ModelIdentityFailure; detail: string } {
+):
+  | { ok: true; modelId: string; model: string; modelVariant: string | null }
+  | { ok: false; reason: ModelIdentityFailure; detail: string } {
   if (hasControlCharacters(raw)) {
     return {
       ok: false,
@@ -184,16 +218,50 @@ export function validateCanonicalModelId(
       detail: `length ${raw.length} exceeds ${MODEL_ID_MAX_LENGTH}`,
     }
   }
-  if (!CANONICAL_MODEL_ID_RE.test(raw)) {
+
+  // Split ONLY on a trailing bracketed suffix. Anything else keeping a bracket
+  // stays a failure: this is a declared grammar, not a strip-what-you-don't-like.
+  let base = raw
+  let variant: string | null = null
+  if (raw.endsWith(']')) {
+    const open = raw.lastIndexOf('[')
+    if (open <= 0) {
+      return {
+        ok: false, reason: 'MODEL_IDENTITY_NOT_CANONICAL',
+        detail: 'a trailing "]" with no opening bracket, or an empty base id',
+      }
+    }
+    const suffix = raw.slice(open)
+    if (!MODEL_VARIANT_RE.test(suffix)) {
+      return {
+        ok: false, reason: 'MODEL_IDENTITY_NOT_CANONICAL',
+        detail:
+          `the trailing suffix ${JSON.stringify(suffix)} is not a declared variant `
+          + '(one bracketed lowercase alphanumeric token, e.g. "[1m]"); it is rejected, not removed',
+      }
+    }
+    base = raw.slice(0, open)
+    variant = suffix.slice(1, -1)
+  }
+
+  if (!CANONICAL_MODEL_ID_RE.test(base)) {
     return {
       ok: false,
       reason: 'MODEL_IDENTITY_NOT_CANONICAL',
       detail:
-        'does not match the canonical model-id grammar (alphanumeric segments joined by '
-        + '. _ - and optionally namespaced with /); no character is removed to make it fit',
+        'the base id does not match the canonical model-id grammar (alphanumeric segments '
+        + 'joined by . _ - and optionally namespaced with /); no character is removed to make it fit',
     }
   }
-  return { ok: true }
+
+  // What keeps this a PARSE and not a sanitize: `modelId` is `raw` itself, by
+  // construction. `model` and `modelVariant` are derived VIEWS for grouping and
+  // reporting; the value that gets recorded is never rebuilt from them, so no
+  // parsing slip can hand back a different identity than the one that was read.
+  // (An explicit base+variant recomposition check was written here first and then
+  // removed: the split is a pure substring of `raw`, so the check could not fail,
+  // and a guard that cannot go red reads as protection while providing none.)
+  return { ok: true, modelId: raw, model: base, modelVariant: variant }
 }
 
 /**
@@ -232,7 +300,7 @@ export function resolveRuntimeModelIdentity(
       // The nearest claude is authoritative even when it is silent. Walking past
       // it would let an OUTER session's model be reported as this one's.
       return {
-        ok: false, model: null, raw: null,
+        ok: false, modelId: null, model: null, modelVariant: null, raw: null,
         reason: 'MODEL_IDENTITY_UNRESOLVED',
         detail:
           `the nearest claude ancestor (pid ${p.pid}) was launched without --model; `
@@ -252,15 +320,19 @@ export function resolveRuntimeModelIdentity(
     const verdict = validateCanonicalModelId(found.raw)
     if (!verdict.ok) {
       return {
-        ok: false, model: null, raw: found.raw,
+        ok: false, modelId: null, model: null, modelVariant: null, raw: found.raw,
         reason: verdict.reason, detail: verdict.detail, source, walked,
       }
     }
-    return { ok: true, model: found.raw, raw: found.raw, reason: null, detail: null, source, walked }
+    return {
+      ok: true, modelId: verdict.modelId, model: verdict.model,
+      modelVariant: verdict.modelVariant, raw: found.raw,
+      reason: null, detail: null, source, walked,
+    }
   }
 
   return {
-    ok: false, model: null, raw: null,
+    ok: false, modelId: null, model: null, modelVariant: null, raw: null,
     reason: 'MODEL_IDENTITY_UNRESOLVED',
     detail: 'no claude process found among the ancestors of pid ' + startPid,
     source: null, walked,
@@ -305,9 +377,15 @@ export function procfsReader(): ProcReader {
   }
 }
 
-/** Convenience for callers that just need the value or the sentinel. The full
- *  resolution is what a REPORT should carry -- this loses the provenance source,
- *  so never use it to build one. */
+/** What a receipt's `model` field records: the FULL validated identity, exactly
+ *  as the process was launched (`claude-opus-5[1m]`), or the sentinel.
+ *
+ *  The full string, not the base, because the receipt must say which build
+ *  decided -- a 1M-context run and a 200k run of the same family are not
+ *  interchangeable evidence. The base id and the variant are available separately
+ *  on the resolution for anyone who needs to group across variants.
+ *
+ *  This loses the provenance source, so never build a REPORT from it. */
 export function runtimeModelIdOrUnresolved(res: ModelIdentityResolution): string {
-  return res.ok && res.model ? res.model : MODEL_IDENTITY_UNRESOLVED
+  return res.ok && res.modelId ? res.modelId : MODEL_IDENTITY_UNRESOLVED
 }

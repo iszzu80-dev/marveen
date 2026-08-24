@@ -49,6 +49,8 @@ describe('blocker #1 -- canonical runtime model identity', () => {
     const r = resolveRuntimeModelIdentity(1000, read)
     expect(r.ok).toBe(true)
     expect(r.model).toBe('claude-opus-5')
+    expect(r.modelId).toBe('claude-opus-5')
+    expect(r.modelVariant).toBeNull()
     // The report must be able to SHOW where it came from, not merely claim it.
     expect(r.source?.path).toBe('/proc/1001/cmdline')
     expect(r.source?.argvIndex).toBe(2)
@@ -65,19 +67,59 @@ describe('blocker #1 -- canonical runtime model identity', () => {
     expect(r.source?.form).toBe('inline')
   })
 
-  it('a decorated claude-opus-5[1m] FAILS and is NOT sanitized to claude-opus-5', () => {
+  it('claude-opus-5[1m] is DECOMPOSED, not cleaned: modelId stays the raw string', () => {
+    // Istvan, 2026-08-24, decision C. The live launcher really does pass this as
+    // a literal argv element, so rejecting it outright would make provenance
+    // permanently unprovable on this fleet. It is parsed instead -- and the test
+    // that keeps parsing honest is that modelId is the raw string, not a rebuild.
     const read = treeReader([
       SHELL,
       { comm: 'claude', argv: ['/home/iszzu/.local/bin/claude', '--model', 'claude-opus-5[1m]'] },
     ])
     const r = resolveRuntimeModelIdentity(1000, read)
-    expect(r.ok).toBe(false)
-    expect(r.model).toBeNull()
-    expect(r.reason).toBe('MODEL_IDENTITY_NOT_CANONICAL')
-    // The exact anti-sanitization assertion: the raw value is preserved verbatim
-    // and the stripped form never appears as an answer.
+    expect(r.ok).toBe(true)
+    expect(r.model).toBe('claude-opus-5')
+    expect(r.modelVariant).toBe('1m')
     expect(r.raw).toBe('claude-opus-5[1m]')
+    // Nothing was discarded: the receipt records the full launched identity.
+    expect(r.modelId).toBe('claude-opus-5[1m]')
+    expect(runtimeModelIdOrUnresolved(r)).toBe('claude-opus-5[1m]')
+  })
+
+  it('a bracket that is not a declared variant is rejected, not stripped', () => {
+    for (const bad of [
+      'claude-opus-5[1M]',        // uppercase is not the declared token shape
+      'claude-opus-5[]',          // empty variant
+      'claude-opus-5[1m',         // unterminated
+      'claude-opus-5]1m[',
+      '[1m]',                     // suffix with no base id
+      'claude-opus-5[1m]x',       // trailing junk after the suffix
+      'claude[1m]-opus-5',        // variant is a SUFFIX, not an infix
+    ]) {
+      const v = validateCanonicalModelId(bad)
+      expect(v.ok, JSON.stringify(bad)).toBe(false)
+    }
+    // And through the resolver, so the failure survives the whole path.
+    const read = treeReader([
+      { comm: 'claude', argv: ['/usr/bin/claude', '--model', 'claude-opus-5[1m]x'] },
+    ])
+    const r = resolveRuntimeModelIdentity(1000, read)
+    expect(r.ok).toBe(false)
+    expect(r.reason).toBe('MODEL_IDENTITY_NOT_CANONICAL')
+    expect(r.raw).toBe('claude-opus-5[1m]x')
+    expect(r.modelId).toBeNull()
     expect(runtimeModelIdOrUnresolved(r)).toBe(MODEL_IDENTITY_UNRESOLVED)
+  })
+
+  it('a variant-carrying value with an ANSI escape still FAILS on the control byte', () => {
+    // Decomposition must not become a way in for the thing it replaced.
+    const read = treeReader([
+      { comm: 'claude', argv: ['/usr/bin/claude', '--model', 'claude-opus-5' + ESC + '[1m'] },
+    ])
+    const r = resolveRuntimeModelIdentity(1000, read)
+    expect(r.ok).toBe(false)
+    expect(r.reason).toBe('MODEL_IDENTITY_CONTROL_CHARACTERS')
+    expect(r.modelId).toBeNull()
   })
 
   it('a real ANSI SGR sequence FAILS as control characters, never stripped', () => {
@@ -152,7 +194,6 @@ describe('blocker #1 -- canonical runtime model identity', () => {
       expect(validateCanonicalModelId(good).ok, good).toBe(true)
     }
     for (const bad of [
-      'claude-opus-5[1m]',      // the reported value
       'claude-opus-5 ',         // trailing space -- never trimmed away
       ' claude-opus-5',
       'claude-opus-5\n',        // a rendered line, not an argv value
