@@ -738,11 +738,30 @@
       ? (needsHuman + pendingRetry)
       : '<p style="color:var(--text-muted,#888);font-size:12px;">Nincs elakadt helyreállítás. (A sort a ciklus 10 percenként frissíti; ez a nézet csak olvassa.)</p>'
 
+    // W14 / §8.6: stale runs and unverified completions. The zero case speaks
+    // here too -- and it says WHICH zero, because "nothing is stuck" and "the
+    // ledger has no rows yet" are different facts.
+    var health = mon.health || { stale: [], unverified: [], clean: true }
+    var healthRows = (health.stale || []).map(function (h) {
+      return row(
+        '<strong style="font-size:13px;">' + esc(h.featureId) + '</strong>' + pill('ELAKADT', '#f59e0b'),
+        '<span style="font-size:11px;color:var(--text-muted,#888);">utolsó futás ' +
+          esc(Math.round(h.ageSeconds / 60)) + ' perce, ' + esc(h.lastRunStatus) + '</span>', '#f59e0b')
+    }).join('') + (health.unverified || []).map(function (u) {
+      return row(
+        '<strong style="font-size:13px;">' + esc(u.source) + '</strong>' + pill('IGAZOLATLAN', '#ef4444') +
+          '<span style="font-size:11px;color:var(--text-muted,#888);">' + esc(u.reference) + '</span>',
+        '<span style="font-size:11px;color:#ef4444;">' + esc(u.detail) + '</span>' +
+          '<div style="font-size:11px;color:var(--text-muted,#888);">' + esc(Math.round(u.ageSeconds / 3600)) + ' órája</div>', '#ef4444')
+    }).join('')
+    var healthHtml = healthRows || '<p style="color:var(--text-muted,#888);font-size:12px;">Nincs elakadt futás és nincs igazolatlan befejezés.</p>'
+
     return '<section style="margin-bottom:24px;"><h2 style="font-size:16px;margin:0 0 10px;">🩺 Monitoring</h2>' +
       '<div style="font-size:12px;color:var(--text-muted,#888);margin-bottom:4px;">Konnektorok</div>' + connHtml +
       '<div style="font-size:12px;color:var(--text-muted,#888);margin:8px 0 4px;">Kimenő állapot</div><div style="margin-bottom:4px;">' + statusPills + '</div>' +
       (attn ? '<div style="font-size:12px;color:#ef4444;margin:8px 0 4px;">Emberi beavatkozás kell</div>' + attn : '') +
       '<div style="font-size:12px;color:var(--text-muted,#888);margin:8px 0 4px;">Helyreállítási sor (§6.7)</div>' + recovHtml +
+      '<div style="font-size:12px;color:var(--text-muted,#888);margin:8px 0 4px;">Futás-egészség (§8.6)</div>' + healthHtml +
       (quotaHtml ? '<div style="font-size:12px;color:var(--text-muted,#888);margin:8px 0 4px;">Kvóta</div>' + quotaHtml : '') +
       '</section>'
   }

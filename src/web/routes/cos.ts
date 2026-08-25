@@ -31,6 +31,7 @@ import { engageKillSwitch, releaseKillSwitch, killSwitchState } from '../../cos/
 import { evaluateOutputFloors, breachedFloors } from '../../cos/output-floor.js'
 import { runDailyReconcile } from '../../cos/reconcile.js'
 import { listNeedsHuman, listDueForRetry } from '../../cos/recovery-queue.js'
+import { operationalHealth } from '../../cos/operational-health.js'
 import { linkCases, suggestLinks, linkedCases } from '../../cos/case-link.js'
 import { classifyScope, describeScope } from '../../cos/scope-gate.js'
 import { deriveAnswerOptions } from '../../cos/answer-options.js'
@@ -1067,6 +1068,7 @@ export function listMonitoring(db: ReturnType<typeof getDb>): {
   quotas: unknown[]; outputFloors: unknown[]; breached: unknown[]
   alerts: { findings: unknown[]; counts: Record<string, number>; clean: boolean }
   recovery: { needsHuman: unknown[]; pendingRetry: unknown[]; counts: Record<string, number> }
+  health: { stale: unknown[]; unverified: unknown[]; clean: boolean; checkedAt: number }
 } {
   const connectors = db.prepare(
     `SELECT connector_id, kind, mode, status, consecutive_failures, last_ok_at, last_error_at, last_error
@@ -1111,10 +1113,17 @@ export function listMonitoring(db: ReturnType<typeof getDb>): {
     attempts: r.attemptCount, maxAttempts: r.maxAttempts, nextAttemptAt: r.nextAttemptAt,
     lastError: r.lastError,
   }))
+  // W14 / §8.6 — the two metrics that had nothing behind them until the run
+  // ledger got a writer: something that should be running and stopped, and
+  // something that acted and was never confirmed. They fail in opposite
+  // directions, so a surface carrying only one of them can be green while the
+  // other is the outage.
+  const health = operationalHealth(db, Math.floor(Date.now() / 1000))
   return { connectors, outboundHealth: { byStatus, needsAttention }, quotas,
     outputFloors, breached: breachedFloors(outputFloors),
     alerts: { findings: rec.findings, counts: rec.counts, clean: rec.clean },
-    recovery: { needsHuman, pendingRetry, counts: recoveryCounts } }
+    recovery: { needsHuman, pendingRetry, counts: recoveryCounts },
+    health }
 }
 
 

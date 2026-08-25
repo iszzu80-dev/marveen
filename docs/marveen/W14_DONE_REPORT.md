@@ -143,10 +143,33 @@ window, announced.
 | rollback / forward-fix runbook exercised | **PARTIAL** — two layers drilled, the code layer not (§5) |
 | production readiness checklist green | see `PHASE_0_GO_NO_GO.md` |
 
+## 6b. The two §8.6 metrics (closed after the first draft of this report)
+
+`src/cos/operational-health.ts`, on `/api/cos/monitoring` and in COS Control.
+
+- **stale runs** — a feature whose newest recorded run is older than an hour (six
+  cycles: long enough that one skipped tick is not an alarm, short enough to
+  notice within a working morning). The NEWEST run decides, so a feature that
+  resumed is healthy. **What it cannot see is asserted**: a feature that has NEVER
+  recorded a run has no row and cannot be stale — absence is a different
+  question, answered by comparing against a declared expected set.
+- **unverified completion** — two sources on purpose: a RUN that acted without a
+  readback (§8.7's PARTIAL) and an `APPLIED_UNVERIFIED` ledger row the provider
+  accepted while the marker never came back. Reporting only the first would miss
+  the concrete side effect; only the second would miss every non-outbound step
+  that acts outside.
+
+**The metric had a finding before it existed**: two `APPLIED_UNVERIFIED` rows on
+the live store from 2026-08-10 — sixteen days old, never resent by design, and
+surfaced by nothing. They are the first thing this metric will report.
+
+The two fail in opposite directions — silence where there should be noise, and
+noise never resolved into a fact — which is why they are two metrics and not one
+health number. The zero case says which zero it is.
+
 ## 7. Named gaps
 
-1. **Two §8.6 metrics are still missing**: stale runs and unverified completion.
-   Both are now cheap — the run ledger has the data — and neither is written.
+1. ~~**Two §8.6 metrics**~~ — **CLOSED**, see §6b.
 2. **Staging parity is one of six dimensions.** Named in the audit, unchanged.
 3. **The code-rollback rehearsal** (§5).
 4. **The canary covers one behaviour.** It is a mechanism with one subject today;
@@ -155,9 +178,9 @@ window, announced.
 ## 8. Test results
 
 ```text
-vitest run (full suite, 2026-08-26 02:10)
-Test Files  579 passed (579)
-Tests       7752 passed | 4 skipped (7756)
+vitest run (full suite, 2026-08-26)
+Test Files  580 passed (580)
+Tests       7765 passed | 4 skipped (7769)
 exit 0
 ```
 
