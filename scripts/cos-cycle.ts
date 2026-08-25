@@ -25,7 +25,8 @@
  */
 import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { standardFeatureResult, type FeatureRunResult } from '../src/cos/consumer-manifest.js'
+import { standardFeatureResult, recordFeatureRun, type FeatureRunResult, type VerificationStatus } from '../src/cos/consumer-manifest.js'
+import { getDb, initDatabase } from '../src/db.js'
 import {
   declaredScheduledIdentity, scheduledIdentityEnv,
 } from '../src/identity/scheduled-task-identity.js'
@@ -230,8 +231,72 @@ function cppResult(
   })
 }
 
+/**
+ * W14 / §8.7 — RUN INTEGRITY, written where every step passes.
+ *
+ * The table (`cos_feature_runs`) has existed since ACP v1.4.5 and, measured on
+ * the live store on 2026-08-26, held ZERO rows: `recordFeatureRun` had no
+ * production caller anywhere. The third instance of this codebase's
+ * characteristic defect in three packets — correct code with no consumer.
+ *
+ * It is written HERE, in the parent, rather than in each step: the cycle is the
+ * one place every step passes through, so a new step is recorded without its
+ * author remembering to. The cost is that the parent sees only what a step
+ * PRINTS, which is why the cursor and verification fields are read out of the
+ * step payload rather than invented.
+ *
+ * VERIFICATION IS DERIVED FROM THE GRANT, not from optimism. A step whose
+ * scheduled-task grant has no EXTERNAL_EFFECT has nothing to read back, and
+ * NOT_APPLICABLE is its honest answer. A step that MAY act outside and did act,
+ * without saying it verified, is UNVERIFIED — so §8.7's rule bites and the run
+ * lands as PARTIAL rather than SUCCESS.
+ */
+function verificationFor(
+  capabilities: readonly string[], payload: Record<string, unknown> | null, cpp: FeatureRunResult,
+): VerificationStatus {
+  if (!capabilities.includes('EXTERNAL_EFFECT')) return 'NOT_APPLICABLE'
+  if (payload && (payload.verified === true || payload.readback === 'VERIFIED')) return 'VERIFIED'
+  return cpp.acted > 0 ? 'UNVERIFIED' : 'NOT_APPLICABLE'
+}
+
+/** A cursor a step reported, if it reported one. Never derived from anything
+ *  else: a cursor field filled in by the parent would be a claim the step never
+ *  made. */
+const cursorField = (payload: Record<string, unknown> | null, key: string): string | null => {
+  const v = payload?.[key]
+  return typeof v === 'string' || typeof v === 'number' ? String(v) : null
+}
+
+/** One §8.7 row per step. Never throws: a run ledger that can take the cycle
+ *  down would be a monitoring surface that causes the outage it reports. */
+function recordRun(
+  step: Step, identity: { capabilityScope: readonly string[] },
+  cpp: FeatureRunResult, payload: Record<string, unknown> | null, startedAt: number,
+): string {
+  try {
+    return recordFeatureRun(getDb(), {
+      runId: `${RUN_ID}:${step.name}`, featureId: step.task, domain: 'personal',
+      result: cpp, startedAt, finishedAt: Math.floor(Date.now() / 1000),
+      integrity: {
+        capabilityResult: identity.capabilityScope.join(','),
+        inputCursor: cursorField(payload, 'cursorBefore'),
+        finalCursor: cursorField(payload, 'cursor') ?? cursorField(payload, 'cursorAfter'),
+        pendingWrites: typeof payload?.pending === 'number' ? payload.pending : null,
+        sideEffects: payload?.sent ?? payload?.posted ?? null,
+        verificationStatus: verificationFor(identity.capabilityScope, payload, cpp),
+      },
+    })
+  } catch (err) {
+    problems.push(`${step.name}: run ledger write failed: ${err instanceof Error ? err.message : String(err)}`)
+    return 'UNKNOWN'
+  }
+}
+
+initDatabase()
+
 for (const s of STEPS) {
   const stepIdentity = declaredScheduledIdentity(s.task, RUN_ID)
+  const startedAt = Math.floor(Date.now() / 1000)
   const r = spawnSync('npx', ['tsx', ...s.args], {
     encoding: 'utf8',
     env: { ...process.env, ...scheduledIdentityEnv(stepIdentity) },
@@ -244,9 +309,11 @@ for (const s of STEPS) {
   const err = (r.stderr ?? '').trim()
   if (r.status !== 0 || r.error) {
     const why = r.error ? String(r.error.message) : `exit ${r.status}`
+    const failedCpp = cppResult(s.name, null, why)
     report[s.name] = {
       failed: true, error: why, stderr: err.slice(-500),
-      cpp: cppResult(s.name, null, why),
+      cpp: failedCpp,
+      runStatus: recordRun(s, stepIdentity, failedCpp, null, startedAt),
     }
     problems.push(`${s.name}: ${why}`)
     continue
@@ -269,7 +336,9 @@ for (const s of STEPS) {
   }
 
   const stepReport: Record<string, unknown> = parsed ? { ...parsed } : { raw: out.slice(-500) }
-  stepReport.cpp = cppResult(s.name, parsed, null)
+  const cpp = cppResult(s.name, parsed, null)
+  stepReport.cpp = cpp
+  stepReport.runStatus = recordRun(s, stepIdentity, cpp, parsed, startedAt)
   report[s.name] = stepReport
 
   // A step can exit 0 and still say it failed. The progression runner does
