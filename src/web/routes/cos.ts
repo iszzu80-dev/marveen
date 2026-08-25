@@ -30,6 +30,7 @@ import { storeDocument, documentsForCase, readDocumentBytes, resolveShareableAtt
 import { engageKillSwitch, releaseKillSwitch, killSwitchState } from '../../cos/kill-switch.js'
 import { evaluateOutputFloors, breachedFloors } from '../../cos/output-floor.js'
 import { runDailyReconcile } from '../../cos/reconcile.js'
+import { listNeedsHuman, listDueForRetry } from '../../cos/recovery-queue.js'
 import { linkCases, suggestLinks, linkedCases } from '../../cos/case-link.js'
 import { classifyScope, describeScope } from '../../cos/scope-gate.js'
 import { deriveAnswerOptions } from '../../cos/answer-options.js'
@@ -110,6 +111,14 @@ export function toZstTriagedEmail(input: TriagedEmail): ZstTriagedEmail {
     followUpAt: input.followUpAt,
     headers: input.headers,
     caseType: input.caseType ? PERSONAL_TO_ZST_CASE_TYPE[input.caseType] : undefined,
+    // Stage 2G: provenance crosses the boundary unchanged. Mapping it would
+    // change the verdict fingerprint, and the gate would then reject the very
+    // receipt the caller wrote.
+    sourceManifestHash: input.sourceManifestHash,
+    triageActor: input.triageActor,
+    triageModel: input.triageModel,
+    triagePromptFingerprint: input.triagePromptFingerprint,
+    triageDecidedAt: input.triageDecidedAt,
     declaredSensitivity: input.declaredSensitivity
       ? PERSONAL_TO_ZST_SENSITIVITY[input.declaredSensitivity]
       : undefined,
@@ -264,7 +273,7 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
       // would make it a button that means something else — and on 2026-08-10 it
       // did: the click recorded consent and a human still had to run the send by
       // hand. A control must do what its label promises.
-      const sent = await dispatchApproved(getDb(), b.ledgerId, now)
+      const sent = await dispatchApproved(getDb(), b.ledgerId, now, ctx.identity ?? null)
       json(res, { ...r, ...sent })
     } catch (e) { json(res, { error: String((e as Error).message) }, 400) }
     return true
@@ -458,7 +467,7 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     try {
       json(res, await approveAndDispatchZst(
         getDb(), b.ledgerId, b.renderedPayloadHash, b.approvedBy ?? 'istvan',
-        b.allowedRecipients, Math.floor(Date.now() / 1000),
+        b.allowedRecipients, Math.floor(Date.now() / 1000), ctx.identity ?? null,
       ))
     } catch (e) { json(res, { error: String((e as Error).message) }, 400) }
     return true
@@ -1057,6 +1066,7 @@ export function listMonitoring(db: ReturnType<typeof getDb>): {
   connectors: unknown[]; outboundHealth: { byStatus: Record<string, number>; needsAttention: unknown[] }
   quotas: unknown[]; outputFloors: unknown[]; breached: unknown[]
   alerts: { findings: unknown[]; counts: Record<string, number>; clean: boolean }
+  recovery: { needsHuman: unknown[]; pendingRetry: unknown[]; counts: Record<string, number> }
 } {
   const connectors = db.prepare(
     `SELECT connector_id, kind, mode, status, consecutive_failures, last_ok_at, last_error_at, last_error
@@ -1077,9 +1087,34 @@ export function listMonitoring(db: ReturnType<typeof getDb>): {
   ).all()
   const outputFloors = evaluateOutputFloors(db)
   const rec = runDailyReconcile(db)
+  // W12 / §6.7: the recovery queue, READ-ONLY here.
+  //
+  // This endpoint does not reconcile. Membership is re-derived by the cycle
+  // step (scripts/cos-recovery-queue.ts) every ten minutes, and a GET that
+  // silently rewrote the queue would make the UI its own source of truth: the
+  // page would then always agree with itself, whether or not the step that is
+  // supposed to maintain it ever ran. A queue that is stale because the cycle
+  // stopped is a fact worth being able to see.
+  const recoveryCounts: Record<string, number> = {}
+  for (const r of db.prepare(`SELECT status, COUNT(*) AS n FROM cos_recovery_queue GROUP BY status`)
+    .all() as Array<{ status: string; n: number }>) recoveryCounts[r.status] = r.n
+  const needsHuman = listNeedsHuman(db, 50).map(r => ({
+    queueId: r.queueId, surface: r.surface, ref: r.ref, caseId: r.caseId,
+    pendingAction: r.pendingAction, lastKnownOutcome: r.lastKnownOutcome,
+    retryClass: r.retryClass, attempts: r.attemptCount, maxAttempts: r.maxAttempts,
+    escalateAfter: r.escalateAfterAttempts, escalatedAt: r.escalatedAt,
+    escalationReason: r.escalationReason, lastError: r.lastError,
+  }))
+  const pendingRetry = listDueForRetry(db, Math.floor(Date.now() / 1000) + 86400 * 365, 50).map(r => ({
+    queueId: r.queueId, surface: r.surface, ref: r.ref, caseId: r.caseId,
+    pendingAction: r.pendingAction, retryClass: r.retryClass,
+    attempts: r.attemptCount, maxAttempts: r.maxAttempts, nextAttemptAt: r.nextAttemptAt,
+    lastError: r.lastError,
+  }))
   return { connectors, outboundHealth: { byStatus, needsAttention }, quotas,
     outputFloors, breached: breachedFloors(outputFloors),
-    alerts: { findings: rec.findings, counts: rec.counts, clean: rec.clean } }
+    alerts: { findings: rec.findings, counts: rec.counts, clean: rec.clean },
+    recovery: { needsHuman, pendingRetry, counts: recoveryCounts } }
 }
 
 
@@ -1209,6 +1244,9 @@ export async function approveAndDispatchZst(
   approvedBy: string,
   allowedRecipients: string[] | undefined,
   now: number,
+  /** W10: WHO clicked send on the corporate side. Same rule as the personal
+   *  path -- absent means the broker refuses. */
+  identity: import('../../identity/execution-identity.js').ExecutionIdentity | null = null,
 ): Promise<{ sent: boolean; status?: string; externalRef?: string; reasons?: string[]; sensitivityTier?: string }> {
   const row = db.prepare(
     `SELECT l.payload AS payload, l.campaign_id AS campaign_id, l.case_id AS case_id,
@@ -1260,6 +1298,7 @@ export async function approveAndDispatchZst(
     email, templateHash: row.template_hash, renderedPayloadHash: hash,
     declaredSensitivity: row.sensitivity ?? undefined,
     targetProfile: 'premium_reasoning',
+    identity,
   }, now)
 
   return {
@@ -1292,6 +1331,12 @@ export function dispatchReasons(r: {
 
 export async function dispatchApproved(
   db: ReturnType<typeof getDb>, ledgerId: string, now: number,
+  // W10: WHO clicked "Elkuldom". Threaded from the request principal rather than
+  // resolved here, because the answer already exists one layer up and a second
+  // resolver would be a second answer to one question. Absent -> the broker
+  // refuses the send, which is the intended direction of failure for the loudest
+  // action this system can take.
+  identity: import('../../identity/execution-identity.js').ExecutionIdentity | null = null,
 ): Promise<{ sent: boolean; status?: string; externalRef?: string; reasons?: string[]; sensitivityTier?: string }> {
   // F-6: the case's own sensitivity has to come along. It used to be hardcoded
   // PERSONAL below, which silently downgraded every HIGHLY_SENSITIVE case on the
@@ -1324,6 +1369,7 @@ export async function dispatchApproved(
     // through the back door.
     declaredSensitivity: row.sensitivity ?? undefined,
     targetProfile: 'premium_reasoning',
+    identity,
   }, now)
   return {
     sent: r.sent, status: r.action?.status, externalRef: r.action?.externalRef ?? undefined,

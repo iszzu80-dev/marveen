@@ -86,6 +86,35 @@ export const SENSITIVE_FIELD_NAMES: ReadonlySet<string> = new Set([
   'rendered_payload', 'payload', 'raw', 'html', 'text',
 ].map(s => s.toLowerCase()))
 
+/**
+ * Credential-shaped key names, for the LOG path (W13 / §7.2 "secret nem logban").
+ *
+ * Deliberately NOT merged into SENSITIVE_FIELD_NAMES above: that set is about
+ * case CONTENT (a mail body, an attachment), this one is about SECRETS, and a
+ * caller redacting a skill trajectory wants the first without being forced into
+ * the second.
+ *
+ * Deliberately NOT included: bare `key`, `auth`, `session`, `sessionId`. In this
+ * codebase those name identifiers — a setting key, a quota key, a claim key, a
+ * tmux session — and redacting them would blind the logs that diagnose the
+ * system while protecting nothing. A redaction list that eats identifiers
+ * teaches its reader to turn it off.
+ */
+export const CREDENTIAL_FIELD_NAMES: ReadonlySet<string> = new Set([
+  'token', 'tokens', 'apikey', 'api_key', 'access_token', 'accesstoken',
+  'refresh_token', 'refreshtoken', 'id_token', 'idtoken', 'client_secret',
+  'clientsecret', 'secret', 'secrets', 'password', 'passwd', 'passphrase',
+  'authorization', 'cookie', 'set-cookie', 'private_key', 'privatekey',
+  'master_key', 'masterkey', 'vault_key', 'vaultkey', 'bearer',
+  'credential', 'credentials',
+].map(s => s.toLowerCase()))
+
+/** What the LOGGER redacts: secrets AND case content. One set, so a new log
+ *  line cannot carry either past the choke point in src/logger.ts. */
+export const LOG_REDACTED_FIELD_NAMES: ReadonlySet<string> = new Set([
+  ...SENSITIVE_FIELD_NAMES, ...CREDENTIAL_FIELD_NAMES,
+])
+
 export const REDACTED = '[REDACTED]'
 
 /**
@@ -95,10 +124,23 @@ export const REDACTED = '[REDACTED]'
  * / attachment into a debug log or skill-trajectory. Cycles are handled; the
  * input is never mutated.
  */
-export function redactSensitive(value: unknown, sensitiveKeys: ReadonlySet<string> = SENSITIVE_FIELD_NAMES): unknown {
+export function redactSensitive(
+  value: unknown,
+  sensitiveKeys: ReadonlySet<string> = SENSITIVE_FIELD_NAMES,
+  opts: {
+    /** Objects this returns true for are passed through UNTOUCHED.
+     *
+     *  The logger needs it for Error instances: an Error's interesting parts
+     *  (message, stack) are non-enumerable, so walking one with Object.entries
+     *  turns it into `{}` and the stack is gone. A redactor that silently
+     *  destroys every logged error would be a worse bug than the one it fixes. */
+    preserve?: (v: object) => boolean
+  } = {},
+): unknown {
   const seen = new WeakSet<object>()
   const walk = (v: unknown): unknown => {
     if (v === null || typeof v !== 'object') return v
+    if (opts.preserve?.(v as object)) return v
     if (seen.has(v as object)) return '[CYCLE]'
     seen.add(v as object)
     if (Array.isArray(v)) return v.map(walk)

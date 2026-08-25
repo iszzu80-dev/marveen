@@ -2,8 +2,29 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import { createCase } from '../cos/case-store.js'
 import { openBatch } from '../cos/email-ingest.js'
-import { ingestEmail } from '../cos/intake.js'
+import { ingestEmail as ingestEmailRaw } from '../cos/intake.js'
+import { recordTriageReceipt } from '../cos/triage-provenance.js'
 import { planAction } from '../cos/executor.js'
+
+// Stage 2G (2026-08-17): `ingestEmail` refuses to open a case without a durable
+// triage receipt. Production writes one in the bridge before calling in; these
+// tests call the layer directly, so they write the same receipt. The gate has
+// its own tests in cos-stage2-semantics.test.ts — this wrapper must not be the
+// only place it is exercised, or it would hide what it satisfies.
+function ingestEmail(db: any, input: any, now: number) {
+  // The receipt must describe the SAME verdict the intake will re-derive, or the
+  // exact-fingerprint gate rejects it — which is the point of the gate.
+  const withProvenance = { ...input, triageActor: 'test' }
+  recordTriageReceipt(db, {
+    accountId: input.accountId, messageId: input.messageId, threadId: input.threadId ?? null,
+    sourceManifestHash: null,
+    actionable: input.actionable, caseType: input.caseType ?? null, title: input.title ?? null,
+    workspace: null, priority: input.priority ?? null, declaredSensitivity: input.declaredSensitivity ?? null,
+    actor: 'test', model: null, promptFingerprint: null,
+  }, now)
+  return ingestEmailRaw(db, withProvenance, now)
+}
+
 
 // IN-2 / §8: every processed message carries a thread id, no message is dropped
 // to achieve that, and a thread id we INVENTED is never mistaken for one the

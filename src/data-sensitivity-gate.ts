@@ -23,6 +23,22 @@ export interface SensitivityPattern {
 
 export interface GateConfig {
   mode: 'off' | 'observe-only' | 'enforce';
+  /**
+   * NARROW ENFORCEMENT (Istvan's decision, 2026-08-24: "APPROVED -- narrow
+   * enforcement"). Categories that BLOCK even while `mode` is observe-only.
+   *
+   * Why a second field rather than flipping `mode` to enforce: his approval was
+   * explicitly for RESTRICTED credential/auth-token traffic ONLY, with internal
+   * and everything else staying observe-only. A single global switch cannot
+   * express that, and the way a single switch usually gets used to express it is
+   * by flipping the whole thing and calling the difference an implementation
+   * detail. It is not: `internal` matches production database names and secret
+   * KEY NAMES, which appear constantly in legitimate fleet traffic, and enforcing
+   * on those would break inter-agent work the same night.
+   *
+   * Absent or empty means: no narrow enforcement, behave exactly as before.
+   */
+  enforceCategories?: SensitivityCategory[];
   enabled: boolean;
   auditLogRetentionDays: number;
   restricted: SensitivityPattern[];
@@ -41,7 +57,11 @@ export interface GateResult {
 // Default patterns shipped in code so the gate has teeth even before
 // store/data-sensitivity-gate.json is provisioned. Site operators can
 // override via the store file; these are the factory defaults.
-const DEFAULT_RESTRICTED: SensitivityPattern[] = [
+// Exported (W10) so the identity boundary can reuse THIS list rather than
+// re-spelling the same regexes somewhere else. A second copy of a credential
+// pattern set is a set that drifts, and the half that drifts is the half that
+// stops matching.
+export const DEFAULT_RESTRICTED: SensitivityPattern[] = [
   { name: 'email', pattern: '[\\w.+-]+@[\\w.-]+\\.[\\w]{2,}', description: 'Email address' },
   { name: 'api_key_header', pattern: '(?:Authorization|X-API-?Key|Bearer)[:\\s]+\\s*[A-Za-z0-9_\\-]{20,}', description: 'API key or bearer token in header format' },
   { name: 'jwt_token', pattern: 'eyJ[A-Za-z0-9_\\-]{20,}\\.[A-Za-z0-9_\\-]{20,}\\.[A-Za-z0-9_\\-]{10,}', description: 'JWT token (base64url-encoded header.payload.signature)' },
@@ -54,7 +74,7 @@ const DEFAULT_RESTRICTED: SensitivityPattern[] = [
   { name: 'hungarian_tax_id', pattern: '\\b\\d{10}\\b', context: 'adószám|tax.id|adó|NAV|tax.number|tax_?id', description: 'Hungarian tax ID (10-digit number near tax context)' },
 ];
 
-const DEFAULT_INTERNAL: SensitivityPattern[] = [
+export const DEFAULT_INTERNAL: SensitivityPattern[] = [
   { name: 'prod_db_name', pattern: 'suite-postgres-08wb|suite-postgres|production\\s+(?:db|database|postgres)', description: 'Production database name references' },
   { name: 'secret_key_name', pattern: 'DEEPSEEK_API_KEY|RENDER_API_KEY|DATABASE_URL_RUNTIME|ANTHROPIC_AUTH_TOKEN', description: 'Secret env-var or credential key name references' },
   { name: 'vault_path', pattern: 'store/vault\\.json|store/\\.dashboard-token|secrets\\.token_hex', description: 'Vault or secret-store path references' },
@@ -63,6 +83,19 @@ const DEFAULT_INTERNAL: SensitivityPattern[] = [
 
 const DEFAULT_CONFIG: GateConfig = {
   mode: 'observe-only',
+  // ARMED 2026-08-25, on Istvan's explicit approval and only after the condition
+  // attached to it was met: the policy-boundary coverage on the relevant
+  // execution paths is complete and test-proven (COS send, ZST send, CoS
+  // channel, Gmail labelling, dashboard API writes, fleet dispatch, scheduled
+  // identity propagation).
+  //
+  // What this changes in practice: a message carrying a credential, a bearer
+  // token, a JWT, a private key or a database URL to a NON-TRUSTED model now
+  // BLOCKS instead of being logged as would_block. Everything the gate classifies
+  // as `internal` -- production database names, secret key NAMES -- keeps its
+  // observe-only behaviour, because those appear in ordinary fleet traffic and
+  // enforcing on them would break legitimate work rather than prevent a leak.
+  enforceCategories: ['restricted'],
   enabled: true,
   auditLogRetentionDays: 90,
   restricted: DEFAULT_RESTRICTED,
@@ -229,7 +262,13 @@ export function evaluateDispatch(
   }
 
   // restricted/internal content → non-trusted provider → BLOCK (or would_block).
-  const verdict = config.mode === 'enforce' ? 'block' : 'would_block';
+  //
+  // Narrow enforcement: a category listed in `enforceCategories` blocks even in
+  // observe-only mode. The precedence is deliberate -- `mode: 'off'` never
+  // reaches this line, so the narrow list cannot resurrect a gate the operator
+  // turned off, and a full `enforce` mode is unaffected by it.
+  const narrowlyEnforced = (config.enforceCategories ?? []).includes(effectiveCategory);
+  const verdict = (config.mode === 'enforce' || narrowlyEnforced) ? 'block' : 'would_block';
 
   return {
     verdict,
@@ -245,6 +284,13 @@ export function normalizeConfig(raw: unknown): GateConfig {
   const o = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
   const config: GateConfig = { ...DEFAULT_CONFIG };
 
+  if (Array.isArray(o.enforceCategories)) {
+    // A stored config may narrow or widen the enforced set. Unknown category
+    // strings are DROPPED rather than kept: an unrecognised category that
+    // survived into this list would match nothing and read as enforcement.
+    config.enforceCategories = (o.enforceCategories as unknown[]).filter(
+      (c): c is SensitivityCategory => c === 'restricted' || c === 'internal' || c === 'public');
+  }
   if (typeof o.mode === 'string' && ['off', 'observe-only', 'enforce'].includes(o.mode)) {
     config.mode = o.mode as GateConfig['mode'];
   }

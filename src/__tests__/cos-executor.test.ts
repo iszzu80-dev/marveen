@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import { issueAuthorization } from '../cos/action-authorization.js'
 import { mintGatePermit } from '../cos/gate-permit.js'
-import { createCase } from '../cos/case-store.js'
+import { createCase, appendCaseEvent } from '../cos/case-store.js'
 import {
   planAction, executeAction, recoverAction, verifyAction, cancelAction,
   idempotencyKey, SendError,
@@ -68,10 +68,27 @@ function authorized(db: Parameters<typeof issueAuthorization>[0], ledgerId: stri
   return { authorizationId: issueAuthorization(db, ctx, now, {}, mintGatePermit({ allowed: true, reasons: [] })).authorizationId, authorizationContext: ctx }
 }
 
-const exec: typeof executeAction = (db, adapter, ledgerId, now, opts = {}) =>
-  executeAction(db, adapter, ledgerId, now, {
+function ensureDraftEvidence(db: Parameters<typeof issueAuthorization>[0], ledgerId: string, now: number): void {
+  const row = db.prepare(`SELECT case_id, status, case_version FROM outbound_ledger WHERE ledger_id=?`).get(ledgerId) as
+    { case_id: string | null; status: string; case_version: number | null } | undefined
+  if (!row || !row.case_id || (row.status !== 'PLANNED' && row.status !== 'FAILED_RETRYABLE')) return
+  const c = db.prepare(`SELECT version FROM personal_cases WHERE case_id=?`).get(row.case_id) as { version: number } | undefined
+  if (!c) throw new Error(`test case missing: ${row.case_id}`)
+  if (row.case_version == null) db.prepare(`UPDATE outbound_ledger SET case_version=? WHERE ledger_id=?`).run(c.version, ledgerId)
+  const exists = db.prepare(`SELECT 1 FROM personal_case_events WHERE case_id=? AND event_type='OUTBOUND_DRAFTED' AND source_reference=? LIMIT 1`).get(row.case_id, ledgerId)
+  if (!exists) appendCaseEvent(db, {
+    caseId: row.case_id, caseVersion: c.version, actor: 'test', eventType: 'OUTBOUND_DRAFTED',
+    reason: 'executor unit fixture: production-equivalent draft evidence horizon',
+    sourceSystem: 'test:executor', sourceReference: ledgerId, payload: { ledgerId },
+  }, now)
+}
+
+const exec: typeof executeAction = (db, adapter, ledgerId, now, opts = {}) => {
+  ensureDraftEvidence(db, ledgerId, now)
+  return executeAction(db, adapter, ledgerId, now, {
     ...authorized(db, ledgerId, 'EMAIL_SEND', now), ...opts,
   })
+}
 
 describe('COS Action Executor', () => {
   beforeEach(() => {

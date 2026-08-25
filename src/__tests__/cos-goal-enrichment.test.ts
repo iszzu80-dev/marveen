@@ -57,7 +57,7 @@ describe('goal enrichment', () => {
 
     expect(casesNeedingGoal(getDb(), 0).map(c => c.caseId)).toContain('c1')
 
-    const r = await enrichCaseGoal(getDb(), 'personal', 'c1', llm)
+    const r = await enrichCaseGoal(getDb(), 'personal', 'c1', llm, undefined, { provider: 'anthropic' })
     expect(r.interpreted).toBe(true)
     expect(llm.calls.length).toBe(1)
   })
@@ -67,14 +67,14 @@ describe('goal enrichment', () => {
     const llm = fakeLlm()
 
     expect(casesNeedingGoal(getDb(), 0).map(c => c.caseId)).not.toContain('c2')
-    const r = await enrichCaseGoal(getDb(), 'personal', 'c2', llm)
+    const r = await enrichCaseGoal(getDb(), 'personal', 'c2', llm, undefined, { provider: 'anthropic' })
     expect(r.interpreted).toBe(false)
     expect(llm.calls.length).toBe(0)
   })
 
   it('writes the goal AND the summary, so the marker it checks is the one it sets', async () => {
     seedCase('c3')
-    await enrichPendingGoals(getDb(), fakeLlm({ goal: 'Kifizetni a vízszámlát és visszaigazolást kérni.' }), 5)
+    await enrichPendingGoals(getDb(), { general: { client: fakeLlm({ goal: 'Kifizetni a vízszámlát és visszaigazolást kérni.' }), provider: 'anthropic' } }, 5)
     const row = getDb().prepare(
       `SELECT goal, summary, goal_version FROM case_progression_state WHERE case_id = 'c3'`,
     ).get() as { goal: string; summary: string; goal_version: number }
@@ -92,14 +92,14 @@ describe('goal enrichment', () => {
 
   it('respects the per-cycle bound, and says how many are still waiting', async () => {
     for (let i = 0; i < 7; i++) seedCase(`c-many-${i}`)
-    const r = await enrichPendingGoals(getDb(), fakeLlm(), 3)
+    const r = await enrichPendingGoals(getDb(), { general: { client: fakeLlm(), provider: 'anthropic' } }, 3)
     expect(r.enriched).toBe(3)
     expect(r.remaining).toBe(4)
   })
 
   it('one failing case does not stop the sweep, and is reported', async () => {
     seedCase('c-a'); seedCase('c-b')
-    const r = await enrichPendingGoals(getDb(), fakeLlm({ throws: true }), 5)
+    const r = await enrichPendingGoals(getDb(), { general: { client: fakeLlm({ throws: true }), provider: 'anthropic' } }, 5)
     expect(r.enriched).toBe(0)
     expect(r.failures.length).toBe(2)
     expect(r.failures[0].error).toMatch(/model unavailable/)
@@ -115,7 +115,7 @@ describe('goal enrichment', () => {
        VALUES ('zst', 'z1', 1, 'internal', ?, ?)`,
     ).run(NOW - 86400, NOW - 3600)
     expect(casesNeedingGoal(db, 0).some(c => c.domain === 'zst' && c.caseId === 'z1')).toBe(true)
-    const r = await enrichPendingGoals(db, fakeLlm(), 5)
+    const r = await enrichPendingGoals(db, { general: { client: fakeLlm(), provider: 'anthropic' } }, 5)
     expect(r.enriched).toBe(1)
   })
 
@@ -125,7 +125,31 @@ describe('goal enrichment', () => {
     // template it replaces, so the content choice is part of the feature.
     seedCase('c-thread')
     const llm = fakeLlm()
-    await enrichPendingGoals(getDb(), llm, 5)
+    await enrichPendingGoals(getDb(), { general: { client: llm, provider: 'anthropic' } }, 5)
     expect(llm.calls[0]).toContain('Egy leírás.')   // description fallback reached the prompt
+  })
+
+  // W13 / §7.4 (2026-08-26). The five calls above gained an explicit
+  // `provider: 'anthropic'`, and that is not test bookkeeping — it is the new
+  // contract. The enrichment path now makes a DISCLOSURE decision per field,
+  // and a decision needs a destination. A caller that does not name one is an
+  // unknown destination, and an unknown destination receives nothing personal.
+  //
+  // This test pins that behaviour rather than letting it be discovered as a
+  // silent regression by whoever next passes a bare client.
+  it('a caller that does not name its destination discloses NOTHING, and says so', async () => {
+    seedCase('c-unnamed')
+    const llm = fakeLlm()
+    const r = await enrichPendingGoals(getDb(), llm, 5)   // bare client → 'unknown'
+    expect(r.enriched).toBe(0)
+    expect(r.disclosureBlocked).toBe(1)
+    expect(llm.calls.length).toBe(0)                       // the model was never called
+    // and the refusal is recorded, with the reason, in the disclosure log
+    const rec = getDb().prepare(
+      `SELECT trust_class, disclosed_fields, any_denied FROM cos_disclosure_records ORDER BY at DESC LIMIT 1`,
+    ).get() as { trust_class: string; disclosed_fields: string; any_denied: number }
+    expect(rec.trust_class).toBe('UNKNOWN_UNTRUSTED')
+    expect(JSON.parse(rec.disclosed_fields)).toEqual([])
+    expect(rec.any_denied).toBe(1)
   })
 })

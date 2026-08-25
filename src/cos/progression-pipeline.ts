@@ -54,11 +54,14 @@ import { transitionZstCase } from './zst-case-store.js'
 import { scheduleNextProgression } from './progression-scheduler.js'
 import { canonicalTriggerType } from './progression-trigger.js'
 import { killSwitchRefusal } from './kill-switch.js'
+import { discloseAndRecord, trustClassOfProvider, type FieldKind } from './disclosure.js'
+import { egressTierFor } from './provider-data-policy.js'
 import {
   preflight, enterWaitSystem, clearWaitSystem, type CapabilityPreflight,
 } from './capability-preflight.js'
 import { answerIntentOf, type AnswerIntent } from './answer-options.js'
 import { CASE_STATUSES } from './schema.js'
+import { evaluateCaseTemporalConsistency } from './temporal-consistency-gate.js'
 
 // ── Valid progression decisions (plan §13) ──────────────────────────────
 
@@ -696,7 +699,12 @@ export async function enrichCaseGoal(
   caseId: string,
   llmClient: LlmClient,
   emailThreadContent?: string,
-): Promise<{ interpreted: boolean; goal: string; summary: string; title: string }> {
+  /** W13 / §7.4: WHERE this prompt is going. The disclosure decision needs a
+   *  destination, and a caller that does not name one is treated as an unknown
+   *  destination — which, for anything at PERSONAL or above, discloses nothing.
+   *  Fail-closed by construction rather than by the caller remembering. */
+  opts: { provider?: string; runId?: string | null } = {},
+): Promise<{ interpreted: boolean; goal: string; summary: string; title: string; disclosureRecordId?: string; blockedByDisclosure?: boolean }> {
   // Lazy: if already enriched, return existing
   const existing = db.prepare(
     'SELECT goal, summary FROM case_progression_state WHERE domain = ? AND case_id = ?',
@@ -717,22 +725,70 @@ export async function enrichCaseGoal(
   // Read case metadata
   const tableName = domain === 'personal' ? 'personal_cases' : 'zst_cases'
   const caseRow = db.prepare(
-    `SELECT title, case_type, description FROM ${tableName} WHERE case_id = ?`,
-  ).get(caseId) as { title: string; case_type: string; description: string | null } | undefined
+    `SELECT title, case_type, description, sensitivity FROM ${tableName} WHERE case_id = ?`,
+  ).get(caseId) as { title: string; case_type: string; description: string | null; sensitivity?: unknown } | undefined
 
   if (!caseRow) {
     throw new Error(`Case not found: ${domain}/${caseId}`)
   }
 
-  // Interpret via LLM
+  // ── W13 / §7.4: the DISCLOSURE DECISION, before anything leaves ──────────
+  //
+  // This is the LLM reading path, and until now it handed the provider the case
+  // title, the description and the whole email thread, gated only by a tier
+  // check deciding WHETHER the case could go at all. Which FIELDS travel was
+  // never a decision anyone made.
+  //
+  // THE TIER IS DERIVED HERE, not accepted from the caller. A caller-supplied
+  // sensitivity would be a bypass: the one thing a caller must not be able to
+  // do is declare the data less sensitive than it is. `egressTierFor` is the
+  // same function the reader and the enrichment router already use, so this is
+  // one definition consulted again, not a second one.
   const content = emailThreadContent ?? caseRow.description ?? ''
+  const sensitivity = egressTierFor(
+    domain,
+    (caseRow as { sensitivity?: unknown }).sensitivity,
+    [caseRow.title, caseRow.description ?? '', content].join('\n'),
+  )
+  const provider = opts.provider ?? 'unknown'
+  const REQUIRED: FieldKind[] = ['SUBJECT', 'SUMMARY', 'BODY_FULL']
+  const { disclosed, recordId, decision } = discloseAndRecord(db, {
+    actor: 'cos-goal-enrichment', onBehalfOf: 'istvan', runId: opts.runId ?? null,
+    destination: 'llm:' + provider,
+    trustClass: trustClassOfProvider(provider),
+    taskTier: 'SUMMARIZE_EXTRACT',
+    caseSensitivity: sensitivity,
+    fields: [
+      { kind: 'SUBJECT', value: caseRow.title ?? '' },
+      { kind: 'SUMMARY', value: caseRow.description ?? '' },
+      { kind: 'BODY_FULL', value: content },
+    ],
+    // Minimum necessary for THIS task: the goal interpreter reads a subject, a
+    // description and the thread. It has never needed the sender, and it is not
+    // offered one.
+    requiredFields: REQUIRED,
+  }, Math.floor(Date.now() / 1000))
+
+  const byKind = new Map(disclosed.map(d => [d.kind, d.value]))
+  // Nothing survived the policy: do NOT call the model. An empty prompt would
+  // produce a confident-sounding goal derived from nothing, which is worse than
+  // no goal at all — and the caller can tell the two apart.
+  if (byKind.size === 0) {
+    return {
+      interpreted: false, goal: '', summary: '', title: '',
+      disclosureRecordId: recordId, blockedByDisclosure: true,
+    }
+  }
+
+  // Interpret via LLM — on the DISCLOSED values, never the raw ones.
   const interpretation = await interpretGoal(
     llmClient,
-    caseRow.title,
+    byKind.get('SUBJECT') ?? '',
     caseRow.case_type,
-    caseRow.description,
-    content,
+    byKind.get('SUMMARY') ?? null,
+    byKind.get('BODY_FULL') ?? '',
   )
+  void decision
 
   const now = Math.floor(Date.now() / 1000)
 
@@ -758,6 +814,7 @@ export async function enrichCaseGoal(
 
   return {
     interpreted: true,
+    disclosureRecordId: recordId,
     goal: interpretation.goal,
     summary: interpretation.summary,
     title: interpretation.title,
@@ -1099,6 +1156,19 @@ function runProgressionCycleInner(
         canonicalTriggerType(opts.triggerType ?? 'MANUAL'), opts.triggerReference ?? 'checkpoint-b', now)
     }
     throw new Error(`Case not found: ${domain}/${caseId}`)
+  }
+
+  // ACP v1.4.5 TSCG_ENTRY_GUARD. Domain ownership is established above
+  // before temporal semantics are evaluated, so CROSS_DOMAIN_LEAKAGE and
+  // ordinary not-found behavior cannot be masked by TEMPORAL_MISSING. Every
+  // public progression entry still reaches this shared inner gate before
+  // outcome-contract, resolver, planning or policy decisions.
+  const temporal = evaluateCaseTemporalConsistency(db, domain, caseId, now)
+  if (!temporal.allowProgression) {
+    return recordRefusedRun(
+      db, runId, domain, caseId, 'TEMPORAL_GATE_BLOCKED',
+      `${temporal.status}: ${temporal.reasons.join('; ')}`, opts, now,
+    )
   }
 
   // 2. Outcome contract — lazy enrichment: if goal was already set by

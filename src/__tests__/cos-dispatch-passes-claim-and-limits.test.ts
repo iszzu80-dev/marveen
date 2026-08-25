@@ -18,6 +18,7 @@ import { draftSend, approveSend, dispatchApprovedSend } from '../cos/send-flow.j
 import { executeAction } from '../cos/executor.js'
 import { reconcileOutbound } from '../cos/scheduler.js'
 import { GmailSendAdapter, DryRunTransport } from '../cos/adapters/gmail-send.js'
+import { AS_OPERATOR, TEST_OPERATOR } from './helpers/w10-identity.js'
 
 const T0 = 1_700_000_000
 const EMAIL = { to: 'v@x.com', subject: 'S', body: 'B' }
@@ -42,6 +43,7 @@ function draftApprove(caseId: string, envelope?: Record<string, unknown>) {
 }
 
 const dispatchInput = (d: ReturnType<typeof draftApprove>) => ({
+  ...AS_OPERATOR,
   ledgerId: d.ledgerId, connectorId: 'gmail', campaignId: d.campaignId,
   templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash,
   email: EMAIL, declaredSensitivity: 'PERSONAL', targetProfile: 'premium_reasoning',

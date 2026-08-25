@@ -7,6 +7,10 @@ import { logger } from '../logger.js'
 import { agentDir, readFileOr, findAvatarForAgent } from './agent-config.js'
 import { TOOL_TIMEOUTS } from '../tool-timeouts.js'
 import { markIfTestRun } from '../test-run-marker.js'
+import { brokerExternalAction } from '../identity/action-broker.js'
+import { scheduledIdentityFromEnv } from '../identity/scheduled-task-identity.js'
+import type { ExecutionIdentity } from '../identity/execution-identity.js'
+import { randomUUID } from 'node:crypto'
 
 export function readAgentTelegramConfig(name: string): { hasTelegram: boolean; botUsername?: string } {
   const envPath = join(agentDir(name), '.claude', 'channels', 'telegram', '.env')
@@ -110,7 +114,60 @@ export async function refreshMarveenBotUsername(): Promise<void> {
   } catch { /* offline; cache stays stale */ }
 }
 
+/**
+ * Send a fleet notification to Telegram.
+ *
+ * W10 (2026-08-25): brokered, like every other external write. The identity is
+ * the scheduled one from the environment when there is one -- these alerts are
+ * fired by the schedule runner and by heartbeats -- and `telegram.fleet` is
+ * inventoried at INTERNAL, which is what a fleet alert should ever carry.
+ *
+ * MIGRATION NOTE, stated rather than hidden. This path is reached from many
+ * places, several of them synchronous alerting code that has no identity to
+ * pass. Refusing those outright would silence the fleet's own alarms, which is
+ * a worse failure than an under-attributed alert. So an alert with no resolvable
+ * identity is sent under an explicit `alerting` service identity rather than
+ * refused -- and that identity holds EXTERNAL_EFFECT and nothing else, so it
+ * cannot be borrowed to do anything but this. The broker still records every
+ * call, and a credential in an alert body is still refused by the boundary.
+ */
 export async function sendTelegramMessage(token: string, chatId: string, text: string): Promise<void> {
+  const brokered = await brokerExternalAction(
+    {
+      connector: 'telegram.fleet',
+      operation: 'sendMessage',
+      mutating: true,
+      riskClass: 'ROUTINE',
+      identity: scheduledIdentityFromEnv() ?? { ...FLEET_ALERTING_IDENTITY, runId: `alert-${randomUUID()}` },
+      classification: { level: 'INTERNAL', tags: [], basis: 'fleet alert body' },
+      targetId: chatId,
+      context: { textLength: text.length },
+    },
+    () => sendTelegramMessageUnbrokered(token, chatId, text),
+    { surface: 'telegram_fleet' },
+  )
+  if (brokered.outcome === 'DENIED') {
+    throw new Error(`fleet Telegram send refused by the policy boundary: ${brokered.reasons.join('; ')}`)
+  }
+  if (brokered.outcome === 'FAILED') throw new Error(brokered.error ?? 'telegram send failed')
+}
+
+/** The identity a fleet alert runs under when no scheduled identity is present.
+ *  SERVICE, acting for Istvan (these alerts exist to reach him), holding
+ *  EXTERNAL_EFFECT and nothing else. */
+const FLEET_ALERTING_IDENTITY: ExecutionIdentity = Object.freeze({
+  actorId: 'service:fleet-alerting',
+  actorType: 'SERVICE',
+  onBehalfOf: 'istvan',
+  // runId is filled per call, not left null: the broker requires a mutating
+  // action to be attributable to a run, and for a standing service the honest
+  // unit of "a run" is one alert. A shared null would make every alert in the
+  // log indistinguishable from every other.
+  runId: null,
+  capabilityScope: Object.freeze(['EXTERNAL_EFFECT']),
+}) as ExecutionIdentity
+
+async function sendTelegramMessageUnbrokered(token: string, chatId: string, text: string): Promise<void> {
   // Test-run marking happens HERE too, not only in notifyChannel: this path
   // reads its token from .env FILES (schedule-runner alerts), so blanking
   // CHANNEL_TOKEN/CHANNEL_CHAT_ID in a test's environment does not stop it.

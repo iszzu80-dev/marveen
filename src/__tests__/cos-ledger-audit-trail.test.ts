@@ -17,6 +17,7 @@ import { registerConnector } from '../cos/connector-health.js'
 import { setLadder } from '../cos/autonomy-ladder.js'
 import { draftSend, approveSend, dispatchApprovedSend } from '../cos/send-flow.js'
 import { GmailSendAdapter, DryRunTransport } from '../cos/adapters/gmail-send.js'
+import { AS_OPERATOR, TEST_OPERATOR } from './helpers/w10-identity.js'
 
 const T0 = 1_700_000_000
 const EMAIL = { to: 'vendor@example.com', subject: 'Ajanlatkeres', body: 'Kerem az arajanlatot.' }
@@ -72,6 +73,7 @@ describe('the outbound ledger carries its own audit trail (F-2 / AC-21)', () => 
     }, T0)
     const t = new DryRunTransport()
     const res = await dispatchApprovedSend(db, new GmailSendAdapter(t), {
+      ...AS_OPERATOR,
       ledgerId: d.ledgerId, connectorId: 'gmail', campaignId: d.campaignId,
       templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash,
       email: EMAIL, declaredSensitivity: 'PERSONAL', targetProfile: 'premium_reasoning',
@@ -95,6 +97,7 @@ describe('the outbound ledger carries its own audit trail (F-2 / AC-21)', () => 
       renderedPayloadHash: d.renderedPayloadHash, approvedBy: 'istvan', recipient: EMAIL.to,
     }, T0)
     await dispatchApprovedSend(db, new GmailSendAdapter(new DryRunTransport()), {
+      ...AS_OPERATOR,
       ledgerId: d.ledgerId, connectorId: 'gmail', campaignId: d.campaignId,
       templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash,
       email: EMAIL, declaredSensitivity: 'PERSONAL', targetProfile: 'premium_reasoning',

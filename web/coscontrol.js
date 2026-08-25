@@ -709,10 +709,40 @@
       return row('<strong style="font-size:13px;">' + esc(q.quota_key) + '</strong>',
         '<span style="font-size:12px;color:' + col + ';">' + esc(q.used_count) + ' / ' + esc(q.max_count) + '</span>', col)
     }).join('') : ''
+    // W12 / §6.7: the recovery queue. This is the surface Istvan chose for it --
+    // an EXISTING internal view, not a new notification channel.
+    //
+    // The zero case is written out ("nincs elakadt helyreallitas"), it is not an
+    // empty div: a block that disappears when the queue is empty cannot be told
+    // apart from one whose data stopped arriving, and this queue's whole job is
+    // to be the thing that notices when something stopped.
+    var recov = mon.recovery || { needsHuman: [], pendingRetry: [], counts: {} }
+    var needsHuman = (recov.needsHuman || []).map(function (r) {
+      return row(
+        '<strong style="font-size:13px;">' + esc(r.surface) + '</strong>' + pill('EMBER KELL', '#ef4444') +
+          '<span style="font-size:11px;color:var(--text-muted,#888);">' + esc(r.ref) + '</span>',
+        '<span style="font-size:11px;color:#ef4444;">' + esc(r.pendingAction) + '</span>' +
+          '<div style="font-size:11px;color:var(--text-muted,#888);">' +
+          esc(r.attempts + '/' + r.maxAttempts + ' probalkozas, kuszob ' + r.escalateAfter) +
+          (r.lastError ? ' — ' + esc(r.lastError) : '') + '</div>', '#ef4444')
+    }).join('')
+    var pendingRetry = (recov.pendingRetry || []).map(function (r) {
+      return row(
+        '<strong style="font-size:13px;">' + esc(r.surface) + '</strong>' + pill('UJRAPROBA', '#f59e0b') +
+          '<span style="font-size:11px;color:var(--text-muted,#888);">' + esc(r.ref) + '</span>',
+        '<span style="font-size:11px;color:var(--text-muted,#888);">' +
+          esc(r.attempts + '/' + r.maxAttempts) +
+          (r.nextAttemptAt ? ', kovetkezo ' + esc(fmtDate(r.nextAttemptAt)) : '') + '</span>', '#f59e0b')
+    }).join('')
+    var recovHtml = (needsHuman || pendingRetry)
+      ? (needsHuman + pendingRetry)
+      : '<p style="color:var(--text-muted,#888);font-size:12px;">Nincs elakadt helyreállítás. (A sort a ciklus 10 percenként frissíti; ez a nézet csak olvassa.)</p>'
+
     return '<section style="margin-bottom:24px;"><h2 style="font-size:16px;margin:0 0 10px;">🩺 Monitoring</h2>' +
       '<div style="font-size:12px;color:var(--text-muted,#888);margin-bottom:4px;">Konnektorok</div>' + connHtml +
       '<div style="font-size:12px;color:var(--text-muted,#888);margin:8px 0 4px;">Kimenő állapot</div><div style="margin-bottom:4px;">' + statusPills + '</div>' +
       (attn ? '<div style="font-size:12px;color:#ef4444;margin:8px 0 4px;">Emberi beavatkozás kell</div>' + attn : '') +
+      '<div style="font-size:12px;color:var(--text-muted,#888);margin:8px 0 4px;">Helyreállítási sor (§6.7)</div>' + recovHtml +
       (quotaHtml ? '<div style="font-size:12px;color:var(--text-muted,#888);margin:8px 0 4px;">Kvóta</div>' + quotaHtml : '') +
       '</section>'
   }

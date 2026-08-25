@@ -15,6 +15,7 @@ import type Database from 'better-sqlite3'
 import { openBatch, TRIAGE_BATCH_PREFIX } from './email-ingest.js'
 import { ingestEmail, type EmailIntakeInput, type IntakeOutcome } from './intake.js'
 import type { CaseSensitivity } from './schema.js'
+import { recordTriageReceipt } from './triage-provenance.js'
 
 export interface TriagedEmail {
   accountId: string
@@ -36,6 +37,15 @@ export interface TriagedEmail {
   declaredSensitivity?: CaseSensitivity
   followUpAt?: number
   headers?: Record<string, string>
+  /** Verdict priority. It reaches the CASE, so it must reach the RECEIPT too:
+   *  a receipt that omits part of the verdict cannot prove what opened the case. */
+  priority?: string
+  /** Stage 2G provenance (all optional; absence is recorded as UNDECLARED). */
+  sourceManifestHash?: string
+  triageActor?: string
+  triageModel?: string
+  triagePromptFingerprint?: string
+  triageDecidedAt?: number
 }
 
 export type BridgeOutcome = IntakeOutcome | 'ALREADY_PROCESSED'
@@ -47,8 +57,30 @@ export interface BridgeResult {
 }
 
 /** Ingest one triaged email into the COS. Idempotent per (account, message):
- *  a message already seen returns ALREADY_PROCESSED and is left untouched. */
+ *  a message already seen returns ALREADY_PROCESSED and is left untouched.
+ *
+ *  W12 / §6.9 — the idempotency check and the writes it authorises are ONE
+ *  transaction, and it is an IMMEDIATE one.
+ *
+ *  Until 2026-08-25 this was a bare read followed by unprotected writes. In a
+ *  single process that is safe by accident: the second call performs its own
+ *  read and always sees the first one's committed row. Across PROCESSES — the
+ *  ten-minute cycle plus a hand-run script, which happens on this machine —
+ *  both readers could see nothing and both proceed, and the loser died on a
+ *  UNIQUE constraint (`email_processing_batches.batch_id` is derived from the
+ *  message id, so it collides first) instead of returning ALREADY_PROCESSED.
+ *  No duplicate case was ever possible; a crash in the caller was.
+ *
+ *  IMMEDIATE, not deferred: a deferred transaction takes its write lock at the
+ *  first write, which is AFTER this read, leaving exactly the window it is
+ *  meant to close. With IMMEDIATE the second process blocks at BEGIN (up to
+ *  better-sqlite3's busy timeout), then reads a state that already includes the
+ *  winner's row. */
 export function ingestTriagedEmail(db: Database.Database, input: TriagedEmail, now: number): BridgeResult {
+  return db.transaction((): BridgeResult => ingestTriagedEmailInTx(db, input, now)).immediate()
+}
+
+function ingestTriagedEmailInTx(db: Database.Database, input: TriagedEmail, now: number): BridgeResult {
   const existing = db.prepare(
     `SELECT status FROM email_processing WHERE gmail_account_id = ? AND message_id = ?`
   ).get(input.accountId, input.messageId) as { status: string } | undefined
@@ -65,6 +97,19 @@ export function ingestTriagedEmail(db: Database.Database, input: TriagedEmail, n
   // into email_source_checkpoints for the real account id, filling the P0.2
   // cursor the whole state machine reads with a string no history poller can
   // start from.
+  // Stage 2G: the judgement becomes durable BEFORE the case it authorises.
+  // Undeclared actor/model/prompt fields are recorded as UNDECLARED rather than
+  // dropped, so the gap stays countable instead of looking like a decision.
+  recordTriageReceipt(db, {
+    accountId: input.accountId, messageId: input.messageId, threadId: input.threadId ?? null,
+    sourceManifestHash: input.sourceManifestHash ?? null,
+    actionable: input.actionable, caseType: input.caseType ?? null, title: input.title ?? null,
+    workspace: null, priority: input.priority ?? null, declaredSensitivity: input.declaredSensitivity ?? null,
+    actor: input.triageActor ?? null, model: input.triageModel ?? null,
+    promptFingerprint: input.triagePromptFingerprint ?? null,
+    decidedAt: input.triageDecidedAt ?? now,
+  }, now)
+
   const batchId = `${TRIAGE_BATCH_PREFIX}${input.accountId}-${input.messageId}`
   openBatch(db, {
     batchId, accountId: input.accountId, cursorBefore: null, cursorAfter: `${TRIAGE_BATCH_PREFIX}${now}`,
@@ -77,6 +122,16 @@ export function ingestTriagedEmail(db: Database.Database, input: TriagedEmail, n
     actionable: input.actionable, caseType: input.caseType, title: input.title,
     declaredSensitivity: input.declaredSensitivity, direction: input.direction,
     followUpAt: input.followUpAt, headers: input.headers,
+    priority: input.priority,
+    // Stage 2G: forwarded VERBATIM. The receipt above was written from these
+    // values, and the intake re-derives the fingerprint from what it receives —
+    // so dropping them here would make the gate reject the very receipt this
+    // function just wrote, and only after activation, when the fields stop
+    // being UNDECLARED on both sides at once.
+    sourceManifestHash: input.sourceManifestHash,
+    triageActor: input.triageActor,
+    triageModel: input.triageModel,
+    triagePromptFingerprint: input.triagePromptFingerprint,
   }
   const res = ingestEmail(db, intakeInput, now)
   return { outcome: res.outcome, caseId: res.caseId, messageStatus: res.messageStatus }

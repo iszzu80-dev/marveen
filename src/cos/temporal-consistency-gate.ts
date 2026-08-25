@@ -1,0 +1,208 @@
+// ACP v1.4.5 — Temporal Semantic Consistency Gate (TSCG).
+//
+// A scalar timestamp being present is not proof that the system knows what the
+// timestamp means. The gate blocks owner-facing / progression decisions when a
+// binding semantic date is missing, unverified, conflicted or already past due
+// without an explicit handled state.
+
+import type Database from 'better-sqlite3'
+import type { CosDomain, TemporalFactKind, TemporalFactRow } from './temporal-facts.js'
+import { isBindingTemporalKind, listCaseTemporalFacts } from './temporal-facts.js'
+
+export type TemporalGateStatus =
+  | 'TEMPORAL_OK'
+  | 'TEMPORAL_MISSING'
+  | 'TEMPORAL_UNVERIFIED'
+  | 'TEMPORAL_CONFLICT'
+  | 'TEMPORAL_PAST_DUE'
+
+export interface TemporalClaim {
+  kind: TemporalFactKind
+  occursAt: number
+  source: string
+  raw: string
+}
+
+export interface TemporalGateInput {
+  facts: readonly TemporalFactRow[]
+  now: number
+  /** Semantic kinds the pending action explicitly depends on. */
+  requiredKinds?: readonly TemporalFactKind[]
+  /** Claims extracted from case text or another read-only projection. */
+  observedClaims?: readonly TemporalClaim[]
+  /** Fact ids already acknowledged/handled after passing their deadline. */
+  handledPastDueFactIds?: ReadonlySet<string>
+}
+
+export interface TemporalGateResult {
+  status: TemporalGateStatus
+  allowProgression: boolean
+  reasons: string[]
+  blockingFactIds: string[]
+  missingKinds: TemporalFactKind[]
+}
+
+const DATE_TIME = /\b(20\d{2})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):([0-5]\d))?\b/g
+// Date-only claims are represented at noon UTC. Provider facts often use local
+// midnight, so allow at most 13h drift for claim-to-fact matching. This is wide
+// enough for timezone/date-only representation and far too narrow to let a
+// different day satisfy the claim.
+export const TEMPORAL_CLAIM_MATCH_TOLERANCE_SEC = 13 * 3600
+
+function utcEpoch(y: number, m: number, d: number, hh = 12, mm = 0): number | null {
+  const ms = Date.UTC(y, m - 1, d, hh, mm, 0)
+  const dt = new Date(ms)
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null
+  return Math.floor(ms / 1000)
+}
+
+/** Conservative semantic extraction used only as a consistency signal. */
+export function extractTemporalClaims(text: string, source = 'case_text'): TemporalClaim[] {
+  const lower = (text ?? '').toLowerCase()
+  let kind: TemporalFactKind = 'OTHER'
+  if (/\b(dontes|döntés|valassz|válassz|decide|decision)\b/.test(lower)) kind = 'DECISION_DUE'
+  else if (/\b(felmond|termination)\b/.test(lower)) kind = 'TERMINATION_DEADLINE'
+  else if (/\b(fizet|payment|invoice|szamla|számla)\b/.test(lower)) kind = 'PAYMENT_DUE'
+  else if (/\b(felvetel|felvétel|pickup|booking|foglalas|foglalás)\b/.test(lower)) kind = 'BOOKING_START'
+  else if (/\b(hatarido|határidő|due|deadline)\b/.test(lower)) kind = 'CASE_DUE'
+
+  const out: TemporalClaim[] = []
+  for (const match of text.matchAll(DATE_TIME)) {
+    const y = Number(match[1]); const m = Number(match[2]); const d = Number(match[3])
+    const hasTime = match[4] !== undefined
+    const at = utcEpoch(y, m, d, hasTime ? Number(match[4]) : 12, hasTime ? Number(match[5]) : 0)
+    if (at !== null) out.push({ kind, occursAt: at, source, raw: match[0] })
+  }
+  return out
+}
+
+export function evaluateTemporalConsistency(input: TemporalGateInput): TemporalGateResult {
+  const facts = input.facts.filter(f => f.verification !== 'REJECTED')
+  const reasons: string[] = []
+  const blocking = new Set<string>()
+  const missingKinds: TemporalFactKind[] = []
+  const required = new Set(input.requiredKinds ?? [])
+
+  for (const c of input.observedClaims ?? []) {
+    if (isBindingTemporalKind(c.kind)) required.add(c.kind)
+  }
+
+  const byKind = new Map<TemporalFactKind, TemporalFactRow[]>()
+  for (const f of facts) {
+    const list = byKind.get(f.fact_kind) ?? []
+    list.push(f); byKind.set(f.fact_kind, list)
+  }
+  for (const [kind, rows] of byKind) {
+    const active = rows.filter(r => r.verification !== 'REJECTED')
+    const times = new Set(active.map(r => r.occurs_at))
+    if (active.some(r => r.verification === 'CONFLICTED') || times.size > 1 && active.filter(r => r.verification === 'VERIFIED').length > 1) {
+      reasons.push(`${kind}: egymásnak ellentmondó aktív időpontok`)
+      active.forEach(r => blocking.add(r.fact_id))
+    }
+  }
+  if (blocking.size) return {
+    status: 'TEMPORAL_CONFLICT', allowProgression: false, reasons,
+    blockingFactIds: [...blocking], missingKinds,
+  }
+
+  for (const kind of required) {
+    const rows = (byKind.get(kind) ?? []).filter(r => r.verification !== 'REJECTED')
+    if (!rows.length) {
+      missingKinds.push(kind)
+      reasons.push(`${kind}: nincs provenance-bound temporal fact`)
+      continue
+    }
+    const verified = rows.filter(r => r.verification === 'VERIFIED')
+    if (!verified.length) {
+      rows.forEach(r => blocking.add(r.fact_id))
+      reasons.push(`${kind}: csak nem ellenőrzött temporal fact áll rendelkezésre`)
+    }
+  }
+  if (missingKinds.length) return {
+    status: 'TEMPORAL_MISSING', allowProgression: false, reasons,
+    blockingFactIds: [...blocking], missingKinds,
+  }
+  if (blocking.size) return {
+    status: 'TEMPORAL_UNVERIFIED', allowProgression: false, reasons,
+    blockingFactIds: [...blocking], missingKinds,
+  }
+
+  // Same KIND is not enough: the fact must also describe the same occurrence.
+  // Without this check, a DECISION_DUE from next week could satisfy an explicit
+  // decision deadline today merely because both are decisions.
+  for (const claim of input.observedClaims ?? []) {
+    if (!isBindingTemporalKind(claim.kind)) continue
+    const verifiedSameKind = (byKind.get(claim.kind) ?? []).filter(r => r.verification === 'VERIFIED')
+    const matchingOccurrence = verifiedSameKind.filter(
+      r => Math.abs(r.occurs_at - claim.occursAt) <= TEMPORAL_CLAIM_MATCH_TOLERANCE_SEC,
+    )
+    if (!matchingOccurrence.length) {
+      missingKinds.push(claim.kind)
+      verifiedSameKind.forEach(r => blocking.add(r.fact_id))
+      reasons.push(`${claim.kind}: explicit szöveges időpont (${claim.raw}) nincs verifikált, azonos esemény-időponthoz kötve`)
+    }
+  }
+  if (missingKinds.length) return {
+    status: 'TEMPORAL_MISSING', allowProgression: false, reasons,
+    blockingFactIds: [...blocking], missingKinds: [...new Set(missingKinds)],
+  }
+
+  const handled = input.handledPastDueFactIds ?? new Set<string>()
+  const past = facts.filter(f => f.verification === 'VERIFIED' && isBindingTemporalKind(f.fact_kind)
+    && f.occurs_at < input.now && !handled.has(f.fact_id))
+  if (past.length) {
+    past.forEach(f => blocking.add(f.fact_id))
+    reasons.push(`${past.length} verifikált, kötelező temporal fact elmúlt és nincs kezelve`)
+    return {
+      status: 'TEMPORAL_PAST_DUE', allowProgression: false, reasons,
+      blockingFactIds: [...blocking], missingKinds,
+    }
+  }
+
+  return {
+    status: 'TEMPORAL_OK', allowProgression: true,
+    reasons: ['minden szükséges szemantikus időpont verifikált és konzisztens'],
+    blockingFactIds: [], missingKinds: [],
+  }
+}
+
+/**
+ * Runtime adapter for a stored case.
+ *
+ * It deliberately does NOT promote legacy scalar due_at/follow_up_at fields into
+ * semantic facts. Existing cases may continue while the backfill is staged, but
+ * an explicit binding date in title/description/next_action, or any already
+ * stored binding semantic fact, becomes fail-closed immediately. This catches
+ * the Hertz/Sixt class without freezing every pre-v4.4 case merely because it
+ * has a legacy date column.
+ */
+export function evaluateCaseTemporalConsistency(
+  db: Database.Database,
+  domain: CosDomain,
+  caseId: string,
+  now: number = Math.floor(Date.now() / 1000),
+): TemporalGateResult {
+  const table = domain === 'personal' ? 'personal_cases' : 'zst_cases'
+  const row = db.prepare(
+    `SELECT title, description, next_action FROM ${table} WHERE case_id=?`,
+  ).get(caseId) as { title: string; description: string | null; next_action: string | null } | undefined
+
+  if (!row) {
+    return {
+      status: 'TEMPORAL_MISSING', allowProgression: false,
+      reasons: [`${domain}/${caseId}: case missing while evaluating temporal gate`],
+      blockingFactIds: [], missingKinds: [],
+    }
+  }
+
+  const facts = listCaseTemporalFacts(db, domain, caseId)
+  const requiredKinds = [...new Set(
+    facts.filter(f => isBindingTemporalKind(f.fact_kind)).map(f => f.fact_kind),
+  )]
+  const observedClaims = extractTemporalClaims(
+    [row.title, row.description ?? '', row.next_action ?? ''].join('\n'),
+    `${domain}:${caseId}:case-text`,
+  )
+
+  return evaluateTemporalConsistency({ facts, now, requiredKinds, observedClaims })
+}

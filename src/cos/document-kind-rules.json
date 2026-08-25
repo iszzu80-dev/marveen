@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "note": "NORMATIVE. The one place the attachment docKind rule exists. The TypeScript classifier (src/cos/document-kind.ts) and the Python ingest script (scripts/cos-attachment-ingest.py) both READ this file; neither may restate the literals. Rules are evaluated in array order; the first match wins.",
+  "rules": [
+    { "kind": "invoice", "filenameContains": ["szaml", "invoice", "dmrv", "gm-", "receipt"] },
+    { "kind": "photo", "filenameEndsWith": [".jpg", ".jpeg", ".png"] },
+    { "kind": "contract", "filenameContains": ["szerzod", "contract"] }
+  ],
+  "fallback": "other"
+}

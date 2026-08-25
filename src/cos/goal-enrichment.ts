@@ -34,6 +34,12 @@ export interface GoalEnrichmentResult {
    *  Counted, never silent — "enriched: 2" and "enriched: 2, sensitivityBlocked: 1"
    *  must not look the same. */
   sensitivityBlocked: number
+  /** W13 / §7.4: cases where the DISCLOSURE decision left nothing to send.
+   *  Distinct from sensitivityBlocked on purpose: that one means "no provider is
+   *  cleared for this case at all", this one means "a cleared provider was
+   *  found and the field policy still disclosed nothing". Two different
+   *  remedies, so two different counters. */
+  disclosureBlocked: number
   /** Cases that were already interpreted (should be 0 — they are filtered out). */
   skipped: number
   /** Per-case failures. A failure never blocks the others. */
@@ -170,7 +176,7 @@ export async function enrichPendingGoals(
 ): Promise<GoalEnrichmentResult> {
   const candidates = casesNeedingGoal(db, limit)
   const routes = toRoutes(llm)
-  const result: GoalEnrichmentResult = { enriched: 0, skipped: 0, sensitivityBlocked: 0, failures: [], remaining: 0 }
+  const result: GoalEnrichmentResult = { enriched: 0, skipped: 0, sensitivityBlocked: 0, disclosureBlocked: 0, failures: [], remaining: 0 }
 
   for (const c of candidates) {
     try {
@@ -208,8 +214,14 @@ export async function enrichPendingGoals(
         result.sensitivityBlocked++
         continue
       }
-      const r = await enrichCaseGoal(db, c.domain, c.caseId, route.client, content)
+      // W13 / §7.4: the destination travels WITH the request. enrichCaseGoal
+      // decides field by field what may go to THIS provider, and a caller that
+      // does not name one is treated as an unknown destination.
+      const r = await enrichCaseGoal(db, c.domain, c.caseId, route.client, content, {
+        provider: route.provider,
+      })
       if (r.interpreted) result.enriched++
+      else if (r.blockedByDisclosure) result.disclosureBlocked++
       else result.skipped++
     } catch (e) {
       // One unreadable case, one model timeout, one malformed reply -- none of

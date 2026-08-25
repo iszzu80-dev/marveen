@@ -20,6 +20,11 @@ import { authorizeSend } from './campaigns.js'
 import { permits } from './autonomy-ladder.js'
 import { routeModelForSensitivity, type RoutingStrategy } from './model-routing.js'
 import { mintGatePermit } from './gate-permit.js'
+import { authorizeAction } from '../identity/authorize-action.js'
+import { fromCosSensitivity, tagsFromPatternNames, type Classification } from '../identity/sensitivity-scale.js'
+import { LEGACY_UNKNOWN_IDENTITY, type ExecutionIdentity } from '../identity/execution-identity.js'
+import { bumpPolicyCounter, counterForVerdict } from '../identity/policy-metrics.js'
+import { matchSensitivityPatterns, DEFAULT_RESTRICTED } from '../data-sensitivity-gate.js'
 import { evaluateEnvelope, type EnvelopeDecision, type Intent } from './delegation-envelope.js'
 import type { CaseSensitivity } from './schema.js'
 
@@ -50,6 +55,14 @@ export interface DispatchRequest {
   usedVariables?: string[]
   /** The rendered outbound content (classified for sensitivity). */
   content: string
+  /**
+   * W10: WHO is causing this send. Optional so no existing call site breaks, but
+   * its absence is a counted identity-resolution failure, not a free pass -- an
+   * unmeasured gap and a closed one look identical otherwise.
+   */
+  identity?: ExecutionIdentity | null
+  /** The principal this send is made for, when the actor is acting for someone. */
+  principal?: ExecutionIdentity | null
   /** The model profile that would process/produce this send. */
   targetProfile: string
   /** How to pick the recommended profile for the tier (default 'capability'). */
@@ -74,6 +87,9 @@ export interface DispatchDecision {
   allowed: boolean
   /** Veto reasons; empty iff allowed. */
   reasons: string[]
+  /** W10: what the policy boundary WOULD have vetoed, on a call site that has
+   *  not been migrated to pass an identity yet. Never affects `allowed`. */
+  policyAdvisory?: string[]
   /** The effective sensitivity tier the gate computed. */
   sensitivityTier: CaseSensitivity
   /** The sensitivity-appropriate model profile for this tier (#5a dynamic
@@ -103,6 +119,9 @@ export interface DispatchDecision {
 /** Evaluate the full send gate. Fail-closed: every layer must pass. */
 export function evaluateDispatch(db: Database.Database, req: DispatchRequest): DispatchDecision {
   const reasons: string[] = []
+  /** Non-vetoing observations. Surfaced on the decision so an advisory refusal
+   *  is visible instead of being silently dropped. */
+  const advisory: string[] = []
 
   if (!isUsable(db, req.connectorId, req.requireWrite ?? true)) {
     reasons.push(`connector "${req.connectorId}" is not write-usable`)
@@ -118,6 +137,75 @@ export function evaluateDispatch(db: Database.Database, req: DispatchRequest): D
   // substitutes for an approval, and an approval never substitutes for the rung.
   const rung = permits(db, req.caseType ?? 'UNKNOWN', 'SEND')
   if (!rung.allowed) reasons.push(`autonómia-fokozat: ${rung.reason}`)
+
+  // W10 §4.3: the identity/capability half of the decision, which this gate has
+  // never had. It is a FOURTH independent veto, ANDed like the others -- not a
+  // replacement for any of them. The three existing layers answer "may this
+  // content go to this profile, on this connector, under this approval"; none of
+  // them answers "is the caller allowed to send at all, and on whose behalf".
+  //
+  // A send is EXTERNAL_EFFECT: it leaves the machine. So a credential in the
+  // rendered payload is denied here regardless of tier, which is the one check
+  // the profile allowlist structurally cannot make (it reasons about tiers, and
+  // a credential pasted into PUBLIC text is still a credential).
+  const credentialTags = tagsFromPatternNames(matchSensitivityPatterns(req.content, DEFAULT_RESTRICTED))
+  const classification: Classification = {
+    level: fromCosSensitivity(tier),
+    tags: credentialTags,
+    basis: `cos:${tier}${credentialTags.length ? ` +tags:${credentialTags.join(',')}` : ''}`,
+  }
+  const policy = authorizeAction({
+    action: 'EXTERNAL_EFFECT',
+    identity: req.identity ?? null,
+    principal: req.principal ?? null,
+    classification,
+    target: {
+      id: req.recipient,
+      // Trust is answered by the module that already owns it, not re-derived here.
+      trustedForLevel: () => isProfileAllowedForSensitivity(req.targetProfile, tier),
+    },
+    context: { connectorId: req.connectorId, campaignId: req.campaignId, channel: req.channel ?? 'EMAIL' },
+  })
+  // MIGRATION SEMANTICS, and they are deliberately asymmetric.
+  //
+  // When the caller SUPPLIES an identity, the boundary's verdict is BINDING: a
+  // caller that knows who it is gets held to it, immediately and fully.
+  //
+  // When it does not, the verdict is ADVISORY: recorded, counted, logged -- but
+  // it does not veto. The alternative was to make identity mandatory today,
+  // which would have vetoed every send in the system until the last call site
+  // was migrated, i.e. it would have taken the product down to satisfy a
+  // sequencing preference. Istvan's decision (2026-08-24) names LEGACY_UNKNOWN
+  // as an acceptable migration interim and NOT an acceptable end state.
+  //
+  // What stops this from being a permanent bypass: the advisory path is COUNTED
+  // (`identity_resolution_failure` on the `cos_send` surface), so "how much of
+  // this gate is still advisory" is a number anyone can read, and W10 cannot be
+  // reported VERIFIED_DONE while it is above zero on a live path. An unmeasured
+  // exemption is what rots; a measured one is a work item.
+  //
+  // The credential rule is the exception to the exception: a never-external tag
+  // vetoes even without an identity, because "we do not know who you are" is not
+  // a reason to let a credential leave.
+  const policyBinding = !policy.identityResolutionFailed
+  const credentialVeto = policy.verdict === 'DENY'
+    && policy.reasons.some(r => r.includes('never-external tag'))
+  if (policy.verdict !== 'ALLOW' && (policyBinding || credentialVeto)) {
+    reasons.push(`policy boundary (${policy.verdict}): ${policy.reasons.join('; ')}`)
+  } else if (policy.verdict !== 'ALLOW') {
+    // Advisory: says so out loud rather than vanishing, so a reader of the
+    // decision can see the boundary ran and what it would have said.
+    advisory.push(`policy boundary ADVISORY (${policy.verdict}, no caller identity): ${policy.reasons.join('; ')}`)
+  }
+  try {
+    const nowSec = req.now ?? Math.floor(Date.now() / 1000)
+    bumpPolicyCounter(db, 'cos_send', counterForVerdict(policy.verdict), nowSec)
+    if (policy.identityResolutionFailed) {
+      bumpPolicyCounter(db, 'cos_send', 'identity_resolution_failure', nowSec)
+    }
+  } catch {
+    // Counters must never change a send decision. The veto above already stands.
+  }
 
   // F-16: `now` is threaded through. authorizeSend defaults it to wall time, and
   // the gate was letting it — so an approval's expiry was compared against the
@@ -182,7 +270,9 @@ export function evaluateDispatch(db: Database.Database, req: DispatchRequest): D
   // refuses anything not minted here, so a caller can no longer write a ticket by
   // importing the module and calling the function.
   return mintGatePermit({
-    allowed: reasons.length === 0, reasons, sensitivityTier: tier, recommendedProfile: routed.profile,
+    allowed: reasons.length === 0, reasons,
+    policyAdvisory: advisory.length ? advisory : undefined,
+    sensitivityTier: tier, recommendedProfile: routed.profile,
     campaignVersion: auth.campaignVersion, approvalVersion: auth.approvalVersion,
     limits: auth.limits, approvalId: auth.approvalId,
     // Carried out of the gate so the caller can bind it into the authorization

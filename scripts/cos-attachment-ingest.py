@@ -14,21 +14,60 @@ Prints a JSON summary: {stored, duplicate, skipped, files:[...]}.
 import sys, os, json, base64, importlib.util, urllib.request, urllib.error
 
 REPO = os.path.expanduser("~/marveen")
-TOKEN = open(os.path.join(REPO, "store", ".dashboard-token")).read().strip()
 DOCS_URL = "http://localhost:3420/api/cos/documents"
 
-if len(sys.argv) < 3:
-    print("usage: cos-attachment-ingest.py <private|zst> <messageId> [caseId]"); sys.exit(2)
-account = sys.argv[1]
-message_id = sys.argv[2]
-case_id = sys.argv[3] if len(sys.argv) > 3 else None
-namespace = "zst" if account == "zst" else "personal"
+# IMPORTING THIS FILE MUST NOT READ A SECRET (2026-08-18).
+#
+# The dashboard token and the Gmail MCP module used to load at import time. That
+# made the module unimportable anywhere the credential is absent -- and it hid
+# the fact behind a machine that happened to have one. The cross-language docKind
+# test imports this file; it passed here and failed in CI with
+# `FileNotFoundError: .../store/.dashboard-token`, which means the evidence that
+# the two languages agree was resting on a local secret being present.
+#
+# Everything that needs credentials now happens in `_bootstrap()`, called from
+# `main()`. `classify_document_kind` is importable with nothing but the repo.
+TOKEN = None
+account = message_id = case_id = namespace = None
+g = None
 
-mod = "google-zst-mcp.py" if account == "zst" else "google-private-mcp.py"
-spec = importlib.util.spec_from_file_location("g", os.path.join(REPO, "mcp-servers", mod))
-g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+
+def _bootstrap(argv):
+    """Read credentials and load the Gmail module. Program path only."""
+    global TOKEN, account, message_id, case_id, namespace, g
+    if len(argv) < 3:
+        print("usage: cos-attachment-ingest.py <private|zst> <messageId> [caseId]"); sys.exit(2)
+    TOKEN = open(os.path.join(REPO, "store", ".dashboard-token")).read().strip()
+    account = argv[1]
+    message_id = argv[2]
+    case_id = argv[3] if len(argv) > 3 else None
+    namespace = "zst" if account == "zst" else "personal"
+    mod = "google-zst-mcp.py" if account == "zst" else "google-private-mcp.py"
+    spec = importlib.util.spec_from_file_location("g", os.path.join(REPO, "mcp-servers", mod))
+    g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
 
 SKIP_MIME_PREFIX = ("text/",)  # inline text bodies, not real attachments
+
+# Stage 2H-D (2026-08-18): the docKind rule used to be a ternary chain right
+# here, and it was the ONLY place it existed -- the TypeScript side received
+# docKind as a finished value. That made the rule unreplayable without writing a
+# second copy. The literals now live in src/cos/document-kind-rules.json and both
+# this script and src/cos/document-kind.ts READ them. Do not restate them here.
+_RULES_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "src", "cos", "document-kind-rules.json")
+with open(_RULES_PATH, encoding="utf-8") as _f:
+    _KIND_RULES = json.load(_f)
+
+
+def classify_document_kind(filename):
+    """Normative docKind. Rules are evaluated in array order; first match wins."""
+    name = (filename or "").lower()
+    for rule in _KIND_RULES["rules"]:
+        if any(k in name for k in rule.get("filenameContains", [])):
+            return rule["kind"]
+        if any(name.endswith(k) for k in rule.get("filenameEndsWith", [])):
+            return rule["kind"]
+    return _KIND_RULES["fallback"]
 
 
 def walk_parts(part, out):
@@ -56,10 +95,7 @@ def main():
             result["skipped"] += 1; continue
         raw = base64.urlsafe_b64decode(a["data"] + "===")  # Gmail returns base64url
         std_b64 = base64.b64encode(raw).decode()
-        kind = ("invoice" if any(k in filename.lower() for k in ("szaml", "invoice", "dmrv", "gm-", "receipt"))
-                else "photo" if filename.lower().endswith((".jpg", ".jpeg", ".png"))
-                else "contract" if "szerzod" in filename.lower() or "contract" in filename.lower()
-                else "other")
+        kind = classify_document_kind(filename)
         payload = {"namespace": namespace, "source": "email", "sourceRef": message_id,
                    "filename": filename, "mimeType": mime, "contentBase64": std_b64, "docKind": kind}
         if case_id:
@@ -80,4 +116,5 @@ def main():
 
 
 if __name__ == "__main__":
+    _bootstrap(sys.argv)
     main()

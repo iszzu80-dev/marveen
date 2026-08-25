@@ -31,6 +31,7 @@ import { mintGatePermit } from './gate-permit.js'
 import { evaluateEnvelope, type EnvelopeDecision, type Intent } from './delegation-envelope.js'
 import { acquireZstClaim, releaseZstClaim } from './zst-case-store.js'
 import { type EmailDraft, renderedPayloadHash, templateHashFor } from './email-payload.js'
+import { brokerExternalAction } from '../identity/action-broker.js'
 
 const zstExecutor = makeExecutor('zst_outbound_ledger', 'zst_case_claims')
 
@@ -287,6 +288,11 @@ export function authorizeZstSend(
 }
 
 export interface DispatchZstSendInput {
+  /** W10: WHO is sending. Absent -> the broker refuses; a corporate send with no
+   *  attributable actor is not a supported path. */
+  identity?: import('../identity/execution-identity.js').ExecutionIdentity | null
+  /** The principal this send is made for, when one exists. */
+  principal?: import('../identity/execution-identity.js').ExecutionIdentity | null
   ledgerId: string
   campaignId: string
   connectorId: string
@@ -501,7 +507,47 @@ export async function dispatchZstSend(
   }
   const ticket = issueAuthorization(db, authContext, now, {}, decision)
   try {
-    const action = await zstExecutor.executeAction(db, adapter, input.ledgerId, now, {
+    // W10 / HYBRID EXTERNAL ACTION BOUNDARY (2026-08-25). Same shape as the
+    // personal path in send-flow.ts, and same reason: this is the corporate mail
+    // send, so the effect is handed to the broker rather than guarded by a
+    // preceding statement the next edit can separate from it.
+    let action!: Awaited<ReturnType<typeof zstExecutor.executeAction>>
+    const brokered = await brokerExternalAction(
+      {
+        // The CORPORATE credential, not the private one. Measured 2026-08-25:
+        // gmail.send exists on the ZST account and does NOT exist on the private
+        // one, so naming the wrong connector here would attach this send's audit
+        // rows and risk ceiling to a credential it never touches.
+        connector: 'gmail.send.zst',
+        operation: 'messages.send',
+        mutating: true,
+        riskClass: 'CONTRACTUAL',
+        identity: input.identity ?? null,
+        principal: input.principal ?? null,
+        classification: {
+          level: 'CONFIDENTIAL', tags: [],
+          basis: `zst-send declaredSensitivity=${String(input.declaredSensitivity ?? 'unset')}`,
+        },
+        targetId: input.email.to,
+        approval: decision.approvalId
+          ? {
+              kind: 'OWNER_APPROVAL' as const,
+              approvalId: decision.approvalId,
+              approvedBy: 'istvan',
+              approvedAt: now,
+              scopeDescription: `zst outbound ${input.ledgerId} to ${input.email.to} (payload ${input.renderedPayloadHash.slice(0, 12)})`,
+            }
+          : {
+              kind: 'GATE_PERMIT' as const,
+              approvalId: `zst-dispatch-gate:${input.ledgerId}`,
+              approvedBy: 'zst-dispatch-gate',
+              approvedAt: now,
+              scopeDescription: `zst outbound ${input.ledgerId} to ${input.email.to}`,
+            },
+        context: { ledgerId: input.ledgerId, campaignId: input.campaignId, connectorId: input.connectorId, namespace: 'zst' },
+      },
+      async () => {
+        action = await zstExecutor.executeAction(db, adapter, input.ledgerId, now, {
       ...opts,
       authorizationId: ticket.authorizationId,
       authorizationContext: authContext,
@@ -520,7 +566,21 @@ export async function dispatchZstSend(
         campaignVersion: decision.campaignVersion ?? null,
         approvalVersion: decision.approvalVersion ?? null,
       },
-    })
+        })
+        return action
+      },
+      {
+        db, surface: 'zst_send',
+        readback: a => `${a.status}${a.externalRef ? ` ref=${a.externalRef}` : ''}`,
+      },
+    )
+    if (brokered.outcome === 'DENIED') {
+      return {
+        sent: false,
+        decision: { ...decision, allowed: false, reasons: [...decision.reasons, ...brokered.reasons] },
+      }
+    }
+    if (brokered.outcome === 'FAILED') throw new Error(brokered.error ?? 'zst send failed')
     return { sent: action.status === 'VERIFIED' || action.status === 'APPLIED_UNVERIFIED', decision, action }
   } finally {
     // Released whatever happened: a claim left behind would block the row's next

@@ -14,6 +14,11 @@
 
 import { readFileSync } from 'node:fs'
 import { basename } from 'node:path'
+import type Database from 'better-sqlite3'
+import type { ExecutionIdentity } from '../identity/execution-identity.js'
+import type { Classification } from '../identity/sensitivity-scale.js'
+import { brokerExternalAction } from '../identity/action-broker.js'
+import { scheduledIdentityFromEnv } from '../identity/scheduled-task-identity.js'
 
 export interface CosBotConfig {
   token: string
@@ -178,11 +183,46 @@ async function call<T>(
   return j.result
 }
 
-export interface SendOptions { fetchImpl?: typeof fetch; timeoutMs?: number }
+export interface SendOptions {
+  fetchImpl?: typeof fetch
+  timeoutMs?: number
+  /**
+   * W10: WHO is sending. Defaults to the scheduled identity carried in the
+   * environment, so a cycle step needs no change to be identified — and a script
+   * run by hand, with no such environment, gets NO identity and is refused.
+   *
+   * Pass `null` explicitly to assert "no identity", which is a denial, not a
+   * bypass. There is no value of this field that skips the broker.
+   */
+  identity?: ExecutionIdentity | null
+  /** Sensitivity of the text. Defaults to CONFIDENTIAL: a CoS question quotes a
+   *  case, and guessing low about someone's private business is the one direction
+   *  a default must never be wrong in. */
+  classification?: Classification
+  /** Where the audit row and counters go. */
+  db?: Database.Database
+}
 
-/** Send one question to the CoS chat. Returns the Telegram message id, which is
- *  what lets a later reply be tied back to THIS question rather than to whatever
- *  was asked most recently. */
+/** Thrown when the boundary refuses a send. Distinct from a transport failure,
+ *  because "we were not allowed to" and "Telegram said no" are different facts
+ *  and a caller that retries the second must not retry the first. */
+export class CosSendRefused extends Error {
+  constructor(public readonly reasons: string[]) {
+    super(`CoS send refused by the policy boundary: ${reasons.join('; ')}`)
+    this.name = 'CosSendRefused'
+  }
+}
+
+/**
+ * Send one question to the CoS chat. Returns the Telegram message id, which is
+ * what lets a later reply be tied back to THIS question rather than to whatever
+ * was asked most recently.
+ *
+ * W10: this is the single external write for the CoS channel, so the broker sits
+ * INSIDE it rather than in front of it at three call sites. Callers cannot forget
+ * the gate, because there is no path to the transport that does not go through
+ * it — the `call()` helper is module-private and this is its only mutating use.
+ */
 export async function sendCosMessage(
   cfg: CosBotConfig, text: string, opts: SendOptions = {},
 ): Promise<{ messageId: number; chatId: string }> {
@@ -191,9 +231,32 @@ export async function sendCosMessage(
     // the bot once, Telegram will not tell us which chat he is.
     throw new Error('CoS bot has no chat_id yet — Istvan must message the bot once')
   }
-  const res = await call<{ message_id: number; chat: { id: number } }>(
-    cfg, 'sendMessage', { chat_id: cfg.chatId, text, disable_web_page_preview: true },
-    opts.fetchImpl ?? fetch, opts.timeoutMs ?? 30_000)
+  const identity = opts.identity === undefined ? scheduledIdentityFromEnv() : opts.identity
+
+  const brokered = await brokerExternalAction(
+    {
+      connector: 'telegram.cos',
+      operation: 'sendMessage',
+      mutating: true,
+      riskClass: 'ROUTINE',
+      identity,
+      classification: opts.classification
+        ?? { level: 'CONFIDENTIAL', tags: [], basis: 'cos-telegram default: a CoS message quotes a case' },
+      targetId: cfg.chatId,
+      context: { textLength: text.length },
+    },
+    () => call<{ message_id: number; chat: { id: number } }>(
+      cfg, 'sendMessage', { chat_id: cfg.chatId, text, disable_web_page_preview: true },
+      opts.fetchImpl ?? fetch, opts.timeoutMs ?? 30_000),
+    { db: opts.db, surface: 'cos_channel_send' },
+  )
+
+  if (brokered.outcome === 'DENIED') throw new CosSendRefused(brokered.reasons)
+  // A transport failure is re-thrown as itself: the broker recorded it, and the
+  // caller's existing error handling is about Telegram, not about policy.
+  if (brokered.outcome === 'FAILED') throw new Error(brokered.error ?? 'telegram sendMessage failed')
+
+  const res = brokered.value!
   return { messageId: res.message_id, chatId: String(res.chat.id) }
 }
 

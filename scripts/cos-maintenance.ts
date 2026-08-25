@@ -24,14 +24,22 @@
  * Exit code 1 on any failure so a scheduler can tell.
  */
 import { existsSync, mkdirSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { getDb, initDatabase } from '../src/db.js'
 import { assertStorePermissions, anyTooOpen, missingPaths } from '../src/cos/store-security.js'
-import { createEncryptedBackup, pruneBackups, verifyEncryptedBackup } from '../src/cos/backup.js'
+import {
+  createEncryptedBackup, pruneBackups, verifyEncryptedBackup,
+  createPolicyBackup, prunePolicyBackups, verifyPolicyBackup,
+} from '../src/cos/backup.js'
 import {
   purgeExpiredAttachmentContent, deletedCasesEligibleForPurge, purgeExpiredEvidencePackets,
 } from '../src/cos/retention.js'
 
 const DB_PATH = process.env.MARVEEN_DB ?? 'store/claudeclaw.db'
+/** Where the policy files live. Derived from DB_PATH so an override moves both
+ *  halves of the backup together — a policy bundle taken from a different store
+ *  than the database would be worse than none. */
+const STORE_DIR = dirname(DB_PATH)
 const BACKUP_DIR = process.env.COS_BACKUP_DIR ?? 'store/backups'
 const now = Math.floor(Date.now() / 1000)
 const problems: string[] = []
@@ -110,6 +118,32 @@ if (!passphrase) {
     // proof of anything when the live store has cases.
     const live = (db.prepare('SELECT COUNT(*) AS n FROM personal_cases').get() as { n: number }).n
     if (rows !== live) problems.push(`restore test: backup holds ${rows} cases, live store has ${live}`)
+
+    // W14 / §8.2 — THE POLICY HALF. The database backup carries every case and
+    // none of the rules: the autonomy levels, the egress allowlist, which secret
+    // is bound to which MCP server, the source-commit policy. A restore from the
+    // db backup alone would produce a store that looks complete and behaves
+    // differently — including a security control that would come back empty.
+    //
+    // Same crypto, same retention, same restore test: decrypt, parse, and check
+    // every file the manifest claims is there.
+    const pol = createPolicyBackup({ storeDir: STORE_DIR, destDir: BACKUP_DIR, passphrase, now })
+    const polPruned = prunePolicyBackups({ destDir: BACKUP_DIR, now })
+    const polV = verifyPolicyBackup({ encPath: pol.path, passphrase })
+    report.policyBackup = {
+      path: pol.path, bytes: pol.bytes, files: polV.restoredFiles.length,
+      pruned: polPruned.deleted.length, unclassified: pol.unclassified,
+    }
+    if (!polV.ok) {
+      problems.push(`policy restore test: ${polV.problem ?? `missing ${polV.missing.join(', ')}`}`)
+    }
+    // NOT a problem, deliberately: an unclassified store file is a question for
+    // the operator, not a failure of the run. It is reported on every run until
+    // somebody decides whether it is policy or state — which is what stops the
+    // declared list from quietly rotting as the system grows.
+    if (pol.unclassified.length) {
+      report.policyUnclassified = pol.unclassified
+    }
   } catch (e) {
     problems.push(`backup/restore: ${String((e as Error)?.message ?? e)}`)
   }

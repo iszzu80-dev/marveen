@@ -45,6 +45,11 @@ export const DETECTOR_BEHAVIOUR_SCOPE: readonly string[] = [
   // Beviteli út: ebből lesz ügy egy üzenetből.
   'src/cos/intake.ts',
   'src/cos/triage-bridge.ts',
+  // Stage 2G kapu (2026-08-17): e-mail-eredetű ügy triage-nyugta nélkül nem
+  // jöhet létre. Ez DÖNTÉS, nem infrastruktúra — ezért a hatókörbe kerül, nem a
+  // deklarált kivételek közé, és a viselkedési hash mozdul vele. Épp ez a
+  // helyes: a beviteli út viselkedése tényleg megváltozott.
+  'src/cos/triage-provenance.ts',
   'src/cos/email-ingest.ts',
   // Ügy-életciklus: ez dönti el, mi van nyitva, és mikor záródik.
   'src/cos/case-store.ts',

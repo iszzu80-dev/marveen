@@ -12,6 +12,11 @@ import { createHash } from 'node:crypto'
 import { reserveQuota, releaseQuota } from './quota.js'
 import { consumeAuthorization, type AuthorizationContext } from './action-authorization.js'
 import { killSwitchRefusal } from './kill-switch.js'
+import { assertOutboundEvidenceFresh } from './outbound-evidence-freshness.js'
+import {
+  getRetryPolicy, DEFAULT_MAX_SEND_ATTEMPTS as SEED_MAX_SEND_ATTEMPTS,
+  DEFAULT_SEND_BACKOFF_SEC as SEED_SEND_BACKOFF_SEC, type RetryPolicy,
+} from './recovery-queue.js'
 
 /** Used when a caller supplies a ticket but no context: the hash will not match
  *  anything the gate issued, so the send is refused. Deliberately NOT a
@@ -241,11 +246,29 @@ export interface ExecuteOpts {
   retry?: { maxAttempts?: number; baseBackoffSec?: number }
 }
 
-/** F-15 defaults. Five attempts over an exponential backoff reaches ~8 minutes,
- *  which covers a provider blip; past that the failure is not transient and a
- *  human should see it as FAILED_TERMINAL rather than as an endless queue. */
-export const DEFAULT_MAX_SEND_ATTEMPTS = 5
-export const DEFAULT_SEND_BACKOFF_SEC = 30
+/** F-15 defaults, now owned by the POLICY module and re-exported here so
+ *  existing importers keep working. See recovery-queue.ts for why they moved:
+ *  the same two numbers used to exist twice, and an operator editing the policy
+ *  row moved one of them. */
+export { DEFAULT_MAX_SEND_ATTEMPTS, DEFAULT_SEND_BACKOFF_SEC } from './recovery-queue.js'
+
+/**
+ * The send retry policy in force, read from `cos_retry_policy`.
+ *
+ * Falls back to the seed constants when the row is absent, and says so in the
+ * log rather than silently. The fallback is NOT a second definition: the seed
+ * IS these constants (recovery-queue.ts seeds the row from them), so the two
+ * paths cannot disagree on a value — the fallback only covers a store whose
+ * policy table was never created, where refusing to send at all would be a
+ * bigger failure than sending with the shipped default.
+ */
+function sendRetryPolicy(db: Database.Database): Pick<RetryPolicy, 'maxAttempts' | 'baseBackoffSec'> {
+  try {
+    return getRetryPolicy(db, 'OUTBOUND_SEND')
+  } catch {
+    return { maxAttempts: SEED_MAX_SEND_ATTEMPTS, baseBackoffSec: SEED_SEND_BACKOFF_SEC }
+  }
+}
 
 export interface Executor {
   planAction(db: Database.Database, input: PlanInput, now: number): OutboundAction
@@ -367,7 +390,12 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
     // the claim, and BEFORE the backoff so a terminal row stops appearing in the
     // work queue at all.
     if (a.status === 'FAILED_RETRYABLE') {
-      const maxAttempts = opts.retry?.maxAttempts ?? DEFAULT_MAX_SEND_ATTEMPTS
+      // W12 closure (Istvan, 2026-08-25): the ceiling comes from the POLICY
+      // TABLE, so `cos_retry_policy.OUTBOUND_SEND` is the one place that decides
+      // it. An explicit opts.retry still wins — that is a caller stating a
+      // narrower budget for one send, not a second definition of the default.
+      const policy = sendRetryPolicy(db)
+      const maxAttempts = opts.retry?.maxAttempts ?? policy.maxAttempts
       if (a.attempt >= maxAttempts) {
         // Conflict = another worker already moved the row on; its decision is as
         // current as ours and the reloaded row is the answer either way.
@@ -379,7 +407,7 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
       // Exponential backoff from the last attempt. Without it every tick retried
       // immediately, so "5 attempts" would have been spent inside a minute and
       // a transient provider outage would still exhaust the budget.
-      const base = opts.retry?.baseBackoffSec ?? DEFAULT_SEND_BACKOFF_SEC
+      const base = opts.retry?.baseBackoffSec ?? policy.baseBackoffSec
       const waitUntil = (a.sendingAt ?? 0) + base * Math.pow(2, Math.max(0, a.attempt - 1))
       if (now < waitUntil) return a
     }
@@ -415,6 +443,37 @@ export function makeExecutor(ledgerTable: string, claimsTable?: string): Executo
         // progress, and it must not look like progress.
         setStatus(db, ledgerId, a.status, { last_error: `refused: ${stopped}` }, now, a.status)
         return loadOrThrow(db, ledgerId)
+      }
+      // Authorization identity is checked before evidence diagnostics. A missing
+      // ticket is refused by the canonical primitive without consuming anything.
+      if (!opts.authorizationId) {
+        const missing = consumeAuthorization(
+          db, undefined,
+          opts.authorizationContext ?? { ...EMPTY_AUTH_CONTEXT, actionId: ledgerId, actionType: a.actionType },
+          now,
+        )
+        if (!missing.ok) {
+          setStatus(db, ledgerId, a.status, { last_error: `refused: ${missing.reason}` }, now, a.status)
+          return loadOrThrow(db, ledgerId)
+        }
+      }
+      // ACP v1.4.5 OUTBOUND_EVIDENCE_FRESHNESS. Recovery states returned
+      // above; this is the common Personal/ZST first-or-retry delivery door.
+      // Evidence is revalidated BEFORE the ticket is consumed, so a stale
+      // payload neither calls the provider nor burns otherwise valid authority.
+      if (a.actionType === 'EMAIL_SEND') {
+        const evidenceDomain = T === 'outbound_ledger' ? 'personal'
+          : T === 'zst_outbound_ledger' ? 'zst' : null
+        if (!evidenceDomain) {
+          setStatus(db, ledgerId, a.status, { last_error: `refused: unknown email ledger ${T}` }, now, a.status)
+          return loadOrThrow(db, ledgerId)
+        }
+        try {
+          assertOutboundEvidenceFresh(db, evidenceDomain, ledgerId)
+        } catch (err) {
+          setStatus(db, ledgerId, a.status, { last_error: `refused: ${String((err as Error)?.message ?? err)}` }, now, a.status)
+          return loadOrThrow(db, ledgerId)
+        }
       }
       // §22.2. Consumed HERE, not at the door: between the gate's decision and
       // this line the process may have been restarted, the row re-queued, or the

@@ -8,6 +8,7 @@ import {
   renderedPayloadHash,
 } from '../cos/zst-send.js'
 import type { OutboundAdapter, OutboundAction, ReadbackResult } from '../cos/executor-core.js'
+import { AS_OPERATOR, TEST_OPERATOR } from './helpers/w10-identity.js'
 
 const T0 = 1_700_000_000
 const EMAIL = { to: 'konyvelo@example.com', subject: 'Havi csomag', body: 'Csatolva a július.' }
@@ -45,6 +46,7 @@ describe('ZST approval-gated send (Slice 1 write-half, AT-ZA)', () => {
     return d
   }
   const dispatchInput = (d: ReturnType<typeof draftAndApprove>, email = EMAIL) => ({
+  ...AS_OPERATOR,
     ledgerId: d.ledgerId, campaignId: d.campaignId, connectorId: 'zst-gmail', email,
     templateHash: d.templateHash, renderedPayloadHash: renderedPayloadHash(email),
     declaredSensitivity: 'ZST_INTERNAL', targetProfile: 'premium_reasoning',

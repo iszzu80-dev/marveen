@@ -19,6 +19,12 @@ import {
   type GateConfig,
   type GateResult,
 } from '../data-sensitivity-gate.js';
+import {
+  bumpPolicyCounter, counterForVerdict, policyGateLiveness,
+} from '../identity/policy-metrics.js';
+import { fromFleetCategory, tagsFromPatternNames } from '../identity/sensitivity-scale.js';
+import { authorizeAction } from '../identity/authorize-action.js';
+import { resolveIdentity, LEGACY_UNKNOWN_IDENTITY } from '../identity/execution-identity.js';
 import { saveSensitivityAuditEntry, getDb } from '../db.js';
 
 const CONFIG_PATH = join(process.cwd(), 'store', 'data-sensitivity-gate.json');
@@ -68,6 +74,13 @@ export interface GateCheckInput {
   content: string;
   targetAgent: string;
   messageId?: number;
+  /**
+   * W10: who is causing this dispatch. Optional so every existing call site
+   * keeps compiling, but its ABSENCE is recorded as an identity-resolution
+   * failure rather than being treated as "no identity needed" -- an unmeasured
+   * gap and a closed one look identical otherwise.
+   */
+  identity?: unknown;
 }
 
 // Called by the message-router before tmux injection. Returns the gate result
@@ -103,6 +116,42 @@ export function checkDispatchGate(input: GateCheckInput): {
     mode: config.mode,
     reason: result.reason,
   };
+
+  // W10 §4.7: count EVERY decision, including allow.
+  //
+  // This is what makes `policy_allow_count` measurable and -- the same fix --
+  // what turns the liveness question from "are there no violations?" (an
+  // absence claim, true of a healthy quiet gate AND of a dead one) into "did
+  // this gate decide anything?" (a presence claim, which can be false).
+  // Aggregate per hour, so the row count grows with time and not with traffic;
+  // per-message allow rows were rejected for exactly that reason.
+  const identity = resolveIdentity(input.identity);
+  try {
+    const db = getDb();
+    const nowSec = Math.floor(Date.now() / 1000);
+    const verdictCounter = result.verdict === 'allow'
+      ? counterForVerdict('ALLOW')
+      : counterForVerdict('DENY');
+    bumpPolicyCounter(db, 'fleet_dispatch', verdictCounter, nowSec);
+    if (!identity) bumpPolicyCounter(db, 'fleet_dispatch', 'identity_resolution_failure', nowSec);
+    if (result.category === 'restricted' && result.matchedPatterns.length === 0) {
+      bumpPolicyCounter(db, 'fleet_dispatch', 'sensitivity_unknown', nowSec);
+    }
+  } catch (err) {
+    // A metrics failure must never change the dispatch decision. It is recorded
+    // and swallowed; the verdict above already stands on its own.
+    logger.warn({ err }, 'data-sensitivity-gate: failed to record policy counters');
+  }
+
+  // W10 §4.9: the audit record must name the ACTOR, not only the target. Until
+  // callers pass one this is LEGACY_UNKNOWN, which is the honest value -- and
+  // the identity_resolution_failure counter above says how often that happens,
+  // so the gap is a number rather than an impression.
+  const actor = identity ?? LEGACY_UNKNOWN_IDENTITY;
+  auditEntry.actor_id = actor.actorId;
+  auditEntry.actor_type = actor.actorType;
+  auditEntry.on_behalf_of = actor.onBehalfOf;
+  auditEntry.run_id = actor.runId;
 
   const shouldBlock = config.mode === 'enforce' && result.verdict === 'block';
 
@@ -161,11 +210,36 @@ export function checkGateLiveness(): { healthy: boolean; lastEntry: number | nul
       .get() as { last_ts: number | null } | undefined;
     const lastTs = row?.last_ts ?? null;
 
+    // W10: ask the PRESENCE question first. The violation log below can only
+    // report absence, and absence is what a healthy quiet gate also produces --
+    // this check reported FAILED for fifteen days in August 2026 while the gate
+    // was demonstrably alive (52/52 messages replayed clean). Decision counters
+    // answer it properly, so they are consulted before the old signal.
+    try {
+      const live = policyGateLiveness(db, Math.floor(Date.now() / 1000));
+      if (live.state === 'LIVE') {
+        return { healthy: true, lastEntry: lastTs };
+      }
+      if (live.state === 'NO_DECISIONS_RECORDED') {
+        logger.warn(
+          { decisions: live.decisions, windowHours: live.windowHours },
+          'data-sensitivity-gate: LIVENESS FAILED — the gate recorded ZERO decisions in the window. '
+          + 'This is a presence check: it means checkDispatchGate is not being called at all.',
+        );
+        return { healthy: false, lastEntry: lastTs };
+      }
+      // NOT_INSTRUMENTED: counters have never been written (this build is newer
+      // than the last dispatch). Fall through to the legacy signal rather than
+      // claiming either health or failure from no data.
+    } catch (err) {
+      logger.warn({ err }, 'data-sensitivity-gate: policy-counter liveness unavailable, falling back');
+    }
+
     if (lastTs === null) {
       logger.warn(
         'data-sensitivity-gate: LIVENESS CHECK FAILED — audit log is EMPTY. ' +
-          'The gate may be unwired (no callers) or the observe window has never triggered a non-allow verdict. ' +
-          'Verify that message-router.ts imports and calls checkDispatchGate.',
+          'NOTE: this signal cannot distinguish a dead gate from a quiet one — only non-allow verdicts land here. ' +
+          'The authoritative check is policyGateLiveness (decision counters). Verify those before concluding anything.',
       );
       return { healthy: false, lastEntry: null };
     }
@@ -176,8 +250,8 @@ export function checkGateLiveness(): { healthy: boolean; lastEntry: number | nul
       logger.warn(
         { lastEntry: new Date(lastTs * 1000).toISOString(), ageHours },
         `data-sensitivity-gate: LIVENESS CHECK FAILED — last audit entry was ${ageHours}h ago. ` +
-          'The gate may be unwired (no callers since last deploy/restart). ' +
-          'Verify that message-router.ts imports and calls checkDispatchGate.',
+          'NOTE: this signal cannot distinguish a dead gate from a quiet one. ' +
+          'The authoritative check is policyGateLiveness (decision counters).',
       );
       return { healthy: false, lastEntry: lastTs };
     }

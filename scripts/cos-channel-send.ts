@@ -13,6 +13,7 @@ import { pendingOutbox, markOutboxSent, markOutboxFailed } from '../src/cos/chan
 import {
   heldOwnerMessages, buildHeldFollowUp, markHeldResolved, outstandingOwnerQuestions,
 } from '../src/cos/owner-question.js'
+import { assertOwnerQuestionFreshForDelivery } from '../src/cos/owner-delivery-freshness.js'
 
 async function main(): Promise<void> {
   initDatabase()
@@ -30,17 +31,36 @@ async function main(): Promise<void> {
   // Questions that are open and have NOT yet been delivered to this channel.
   // `channel IS NULL` is the pre-split backlog: those were asked before the CoS
   // channel existed and are exactly what should move over first.
+  //
+  // progression_run_id is selected because delivery is the final owner-facing
+  // freshness boundary. The question composer silently refreshes this id when an
+  // unchanged ask is re-read from a newer packet; delivery must validate the
+  // exact evidence run the current text represents, not the original asked_at.
   const rows = db.prepare(
-    `SELECT case_id, domain, question_hash, question_text FROM cos_owner_questions
+    `SELECT case_id, domain, question_hash, question_text, progression_run_id
+       FROM cos_owner_questions
       WHERE answered_at IS NULL AND superseded_at IS NULL
         AND (channel IS NULL OR channel != ?)
       ORDER BY asked_at ASC LIMIT 10`,
-  ).all(cfg.channelId) as Array<{ case_id: string; domain: string; question_hash: string; question_text: string }>
+  ).all(cfg.channelId) as Array<{
+    case_id: string
+    domain: 'personal' | 'zst'
+    question_hash: string
+    question_text: string
+    progression_run_id: string | null
+  }>
 
   let sent = 0
+  let staleBlocked = 0
   const failures: Array<{ caseId: string; error: string }> = []
   for (const r of rows) {
     try {
+      // ACP v1.4.5 shared Evidence Freshness Gate. A question can be fresh when
+      // composed and stale by the time the separate delivery step runs. The
+      // watermark checks BOTH case version and event sequence; the 37-second
+      // owner-reply class is therefore caught even when timestamps share a
+      // second. EVIDENCE_UNKNOWN is also fail-closed.
+      assertOwnerQuestionFreshForDelivery(db, r.domain, r.case_id, r.progression_run_id)
       const res = await sendCosMessage(cfg, r.question_text)
       db.prepare(
         `UPDATE cos_owner_questions SET channel = ?, channel_target = ?
@@ -49,8 +69,13 @@ async function main(): Promise<void> {
       sent++
     } catch (e) {
       // One undeliverable question must not stop the rest, and the row is left
-      // unmarked so the next run retries it rather than losing it.
-      failures.push({ caseId: r.case_id, error: String((e as Error)?.message ?? e).slice(0, 160) })
+      // unmarked so the next reader/question pass may refresh it and the next
+      // channel pass retries. A stale/unknown evidence refusal is counted
+      // separately but remains a failure: silence caused by stale evidence must
+      // not look like "nothing to ask".
+      const msg = String((e as Error)?.message ?? e).slice(0, 160)
+      if (msg.includes('STALE_EVIDENCE') || msg.includes('EVIDENCE_UNKNOWN')) staleBlocked++
+      failures.push({ caseId: r.case_id, error: msg })
     }
   }
   // HELD MESSAGES GET AN ANSWER (review 2026-08-12, T-3).
@@ -116,7 +141,7 @@ async function main(): Promise<void> {
   }
 
   console.log('CosChannel:', JSON.stringify({
-    channel: cfg.channelId, pending: rows.length, sent, failures,
+    channel: cfg.channelId, pending: rows.length, sent, staleBlocked, failures,
     // Reported even at zero, same rule as the outbox: "nothing was held" and
     // "held messages are piling up unanswered" must not look the same.
     heldAnswered, heldOpen: heldOwnerMessages(db, 50).length,

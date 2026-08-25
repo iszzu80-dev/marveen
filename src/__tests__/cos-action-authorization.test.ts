@@ -19,6 +19,7 @@ import {
 } from '../cos/action-authorization.js'
 import { mintGatePermit } from '../cos/gate-permit.js'
 import { engageKillSwitch } from '../cos/kill-switch.js'
+import { AS_OPERATOR, TEST_OPERATOR } from './helpers/w10-identity.js'
 
 const T0 = 1_700_000_000
 const EMAIL = { to: 'v@x.com', subject: 'S', body: 'B' }
@@ -250,6 +251,7 @@ describe('§22.2 authorization ticket — adversarial', () => {
     }, T0)
     const t = new DryRunTransport()
     const r = await dispatchApprovedSend(db, new GmailSendAdapter(t), {
+      ...AS_OPERATOR,
       ledgerId: d.ledgerId, connectorId: 'gmail', campaignId: d.campaignId,
       templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash,
       email: EMAIL, declaredSensitivity: 'PERSONAL', targetProfile: 'premium_reasoning',

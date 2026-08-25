@@ -189,13 +189,36 @@ function widenCheckConstraint(db: Database.Database, table: string, probeValue: 
 function ensureColumns(db: Database.Database, table: string, defs: Record<string, string>): void {
   const have = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(c => c.name))
   for (const [name, def] of Object.entries(defs)) {
-    if (!have.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${def}`)
+    if (have.has(name)) continue
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${def}`)
+    } catch (err) {
+      // W12 (2026-08-25), found while building the two-process ingest test.
+      // This is CHECK-THEN-ACT across processes: two boots against the same
+      // fresh store both read PRAGMA table_info, both see the column missing,
+      // and the loser dies with `duplicate column name: <name>` -- during
+      // startup, before any of its own work. Exactly the shape W12 is about,
+      // one layer down.
+      //
+      // The post-condition of this function is "the column exists", and a
+      // duplicate-column error is that post-condition already being true. Every
+      // OTHER error still throws: a failed ALTER that is not this is a schema
+      // problem and must not be swallowed, which is why this catch inspects the
+      // message instead of being bare.
+      const msg = err instanceof Error ? err.message : String(err)
+      if (!/duplicate column name/i.test(msg)) throw err
+    }
   }
 }
 
 import { ensureLadderSchema } from './autonomy-ladder.js'
 import { ensureQuoteSchema } from './quote-campaign.js'
 import { ensureEnvelopeSchema } from './delegation-envelope.js'
+import { ensureTemporalFactsSchema } from './temporal-facts.js'
+import { ensureFeatureRunSchema } from './consumer-manifest.js'
+import { ensureRecoveryQueueSchema } from './recovery-queue.js'
+import { ensureDisclosureSchema } from './disclosure.js'
+import { ensureCanarySchema } from './canary.js'
 
 /**
  * E9 (review 2026-08-13). A ledger of one-time migrations that have already run.
@@ -239,6 +262,18 @@ export function initCosSchema(db: Database.Database): void {
   // §21 delegation envelope -- csak az allapot (visszavonva/visszakapcsolva);
   // maga a jogosultsag kodkonstans, mert az tulajdonosi dontes es reviewalando.
   ensureEnvelopeSchema(db)
+  // v4.4/v1.4.5 shared hardening schema belongs to the root CoS seam.
+  ensureTemporalFactsSchema(db)
+  ensureFeatureRunSchema(db)
+  // W12 / §6.7: the recovery queue and its policy table (see recovery-queue.ts).
+  ensureRecoveryQueueSchema(db)
+  // W13 / §7.4: the disclosure decision record (see disclosure.ts).
+  ensureDisclosureSchema(db)
+  // W14 / §8.5: the canary table. Created at boot like its siblings rather than
+  // lazily on first use: a table that only appears once a feature enrols cannot
+  // be queried by anything that wants to ask "what is under canary right now",
+  // and the merge-migration proof would have to special-case it.
+  ensureCanarySchema(db)
 
   // ── personal_cases (P0.5 version; §6.1) ──────────────────────────────
   // version: optimistic concurrency. Every domain command reads the version it
@@ -611,6 +646,10 @@ export function initCosSchema(db: Database.Database): void {
   // wide key never enters the rebuild, so it needs the ALTER; a fresh one gets
   // the column from EPROC_A3_DDL and this is a no-op.
   ensureColumns(db, 'email_processing', { thread_id_derived: 'INTEGER NOT NULL DEFAULT 0' })
+  // Stage 2G (2026-08-17): which triage receipt opened this case. Nullable on
+  // purpose — rows written before the gate existed have no receipt, and a
+  // back-filled default would invent provenance that never existed.
+  ensureColumns(db, 'email_processing', { triage_receipt_id: 'TEXT' })
   // F-8: an existing database that did NOT go through the A.3 rebuild still has
   // the narrow CHECK. Widen it here, where the surviving definition is known.
   widenCheckConstraint(db, 'email_processing', 'SOURCE_COMMIT_SKIPPED', EPROC_A3_DDL)
@@ -1241,6 +1280,7 @@ export function initZstSchema(db: Database.Database): void {
       CHECK (status IN ('LOCAL_APPLIED','EXCLUDED','DUPLICATE','EXCLUDED_SELF_SEND'))
     )
   `)
+  ensureColumns(db, 'zst_email_processing', { triage_receipt_id: 'TEXT' })
   db.exec(`CREATE INDEX IF NOT EXISTS idx_zeproc_case ON zst_email_processing(case_id)`)
 
   initZstSendSchema(db)         // Slice 1 write-half

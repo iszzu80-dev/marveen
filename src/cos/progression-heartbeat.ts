@@ -29,6 +29,7 @@ import { runProgressionCycle, type PipelineOptions } from './progression-pipelin
 import { acquireClaim, releaseClaim } from './case-store.js'
 import { decideTrigger, recordProgressionState, dueDeadline } from './progression-trigger.js'
 import { killSwitchRefusal } from './kill-switch.js'
+import { evaluateCaseTemporalConsistency } from './temporal-consistency-gate.js'
 
 /** How far out the next check is pushed after a case ran. Matches the sweep
  *  cadence: the case is examined again on the next sweep, not sooner. */
@@ -57,6 +58,11 @@ export interface HeartbeatResult {
   skippedClaimed: number
   /** §10.8: due, but nothing about the case changed and no clock came round. */
   skippedNoTrigger: number
+  /** Cases whose trigger was real but TSCG refused to let policy reason from an
+   *  unverified/missing/conflicted/past-due semantic time fact. */
+  temporalBlocked: number
+  /** Bounded evidence for the operator; the count above is authoritative. */
+  temporalBlockReasons: string[]
   /** Cases that threw during the cycle. */
   cycleErrors: number
   /** §11 C-invariant: due cases the per-domain bound left for the next sweep.
@@ -93,6 +99,8 @@ export function runProgressionHeartbeat(
     errors: [],
     skippedClaimed: 0,
     skippedNoTrigger: 0,
+    temporalBlocked: 0,
+    temporalBlockReasons: [],
     cycleErrors: 0,
     remainingDue: { personal: 0, zst: 0 },
     truncated: false,
@@ -139,19 +147,6 @@ export function runProgressionHeartbeat(
       const claimed = tryClaimProgression(db, domain, dc.case_id, runId, 300, now)
       if (claimed) {
         // Mirror the claim into case_claims, WITH a fence (§6.6 / A.2).
-        //
-        // Two claim mechanisms existed side by side: the progression lease,
-        // which the live path actually uses, and case_claims, which the spec
-        // specifies and which had zero rows. The difference is not cosmetic —
-        // case_claims carries a monotonic fence token and the lease does not.
-        // Without a fence, a worker whose lease expired mid-run can still write
-        // when it wakes: its row no longer matches, and nothing in its own path
-        // notices. A.2 exists for exactly that late write, and the live path sat
-        // outside its protection.
-        //
-        // Done HERE and not in the scheduler because that module documents a
-        // hard invariant of zero side effects beyond case_progression_state. An
-        // invariant worth writing down is worth not quietly breaking.
         try {
           acquireClaim(db, {
             claimKey: `progression:${domain}:${dc.case_id}`, ownerRunId: runId, ttlSeconds: 300,
@@ -166,29 +161,16 @@ export function runProgressionHeartbeat(
       }
 
       // §10.8 trigger contract. Being DUE is not a reason; the clock coming
-      // round again says nothing about the case. Measured before this existed:
-      // 10 716 runs in 24 hours over 101 cases, 10 347 of them deciding
-      // CONTINUE_AUTONOMOUSLY and NONE starting an action. Harmless while the
-      // engine is deterministic, and one model call each the moment §10.2's
-      // Reader arrives — which is why this is the Reader's precondition rather
-      // than a later optimisation.
+      // round again says nothing about the case.
       const trig = decideTrigger(db, domain, dc.case_id, now)
       if (!trig.shouldRun) {
         result.skippedNoTrigger++
-        // Push the next check out — for real this time. Re-examining an
-        // unchanged case every cycle is cheaper than a run and still not free,
-        // and until now the line below this comment was a claim release, which
-        // pushes nothing.
         deferProgression(db, domain, dc.case_id, now + NO_TRIGGER_BACKOFF_SEC, now)
         releaseProgressionClaim(db, domain, dc.case_id, runId, now)
         continue
       }
 
-      // A run whose trigger is missing must not be labelled 'SCHEDULED' -- §10.8
-      // says the clock coming round is not a reason, and writing it here would
-      // put 'the clock' back into the record under a different route. If
-      // decideTrigger said yes without naming a trigger, that is a defect in the
-      // trigger contract, and it is recorded as one rather than smoothed over.
+      // A run whose trigger is missing must not be labelled 'SCHEDULED'.
       if (!trig.trigger) {
         result.cycleErrors++
         result.errors.push(`${domain}/${dc.case_id}: shouldRun with no trigger named (§10.8 defect)`)
@@ -197,6 +179,25 @@ export function runProgressionHeartbeat(
       }
 
       try {
+        // ACP v1.4.5 TSCG — BEFORE the policy decision. A real trigger is not
+        // permission to reason from a date whose semantic meaning is absent or
+        // unresolved. This is intentionally inside the already-held claim, so
+        // the facts cannot be changed concurrently between the gate and cycle.
+        const temporal = evaluateCaseTemporalConsistency(db, domain, dc.case_id, now)
+        if (!temporal.allowProgression) {
+          result.temporalBlocked++
+          if (result.temporalBlockReasons.length < 20) {
+            result.temporalBlockReasons.push(
+              `${domain}/${dc.case_id}: ${temporal.status}: ${temporal.reasons.join('; ')}`,
+            )
+          }
+          // Do not record the state hash: resolving/verifying the temporal fact
+          // must make this case eligible again even if no legacy case column
+          // changed. A short defer prevents a tight retry loop meanwhile.
+          deferProgression(db, domain, dc.case_id, now + POST_RUN_RECHECK_SEC, now)
+          continue
+        }
+
         const opts: PipelineOptions = {
           triggerType: trig.trigger,
           triggerReference: trig.triggerReference ?? `heartbeat-${runId.slice(0, 8)}`,
@@ -215,12 +216,6 @@ export function runProgressionHeartbeat(
         // meant every case looked changed on the next pass and ran again for
         // ever. Measured: 30 cases still running every cycle with the pre-run
         // hash recorded.
-        //
-        // Recording the POST-run state says the true thing: "this is the state I
-        // have already reasoned about, my own effects included". An external
-        // change after this point produces a different hash and earns a new run.
-        // The crash-safety property survives: a crash records nothing, so the
-        // case stays eligible.
         recordProgressionState(db, domain, dc.case_id,
           decideTrigger(db, domain, dc.case_id, now).effectiveStateHash, now,
           dueDeadline(db, domain, dc.case_id, now))

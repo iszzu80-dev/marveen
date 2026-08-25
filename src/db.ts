@@ -7,8 +7,51 @@ import { logger } from './logger.js'
 import { TOOL_TIMEOUTS } from './tool-timeouts.js'
 import { initCostOpsSchema } from './costops/schema.js'
 import { initCosSchema } from './cos/schema.js'
+import {
+  adoptUnversionedStore, checkStoreSchema, markVerified, setStoreReadOnly,
+} from './schema/store-schema.js'
+import { ensureColumnStrict, dropColumnIfPresentStrict } from './schema/migration-runner.js'
 
 let db: Database.Database
+
+/** Switch the connection to WAL, tolerating a CONCURRENT FIRST BOOT.
+ *
+ *  W12 / §6.8, found while building the two-process ingest test (2026-08-25).
+ *  `PRAGMA journal_mode = WAL` needs brief exclusive access, and unlike ordinary
+ *  statements it does NOT wait on the connection's busy timeout -- it returns
+ *  SQLITE_BUSY at once. So two processes opening a store that is not yet in WAL
+ *  (a fresh database, or one whose schema another process is still creating)
+ *  ended with the loser DEAD AT STARTUP, before a line of its own work ran:
+ *
+ *    SqliteError: database is locked
+ *      at initDatabase (src/db.ts:75)
+ *
+ *  That is narrow in production -- once a store is in WAL the pragma is a no-op
+ *  and never locks -- but it made the "two workers, same input" criterion
+ *  impossible to even ASK, because the second worker died before reaching the
+ *  ingest. A boot that cannot survive a concurrent boot also cannot be tested
+ *  for concurrency.
+ *
+ *  The retry is a bounded synchronous spin (the caller is a synchronous
+ *  initialiser, so there is no event loop to yield to) and it re-throws when it
+ *  runs out: a store stuck in a mode we cannot change is a startup failure, not
+ *  something to continue past quietly. */
+function enterWalMode(conn: Database.Database, dbPath: string): void {
+  const deadline = Date.now() + 5000
+  for (let attempt = 1; ; attempt++) {
+    try {
+      conn.pragma('journal_mode = WAL')
+      if (attempt > 1) logger.info({ dbPath, attempt }, 'WAL mode acquired after contention')
+      return
+    } catch (err) {
+      const code = (err as { code?: string })?.code
+      if (code !== 'SQLITE_BUSY' || Date.now() >= deadline) throw err
+      // Synchronous sleep: Atomics.wait on a private buffer, ~25ms, jittered by
+      // attempt so two contenders do not re-collide in lockstep.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15 + (attempt % 5) * 10)
+    }
+  }
+}
 
 // Lock the DB file and its sidecars (WAL, SHM, rollback journal) down to
 // owner-only. better-sqlite3 opens the main file with the process umask
@@ -68,7 +111,7 @@ export function initDatabase(dbPathOverride?: string): void {
     }
   }
   db = new Database(dbPath)
-  db.pragma('journal_mode = WAL')
+  enterWalMode(db, dbPath)
   // Performance pragmas: safe with WAL, applied after journal_mode is set.
   // cache_size: negative value = kibibytes; -65536 → 64 MB page cache.
   // mmap_size: memory-mapped I/O in bytes; 256 MB. Skipped for :memory: (no file to map).
@@ -454,14 +497,14 @@ export function initDatabase(dbPathOverride?: string): void {
   // trace_id: root trace identifier spanning an entire agent chain (e.g. morning-chain).
   // span_id: this message's own span identifier (nanoid).
   // parent_span_id: sender's span_id -- links child back to parent in the waterfall.
-  try { db.exec('ALTER TABLE agent_messages ADD COLUMN trace_id TEXT') } catch { /* exists */ }
-  try { db.exec('ALTER TABLE agent_messages ADD COLUMN span_id TEXT') } catch { /* exists */ }
-  try { db.exec('ALTER TABLE agent_messages ADD COLUMN parent_span_id TEXT') } catch { /* exists */ }
+  ensureColumnStrict(db, 'agent_messages', 'trace_id', "TEXT")
+  ensureColumnStrict(db, 'agent_messages', 'span_id', "TEXT")
+  ensureColumnStrict(db, 'agent_messages', 'parent_span_id', "TEXT")
   // P2-A (CostOps Dispatch & Outcome Attribution): the opaque dispatch_id a
   // kanban/scheduler/worker origin minted, carried on the queued message so the
   // router can thread it to sendPromptToSession. Nullable, forward-only; a
   // message enqueued without one (channel-inbound, un-instrumented) stays NULL.
-  try { db.exec('ALTER TABLE agent_messages ADD COLUMN dispatch_id TEXT') } catch { /* exists */ }
+  ensureColumnStrict(db, 'agent_messages', 'dispatch_id', "TEXT")
 
   // INVARIANT: a row that says 'delivered' must carry a delivered_at.
   //
@@ -529,7 +572,7 @@ export function initDatabase(dbPathOverride?: string): void {
     )
   `)
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_pcr_agent_channel ON pending_channel_requests(agent, channel_id) WHERE status = 'pending'`)
-  try { db.exec('ALTER TABLE pending_channel_requests ADD COLUMN resolved_at INTEGER') } catch { /* already exists */ }
+  ensureColumnStrict(db, 'pending_channel_requests', 'resolved_at', "INTEGER")
 
   // --- Task Run History ---
   // Log every scheduled-task firing so the dashboard overview's "tasksToday"
@@ -545,7 +588,7 @@ export function initDatabase(dbPathOverride?: string): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_task_runs_ts ON task_runs(ts)`)
   // Migration: add status column to task_runs (introduced 2026-06-13)
-  try { db.exec(`ALTER TABLE task_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'fired'`) } catch { /* already present */ }
+  ensureColumnStrict(db, 'task_runs', 'status', "TEXT NOT NULL DEFAULT 'fired'")
 
   // --- Pending Scheduled Task Retries ---
   // Busy-skipped scheduled tasks used to live in an in-memory Map. On a
@@ -610,8 +653,8 @@ export function initDatabase(dbPathOverride?: string): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_token_usage_ts ON token_usage(timestamp)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_token_usage_agent_ts ON token_usage(agent, timestamp)`)
   // Migrations for columns added after initial release
-  try { db.exec('ALTER TABLE token_usage ADD COLUMN thinking_tokens INTEGER NOT NULL DEFAULT 0') } catch { /* already exists */ }
-  try { db.exec('ALTER TABLE token_usage ADD COLUMN model TEXT') } catch { /* already exists */ }
+  ensureColumnStrict(db, 'token_usage', 'thinking_tokens', "INTEGER NOT NULL DEFAULT 0")
+  ensureColumnStrict(db, 'token_usage', 'model', "TEXT")
 
   // Deduplicate existing rows before creating unique index
   try {
@@ -651,8 +694,8 @@ export function initDatabase(dbPathOverride?: string): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_idea_box_status ON idea_box(status)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_idea_box_category ON idea_box(category)`)
   // impact/effort scoring -- added after initial release; safe ALTER on existing DBs
-  try { db.exec('ALTER TABLE idea_box ADD COLUMN impact INTEGER') } catch { /* already exists */ }
-  try { db.exec('ALTER TABLE idea_box ADD COLUMN effort INTEGER') } catch { /* already exists */ }
+  ensureColumnStrict(db, 'idea_box', 'impact', "INTEGER")
+  ensureColumnStrict(db, 'idea_box', 'effort', "INTEGER")
 
   // --- Idea Comments ---
   db.exec(`
@@ -747,7 +790,7 @@ export function initDatabase(dbPathOverride?: string): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_store_file_audit_ts ON store_file_audit(created_at)`)
   // Migration: add agent column to installs that created the table before this column existed.
-  try { db.exec(`ALTER TABLE store_file_audit ADD COLUMN agent TEXT`) } catch { /* column already exists */ }
+  ensureColumnStrict(db, 'store_file_audit', 'agent', "TEXT")
 
   // --- Data-sensitivity audit log (card 6bf535bf) ---
   // Gate observe/enforce events persisted to SQLite so a daily false-positive
@@ -872,11 +915,11 @@ export function initDatabase(dbPathOverride?: string): void {
   // Drop legacy per-server key columns that are no longer written or read.
   // On older installs these were added via ALTER TABLE; fresh installs never had them.
   // SQLite 3.35+ is required; try-catch makes this a no-op on either scenario.
-  try { db.exec('ALTER TABLE vault_ssh_servers DROP COLUMN key_type') } catch { /* column absent or SQLite pre-3.35 */ }
-  try { db.exec('ALTER TABLE vault_ssh_servers DROP COLUMN fingerprint') } catch { /* column absent or SQLite pre-3.35 */ }
-  try { db.exec('ALTER TABLE vault_ssh_servers DROP COLUMN vault_key_id') } catch { /* column absent or SQLite pre-3.35 */ }
-  try { db.exec('ALTER TABLE vault_ssh_servers DROP COLUMN key_expires_at') } catch { /* column absent or SQLite pre-3.35 */ }
-  try { db.exec('ALTER TABLE vault_ssh_servers ADD COLUMN ssh_key_id TEXT REFERENCES vault_ssh_keys(id)') } catch { /* already exists */ }
+  dropColumnIfPresentStrict(db, 'vault_ssh_servers', 'key_type')
+  dropColumnIfPresentStrict(db, 'vault_ssh_servers', 'fingerprint')
+  dropColumnIfPresentStrict(db, 'vault_ssh_servers', 'vault_key_id')
+  dropColumnIfPresentStrict(db, 'vault_ssh_servers', 'key_expires_at')
+  ensureColumnStrict(db, 'vault_ssh_servers', 'ssh_key_id', "TEXT REFERENCES vault_ssh_keys(id)")
   db.exec(`CREATE INDEX IF NOT EXISTS idx_vault_ssh_servers_key ON vault_ssh_servers(ssh_key_id)`)
 
   // --- Approvals (HITL) ---
@@ -952,7 +995,7 @@ export function initDatabase(dbPathOverride?: string): void {
   // Bridge pairing (AUTHPLAN1 #2): links a device key to the SSH enrollment's
   // marveen-remote:<uuid> so revoking the key can drop the authorized_keys
   // line in the same step. Null for keys minted outside the pairing flow.
-  try { db.exec(`ALTER TABLE device_keys ADD COLUMN install_id TEXT`) } catch { /* column already exists */ }
+  ensureColumnStrict(db, 'device_keys', 'install_id', "TEXT")
 
   // --- OTel Distributed Tracing (card def5a189) ---
   // SQLite-native span store. No external OTel SDK: spans are written via
@@ -987,6 +1030,29 @@ export function initDatabase(dbPathOverride?: string): void {
   // race). Import rows if they exist, then rename the file so we don't keep
   // re-importing. Wrapped in a transaction so a crash mid-import is safe.
   migrateTaskRunsFromJson()
+
+  // MIP-v1.0 / §5 / W11. The schema gate, LAST -- after every CREATE TABLE, so a
+  // fresh install has the tables the gate reads, and before any caller can write.
+  //
+  // Order matters and is the whole point: adopt first (a store written before
+  // versioning existed reads as version 0, which is every existing install and
+  // is NOT an error), then check, then latch.
+  //
+  // A store written by NEWER code does not stop the process -- it drops to
+  // read-only. Refusing to boot would take the owner's entire case board away to
+  // protect it from a write nobody was making; read-only keeps every read working
+  // and refuses exactly the operations that could corrupt a schema this build
+  // does not understand.
+  const nowSec = Math.floor(Date.now() / 1000)
+  adoptUnversionedStore(db, nowSec)
+  const schemaCheck = checkStoreSchema(db, nowSec)
+  setStoreReadOnly(schemaCheck.readOnly ? schemaCheck.reason : null)
+  if (schemaCheck.readOnly) {
+    logger.error({ verdict: schemaCheck.verdict, version: schemaCheck.state.version },
+      `SCHEMA GATE: store is READ-ONLY -- ${schemaCheck.reason}`)
+  } else {
+    markVerified(db, nowSec)
+  }
 }
 
 function migrateTaskRunsFromJson(): void {
