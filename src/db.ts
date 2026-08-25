@@ -7,6 +7,9 @@ import { logger } from './logger.js'
 import { TOOL_TIMEOUTS } from './tool-timeouts.js'
 import { initCostOpsSchema } from './costops/schema.js'
 import { initCosSchema } from './cos/schema.js'
+import {
+  adoptUnversionedStore, checkStoreSchema, markVerified, setStoreReadOnly,
+} from './schema/store-schema.js'
 
 let db: Database.Database
 
@@ -987,6 +990,29 @@ export function initDatabase(dbPathOverride?: string): void {
   // race). Import rows if they exist, then rename the file so we don't keep
   // re-importing. Wrapped in a transaction so a crash mid-import is safe.
   migrateTaskRunsFromJson()
+
+  // MIP-v1.0 / §5 / W11. The schema gate, LAST -- after every CREATE TABLE, so a
+  // fresh install has the tables the gate reads, and before any caller can write.
+  //
+  // Order matters and is the whole point: adopt first (a store written before
+  // versioning existed reads as version 0, which is every existing install and
+  // is NOT an error), then check, then latch.
+  //
+  // A store written by NEWER code does not stop the process -- it drops to
+  // read-only. Refusing to boot would take the owner's entire case board away to
+  // protect it from a write nobody was making; read-only keeps every read working
+  // and refuses exactly the operations that could corrupt a schema this build
+  // does not understand.
+  const nowSec = Math.floor(Date.now() / 1000)
+  adoptUnversionedStore(db, nowSec)
+  const schemaCheck = checkStoreSchema(db, nowSec)
+  setStoreReadOnly(schemaCheck.readOnly ? schemaCheck.reason : null)
+  if (schemaCheck.readOnly) {
+    logger.error({ verdict: schemaCheck.verdict, version: schemaCheck.state.version },
+      `SCHEMA GATE: store is READ-ONLY -- ${schemaCheck.reason}`)
+  } else {
+    markVerified(db, nowSec)
+  }
 }
 
 function migrateTaskRunsFromJson(): void {
