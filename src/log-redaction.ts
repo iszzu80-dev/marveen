@@ -20,6 +20,7 @@
 // asserts each surface separately rather than trusting that one implies another.
 
 import { LOG_REDACTED_FIELD_NAMES, REDACTED } from './cos/store-security.js'
+import { scrubKnownSecrets } from './known-secrets.js'
 
 /**
  * Secret-shaped values inside FREE TEXT — a URL query parameter, an
@@ -50,7 +51,13 @@ const TEXT_SECRET_PATTERNS: Array<{ re: RegExp; as: string }> = [
 /** Scrub secret-shaped values out of a string. Returns the input unchanged when
  *  nothing matches, so an ordinary log line is untouched. */
 export function scrubSecretText(text: string): string {
-  let out = text
+  // KNOWN secrets first (W13 closure invariant): a value this system loaded from
+  // a credential source is removed by PROVENANCE, wherever it sits — mid
+  // sentence, inside a concatenation, buried in an SDK's error message. The
+  // structural patterns below then catch secret-carrying shapes whose value we
+  // never held. The two are different mechanisms answering different questions,
+  // and neither replaces the other.
+  let out = scrubKnownSecrets(text)
   for (const p of TEXT_SECRET_PATTERNS) out = out.replace(p.re, p.as)
   return out
 }

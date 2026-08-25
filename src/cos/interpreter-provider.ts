@@ -13,6 +13,19 @@
 
 import { AnthropicLlmClient, DEFAULT_INTERPRETER_MODEL, type LlmClient } from './progression-interpreter.js'
 import { OpenAiLlmClient, DEFAULT_OPENAI_MODEL } from './openai-interpreter.js'
+import { registerKnownSecret } from '../known-secrets.js'
+
+/** Read a credential from the environment, falling back to the vault, and
+ *  REGISTER it either way (W13 closure invariant).
+ *
+ *  The vault accessor registers what it hands out, so the vault branch is
+ *  covered twice over; the ENV branch is the one that would otherwise be a hole
+ *  — and on this machine the live Anthropic key has arrived both ways. */
+function credentialFromEnvOrVault(fromEnv: string | undefined, fromVault: () => string | null | undefined): string {
+  const value = (fromEnv || fromVault() || '').trim()
+  if (value) registerKnownSecret(value)
+  return value
+}
 
 /** DeepSeek's Anthropic-compatible endpoint. The SDK appends /v1/messages. */
 export const DEEPSEEK_ANTHROPIC_BASE_URL = 'https://api.deepseek.com/anthropic'
@@ -76,9 +89,10 @@ export function resolveInterpreter(
   // env-only lookup could not see it -- the provider would have stayed DeepSeek
   // while every report said "switched to Anthropic". A key nobody reads is the
   // same as no key, and it would have been invisible in the cycle output.
-  const anthropicKey = process.env.ANTHROPIC_API_KEY
-    || process.env.ANTHROPIC_AUTH_TOKEN
-    || (getSecret('ANTHROPIC_API_KEY') ?? '').trim()
+  const anthropicKey = credentialFromEnvOrVault(
+    process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN,
+    () => getSecret('ANTHROPIC_API_KEY'),
+  )
   if (anthropicKey) {
     return {
       client: new AnthropicLlmClient({
@@ -130,9 +144,10 @@ export function resolveReaderInterpreters(
   getSecret: SecretReader,
   opts: { maxTokens?: number } = {},
 ): { contracted: ResolvedInterpreter | null; general: ResolvedInterpreter | null } {
-  const anthropicKey = process.env.ANTHROPIC_API_KEY
-    || process.env.ANTHROPIC_AUTH_TOKEN
-    || (getSecret('ANTHROPIC_API_KEY') ?? '').trim()
+  const anthropicKey = credentialFromEnvOrVault(
+    process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN,
+    () => getSecret('ANTHROPIC_API_KEY'),
+  )
   // TWO contracted providers, tried in order (Istvan, 2026-08-11: sensitive may
   // go to Anthropic or OpenAI). The second one is not redundancy for its own
   // sake: with a single cleared provider, an expired key means every sensitive

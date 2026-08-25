@@ -372,7 +372,7 @@ Due date: 2026-08-15.
         'Pay the external invoice by the due date.',
       )
 
-      const result = await enrichCaseGoal(db, 'personal', 'pri-001', client)
+      const result = await enrichCaseGoal(db, 'personal', 'pri-001', client, undefined, { provider: 'anthropic' })
 
       expect(result.interpreted).toBe(true)
       expect(result.goal).toBe('Pay the external invoice by the due date.')
@@ -395,13 +395,13 @@ Due date: 2026-08-15.
       const client2 = mockOk('Second Title', 'Second summary.', 'Second goal.')
 
       // First run — interprets
-      const r1 = await enrichCaseGoal(db, 'personal', 'pri-002', client1)
+      const r1 = await enrichCaseGoal(db, 'personal', 'pri-002', client1, undefined, { provider: 'anthropic' })
       expect(r1.interpreted).toBe(true)
       expect(r1.goal).toBe('First goal.')
       expect(client1.calls).toBe(1)
 
       // Second run — no-op (goal already set)
-      const r2 = await enrichCaseGoal(db, 'personal', 'pri-002', client2)
+      const r2 = await enrichCaseGoal(db, 'personal', 'pri-002', client2, undefined, { provider: 'anthropic' })
       expect(r2.interpreted).toBe(false)
       expect(r2.goal).toBe('First goal.') // original, not second
       expect(client2.calls).toBe(0) // never called
@@ -424,7 +424,7 @@ Due date: 2026-08-15.
         'Evaluate the collaboration opportunity and respond to the partner.',
       )
 
-      const result = await enrichCaseGoal(db, 'zst', 'zst-001', client)
+      const result = await enrichCaseGoal(db, 'zst', 'zst-001', client, undefined, { provider: 'anthropic' })
 
       expect(result.interpreted).toBe(true)
       expect(result.goal).toContain('collaboration')
@@ -441,7 +441,7 @@ Due date: 2026-08-15.
       const client = mockOk('Test', 'Test.', 'Test.')
 
       await expect(
-        enrichCaseGoal(db, 'personal', 'zst-only', client),
+        enrichCaseGoal(db, 'personal', 'zst-only', client, undefined, { provider: 'anthropic' }),
       ).rejects.toThrow(CrossDomainReadError)
     })
 
@@ -457,7 +457,7 @@ Due date: 2026-08-15.
         },
       }
 
-      await enrichCaseGoal(db, 'personal', 'pri-003', captureClient, emailContent)
+      await enrichCaseGoal(db, 'personal', 'pri-003', captureClient, emailContent, { provider: 'anthropic' })
 
       expect(capturedUserMessage).toContain('Q3 budget review')
       expect(capturedUserMessage).toContain('BEGIN RAW EMAIL DATA')
@@ -473,7 +473,7 @@ Due date: 2026-08-15.
         },
       }
 
-      await enrichCaseGoal(db, 'personal', 'pri-004', captureClient) // no emailThreadContent
+      await enrichCaseGoal(db, 'personal', 'pri-004', captureClient, undefined, { provider: 'anthropic' }) // no emailThreadContent
 
       // Should contain the description as fallback
       expect(capturedUserMessage).toContain('Fallback description text')

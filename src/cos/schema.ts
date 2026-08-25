@@ -217,6 +217,7 @@ import { ensureEnvelopeSchema } from './delegation-envelope.js'
 import { ensureTemporalFactsSchema } from './temporal-facts.js'
 import { ensureFeatureRunSchema } from './consumer-manifest.js'
 import { ensureRecoveryQueueSchema } from './recovery-queue.js'
+import { ensureDisclosureSchema } from './disclosure.js'
 
 /**
  * E9 (review 2026-08-13). A ledger of one-time migrations that have already run.
@@ -265,6 +266,8 @@ export function initCosSchema(db: Database.Database): void {
   ensureFeatureRunSchema(db)
   // W12 / §6.7: the recovery queue and its policy table (see recovery-queue.ts).
   ensureRecoveryQueueSchema(db)
+  // W13 / §7.4: the disclosure decision record (see disclosure.ts).
+  ensureDisclosureSchema(db)
 
   // ── personal_cases (P0.5 version; §6.1) ──────────────────────────────
   // version: optimistic concurrency. Every domain command reads the version it

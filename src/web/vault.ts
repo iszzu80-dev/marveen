@@ -5,6 +5,7 @@ import { PROJECT_ROOT } from '../config.js'
 import { atomicWriteFileSync } from './atomic-write.js'
 import { isKeychainAvailable, keychainStore, keychainRetrieve } from './keychain.js'
 import { logger } from '../logger.js'
+import { registerKnownSecret } from '../known-secrets.js'
 
 const VAULT_PATH = join(PROJECT_ROOT, 'store', 'vault.json')
 const VAULT_KEY_PATH = join(PROJECT_ROOT, 'store', '.vault-key')
@@ -121,7 +122,14 @@ export function getSecret(id: string): string | null {
   const store = readVault()
   const entry = store.entries.find(e => e.id === id)
   if (!entry) return null
-  return decrypt(entry.encrypted)
+  const value = decrypt(entry.encrypted)
+  // W13 closure invariant (Istvan, 2026-08-26): a value that leaves the vault is
+  // a KNOWN credential from here on. Registering it at the accessor — rather
+  // than asking every consumer to be careful — is what makes "a known secret
+  // cannot enter a log or a prompt, even inside an unstructured string" a
+  // property of the system instead of a habit. See src/known-secrets.ts.
+  registerKnownSecret(value)
+  return value
 }
 
 export function deleteSecret(id: string): boolean {
