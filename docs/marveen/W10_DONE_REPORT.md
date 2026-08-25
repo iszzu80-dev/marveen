@@ -362,3 +362,164 @@ Still **not ready**, and now for exactly two reasons, both named above:
 
 Nothing in production changed behaviour in this pass either. The fleet gate is
 still `observe-only`; narrow enforcement is built but **not switched on**.
+
+---
+
+# 12. Coverage pass 3 — Istvan's HYBRID EXTERNAL ACTION BOUNDARY decision (2026-08-25)
+
+His decision changed the invariant rather than the goal: every side-effecting
+action must have a Marveen-controlled, actor-aware enforcement point, and that
+point need not live in one process. Two layers are mandatory (provider-side
+least privilege as the outer guard, a Marveen broker in front of every external
+mutating action), direct broker-less external WRITE stops being a supported path,
+and read-only direct access stays direct on four stated conditions.
+
+## What landed
+
+**`src/identity/action-broker.ts`** — the broker. Its one design decision worth
+naming: the caller hands the effect IN as a thunk, and the broker decides whether
+it is ever invoked. The alternative shape — `if (allowed) { doIt() }` — has failed
+in this repository before, because the check and the call are two statements and a
+later edit can separate them while the code still reads as gated. Here a denial is
+a function that was never called. Every denial test asserts on a call counter, not
+on the returned verdict: a verdict is what the broker says, the counter is what the
+outside world saw.
+
+Gates, in order: connector must be in the inventory → a read-only credential may
+not be used for a write → the inventory's risk ceiling overrides a caller that
+declares a gentler one → mutating needs an actor and a run id → high-risk needs an
+authorisation basis, an attributable human and a readback → then `authorizeAction`,
+which remains the only place any authority question is answered.
+
+**`src/identity/external-capability-inventory.ts`** — every way this system reaches
+outside itself, as data the broker reads at runtime. An undeclared connector is
+denied, which is the only thing that keeps an inventory true: if forgetting an
+entry were free, the inventory would be fiction within a release.
+
+**`src/identity/scheduled-task-identity.ts`** — the propagation Istvan asked to be
+finished. The non-obvious part is that the COS cycle does not *run* its steps, it
+*spawns* eleven of them, so an identity built in the parent and never crossing the
+process boundary is an identity the acting code does not have. The environment
+carries **identifiers only**; the capability scope is re-derived in the child from
+a declaration in code. A step cannot widen its own grant by editing an env var
+before spawning something else, and a forged task name gets the unknown-task
+scope. Both proven by mutation.
+
+**Brokered surfaces:** COS mail send, ZST mail send, CoS Telegram channel, Gmail
+labelling (source-commit), fleet Telegram alerts, and the five-provider channel
+abstraction. Plus, from pass 2: dashboard API writes, fleet dispatch.
+
+**Narrow enforcement ARMED** on the fleet data-sensitivity gate, as a second field
+rather than by flipping `mode`. A single global switch cannot express "RESTRICTED
+credentials only", and the way a single switch usually gets used to express it is
+by flipping the whole thing. `internal` matches production database names and
+secret key NAMES, which appear constantly in legitimate fleet traffic; enforcing on
+those would have broken inter-agent work the same night. A bearer token, JWT, DB
+URL, Render key or private key heading for a non-trusted model now **blocks**.
+
+## The finding this pass turned on
+
+I measured what the Google credentials are actually allowed to do, instead of
+reading what this repository says about them. `scripts/w10-verify-external-scopes.ts`
+asks the provider's own tokeninfo endpoint and compares the answer to the inventory.
+
+Its first run falsified two long-standing comments in this codebase:
+
+| Claim in the code | Measured 2026-08-25 |
+|---|---|
+| `gmail-label-api.ts`: "Istvan granted gmail.modify on 2026-08-11 and the scope is confirmed by the provider" | The **private** account grants `gmail.readonly` only. No `gmail.modify`. |
+| `gmail-api-transport.ts` sends personal mail with the private credential | The **private** account has no `gmail.send`. |
+
+Both call sites load `store/.google-private-creds.json`, and `cos-close-batches.ts`
+picks the labelling committer from **the file existing** rather than from a scope
+check — so the committer is wired to a credential that cannot label, and the
+personal send path is blocked at the provider regardless of what this code decides.
+The ZST account holds both scopes, which is why the corporate path works.
+
+This is a consent-side fact, not a code defect, and I have not touched it. It is
+recorded as a `scopeGap` on both inventory entries and escalated to Istvan.
+
+The same script then found something the per-connector view could not: the ZST
+credential carried five write scopes (`gmail.send`, `gmail.modify`, `calendar.events`,
+`drive.file`, `spreadsheets`) that **no inventory entry declared**. An undeclared
+capability is one the broker cannot gate, because nothing tells it the connector
+exists. All five are now declared, three of them marked `granted but no caller` —
+worth naming, because a held-and-undocumented capability is the one nobody thinks
+to revoke, and W13's least-privilege work should consider dropping them.
+
+The script exits 1 on drift and **2 when it could not measure**, because "could not
+ask" and "asked and it was fine" must not share an exit code.
+
+## Deliberate edits to pre-existing tests, declared
+
+Six existing test files dispatched sends as nobody, which was legal under pass 2's
+advisory rule and is refused now. They were given an identity via
+`src/__tests__/helpers/w10-identity.ts`. What each measures — double-send, quota
+ceilings, claim contention, ledger audit fields — is unchanged; the refusal path
+they never covered now has its own tests.
+
+One assertion was **rewritten rather than adapted**, and it is the one to read:
+`w10-principal-adapter.test.ts` asserted that *no* principal class could reach
+`EXTERNAL_EFFECT` — "HTTP is not a send surface". That was already false when it
+was written: `/api/cos/outbound/approve` is the button labelled "Elküldöm" and it
+has sent mail since 2026-08-10. It passed because nothing on the send path
+consulted the boundary, so nothing measured the contradiction. Wiring the broker
+made it fail, which is the test doing its job late. The operator scope now holds
+`EXTERNAL_EFFECT`; the **shared fleet token still does not**, and a new test
+asserts that operator is the only class that gained it.
+
+## Mutation proof — ten mutations, all RED, all reverted
+
+| Mutation | Result |
+|---|---|
+| connector inventory check disabled | 1 RED |
+| read-only credential check disabled | 2 RED |
+| inventory risk ceiling removed | 1 RED |
+| mutating-without-identity allowed | 1 RED |
+| high-risk authorisation requirement removed | 1 RED |
+| high-risk readback requirement removed | 1 RED |
+| child trusts env scope instead of re-deriving it | 2 RED |
+| env-claimed principal adopted instead of compared | 1 RED |
+| narrow enforcement silently disabled | 6 RED |
+| `mode:off` overridden by the narrow list | 1 RED |
+
+## Against Istvan's VERIFIED_DONE criteria (2026-08-25 list)
+
+| # | Criterion | Verdict |
+|---|---|---|
+| 1 | In-process side-effecting actions on a common actor-aware boundary | **MET** — COS send, ZST send, CoS channel, Gmail label, fleet Telegram, channel abstraction, dashboard API writes, fleet dispatch |
+| 2 | Scheduled identity propagation complete | **MET** — all 11 cycle steps; a drift test fails if a step loses its grant |
+| 3 | A brokered enforcement path exists and is proven for external side-effecting actions | **MET** — broker + 42 tests + 10 mutations |
+| 4 | No direct write bypass | **MET as far as a test can state it** — every module with a mutating provider endpoint imports the broker, checked in CI, with the one leaf exemption itself checked at its construction sites. The inherited limit stands: in one process, anything importable is callable |
+| 5 | Read-only direct paths proven read-only at capability level **and audited** | **PARTIAL** — proven, not audited. See below |
+| 6 | Credential/auth-token exfiltration fail-closed | **MET** — refused with a full capability scope and with no identity at all |
+| 7 | Unknown / high-risk fail-closed | **MET** — unknown level re-derived inside the boundary; unknown connector, unknown task and unknown risk class all deny |
+| 8 | Runtime counters / liveness measurable | **MET** — `policy_decision_counters` on six surfaces plus `external_action_log` rows carrying actor, principal, run, verdict, outcome, readback |
+| 9 | No W10-caused regression | **MET, measured** — 562 files, 7547 tests, 0 failures |
+
+## The one criterion that is not met, stated plainly
+
+**Read-only external calls are proven read-only, and are not audited.**
+
+`gmail.read`, `gcal.read` and `drive.read` happen in the *agent's* process, through
+MCP servers this Node process neither hosts nor proxies. Nothing here writes a row
+when a thread is read. The inventory now says exactly that —
+`auditSurface: 'NONE in-process'` — rather than naming a log that does not receive
+them.
+
+The fix does **not** need the generic proxy Istvan ruled out: those MCP servers are
+our own Python, so they can append their own call log. That is a connector
+recording its own calls, not a gateway in the path of every read. I have not done
+it in this packet because the servers run from a **pinned release**
+(`~/.marveen-mcp-pin/mcp-servers-current`, frozen 2026-07-30), and a pinned artifact
+changes by release, not by edit — editing it mid-packet would put untested Python
+in the path of the agent's Gmail access, which is the highest-value read in the
+system. It needs its own card and its own release.
+
+## Verification
+
+- `tsc --noEmit`: clean
+- Full suite: **562 files, 7547 passed, 4 skipped, 0 failed**
+- `scripts/w10-verify-external-scopes.ts`: exit 0, no undeclared write scopes,
+  no falsified read-only claims, five declared and explained gaps
+- Ten mutations red, all reverted

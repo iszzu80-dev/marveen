@@ -20,6 +20,7 @@ import { setLadder } from '../cos/autonomy-ladder.js'
 import { draftZstSend, renderedPayloadHash } from '../cos/zst-send.js'
 import { isProfileAllowedForZstSensitivity } from '../cos/zst-sensitivity.js'
 import { approveAndDispatchZst, escalationNeedsIstvanInPerson } from '../web/routes/cos.js'
+import { AS_OPERATOR, TEST_OPERATOR } from './helpers/w10-identity.js'
 
 // The door builds its own live Gmail transport. Swapped for the in-memory
 // DryRunTransport so the SUCCESS case can be driven end-to-end: the adapter, the
@@ -70,7 +71,7 @@ describe('the corporate outbound door', () => {
     // The case's OWN type, at the rung that permits an approved send.
     setLadder(db, 'CONTRACT', { rung: 'EXECUTE_WITH_APPROVAL' }, T0 - 1000)
     const d = draft()
-    const res = await approveAndDispatchZst(db, d.ledgerId, d.renderedPayloadHash, 'istvan', undefined, T0 + 5)
+    const res = await approveAndDispatchZst(db, d.ledgerId, d.renderedPayloadHash, 'istvan', undefined, T0 + 5, TEST_OPERATOR)
 
     expect(res.reasons).toBeUndefined()
     expect(res.sent).toBe(true)
@@ -100,7 +101,7 @@ describe('the corporate outbound door', () => {
     const db = getDb()
     setLadder(db, 'UNKNOWN', { rung: 'EXECUTE_WITH_APPROVAL' }, T0 - 1000)
     const d = draft()
-    const res = await approveAndDispatchZst(db, d.ledgerId, d.renderedPayloadHash, 'istvan', undefined, T0 + 5)
+    const res = await approveAndDispatchZst(db, d.ledgerId, d.renderedPayloadHash, 'istvan', undefined, T0 + 5, TEST_OPERATOR)
     expect(res.sent).toBe(false)
     expect(res.reasons?.join(' ')).toMatch(/CONTRACT fokozata PREPARE/)
   })
@@ -117,7 +118,7 @@ describe('the corporate outbound door', () => {
 
   it('refuses when the text changed since the owner saw it, and records no approval', async () => {
     const d = draft()
-    const res = await approveAndDispatchZst(getDb(), d.ledgerId, 'sha256:stale-hash', 'istvan', undefined, T0 + 5)
+    const res = await approveAndDispatchZst(getDb(), d.ledgerId, 'sha256:stale-hash', 'istvan', undefined, T0 + 5, TEST_OPERATOR)
     expect(res.sent).toBe(false)
     expect(res.reasons?.join(' ')).toMatch(/megváltozott/)
     // The approval must not exist: a YES to a message that no longer exists
@@ -143,7 +144,7 @@ describe('the corporate outbound door', () => {
     // Not to "everyone on the case", and not to an empty list that means
     // anything. One YES authorises one recipient.
     const d = draft()
-    await approveAndDispatchZst(getDb(), d.ledgerId, d.renderedPayloadHash, 'istvan', undefined, T0 + 5)
+    await approveAndDispatchZst(getDb(), d.ledgerId, d.renderedPayloadHash, 'istvan', undefined, T0 + 5, TEST_OPERATOR)
     const a = getDb().prepare(
       'SELECT allowed_recipients FROM zst_campaign_approvals LIMIT 1',
     ).get() as { allowed_recipients: string } | undefined
@@ -154,7 +155,7 @@ describe('the corporate outbound door', () => {
     const db = getDb()
     setMode(db, 'gmail-zst', 'READ_ONLY', T0 + 1)
     const d = draft()
-    const res = await approveAndDispatchZst(db, d.ledgerId, d.renderedPayloadHash, 'istvan', undefined, T0 + 5)
+    const res = await approveAndDispatchZst(db, d.ledgerId, d.renderedPayloadHash, 'istvan', undefined, T0 + 5, TEST_OPERATOR)
     expect(res.sent).toBe(false)
     expect(res.reasons?.join(' ')).toMatch(/write-usable/)
   })
@@ -178,7 +179,7 @@ describe('the corporate outbound door', () => {
   it('carries the case sensitivity into the decision, and escalates it on content', async () => {
     const db = getDb()
     const d = draft()
-    const res = await approveAndDispatchZst(db, d.ledgerId, d.renderedPayloadHash, 'istvan', undefined, T0 + 5)
+    const res = await approveAndDispatchZst(db, d.ledgerId, d.renderedPayloadHash, 'istvan', undefined, T0 + 5, TEST_OPERATOR)
     expect(res.sensitivityTier).toBeTruthy()
 
     // A stricter case reaches the decision as the stricter tier, purely by
@@ -188,7 +189,7 @@ describe('the corporate outbound door', () => {
     createZstCase(db2, { caseId: 'ZST-LEGAL-1', title: 'Titkos', caseType: 'CONTRACT', sensitivity: 'ZST_HIGHLY_SENSITIVE' }, T0)
     registerConnector(db2, 'gmail-zst', 'email', 'READ_WRITE', T0)
     const d2 = draft()
-    const res2 = await approveAndDispatchZst(db2, d2.ledgerId, d2.renderedPayloadHash, 'istvan', undefined, T0 + 5)
+    const res2 = await approveAndDispatchZst(db2, d2.ledgerId, d2.renderedPayloadHash, 'istvan', undefined, T0 + 5, TEST_OPERATOR)
     expect(res2.sensitivityTier).toBe('ZST_HIGHLY_SENSITIVE')
     expect(res2.sensitivityTier).not.toBe(res.sensitivityTier)
   })
@@ -208,7 +209,7 @@ describe('the corporate outbound door', () => {
     const db = getDb()
     const d = draft()
     db.prepare('UPDATE zst_outbound_ledger SET payload = NULL WHERE ledger_id = ?').run(d.ledgerId)
-    const res = await approveAndDispatchZst(db, d.ledgerId, undefined, 'istvan', undefined, T0 + 5)
+    const res = await approveAndDispatchZst(db, d.ledgerId, undefined, 'istvan', undefined, T0 + 5, TEST_OPERATOR)
     expect(res.sent).toBe(false)
     expect(res.reasons?.join(' ')).toMatch(/hiányzik/)
     expect(approvals()).toBe(0)

@@ -24,34 +24,55 @@
  * finished.
  */
 import { spawnSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { standardFeatureResult, type FeatureRunResult } from '../src/cos/consumer-manifest.js'
+import {
+  declaredScheduledIdentity, scheduledIdentityEnv,
+} from '../src/identity/scheduled-task-identity.js'
 
-interface Step { name: string; args: string[] }
+/**
+ * W10 identity propagation (Istvan's decision 2026-08-25 §1).
+ *
+ * The cycle does not RUN its steps, it SPAWNS them -- so an identity built here
+ * and never crossing the process boundary is an identity the acting code does
+ * not have. Each step therefore gets ITS OWN declared identity in its
+ * environment, keyed by `task` below rather than by the report key: the report
+ * key is a display name (`plannedDigest`) and the grant is about the program
+ * (`cos-planned-digest`). Tying authority to a display name is how a rename
+ * silently changes what something may do.
+ *
+ * The environment carries identifiers only. The capability scope is re-derived
+ * in the child from the declaration, so a step cannot widen its own grant by
+ * editing an env var before spawning something else.
+ */
+const RUN_ID = `cos-cycle-${randomUUID()}`
+
+interface Step { name: string; args: string[]; task: string }
 
 const STEPS: Step[] = [
-  { name: 'progression', args: ['scripts/progression-heartbeat-runner.ts'] },
-  { name: 'batches', args: ['scripts/cos-close-batches.ts'] },
-  { name: 'threads', args: ['scripts/cos-fetch-threads.ts', '--limit', '10'] },
-  { name: 'followups', args: ['scripts/cos-draft-followups.ts', '--limit', '5'] },
+  { name: 'progression', args: ['scripts/progression-heartbeat-runner.ts'], task: 'progression' },
+  { name: 'batches', args: ['scripts/cos-close-batches.ts'], task: 'cos-close-batches' },
+  { name: 'threads', args: ['scripts/cos-fetch-threads.ts', '--limit', '10'], task: 'cos-fetch-threads' },
+  { name: 'followups', args: ['scripts/cos-draft-followups.ts', '--limit', '5'], task: 'cos-draft-followups' },
   // A megfogalmazas es a FELSZINRE HOZASA ket kulon lepes, ugyanazert, amiert a
   // kerdes megirasa es kikuldese az: enelkul egy PLANNED sor, amirol senki nem
   // szol, ugy nez ki, mint "nem volt mit megfogalmazni". A lepes naponta egyszer
   // szolal meg (sajat napi-naplo nyugtaja a kapu), es a nulla esetet is kimondja.
-  { name: 'plannedDigest', args: ['scripts/cos-planned-digest.ts'] },
+  { name: 'plannedDigest', args: ['scripts/cos-planned-digest.ts'], task: 'cos-planned-digest' },
   // Ugyanaz az alak, mas targy: a radar celar alatti, de NEM igazolt
   // szallithatosagu talalatai. Ezek nem riasztanak (nem mondjuk Istvannak hogy
   // vegye meg, amirol nem tudjuk hogy megkapja) -- de ha eltunnenek, a "semmi
   // nem volt eleg olcso" es a "harom is volt, csak nem tudtuk ellenorizni"
   // megkulonboztethetetlen lenne. Naponta egyszer, sajat nyugtaval, a nulla
   // esetet is kimondva.
-  { name: 'radarDigest', args: ['scripts/cos-radar-digest.ts'] },
+  { name: 'radarDigest', args: ['scripts/cos-radar-digest.ts'], task: 'cos-radar-digest' },
   // A felebredt ugyek felszinre hozasa. A `next_wake_at`-nak volt iroja
   // (setNextWake) es olvasoja (dueCases), a tick hivta is az olvasot -- es a
   // sorok helyett a HOSSZUKAT tartotta meg, tehat egy ebresztesre soha semmi
   // nem tudott cselekedni, es ezert nem is toltotte ki senki (0/61). Ez a
   // hianyzo fogyaszto. Csendes, ha semmi nem ebredt: ez esemeny-riasztas, nem
   // kivonat.
-  { name: 'wakeAlert', args: ['scripts/cos-wake-alert.ts'] },
+  { name: 'wakeAlert', args: ['scripts/cos-wake-alert.ts'], task: 'cos-wake-alert' },
   // Hatarido, ami csak PROZABAN letezik (2026-08-16, eec5ca9f). Ket
   // auto-berles ugy next_action-jeben ez allt: "DONTES 2026-08-16 10:00 elott",
   // mikozben a datum-oszlopaik a ket nappal kesobbi atvetelre mutattak -- tehat
@@ -59,14 +80,14 @@ const STEPS: Step[] = [
   // sem emlitette. A lepes NEM elemez datumot: azt kerdezi, hogy egy ugy
   // beszel-e hataridorol UGY, hogy kozben EGYETLEN datum-mezoje sincs kitoltve.
   // Mindket nevterre fut, es a nullat is kimondja.
-  { name: 'deadlineAudit', args: ['scripts/cos-deadline-audit.ts'] },
+  { name: 'deadlineAudit', args: ['scripts/cos-deadline-audit.ts'], task: 'cos-deadline-audit' },
   // A kerdes megirasa es a KIKULDESE ket kulon lepes: ha egybe lennenek, egy
   // kezbesitesi hiba ugy nezne ki, mint "nincs mit kerdezni".
-  { name: 'channel', args: ['scripts/cos-channel-send.ts'] },
+  { name: 'channel', args: ['scripts/cos-channel-send.ts'], task: 'cos-channel-send' },
   // A bejovo oldal: Istvan valasza a CoS-csatornarol visszaer az ugyhez.
   // Enelkul a szetvalasztas rosszabb lenne az egycsatornas vilagnal --
   // egy chatbe valaszolna, amit senki nem olvas.
-  { name: 'inbox', args: ['scripts/cos-channel-poll.ts'] },
+  { name: 'inbox', args: ['scripts/cos-channel-poll.ts'], task: 'cos-channel-poll' },
 ]
 
 const problems: string[] = []
@@ -203,8 +224,10 @@ function cppResult(
 }
 
 for (const s of STEPS) {
+  const stepIdentity = declaredScheduledIdentity(s.task, RUN_ID)
   const r = spawnSync('npx', ['tsx', ...s.args], {
     encoding: 'utf8',
+    env: { ...process.env, ...scheduledIdentityEnv(stepIdentity) },
     // A hung step must not hold the ten-minute cycle open forever; the next one
     // would then overlap this one.
     timeout: 8 * 60 * 1000,

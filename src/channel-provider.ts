@@ -5,6 +5,10 @@ import { homedir } from 'node:os'
 import { logger } from './logger.js'
 import { formatForTelegram, splitMessage } from './format.js'
 import { markIfTestRun } from './test-run-marker.js'
+import { brokerExternalAction } from './identity/action-broker.js'
+import { scheduledIdentityFromEnv } from './identity/scheduled-task-identity.js'
+import type { ExecutionIdentity } from './identity/execution-identity.js'
+import { randomUUID } from 'node:crypto'
 
 export type ChannelProviderType = 'telegram' | 'slack' | 'discord' | 'googlechat' | 'teams'
 
@@ -20,6 +24,57 @@ export interface ChannelProvider {
   validateToken(token: string): Promise<{ ok: boolean; botName?: string; error?: string }>
   formatMessage(text: string): string
   splitMessage(text: string): string[]
+}
+
+
+/**
+ * W10 (2026-08-25): every outbound post from this abstraction goes through the
+ * broker, whichever provider implements it.
+ *
+ * ONE helper rather than a wrapper per provider, because the thing being gated
+ * is "a message leaves this machine into a chat", and that is identical across
+ * the five. The provider name rides in the audit context so the row still says
+ * which one it was.
+ *
+ * The identity is the scheduled one when the caller is a cycle step, and the
+ * fleet alerting service otherwise -- same reasoning as web/telegram.ts: an
+ * alert nobody can attribute is still better than an alarm that cannot fire.
+ */
+const CHANNEL_ALERTING_IDENTITY: ExecutionIdentity = Object.freeze({
+  actorId: 'service:channel-outbound',
+  actorType: 'SERVICE',
+  onBehalfOf: 'istvan',
+  // runId is filled per call, not left null: the broker requires a mutating
+  // action to be attributable to a run, and for a standing service the honest
+  // unit of "a run" is one alert. A shared null would make every alert in the
+  // log indistinguishable from every other.
+  runId: null,
+  capabilityScope: Object.freeze(['EXTERNAL_EFFECT']),
+}) as ExecutionIdentity
+
+async function brokeredChannelPost<T>(
+  provider: ChannelProviderType, operation: string, chatId: string, size: number,
+  effect: () => Promise<T>,
+): Promise<T> {
+  const r = await brokerExternalAction(
+    {
+      connector: 'channel.outbound',
+      operation,
+      mutating: true,
+      riskClass: 'ROUTINE',
+      identity: scheduledIdentityFromEnv() ?? { ...CHANNEL_ALERTING_IDENTITY, runId: `channel-${randomUUID()}` },
+      classification: { level: 'INTERNAL', tags: [], basis: `channel ${provider} outbound` },
+      targetId: chatId,
+      context: { provider, size },
+    },
+    effect,
+    { surface: 'channel_outbound' },
+  )
+  if (r.outcome === 'DENIED') {
+    throw new Error(`${provider} send refused by the policy boundary: ${r.reasons.join('; ')}`)
+  }
+  if (r.outcome === 'FAILED') throw new Error(r.error ?? `${provider} send failed`)
+  return r.value as T
 }
 
 // -- Telegram implementation --
@@ -62,7 +117,8 @@ const telegramProvider: ChannelProvider = {
     const payload: Record<string, string> = { chat_id: chatId, text }
     if (parseMode) payload.parse_mode = parseMode
     const body = JSON.stringify(payload)
-    await telegramHttpPost(token, 'sendMessage', body, 'application/json')
+    await brokeredChannelPost('telegram', 'sendMessage', chatId, text.length,
+      () => telegramHttpPost(token, 'sendMessage', body, 'application/json'))
   },
 
   async sendPhoto(token, chatId, photoPath, caption) {
@@ -184,6 +240,7 @@ const slackProvider: ChannelProvider = {
   chatIdFormat: 'Slack channel/DM ID (e.g. C01234ABCDE)',
 
   async sendMessage(token, chatId, text) {
+    await brokeredChannelPost('slack', 'sendMessage', chatId, text.length, async () => {
     const resp = await fetch('https://slack.com/api/chat.postMessage', {
       method: 'POST',
       headers: {
@@ -204,6 +261,7 @@ const slackProvider: ChannelProvider = {
     if (!data.ok) {
       throw new Error(`Slack API error: ${data.error}`)
     }
+    })
   },
 
   async sendPhoto(token, chatId, photoPath, caption) {
@@ -293,6 +351,7 @@ const discordProvider: ChannelProvider = {
   chatIdFormat: 'Discord channel ID (e.g. 1234567890123456789)',
 
   async sendMessage(token, chatId, text) {
+    await brokeredChannelPost('discord', 'sendMessage', chatId, text.length, async () => {
     const resp = await fetch(`https://discord.com/api/v10/channels/${chatId}/messages`, {
       method: 'POST',
       headers: {
@@ -305,6 +364,7 @@ const discordProvider: ChannelProvider = {
       const body = await resp.text().catch(() => '')
       throw new Error(`Discord API ${resp.status}: ${body.slice(0, 200)}`)
     }
+    })
   },
 
   async sendPhoto(token, chatId, photoPath, caption) {

@@ -48,7 +48,22 @@ export interface PrincipalLike {
 }
 
 const SCOPES: Record<PrincipalLike['class'], readonly Capability[]> = {
-  operator: Object.freeze(['READ', 'WRITE_LOCAL', 'ADMIN'] as Capability[]),
+  // EXTERNAL_EFFECT added 2026-08-25, deliberately and narrowly.
+  //
+  // The original scope withheld it from every HTTP principal on the reasoning
+  // that "sends do not happen on an HTTP route, they happen in the COS executor
+  // behind its own gate". That was true of the FLEET token and stays true of it.
+  // It was never true of the operator: /api/cos/outbound/approve is the button
+  // labelled "Elkuldom", and since 2026-08-10 that button sends. A human session
+  // or device credential approving a specific rendered payload IS the authority
+  // for that send -- refusing it would not be caution, it would be a dashboard
+  // whose send button cannot send.
+  //
+  // What this does NOT widen: the shared fleet token below still has no
+  // EXTERNAL_EFFECT, so no dispatched agent gains the ability to mail anyone by
+  // holding it. And the capability is permission to TRY: the payload still has
+  // to pass the dispatch gate, the per-payload approval and the broker.
+  operator: Object.freeze(['READ', 'WRITE_LOCAL', 'EXTERNAL_EFFECT', 'ADMIN'] as Capability[]),
   fleet: Object.freeze(['READ', 'WRITE_LOCAL', 'MODEL_EGRESS'] as Capability[]),
   peer: Object.freeze(['READ'] as Capability[]),
   anonymous: Object.freeze([] as Capability[]),

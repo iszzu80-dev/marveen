@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { GmailLabelApi } from '../cos/adapters/gmail-label-api.js'
+import { TEST_SCHEDULED } from './helpers/w10-identity.js'
 
 // The source-commit write, finally wired: Istvan granted gmail.modify on
 // 2026-08-11, so GmailLabelCommitter -- written under F-8 and deliberately never
@@ -41,7 +42,7 @@ function fakeFetch(labels: Array<{ id: string; name: string }>, modifyOk = true)
 describe('applying COS/Processed', () => {
   it('resolves the label by NAME and modifies the message with its id', async () => {
     const { impl, calls } = fakeFetch([{ id: 'Label_32', name: 'COS/Processed' }])
-    const api = new GmailLabelApi({ credsPath: credsFile(), fetchImpl: impl })
+    const api = new GmailLabelApi({ identity: TEST_SCHEDULED, credsPath: credsFile(), fetchImpl: impl })
     await api.apply('private', 'msg-1')
     const modify = calls.find(c => c.url.includes('/modify'))!
     expect(modify.url).toContain('/messages/msg-1/modify')
@@ -53,7 +54,7 @@ describe('applying COS/Processed', () => {
     // and the whole point of the source-commit is that the mark is the one the
     // system claims to write.
     const { impl, calls } = fakeFetch([{ id: 'Label_1', name: 'Valami mas' }])
-    const api = new GmailLabelApi({ credsPath: credsFile(), fetchImpl: impl })
+    const api = new GmailLabelApi({ identity: TEST_SCHEDULED, credsPath: credsFile(), fetchImpl: impl })
     await expect(api.apply('private', 'msg-1')).rejects.toThrow(/label not found/)
     expect(calls.some(c => c.init?.method === 'POST' && c.url.endsWith('/labels')),
       'no label may be created as a side effect').toBe(false)
@@ -63,13 +64,13 @@ describe('applying COS/Processed', () => {
     // If the scope is later withdrawn, this must fail loudly: the committer then
     // reports FAILED and the batch stays open, which is what F-8 wanted.
     const { impl } = fakeFetch([{ id: 'Label_32', name: 'COS/Processed' }], false)
-    const api = new GmailLabelApi({ credsPath: credsFile(), fetchImpl: impl })
+    const api = new GmailLabelApi({ identity: TEST_SCHEDULED, credsPath: credsFile(), fetchImpl: impl })
     await expect(api.apply('private', 'msg-1')).rejects.toThrow(/403/)
   })
 
   it('caches the token and the label id — one lookup, not one per message', async () => {
     const { impl, calls } = fakeFetch([{ id: 'Label_32', name: 'COS/Processed' }])
-    const api = new GmailLabelApi({ credsPath: credsFile(), fetchImpl: impl })
+    const api = new GmailLabelApi({ identity: TEST_SCHEDULED, credsPath: credsFile(), fetchImpl: impl })
     await api.apply('private', 'm1')
     await api.apply('private', 'm2')
     await api.apply('private', 'm3')

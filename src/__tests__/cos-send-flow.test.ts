@@ -9,6 +9,7 @@ import {
   defaultSendQuota, DEFAULT_SEND_QUOTA_MAX,
 } from '../cos/send-flow.js'
 import { quotaUsage } from '../cos/quota.js'
+import { AS_OPERATOR, TEST_OPERATOR } from './helpers/w10-identity.js'
 
 // #4: the COS can send an email — but ONLY after the owner's explicit per-payload
 // approval AND only through the full dispatch gate. These tests PROVE the
@@ -34,6 +35,7 @@ function draftArgs() {
 }
 function dispatchArgs(d: ReturnType<typeof draftSend>) {
   return {
+    ...AS_OPERATOR,
     ledgerId: d.ledgerId, campaignId: d.campaignId, connectorId: 'gmail', email: EMAIL,
     templateHash: d.templateHash, renderedPayloadHash: d.renderedPayloadHash,
     declaredSensitivity: 'PERSONAL', targetProfile: 'premium_reasoning', recipient: 'teszt@pelda.hu' }

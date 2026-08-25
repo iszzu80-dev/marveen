@@ -24,6 +24,7 @@ import { randomUUID } from 'node:crypto'
 import { sha256Hex } from './attachments.js'
 import { createCampaign, getCampaign, approveCampaign, recordApproval } from './campaigns.js'
 import type { ApprovalEnvelope } from './approval-core.js'
+import { brokerExternalAction } from '../identity/action-broker.js'
 import { planAction, executeAction, cancelAction, type OutboundAdapter, type OutboundAction, type ExecuteOpts } from './executor.js'
 import { evaluateDispatch, type DispatchDecision } from './dispatch-gate.js'
 import { acquireClaim, releaseClaim, appendCaseEvent } from './case-store.js'
@@ -360,6 +361,29 @@ function caseTypeOf(db: Database.Database, ledgerId: string): string | undefined
   return r?.t
 }
 
+/**
+ * The authorisation basis for a brokered send, taken from the gate's decision.
+ *
+ * Order is deliberate: a human's approval of this exact payload outranks a
+ * delegation envelope, which outranks "the gate ran and allowed it". The last
+ * one is the weakest and is labelled as such, so an audit reader can see which
+ * sends went out on a human YES and which did not.
+ */
+function authorisationBasisFor(
+  decision: { approvalId?: string | null; delegationEnvelopeId?: string | null },
+  input: DispatchSendInput,
+  now: number,
+): import('../identity/action-broker.js').ApprovalEvidence {
+  const scope = `outbound ${input.ledgerId} to ${input.email.to} (payload ${input.renderedPayloadHash.slice(0, 12)})`
+  if (decision.approvalId) {
+    return { kind: 'OWNER_APPROVAL', approvalId: decision.approvalId, approvedBy: 'istvan', approvedAt: now, scopeDescription: scope }
+  }
+  if (decision.delegationEnvelopeId) {
+    return { kind: 'DELEGATION', approvalId: decision.delegationEnvelopeId, approvedBy: 'delegation-envelope', approvedAt: now, scopeDescription: scope }
+  }
+  return { kind: 'GATE_PERMIT', approvalId: `dispatch-gate:${input.ledgerId}`, approvedBy: 'cos-dispatch-gate', approvedAt: now, scopeDescription: scope }
+}
+
 export async function dispatchApprovedSend(
   db: Database.Database, adapter: OutboundAdapter, input: DispatchSendInput, now: number, opts: ExecuteOpts = {},
 ): Promise<DispatchSendResult> {
@@ -456,8 +480,47 @@ export async function dispatchApprovedSend(
   const ticket = issueAuthorization(db, authContext, now, {}, decision)
 
   try {
-    const action = await executeAction(db, adapter, input.ledgerId, now, {
-      ...opts,
+    // W10 / Istvan's HYBRID EXTERNAL ACTION BOUNDARY decision (2026-08-25).
+    //
+    // The gate above decides WHETHER. The broker below owns the CALL, and the
+    // difference matters: a gate is a statement the caller is trusted to honour,
+    // a broker is a function that is never invoked when the answer is no. This
+    // is the mail send -- the loudest external action in the system -- so it is
+    // the one place where "the check and the effect are two statements" is worth
+    // paying a wrapper to eliminate.
+    //
+    // Nothing here re-decides policy. The approval is the EXISTING per-payload
+    // campaign approval (`decision.approvalId`), not a second approval concept,
+    // and the readback is what `executeAction` already established with the
+    // provider -- reading its verdict rather than calling Gmail a second time.
+    let action!: Awaited<ReturnType<typeof executeAction>>
+    const brokered = await brokerExternalAction(
+      {
+        connector: 'gmail.send',
+        operation: 'messages.send',
+        mutating: true,
+        riskClass: 'CONTRACTUAL',
+        identity: input.identity ?? null,
+        principal: input.principal ?? null,
+        classification: {
+          level: input.declaredSensitivity === 'HIGHLY_SENSITIVE' ? 'RESTRICTED' : 'CONFIDENTIAL',
+          tags: [],
+          basis: `send-flow declaredSensitivity=${input.declaredSensitivity ?? 'unset'}`,
+        },
+        targetId: input.email.to,
+        // The owner's YES to THIS exact rendered payload. `approveSend` recorded
+        // it; the gate re-checked that it still matches the payload hash. Passing
+        // it here is what makes the broker's high-risk requirement satisfiable
+        // without inventing a second approval the owner never gave.
+        // WHICH authorisation actually applied, named rather than assumed. The
+        // gate has already refused anything with none of the three, so this
+        // reads the answer off the decision instead of asserting one.
+        approval: authorisationBasisFor(decision, input, now),
+        context: { ledgerId: input.ledgerId, campaignId: input.campaignId, connectorId: input.connectorId },
+      },
+      async () => {
+        action = await executeAction(db, adapter, input.ledgerId, now, {
+          ...opts,
       authorizationId: ticket.authorizationId,
       authorizationContext: authContext,
       claim: { claimKey, ownerRunId: runId, fence: claim.fence },
@@ -471,13 +534,37 @@ export async function dispatchApprovedSend(
             ...(decision.limits.maxPerKind !== null ? { maxPerKind: decision.limits.maxPerKind } : {}),
           }
         : opts.campaignLimit,
-      audit: {
-        ...opts.audit,
-        runId,
-        campaignVersion: decision.campaignVersion ?? null,
-        approvalVersion: decision.approvalVersion ?? null,
+          audit: {
+            ...opts.audit,
+            runId,
+            campaignVersion: decision.campaignVersion ?? null,
+            approvalVersion: decision.approvalVersion ?? null,
+          },
+        })
+        return action
       },
-    })
+      {
+        db,
+        surface: 'cos_send',
+        // Not a second provider call: `executeAction` has already asked the
+        // provider whether the message is there, and this reports WHAT IT
+        // CONCLUDED. A readback that re-queries would be a second answer to one
+        // question, and the two would disagree the first time either changed.
+        readback: a => `${a.status}${a.externalRef ? ` ref=${a.externalRef}` : ''}`,
+      },
+    )
+
+    if (brokered.outcome === 'DENIED') {
+      // The effect never ran. Reported as a gate refusal rather than a send
+      // failure, because a caller that retries a transport error must NOT retry
+      // this one.
+      return {
+        sent: false,
+        decision: { ...decision, allowed: false, reasons: [...decision.reasons, ...brokered.reasons] },
+      }
+    }
+    if (brokered.outcome === 'FAILED') throw new Error(brokered.error ?? 'send failed')
+
     return {
       sent: action.status === 'VERIFIED' || action.status === 'APPLIED_UNVERIFIED',
       decision, action,

@@ -272,7 +272,7 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
       // would make it a button that means something else — and on 2026-08-10 it
       // did: the click recorded consent and a human still had to run the send by
       // hand. A control must do what its label promises.
-      const sent = await dispatchApproved(getDb(), b.ledgerId, now)
+      const sent = await dispatchApproved(getDb(), b.ledgerId, now, ctx.identity ?? null)
       json(res, { ...r, ...sent })
     } catch (e) { json(res, { error: String((e as Error).message) }, 400) }
     return true
@@ -466,7 +466,7 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     try {
       json(res, await approveAndDispatchZst(
         getDb(), b.ledgerId, b.renderedPayloadHash, b.approvedBy ?? 'istvan',
-        b.allowedRecipients, Math.floor(Date.now() / 1000),
+        b.allowedRecipients, Math.floor(Date.now() / 1000), ctx.identity ?? null,
       ))
     } catch (e) { json(res, { error: String((e as Error).message) }, 400) }
     return true
@@ -1217,6 +1217,9 @@ export async function approveAndDispatchZst(
   approvedBy: string,
   allowedRecipients: string[] | undefined,
   now: number,
+  /** W10: WHO clicked send on the corporate side. Same rule as the personal
+   *  path -- absent means the broker refuses. */
+  identity: import('../../identity/execution-identity.js').ExecutionIdentity | null = null,
 ): Promise<{ sent: boolean; status?: string; externalRef?: string; reasons?: string[]; sensitivityTier?: string }> {
   const row = db.prepare(
     `SELECT l.payload AS payload, l.campaign_id AS campaign_id, l.case_id AS case_id,
@@ -1268,6 +1271,7 @@ export async function approveAndDispatchZst(
     email, templateHash: row.template_hash, renderedPayloadHash: hash,
     declaredSensitivity: row.sensitivity ?? undefined,
     targetProfile: 'premium_reasoning',
+    identity,
   }, now)
 
   return {
@@ -1300,6 +1304,12 @@ export function dispatchReasons(r: {
 
 export async function dispatchApproved(
   db: ReturnType<typeof getDb>, ledgerId: string, now: number,
+  // W10: WHO clicked "Elkuldom". Threaded from the request principal rather than
+  // resolved here, because the answer already exists one layer up and a second
+  // resolver would be a second answer to one question. Absent -> the broker
+  // refuses the send, which is the intended direction of failure for the loudest
+  // action this system can take.
+  identity: import('../../identity/execution-identity.js').ExecutionIdentity | null = null,
 ): Promise<{ sent: boolean; status?: string; externalRef?: string; reasons?: string[]; sensitivityTier?: string }> {
   // F-6: the case's own sensitivity has to come along. It used to be hardcoded
   // PERSONAL below, which silently downgraded every HIGHLY_SENSITIVE case on the
@@ -1332,6 +1342,7 @@ export async function dispatchApproved(
     // through the back door.
     declaredSensitivity: row.sensitivity ?? undefined,
     targetProfile: 'premium_reasoning',
+    identity,
   }, now)
   return {
     sent: r.sent, status: r.action?.status, externalRef: r.action?.externalRef ?? undefined,
