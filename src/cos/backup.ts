@@ -196,3 +196,193 @@ export function pruneBackups(
   }
   return { deleted, kept }
 }
+
+// ── W14 / §8.2: the POLICY half of the backup ───────────────────────────────
+//
+// The audit measured what the daily backup covers: the database, and nothing
+// else. Everything this system DECIDES with that is not in SQLite sits in
+// `store/*.json` — the autonomy levels, the egress allowlist, which secret is
+// bound to which MCP server, the source-commit policy. A restore from a current
+// backup would produce a store with every case and none of the operator's
+// rules, including a security control.
+//
+// TWO LISTS AND A RULE, rather than one list:
+//
+//   POLICY_FILES     what is backed up, declared by name so the set is auditable
+//   SECRET_FILES     what is deliberately NOT backed up (§8.2: "Secret backup
+//                    külön security policy szerint"), also declared by name so
+//                    the exclusion is a decision on the record and not an
+//                    oversight
+//   isRuntimeState() the pattern for files that are recomputable and belong in
+//                    neither list
+//
+// And the manifest reports anything in `store/` that matches NONE of the three
+// as UNCLASSIFIED. That is the part that keeps this honest: a new policy file
+// added next month does not silently fall outside the backup — it shows up as
+// unclassified in every run until somebody decides which list it belongs to.
+
+/** Operator-authored decisions. Losing one silently changes behaviour. */
+export const POLICY_FILES: readonly string[] = [
+  'autonomy-config.json',            // what may act without asking
+  'egress-allowlist.json',           // a security control
+  'cos-source-commit-policy.json',   // may the cursor advance without a source write
+  'config-overrides.json',           // dashboard settings that survive a restart
+  'capacity-routing-config.json',    // which model takes over when a quota ends
+  'data-sensitivity-gate.json',      // which models may see which data
+  'provider-trust-map.json',
+  'model-profile-map.json',
+  'optimization-config.json',
+  'vault-bindings.json',             // WHICH secret goes WHERE — ids only, no values
+  'costops-config.json', 'costops-collectors.json', 'costops-domains.json',
+  'costops-pricing.json', 'costops-render-pricing.json', 'costops-fx.json',
+  'billing-map.json',
+  'auto-restart.json',
+]
+
+/** Deliberately excluded: these ARE the secrets, and §8.2 puts them under a
+ *  separate policy. Named here so the absence is visible in the manifest rather
+ *  than looking like a file nobody thought about. */
+export const SECRET_FILES: readonly string[] = [
+  'vault.json', '.vault-key', '.dashboard-token', '.claude-oauth-token',
+  'test-user-creds.json',
+]
+
+/** Recomputable runtime state: a restore does not need it and a backup of it
+ *  would age badly. */
+export function isRuntimeState(name: string): boolean {
+  return /-state\.json$/.test(name)
+    || /^schedule-/.test(name)
+    || /^fleet-/.test(name)
+    || /^context-guard-/.test(name)
+    || /^session-/.test(name)
+    || /^terminal-/.test(name)
+    || /snapshot/.test(name)
+    || /^command-task-health\.json$/.test(name)
+}
+
+export type PolicyFileStatus = 'BACKED_UP' | 'MISSING' | 'EXCLUDED_SECRET' | 'RUNTIME_STATE' | 'UNCLASSIFIED'
+
+export interface PolicyManifestEntry { name: string; status: PolicyFileStatus; bytes?: number }
+
+export interface PolicyBackupResult {
+  path: string
+  bytes: number
+  manifest: PolicyManifestEntry[]
+  /** Files in store/ that no rule covers. Non-empty is not a failure — it is a
+   *  question for the operator, and it is asked on every run until answered. */
+  unclassified: string[]
+}
+
+interface PolicyBundle {
+  createdAt: number
+  files: Record<string, string>
+  manifest: PolicyManifestEntry[]
+}
+
+/**
+ * Encrypt the policy set into `policy-<timestamp>.json.enc` beside the database
+ * backup, with the same crypto and the same retention.
+ *
+ * The bundle carries the MANIFEST as well as the contents, so a restore can say
+ * what was expected and not found — a policy file that was already missing when
+ * the backup ran must not look identical to one that restored correctly.
+ */
+export function createPolicyBackup(
+  args: { storeDir: string; destDir: string; passphrase: string; now: number },
+): PolicyBackupResult {
+  const files: Record<string, string> = {}
+  const manifest: PolicyManifestEntry[] = []
+
+  for (const name of POLICY_FILES) {
+    const full = join(args.storeDir, name)
+    if (!existsSync(full)) { manifest.push({ name, status: 'MISSING' }); continue }
+    const content = readFileSync(full, 'utf-8')
+    files[name] = content
+    manifest.push({ name, status: 'BACKED_UP', bytes: content.length })
+  }
+  for (const name of SECRET_FILES) {
+    if (existsSync(join(args.storeDir, name))) manifest.push({ name, status: 'EXCLUDED_SECRET' })
+  }
+
+  const declared = new Set([...POLICY_FILES, ...SECRET_FILES])
+  const unclassified: string[] = []
+  for (const name of readdirSync(args.storeDir)) {
+    if (!name.endsWith('.json')) continue
+    if (declared.has(name)) continue
+    if (isRuntimeState(name)) { manifest.push({ name, status: 'RUNTIME_STATE' }); continue }
+    if (name.endsWith('.example')) continue
+    manifest.push({ name, status: 'UNCLASSIFIED' })
+    unclassified.push(name)
+  }
+
+  const bundle: PolicyBundle = { createdAt: args.now, files, manifest }
+  const blob = encryptBytes(Buffer.from(JSON.stringify(bundle), 'utf-8'), args.passphrase)
+  const path = join(args.destDir, `policy-${args.now}.json.enc`)
+  writeFileSync(path, blob, { mode: 0o600 })
+  return { path, bytes: blob.length, manifest, unclassified }
+}
+
+export interface PolicyVerification {
+  ok: boolean
+  restoredFiles: string[]
+  /** Declared policy files the bundle does not carry. */
+  missing: string[]
+  unclassified: string[]
+  problem?: string
+}
+
+/** The restore test for the policy half: decrypt, parse, and check that every
+ *  file the manifest calls BACKED_UP is actually in the bundle AND parses as
+ *  JSON. A bundle that decrypts to truncated or corrupt content would otherwise
+ *  pass exactly as a good one does. */
+export function verifyPolicyBackup(args: { encPath: string; passphrase: string }): PolicyVerification {
+  try {
+    const bundle = JSON.parse(decryptBytes(readFileSync(args.encPath), args.passphrase).toString('utf-8')) as PolicyBundle
+    const restoredFiles = Object.keys(bundle.files ?? {})
+    const missing: string[] = []
+    for (const entry of bundle.manifest ?? []) {
+      if (entry.status !== 'BACKED_UP') continue
+      const content = bundle.files?.[entry.name]
+      if (content === undefined) { missing.push(entry.name); continue }
+      try { JSON.parse(content) } catch { missing.push(entry.name + ' (unparseable)') }
+    }
+    const unclassified = (bundle.manifest ?? []).filter(e => e.status === 'UNCLASSIFIED').map(e => e.name)
+    return { ok: missing.length === 0 && restoredFiles.length > 0, restoredFiles, missing, unclassified }
+  } catch (e) {
+    return { ok: false, restoredFiles: [], missing: [], unclassified: [], problem: String((e as Error)?.message ?? e) }
+  }
+}
+
+/** Write the policy bundle back onto disk. Used by a restore drill; refuses to
+ *  touch anything the bundle does not carry. */
+export function restorePolicyBackup(
+  args: { encPath: string; passphrase: string; targetDir: string },
+): { written: string[] } {
+  const bundle = JSON.parse(decryptBytes(readFileSync(args.encPath), args.passphrase).toString('utf-8')) as PolicyBundle
+  const written: string[] = []
+  for (const [name, content] of Object.entries(bundle.files ?? {})) {
+    writeFileSync(join(args.targetDir, name), content, { mode: 0o600 })
+    written.push(name)
+  }
+  return { written }
+}
+
+/** Prune the policy bundles on the same window as the database backups. Same
+ *  filename-timestamp rule, and for the same reason: mtime is a property of the
+ *  copy, not of the contents. */
+export function prunePolicyBackups(
+  args: { destDir: string; retentionDays?: number; now: number },
+): PruneResult {
+  const retentionDays = args.retentionDays ?? BACKUP_RETENTION_DAYS
+  const cutoff = args.now - retentionDays * 86400
+  const deleted: string[] = []
+  const kept: string[] = []
+  for (const name of readdirSync(args.destDir)) {
+    const m = /^policy-(\d+)\.json\.enc$/.exec(name)
+    if (!m) continue
+    const full = join(args.destDir, name)
+    if (Number(m[1]) < cutoff) { unlinkSync(full); deleted.push(name) }
+    else kept.push(name)
+  }
+  return { deleted, kept }
+}
