@@ -30,11 +30,26 @@ import { redactSensitive, LOG_REDACTED_FIELD_NAMES } from './cos/store-security.
  *  carrying it. A test that rebuilds an identical formatter of its own proves
  *  only that a copy works — the shape this whole packet exists to stop. */
 export function logRedactionFormatter(obj: Record<string, unknown>): Record<string, unknown> {
-  return redactSensitive(obj, LOG_REDACTED_FIELD_NAMES, {
-    // Errors pass through whole: their message and stack are non-enumerable,
-    // so walking one would empty it.
-    preserve: (v) => v instanceof Error,
-  }) as Record<string, unknown>
+  try {
+    return redactSensitive(obj, LOG_REDACTED_FIELD_NAMES, {
+      // Errors pass through whole: their message and stack are non-enumerable,
+      // so walking one would empty it.
+      preserve: (v) => v instanceof Error,
+    }) as Record<string, unknown>
+  } catch (err) {
+    // FAIL-SAFE, not fail-open (Istvan, 2026-08-25): "a védelem bukása ne
+    // eredményezhesse a raw secret kiírását". If the redactor throws — an exotic
+    // getter, a proxy, a value that explodes on enumeration — returning the
+    // original object would print exactly what the redactor exists to hide.
+    //
+    // And not fail-closed either, in the sense of stopping the caller: a log
+    // line is never worth failing an action for. The line survives, minus its
+    // payload, and says why it is empty so nobody hunts a phantom bug.
+    return {
+      logRedactionFailed: true,
+      reason: err instanceof Error ? err.message : String(err),
+    }
+  }
 }
 
 export const logger = pino({

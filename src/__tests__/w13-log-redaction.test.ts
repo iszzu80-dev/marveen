@@ -83,6 +83,36 @@ describe('W13 §7.2 — a secret cannot reach a log line through the object', ()
   })
 })
 
+describe('W13 §7.2 — a redaction FAILURE must not print the secret', () => {
+  it('an object that explodes on enumeration logs a marker, never the raw value', () => {
+    // Istvan, 2026-08-25: "a védelem bukása ne eredményezhesse a raw secret
+    // kiírását". A redactor that rethrows, or that falls back to the original
+    // object, would print exactly what it exists to hide.
+    const bomb: Record<string, unknown> = { harmless: 'ok' }
+    Object.defineProperty(bomb, 'token', {
+      enumerable: true,
+      get() { throw new Error('exploding getter') },
+    })
+    const out = capture(l => l.info(bomb, 'boom'))
+    // The WHOLE object is dropped, not just the field that threw: after a
+    // failure we do not know which parts were walked, so nothing from it may be
+    // trusted onto the line. `harmless` is the witness — if it appears, the
+    // original object was passed through and so would the token beside it.
+    expect(out).not.toContain('harmless')
+    expect(out).toContain('logRedactionFailed')
+    expect(out).toContain('boom')     // the line still happened
+  })
+
+  it('and the caller is NOT failed: logging never throws', () => {
+    const bomb: Record<string, unknown> = {}
+    Object.defineProperty(bomb, 'apiKey', {
+      enumerable: true,
+      get() { throw new Error('nope') },
+    })
+    expect(() => capture(l => l.warn(bomb, 'still running'))).not.toThrow()
+  })
+})
+
 describe('W13 §7.2 — the stated limit is real, and stated', () => {
   it('a secret interpolated into the MESSAGE STRING is not covered', () => {
     // Documented in src/logger.ts rather than hidden: key-name redaction cannot

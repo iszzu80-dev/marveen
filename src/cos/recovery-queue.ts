@@ -69,17 +69,35 @@ export interface RetryPolicy {
   description: string
 }
 
+/**
+ * The outbound send ceiling, defined ONCE, here.
+ *
+ * F-15 put these in executor-core, and the first W12 build left them there
+ * while `DEFAULT_RETRY_POLICIES` repeated the same two numbers by hand. Istvan
+ * refused that closure (2026-08-25): a duplicated policy source-of-truth means
+ * an operator editing `cos_retry_policy.OUTBOUND_SEND` moves the queue's view
+ * of the budget and NOT the executor's behaviour, and nothing would say so.
+ *
+ * They live in this file rather than in executor-core because this is where
+ * policy lives, and because the dependency has to point one way: the executor
+ * reads the policy, the policy never reads the executor. executor-core
+ * re-exports both names so existing importers are unaffected.
+ *
+ * Five attempts over an exponential backoff reaches ~8 minutes, which covers a
+ * provider blip; past that the failure is not transient and a human should see
+ * it as FAILED_TERMINAL rather than as an endless queue.
+ */
+export const DEFAULT_MAX_SEND_ATTEMPTS = 5
+export const DEFAULT_SEND_BACKOFF_SEC = 30
+
 /** The seeded classes. These are DEFAULTS FOR AN EMPTY TABLE, not the source of
  *  truth: once a row exists, the row wins and this constant is not consulted
  *  again. That is the difference between "policy as data" and "policy in code
  *  with a table that mirrors it".
  *
- *  OUTBOUND_SEND mirrors executor-core's F-15 constants
- *  (DEFAULT_MAX_SEND_ATTEMPTS / DEFAULT_SEND_BACKOFF_SEC) on purpose: the
- *  executor's own retry ceiling is already wired and tested, and a second,
- *  different number for the same decision would be a contradiction, not a
- *  policy. Reconciling those two definitions into one read is named as
- *  follow-up work in W12_DONE_REPORT.md rather than done silently here. */
+ *  OUTBOUND_SEND takes its numbers from the constants above BY REFERENCE, so
+ *  the seed and the executor's fallback cannot drift into two different
+ *  answers to the same question. */
 export const DEFAULT_RETRY_POLICIES: readonly RetryPolicy[] = [
   {
     retryClass: 'INGEST_LOCAL_APPLY', maxAttempts: 5, baseBackoffSec: 60, escalateAfterAttempts: 3,
@@ -90,7 +108,8 @@ export const DEFAULT_RETRY_POLICIES: readonly RetryPolicy[] = [
     description: 'Provider claimed success, marker provably absent. NEVER auto-retried: a retry here is a second send.',
   },
   {
-    retryClass: 'OUTBOUND_SEND', maxAttempts: 5, baseBackoffSec: 30, escalateAfterAttempts: 5,
+    retryClass: 'OUTBOUND_SEND', maxAttempts: DEFAULT_MAX_SEND_ATTEMPTS,
+    baseBackoffSec: DEFAULT_SEND_BACKOFF_SEC, escalateAfterAttempts: DEFAULT_MAX_SEND_ATTEMPTS,
     description: 'Retryable send failure the adapter proved never reached the provider.',
   },
 ]

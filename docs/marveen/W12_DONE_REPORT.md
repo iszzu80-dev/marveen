@@ -204,13 +204,10 @@ transaction, the failed attempt leaves the message id taken, so the retry answer
 
 ## 6. Named, deliberate gaps
 
-1. **Two definitions of the outbound send ceiling.** `executor-core` keeps its
-   F-15 constants (`DEFAULT_MAX_SEND_ATTEMPTS`, `DEFAULT_SEND_BACKOFF_SEC`) and
-   the `OUTBOUND_SEND` policy row mirrors them. Mirrored, not merged: the
-   executor's ceiling is already wired and tested, and rewiring it to read the
-   table is a change to the send path, which is not what this packet is for.
-   Until it is merged, an operator editing `cos_retry_policy.OUTBOUND_SEND` moves
-   the queue's view of the budget and **not** the executor's behaviour.
+1. ~~**Two definitions of the outbound send ceiling.**~~ **CLOSED — see §9.**
+   This was filed as a deliberate gap and Istvan refused that closure the same
+   night, correctly: a duplicated policy source-of-truth is not a smaller
+   version of the defect this packet is about, it is the same one.
 2. **The queue schedules retries; it does not execute them.** `listDueForRetry`
    returns due rows and nothing consumes it yet — the ingest re-apply path is
    W13-adjacent work. What exists today is the durable state, the thresholds, the
@@ -268,3 +265,42 @@ Files changed: `src/cos/email-ingest.ts`, `src/cos/triage-bridge.ts`,
 `src/db.ts`, `src/web/routes/cos.ts`, `web/coscontrol.js`,
 `src/identity/scheduled-task-identity.ts`, `scripts/cos-recovery-queue.ts` (new),
 `scripts/cos-cycle.ts`.
+
+
+## 9. Closure of gap 1 — one source of truth for the send ceiling
+
+**Istvan's ruling (2026-08-25, Telegram):** W12 stays PARTIAL until the
+duplicated send-ceiling policy source-of-truth closure is proven; do not mark it
+DONE without that evidence.
+
+**What changed.** `DEFAULT_MAX_SEND_ATTEMPTS` and `DEFAULT_SEND_BACKOFF_SEC` now
+live in `recovery-queue.ts` — where policy lives — and `executor-core.ts`
+re-exports them so existing importers are unaffected. `DEFAULT_RETRY_POLICIES`
+seeds the `OUTBOUND_SEND` row FROM those constants by reference, and
+`executeAction` reads the row (`getRetryPolicy(db, 'OUTBOUND_SEND')`) where it
+applies the ceiling and the backoff. The dependency points one way: the executor
+reads policy, policy never reads the executor.
+
+An explicit `opts.retry` still wins. That is a caller stating a narrower budget
+for one send, not a second definition of the default — and it has its own test
+saying so.
+
+**Evidence** (`src/__tests__/w12-send-ceiling-single-source.test.ts`, 6 tests):
+
+| test | proves |
+|---|---|
+| lowering the row to 2 gives up on an attempt-2 row | the row decides; with the old constant this row had three attempts left and would have been re-sent |
+| raising it to 9 keeps an attempt-6 row alive | both directions, not just the convenient one |
+| a 3600s backoff on the row holds the send back one minute after the last attempt | the backoff comes from the row too |
+| an explicit per-call `retry` still wins | the narrower ask is not a second default |
+| STANDING CHECK: the seeded row equals the constants | seed and fallback cannot drift |
+| STANDING CHECK: `executor-core` declares no numeric ceiling of its own | guards against a literal fallback being reintroduced next to the policy read, which would pass every behavioural test above |
+
+**Mutation check:** with the executor reading the constants again instead of the
+row, the first three go red; the standing checks stay green, which is exactly
+why both kinds are here.
+
+The fallback that remains in `sendRetryPolicy` is not a second definition: the
+seed IS those constants, so the two paths cannot disagree on a value. It covers
+a store whose policy table was never created, where refusing to send at all
+would be the larger failure.
