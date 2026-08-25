@@ -218,6 +218,7 @@ import { ensureTemporalFactsSchema } from './temporal-facts.js'
 import { ensureFeatureRunSchema } from './consumer-manifest.js'
 import { ensureRecoveryQueueSchema } from './recovery-queue.js'
 import { ensureDisclosureSchema } from './disclosure.js'
+import { ensureCanarySchema } from './canary.js'
 
 /**
  * E9 (review 2026-08-13). A ledger of one-time migrations that have already run.
@@ -268,6 +269,11 @@ export function initCosSchema(db: Database.Database): void {
   ensureRecoveryQueueSchema(db)
   // W13 / §7.4: the disclosure decision record (see disclosure.ts).
   ensureDisclosureSchema(db)
+  // W14 / §8.5: the canary table. Created at boot like its siblings rather than
+  // lazily on first use: a table that only appears once a feature enrols cannot
+  // be queried by anything that wants to ask "what is under canary right now",
+  // and the merge-migration proof would have to special-case it.
+  ensureCanarySchema(db)
 
   // ── personal_cases (P0.5 version; §6.1) ──────────────────────────────
   // version: optimistic concurrency. Every domain command reads the version it
