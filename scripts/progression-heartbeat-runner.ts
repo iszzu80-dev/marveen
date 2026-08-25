@@ -91,10 +91,31 @@ if (ENRICH_PER_CYCLE > 0 || READ_PER_CYCLE > 0) {
         const { resolveReaderInterpreters, READER_MAX_TOKENS } =
           await import('../src/cos/interpreter-provider.js')
         const enrichRoutes = resolveReaderInterpreters(getSecret, { maxTokens: READER_MAX_TOKENS })
-        const enrich = await enrichPendingGoals(db, enrichRoutes, ENRICH_PER_CYCLE)
+
+        // W14 / §8.5 — CANARY on the newly gated enrichment path.
+        //
+        // W13 put a per-FIELD disclosure decision in front of every enrichment
+        // prompt. That is a new critical behaviour on the one path that sends
+        // case content outside, so it rolls out under a canary rather than to
+        // the whole per-cycle budget at once: one case per cycle until ten
+        // consecutive VERIFIED-clean runs, then the full budget.
+        //
+        // The metrics are the run ledger (§8.7), not counters of its own — a
+        // canary with a private opinion about health is a second opinion, and
+        // the two drift. An aborted canary does ZERO work until a human clears
+        // it, which is the difference between an abort and a slowdown.
+        const { startCanary, canaryLimit, evaluateCanary } = await import('../src/cos/canary.js')
+        const nowSec = Math.floor(Date.now() / 1000)
+        startCanary(db, { featureId: 'cos-goal-enrichment-disclosure', maxPerRun: 1, promoteAfterRuns: 10 }, nowSec)
+        const limit = canaryLimit(db, 'cos-goal-enrichment-disclosure', ENRICH_PER_CYCLE)
+
+        const enrich = await enrichPendingGoals(db, enrichRoutes, limit)
+        const canary = evaluateCanary(db, 'cos-goal-enrichment-disclosure', nowSec)
         console.log('GoalEnrichment:', JSON.stringify({
           general: enrichRoutes.general?.provider ?? null,
           contracted: enrichRoutes.contracted?.provider ?? null,
+          canary: canary ? { state: canary.status.state, clean: canary.status.consecutiveSuccesses, changed: canary.changed } : null,
+          limit,
           ...enrich,
         }))
       }
