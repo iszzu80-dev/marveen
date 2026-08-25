@@ -13,7 +13,9 @@ Verdict:  NO-GO — on one gate, for one reason, with a one-line fix that is the
 ## 0. The verdict, up front
 
 **NO-GO**, and not because a gate's work is missing. Every P0 gate below has its
-evidence and eight of nine are PASS.
+evidence and eight of nine are PASS. The code is now merged into `develop`
+(§4), so the blocker is narrower than when this document was drafted — but it is
+the same blocker.
 
 The blocker is that **none of it is running.** W10–W13 are committed on feature
 branches; `develop` does not have them, and the live store proves it:
@@ -49,7 +51,7 @@ work required to change it is a merge and a go-live, not another packet.
 | **Backup / restore** | W14: encrypted DB backup with a live receipt (173 MB, 64 cases read back) + the policy half; six-step drill with clean target, smoke tests and measured RPO/RTO; red-capable | **PASS** |
 | **Staging / canary** | W14: canary with abort, promotion gate and human resume, wired to W13's new behaviour. **Staging parity is one of six dimensions** (migrations) | **PARTIAL — see §2** |
 | **Run integrity** | W14: the cycle writes `cos_feature_runs`; SUCCESS requires verification, enforced by a cross-column CHECK | **PASS** |
-| **RELEASE** (not in §9's list, and the reason for the verdict) | four unmerged branches; the live store has none of the tables | **FAIL** |
+| **RELEASE** (not in §9's list, and the reason for the verdict) | merged into `develop` 2026-08-26 after the §1.5 gate; **not yet cut over** — the live runtime is pinned to `0011de922` and the live store still has none of the tables | **FAIL — pending cutover** |
 
 ---
 
@@ -92,14 +94,36 @@ consumer's *output*, not its code.
 
 ## 4. What would make this a GO
 
-1. **Merge and go-live.** `feat/w10-identity-sensitivity-boundary` and
-   `feat/w11-durable-schema-migration` (which carries W11, W12 and W13) into
-   `develop`, then build and restart the dashboard service per the go-live
-   procedure. Until then no gate above describes the running system.
-2. **Re-measure the four tables on the live store after the go-live.** The same
-   read-only query that produced §0 is the acceptance: they must exist, and
-   `cos_feature_runs` must start gaining rows within one cycle.
-3. **Then re-run this document.** It is a snapshot, not a certificate.
+**Step 1 is done.** `feat/w11-durable-schema-migration` (which carries W10
+through W14) was merged into `develop` on 2026-08-26 after the §1.5 merge gate's
+four conditions were met: full suite green (579 files / 7752 tests), integration,
+security/failure tests, and a migration proof against a COPY of the live store —
+189 MB, 119 cases, every new table created, no row lost, `cos_feature_runs`
+rebuilt to the §8.7 shape, schema gate OK, integrity ok.
+
+**The merge is not the release, and on this install that is enforced rather than
+hoped.** The live runtime is pinned to an exact activation candidate
+(`releases/dashboard-runtime-pin.json`, sha `0011de922`), and the scheduled
+cos-cycle refuses to run unless the cycle release, the deployed runtime and the
+triage feeder all report THAT sha. The merge does not touch any of them — which
+is the pin's entire purpose. Measured after the merge: `dist/index.js` still
+carries its 2026-08-24 19:31 build, matching the pin's `deployedAt`.
+
+So the remaining work is a **cutover**, and it is a multi-consumer one:
+
+1. **Build an activation candidate from the merged sha**, with CI evidence on
+   THAT sha (the pin file records `ciEvidence` per candidate for exactly this
+   reason).
+2. **Move all three consumers together**: the dashboard `dist`, the cos-cycle
+   release archive (`releases/cos-cycle-current`), and the pinned triage feeder.
+   The pin file's own correction note records what happens otherwise — a first
+   cutover advanced the feeder without rebuilding `dist`, two consumers ended on
+   two SHAs, and the guard caught it on its first run. "Functionally equivalent"
+   is not "the same sha".
+3. **Re-measure the four tables on the live store.** The same read-only query
+   that produced §0 is the acceptance: they must exist, and `cos_feature_runs`
+   must start gaining rows within one cycle.
+4. **Then re-run this document.** It is a snapshot, not a certificate.
 
 Two further items are needed for a full green rather than for the GO itself: the
 code-rollback rehearsal in a quiet window, and the two missing §8.6 metrics.
