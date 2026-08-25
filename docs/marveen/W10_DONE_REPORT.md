@@ -2,7 +2,7 @@
 
 ```text
 PACKET: W10 — Identity, Actor & Data Sensitivity Boundary
-Status: PARTIAL  (coverage pass 2 of 2 landed; two named gaps remain)
+Status: VERIFIED_DONE  (coverage pass 3; all nine of Istvan's criteria met 2026-08-25)
 ```
 
 > **Update 2026-08-24, after Istvan's `DECISION: APPROVED – narrow enforcement`.**
@@ -491,35 +491,58 @@ asserts that operator is the only class that gained it.
 | 2 | Scheduled identity propagation complete | **MET** — all 11 cycle steps; a drift test fails if a step loses its grant |
 | 3 | A brokered enforcement path exists and is proven for external side-effecting actions | **MET** — broker + 42 tests + 10 mutations |
 | 4 | No direct write bypass | **MET as far as a test can state it** — every module with a mutating provider endpoint imports the broker, checked in CI, with the one leaf exemption itself checked at its construction sites. The inherited limit stands: in one process, anything importable is callable |
-| 5 | Read-only direct paths proven read-only at capability level **and audited** | **PARTIAL** — proven, not audited. See below |
+| 5 | Read-only direct paths proven read-only at capability level **and audited** | **MET** — proven by measurement; audited by the connector itself since 2026-08-25 (see §13) |
 | 6 | Credential/auth-token exfiltration fail-closed | **MET** — refused with a full capability scope and with no identity at all |
 | 7 | Unknown / high-risk fail-closed | **MET** — unknown level re-derived inside the boundary; unknown connector, unknown task and unknown risk class all deny |
 | 8 | Runtime counters / liveness measurable | **MET** — `policy_decision_counters` on six surfaces plus `external_action_log` rows carrying actor, principal, run, verdict, outcome, readback |
 | 9 | No W10-caused regression | **MET, measured** — 562 files, 7547 tests, 0 failures |
 
-## The one criterion that is not met, stated plainly
-
-**Read-only external calls are proven read-only, and are not audited.**
+## §13 — closing the last criterion: read-only calls are now audited
 
 `gmail.read`, `gcal.read` and `drive.read` happen in the *agent's* process, through
-MCP servers this Node process neither hosts nor proxies. Nothing here writes a row
-when a thread is read. The inventory now says exactly that —
-`auditSurface: 'NONE in-process'` — rather than naming a log that does not receive
-them.
+MCP servers this Node process neither hosts nor proxies. Nothing here could record
+them, and nothing did.
 
-The fix does **not** need the generic proxy Istvan ruled out: those MCP servers are
-our own Python, so they can append their own call log. That is a connector
-recording its own calls, not a gateway in the path of every read. I have not done
-it in this packet because the servers run from a **pinned release**
-(`~/.marveen-mcp-pin/mcp-servers-current`, frozen 2026-07-30), and a pinned artifact
-changes by release, not by edit — editing it mid-packet would put untested Python
-in the path of the agent's Gmail access, which is the highest-value read in the
-system. It needs its own card and its own release.
+The fix is **not** the generic proxy Istvan ruled out. Those MCP servers are our
+own Python, so the connector records its **own** calls: one JSONL line per tool
+call into `store/mcp-call-log.jsonl` — timestamp, server, tool, argument KEYS,
+whether it errored. Nothing sits in the path, nothing can refuse a call.
+
+Three decisions inside those twenty lines:
+
+- **Argument keys, never values.** A Gmail query string can carry a person's name
+  or address. An audit log that leaks what it audits is a second copy of the data
+  with none of the care around the first.
+- **The log fails OPEN, and that is the opposite of the rule everywhere else in
+  this packet.** A gate that fails open is not a gate. But a *log* that fails
+  closed would take the owner's mailbox down to protect a log file, which is worse
+  than the gap it was added to close. Logging is not gating, and the two get
+  opposite answers.
+- **Unknown-tool calls are logged too.** A call for a tool that does not exist is
+  precisely the thing worth seeing.
+
+Verified live: a real `calendar_list` call and a bogus tool call both produced
+rows, with no argument values in either. The servers were then re-pinned
+(`mcp-servers-20260825T055638Z`) so a reinstall does not silently lose the audit.
+
+### A third stale scope claim, found while doing it
+
+`google-private-mcp.py`'s own header claimed the token grants `gmail.modify`,
+`gmail.send` and `spreadsheets`, "measured 2026-08-16 against Google". Re-measured
+2026-08-25: those three are **gone** from that account. Something re-consented the
+token in between.
+
+That header exists because it already replaced one false claim — its own text says
+"this header used to claim ... That was false, and the shape of the falsehood is
+the point." It went stale again in nine days. That is the argument for
+`scripts/w10-verify-external-scopes.ts` in one paragraph: a measurement written
+into a comment is a measurement that expires silently, and only a script that
+re-asks can notice.
 
 ## Verification
 
 - `tsc --noEmit`: clean
-- Full suite: **562 files, 7547 passed, 4 skipped, 0 failed**
+- Full suite: **562 files, 7551 passed, 4 skipped, 0 failed**
 - `scripts/w10-verify-external-scopes.ts`: exit 0, no undeclared write scopes,
   no falsified read-only claims, five declared and explained gaps
 - Ten mutations red, all reverted

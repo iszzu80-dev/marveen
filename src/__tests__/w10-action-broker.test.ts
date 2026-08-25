@@ -295,3 +295,31 @@ describe('the inventory is a closed, checkable set', () => {
     for (const r of RISK_CLASSES) expect(isHighRisk(r)).toBe(r !== 'ROUTINE')
   })
 })
+
+describe('the out-of-process read connectors name an audit surface that exists', () => {
+  // The gap this closes was the last unmet criterion: read-only external calls
+  // were proven read-only and were not recorded anywhere. The claim is now a
+  // file path, so it is checkable -- and a path nobody writes to would be the
+  // same false comfort as the log that did not exist.
+  it('every out-of-process read connector points at the MCP call log', () => {
+    const reads = EXTERNAL_CAPABILITIES.filter(e => e.outOfProcess && e.readOnly)
+    expect(reads.length).toBeGreaterThan(0)
+    for (const e of reads) {
+      expect(e.auditSurface, `${e.id}`).toContain('mcp-call-log.jsonl')
+    }
+  })
+
+  it('the MCP servers actually write that log, and never write argument VALUES', async () => {
+    const { readFileSync, existsSync } = await import('node:fs')
+    const { homedir } = await import('node:os')
+    const { join } = await import('node:path')
+    const src = join(homedir(), 'marveen', 'mcp-servers', 'google-private-mcp.py')
+    if (!existsSync(src)) return // gitignored by owner decision; absent on a fresh clone
+    const py = readFileSync(src, 'utf8')
+    expect(py, 'the MCP server does not write a call log').toContain('mcp-call-log.jsonl')
+    expect(py, 'the log records argument keys, never values').toContain('argKeys')
+    // The specific regression to prevent: someone "improving" the log by dumping
+    // the arguments, which would put mailbox queries into a plaintext file.
+    expect(py).not.toMatch(/"args":\s*args/)
+  })
+})

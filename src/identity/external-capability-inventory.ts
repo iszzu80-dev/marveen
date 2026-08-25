@@ -157,12 +157,15 @@ export const EXTERNAL_CAPABILITIES: readonly ExternalCapabilityEntry[] = Object.
     requiredCapability: 'READ',
     maxRisk: 'ROUTINE',
     maxLevelOut: 'PUBLIC',
-    // HONEST, and it is not what we would like it to say. These reads happen in
-    // the AGENT's process, through an MCP server this Node process neither hosts
-    // nor proxies, so no row is written here when a thread is read. What exists
-    // is the scheduled step's own report (candidate counts, marked ids) -- a
-    // record that the step ran, not a record of which messages it touched.
-    auditSurface: 'NONE in-process: the MCP call is not recorded by Marveen. Scheduled-step reports only.',
+    // These reads happen in the AGENT's process, through an MCP server this Node
+    // process neither hosts nor proxies -- so nothing here could record them, and
+    // until 2026-08-25 nothing did. The fix is the CONNECTOR recording its own
+    // calls rather than a gateway in the path of every read: the MCP servers are
+    // our own Python, so they append a line per tool call. Timestamp, server,
+    // tool, argument KEYS and whether it errored. Never argument values: a query
+    // string can carry a person's name, and an audit log that leaks what it
+    // audits is a second copy of the data with none of the care.
+    auditSurface: 'store/mcp-call-log.jsonl (written by the MCP server itself)',
     outOfProcess: true,
   },
   {
@@ -177,12 +180,15 @@ export const EXTERNAL_CAPABILITIES: readonly ExternalCapabilityEntry[] = Object.
     requiredCapability: 'READ',
     maxRisk: 'ROUTINE',
     maxLevelOut: 'PUBLIC',
-    // HONEST, and it is not what we would like it to say. These reads happen in
-    // the AGENT's process, through an MCP server this Node process neither hosts
-    // nor proxies, so no row is written here when a thread is read. What exists
-    // is the scheduled step's own report (candidate counts, marked ids) -- a
-    // record that the step ran, not a record of which messages it touched.
-    auditSurface: 'NONE in-process: the MCP call is not recorded by Marveen. Scheduled-step reports only.',
+    // These reads happen in the AGENT's process, through an MCP server this Node
+    // process neither hosts nor proxies -- so nothing here could record them, and
+    // until 2026-08-25 nothing did. The fix is the CONNECTOR recording its own
+    // calls rather than a gateway in the path of every read: the MCP servers are
+    // our own Python, so they append a line per tool call. Timestamp, server,
+    // tool, argument KEYS and whether it errored. Never argument values: a query
+    // string can carry a person's name, and an audit log that leaks what it
+    // audits is a second copy of the data with none of the care.
+    auditSurface: 'store/mcp-call-log.jsonl (written by the MCP server itself)',
     outOfProcess: true,
   },
   {
@@ -197,12 +203,15 @@ export const EXTERNAL_CAPABILITIES: readonly ExternalCapabilityEntry[] = Object.
     requiredCapability: 'READ',
     maxRisk: 'ROUTINE',
     maxLevelOut: 'PUBLIC',
-    // HONEST, and it is not what we would like it to say. These reads happen in
-    // the AGENT's process, through an MCP server this Node process neither hosts
-    // nor proxies, so no row is written here when a thread is read. What exists
-    // is the scheduled step's own report (candidate counts, marked ids) -- a
-    // record that the step ran, not a record of which messages it touched.
-    auditSurface: 'NONE in-process: the MCP call is not recorded by Marveen. Scheduled-step reports only.',
+    // These reads happen in the AGENT's process, through an MCP server this Node
+    // process neither hosts nor proxies -- so nothing here could record them, and
+    // until 2026-08-25 nothing did. The fix is the CONNECTOR recording its own
+    // calls rather than a gateway in the path of every read: the MCP servers are
+    // our own Python, so they append a line per tool call. Timestamp, server,
+    // tool, argument KEYS and whether it errored. Never argument values: a query
+    // string can carry a person's name, and an audit log that leaks what it
+    // audits is a second copy of the data with none of the care.
+    auditSurface: 'store/mcp-call-log.jsonl (written by the MCP server itself)',
     outOfProcess: true,
   },
   {
