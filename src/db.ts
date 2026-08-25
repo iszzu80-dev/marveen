@@ -14,6 +14,45 @@ import { ensureColumnStrict, dropColumnIfPresentStrict } from './schema/migratio
 
 let db: Database.Database
 
+/** Switch the connection to WAL, tolerating a CONCURRENT FIRST BOOT.
+ *
+ *  W12 / §6.8, found while building the two-process ingest test (2026-08-25).
+ *  `PRAGMA journal_mode = WAL` needs brief exclusive access, and unlike ordinary
+ *  statements it does NOT wait on the connection's busy timeout -- it returns
+ *  SQLITE_BUSY at once. So two processes opening a store that is not yet in WAL
+ *  (a fresh database, or one whose schema another process is still creating)
+ *  ended with the loser DEAD AT STARTUP, before a line of its own work ran:
+ *
+ *    SqliteError: database is locked
+ *      at initDatabase (src/db.ts:75)
+ *
+ *  That is narrow in production -- once a store is in WAL the pragma is a no-op
+ *  and never locks -- but it made the "two workers, same input" criterion
+ *  impossible to even ASK, because the second worker died before reaching the
+ *  ingest. A boot that cannot survive a concurrent boot also cannot be tested
+ *  for concurrency.
+ *
+ *  The retry is a bounded synchronous spin (the caller is a synchronous
+ *  initialiser, so there is no event loop to yield to) and it re-throws when it
+ *  runs out: a store stuck in a mode we cannot change is a startup failure, not
+ *  something to continue past quietly. */
+function enterWalMode(conn: Database.Database, dbPath: string): void {
+  const deadline = Date.now() + 5000
+  for (let attempt = 1; ; attempt++) {
+    try {
+      conn.pragma('journal_mode = WAL')
+      if (attempt > 1) logger.info({ dbPath, attempt }, 'WAL mode acquired after contention')
+      return
+    } catch (err) {
+      const code = (err as { code?: string })?.code
+      if (code !== 'SQLITE_BUSY' || Date.now() >= deadline) throw err
+      // Synchronous sleep: Atomics.wait on a private buffer, ~25ms, jittered by
+      // attempt so two contenders do not re-collide in lockstep.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15 + (attempt % 5) * 10)
+    }
+  }
+}
+
 // Lock the DB file and its sidecars (WAL, SHM, rollback journal) down to
 // owner-only. better-sqlite3 opens the main file with the process umask
 // (typically 0o644), which leaves a TOCTOU window where any other local
@@ -72,7 +111,7 @@ export function initDatabase(dbPathOverride?: string): void {
     }
   }
   db = new Database(dbPath)
-  db.pragma('journal_mode = WAL')
+  enterWalMode(db, dbPath)
   // Performance pragmas: safe with WAL, applied after journal_mode is set.
   // cache_size: negative value = kibibytes; -65536 → 64 MB page cache.
   // mmap_size: memory-mapped I/O in bytes; 256 MB. Skipped for :memory: (no file to map).

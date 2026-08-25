@@ -100,6 +100,15 @@ function findActiveZstCaseByThread(db: Database.Database, threadId: string): { c
  * this transaction with an explicit next action + owner, or the transaction
  * fails and no half-operational case is committed. */
 export function ingestTriagedZstEmail(db: Database.Database, input: ZstTriagedEmail, now: number): ZstIntakeResult {
+  // W12 / §6.9: the idempotency read and everything it authorises are one
+  // IMMEDIATE transaction. Same reasoning as ingestTriagedEmail's header, and
+  // the corporate path gets it in the SAME change rather than "later, on a
+  // separate code path, maybe" -- that gap is how the personal namespace ended
+  // up protected alone twice before.
+  return db.transaction((): ZstIntakeResult => ingestTriagedZstEmailInTx(db, input, now)).immediate()
+}
+
+function ingestTriagedZstEmailInTx(db: Database.Database, input: ZstTriagedEmail, now: number): ZstIntakeResult {
   const existing = db.prepare(
     `SELECT status FROM zst_email_processing WHERE gmail_account_id = ? AND message_id = ?`
   ).get(input.accountId, input.messageId) as { status: string } | undefined

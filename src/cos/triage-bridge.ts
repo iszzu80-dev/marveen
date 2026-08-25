@@ -57,8 +57,30 @@ export interface BridgeResult {
 }
 
 /** Ingest one triaged email into the COS. Idempotent per (account, message):
- *  a message already seen returns ALREADY_PROCESSED and is left untouched. */
+ *  a message already seen returns ALREADY_PROCESSED and is left untouched.
+ *
+ *  W12 / §6.9 — the idempotency check and the writes it authorises are ONE
+ *  transaction, and it is an IMMEDIATE one.
+ *
+ *  Until 2026-08-25 this was a bare read followed by unprotected writes. In a
+ *  single process that is safe by accident: the second call performs its own
+ *  read and always sees the first one's committed row. Across PROCESSES — the
+ *  ten-minute cycle plus a hand-run script, which happens on this machine —
+ *  both readers could see nothing and both proceed, and the loser died on a
+ *  UNIQUE constraint (`email_processing_batches.batch_id` is derived from the
+ *  message id, so it collides first) instead of returning ALREADY_PROCESSED.
+ *  No duplicate case was ever possible; a crash in the caller was.
+ *
+ *  IMMEDIATE, not deferred: a deferred transaction takes its write lock at the
+ *  first write, which is AFTER this read, leaving exactly the window it is
+ *  meant to close. With IMMEDIATE the second process blocks at BEGIN (up to
+ *  better-sqlite3's busy timeout), then reads a state that already includes the
+ *  winner's row. */
 export function ingestTriagedEmail(db: Database.Database, input: TriagedEmail, now: number): BridgeResult {
+  return db.transaction((): BridgeResult => ingestTriagedEmailInTx(db, input, now)).immediate()
+}
+
+function ingestTriagedEmailInTx(db: Database.Database, input: TriagedEmail, now: number): BridgeResult {
   const existing = db.prepare(
     `SELECT status FROM email_processing WHERE gmail_account_id = ? AND message_id = ?`
   ).get(input.accountId, input.messageId) as { status: string } | undefined

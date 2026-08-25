@@ -100,10 +100,38 @@ export interface MessagePatch {
   attemptDelta?: number
 }
 
+/** Raised when a compare-and-swap transition loses: the row exists, but it is
+ *  no longer in the status the caller believed it was in.
+ *
+ *  A distinct type, not a string message, because the two ways a status write
+ *  can fail need DIFFERENT handling and used to be indistinguishable: a MISSING
+ *  row is a bug in the caller (it never opened the batch), while a MISMATCHED
+ *  row is a concurrency outcome the caller may legitimately absorb as
+ *  ALREADY_PROCESSED. Reporting "row not found" for the second is the
+ *  wrong-cause diagnosis this file has already paid for once. */
+export class MessageStatusConflictError extends Error {
+  constructor(
+    readonly accountId: string,
+    readonly messageId: string,
+    readonly expected: readonly MessageStatus[],
+    readonly actual: MessageStatus,
+  ) {
+    super(`email_processing ${accountId}/${messageId} is ${actual}, expected ${expected.join('|')}`)
+    this.name = 'MessageStatusConflictError'
+  }
+}
+
 /** Set a message's status (+ optional fields). Named helpers below wrap the
- *  common transitions; this is the generic primitive. */
+ *  common transitions; this is the generic primitive.
+ *
+ *  W12 / §6.9. `expect` makes the write a COMPARE-AND-SWAP: the UPDATE only
+ *  matches a row still in one of the expected statuses, so the CHECK does the
+ *  work instead of leaving it to a UNIQUE constraint further downstream. It is
+ *  optional because most transitions in this file are made by the single owner
+ *  of an already-claimed message; the CLAIM is the one that races. */
 export function setMessageStatus(
   db: Database.Database, accountId: string, messageId: string, status: MessageStatus, patch: MessagePatch, now: number,
+  expect?: readonly MessageStatus[],
 ): void {
   const cols = ['status = @status', 'updated_at = @now']
   const params: Record<string, unknown> = { accountId, messageId, status, now }
@@ -111,13 +139,40 @@ export function setMessageStatus(
   if (patch.lastError !== undefined) { cols.push('last_error = @lastError'); params.lastError = patch.lastError }
   if (patch.quarantineReason !== undefined) { cols.push('quarantine_reason = @quarantineReason'); params.quarantineReason = patch.quarantineReason }
   if (patch.attemptDelta) cols.push('attempt = attempt + ' + Math.trunc(patch.attemptDelta))
+  const guard = expect && expect.length
+    ? ` AND status IN (${expect.map((_, i) => `@expect${i}`).join(', ')})`
+    : ''
+  if (expect) expect.forEach((e, i) => { params[`expect${i}`] = e })
   const info = db.prepare(
-    `UPDATE email_processing SET ${cols.join(', ')} WHERE gmail_account_id = @accountId AND message_id = @messageId`
+    `UPDATE email_processing SET ${cols.join(', ')} WHERE gmail_account_id = @accountId AND message_id = @messageId${guard}`
   ).run(params)
-  if (info.changes === 0) throw new Error(`email_processing row not found: ${accountId}/${messageId}`)
+  if (info.changes === 0) {
+    // Zero rows changed has two causes and they are not the same event. Ask the
+    // row which one it was rather than naming the likelier one.
+    const cur = db.prepare(
+      `SELECT status FROM email_processing WHERE gmail_account_id = ? AND message_id = ?`,
+    ).get(accountId, messageId) as { status: MessageStatus } | undefined
+    if (cur && expect) throw new MessageStatusConflictError(accountId, messageId, expect, cur.status)
+    throw new Error(`email_processing row not found: ${accountId}/${messageId}`)
+  }
 }
 
-export const claimMessage = (db: Database.Database, a: string, m: string, now: number) => setMessageStatus(db, a, m, 'CLAIMED', {}, now)
+/** W12 / §6.9: claiming is COMPARE-AND-SWAP on DISCOVERED.
+ *
+ *  It used to be an unconditional UPDATE, and the audit found that the safety of
+ *  concurrent ingest rested on `UNIQUE(gmail_account_id, message_id)` rather
+ *  than on any check this code performs. The constraint is real, so no duplicate
+ *  case could be created — but the loser of a cross-process race got a
+ *  constraint EXCEPTION instead of a clean answer, and "safe by accident" is not
+ *  a property you can keep. Now the loser is told exactly what happened
+ *  (MessageStatusConflictError) and the ingest bridge turns that into
+ *  ALREADY_PROCESSED.
+ *
+ *  Only DISCOVERED is accepted. A re-claim of a CLAIMED row would be a second
+ *  worker walking over the first one's in-flight work; a re-claim of a
+ *  RECOVERY_REQUIRED row is a recovery decision (§6.7), which belongs to the
+ *  recovery queue and not to a silent widening here. */
+export const claimMessage = (db: Database.Database, a: string, m: string, now: number) => setMessageStatus(db, a, m, 'CLAIMED', {}, now, ['DISCOVERED'])
 export const localApply = (db: Database.Database, a: string, m: string, caseId: string, now: number) => setMessageStatus(db, a, m, 'LOCAL_APPLIED', { caseId }, now)
 export const sourceCommit = (db: Database.Database, a: string, m: string, now: number) => setMessageStatus(db, a, m, 'SOURCE_COMMITTED', {}, now)
 /** F-8 / §6.3: terminal, but NOT the success terminal. The message is done on

@@ -189,7 +189,25 @@ function widenCheckConstraint(db: Database.Database, table: string, probeValue: 
 function ensureColumns(db: Database.Database, table: string, defs: Record<string, string>): void {
   const have = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(c => c.name))
   for (const [name, def] of Object.entries(defs)) {
-    if (!have.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${def}`)
+    if (have.has(name)) continue
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${def}`)
+    } catch (err) {
+      // W12 (2026-08-25), found while building the two-process ingest test.
+      // This is CHECK-THEN-ACT across processes: two boots against the same
+      // fresh store both read PRAGMA table_info, both see the column missing,
+      // and the loser dies with `duplicate column name: <name>` -- during
+      // startup, before any of its own work. Exactly the shape W12 is about,
+      // one layer down.
+      //
+      // The post-condition of this function is "the column exists", and a
+      // duplicate-column error is that post-condition already being true. Every
+      // OTHER error still throws: a failed ALTER that is not this is a schema
+      // problem and must not be swallowed, which is why this catch inspects the
+      // message instead of being bare.
+      const msg = err instanceof Error ? err.message : String(err)
+      if (!/duplicate column name/i.test(msg)) throw err
+    }
   }
 }
 
@@ -198,6 +216,7 @@ import { ensureQuoteSchema } from './quote-campaign.js'
 import { ensureEnvelopeSchema } from './delegation-envelope.js'
 import { ensureTemporalFactsSchema } from './temporal-facts.js'
 import { ensureFeatureRunSchema } from './consumer-manifest.js'
+import { ensureRecoveryQueueSchema } from './recovery-queue.js'
 
 /**
  * E9 (review 2026-08-13). A ledger of one-time migrations that have already run.
@@ -244,6 +263,8 @@ export function initCosSchema(db: Database.Database): void {
   // v4.4/v1.4.5 shared hardening schema belongs to the root CoS seam.
   ensureTemporalFactsSchema(db)
   ensureFeatureRunSchema(db)
+  // W12 / §6.7: the recovery queue and its policy table (see recovery-queue.ts).
+  ensureRecoveryQueueSchema(db)
 
   // ── personal_cases (P0.5 version; §6.1) ──────────────────────────────
   // version: optimistic concurrency. Every domain command reads the version it

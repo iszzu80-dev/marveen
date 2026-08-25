@@ -83,6 +83,13 @@ const STEPS: Step[] = [
   { name: 'deadlineAudit', args: ['scripts/cos-deadline-audit.ts'], task: 'cos-deadline-audit' },
   // A kerdes megirasa es a KIKULDESE ket kulon lepes: ha egybe lennenek, egy
   // kezbesitesi hiba ugy nezne ki, mint "nincs mit kerdezni".
+  // W12 / §6.7. A parked ingest row (RECOVERY_REQUIRED) is NON-TERMINAL, so it
+  // pins the account history cursor -- and until this step existed nothing in
+  // the codebase read those rows: no retry, no listing, no alert, no test. The
+  // only symptom would have been "batch not terminal", which the healthy case
+  // reports too. The step delivers nothing (no EXTERNAL_EFFECT grant); the
+  // internal COS Control view is where escalated rows are read.
+  { name: 'recoveryQueue', args: ['scripts/cos-recovery-queue.ts'], task: 'cos-recovery-queue' },
   { name: 'channel', args: ['scripts/cos-channel-send.ts'], task: 'cos-channel-send' },
   // A bejovo oldal: Istvan valasza a CoS-csatornarol visszaer az ugyhez.
   // Enelkul a szetvalasztas rosszabb lenne az egycsatornas vilagnal --

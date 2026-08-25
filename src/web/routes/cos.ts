@@ -30,6 +30,7 @@ import { storeDocument, documentsForCase, readDocumentBytes, resolveShareableAtt
 import { engageKillSwitch, releaseKillSwitch, killSwitchState } from '../../cos/kill-switch.js'
 import { evaluateOutputFloors, breachedFloors } from '../../cos/output-floor.js'
 import { runDailyReconcile } from '../../cos/reconcile.js'
+import { listNeedsHuman, listDueForRetry } from '../../cos/recovery-queue.js'
 import { linkCases, suggestLinks, linkedCases } from '../../cos/case-link.js'
 import { classifyScope, describeScope } from '../../cos/scope-gate.js'
 import { deriveAnswerOptions } from '../../cos/answer-options.js'
@@ -1065,6 +1066,7 @@ export function listMonitoring(db: ReturnType<typeof getDb>): {
   connectors: unknown[]; outboundHealth: { byStatus: Record<string, number>; needsAttention: unknown[] }
   quotas: unknown[]; outputFloors: unknown[]; breached: unknown[]
   alerts: { findings: unknown[]; counts: Record<string, number>; clean: boolean }
+  recovery: { needsHuman: unknown[]; pendingRetry: unknown[]; counts: Record<string, number> }
 } {
   const connectors = db.prepare(
     `SELECT connector_id, kind, mode, status, consecutive_failures, last_ok_at, last_error_at, last_error
@@ -1085,9 +1087,34 @@ export function listMonitoring(db: ReturnType<typeof getDb>): {
   ).all()
   const outputFloors = evaluateOutputFloors(db)
   const rec = runDailyReconcile(db)
+  // W12 / §6.7: the recovery queue, READ-ONLY here.
+  //
+  // This endpoint does not reconcile. Membership is re-derived by the cycle
+  // step (scripts/cos-recovery-queue.ts) every ten minutes, and a GET that
+  // silently rewrote the queue would make the UI its own source of truth: the
+  // page would then always agree with itself, whether or not the step that is
+  // supposed to maintain it ever ran. A queue that is stale because the cycle
+  // stopped is a fact worth being able to see.
+  const recoveryCounts: Record<string, number> = {}
+  for (const r of db.prepare(`SELECT status, COUNT(*) AS n FROM cos_recovery_queue GROUP BY status`)
+    .all() as Array<{ status: string; n: number }>) recoveryCounts[r.status] = r.n
+  const needsHuman = listNeedsHuman(db, 50).map(r => ({
+    queueId: r.queueId, surface: r.surface, ref: r.ref, caseId: r.caseId,
+    pendingAction: r.pendingAction, lastKnownOutcome: r.lastKnownOutcome,
+    retryClass: r.retryClass, attempts: r.attemptCount, maxAttempts: r.maxAttempts,
+    escalateAfter: r.escalateAfterAttempts, escalatedAt: r.escalatedAt,
+    escalationReason: r.escalationReason, lastError: r.lastError,
+  }))
+  const pendingRetry = listDueForRetry(db, Math.floor(Date.now() / 1000) + 86400 * 365, 50).map(r => ({
+    queueId: r.queueId, surface: r.surface, ref: r.ref, caseId: r.caseId,
+    pendingAction: r.pendingAction, retryClass: r.retryClass,
+    attempts: r.attemptCount, maxAttempts: r.maxAttempts, nextAttemptAt: r.nextAttemptAt,
+    lastError: r.lastError,
+  }))
   return { connectors, outboundHealth: { byStatus, needsAttention }, quotas,
     outputFloors, breached: breachedFloors(outputFloors),
-    alerts: { findings: rec.findings, counts: rec.counts, clean: rec.clean } }
+    alerts: { findings: rec.findings, counts: rec.counts, clean: rec.clean },
+    recovery: { needsHuman, pendingRetry, counts: recoveryCounts } }
 }
 
 

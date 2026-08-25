@@ -59,7 +59,10 @@ export interface EmailIntakeInput {
   followUpAt?: number
 }
 
-export type IntakeOutcome = 'CASE_CREATED' | 'LINKED_DUPLICATE' | 'EXCLUDED' | 'EXCLUDED_SELF_SEND'
+/** W12: ALREADY_PROCESSED joins the set. It was previously only a BRIDGE
+ *  outcome, which encoded an assumption that turned out to be false — that the
+ *  bridge's pre-read is the only way a seen message can reach the intake. */
+export type IntakeOutcome = 'CASE_CREATED' | 'LINKED_DUPLICATE' | 'EXCLUDED' | 'EXCLUDED_SELF_SEND' | 'ALREADY_PROCESSED'
 
 export interface IntakeResult {
   outcome: IntakeOutcome
@@ -139,6 +142,31 @@ export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now:
 
   const outbound = input.direction === 'OUTBOUND'
   const tx = db.transaction((): IntakeResult => {
+    // W12 / §6.9 — RE-ENTRY, checked before the claim.
+    //
+    // The claim is now a compare-and-swap on DISCOVERED (email-ingest.ts), and
+    // that made a pre-existing behaviour visible: calling ingestEmail a second
+    // time for the SAME message used to re-claim it unconditionally and then
+    // walk the whole flow again, overwriting a LOCAL_APPLIED row's status with
+    // DUPLICATE on the way. The bridge's pre-read hides this in production, so
+    // it was never a live defect — but "safe because the only caller happens to
+    // check first" is the same shape as the cross-process bug this packet is
+    // about, one layer up.
+    //
+    // A message that has already been through here is REPORTED, not
+    // reprocessed. The linked case is still returned, so a caller asking about
+    // a message it already sent us gets the same answer as before and nothing
+    // is clobbered.
+    const seen = db.prepare(
+      `SELECT status, case_id FROM email_processing WHERE gmail_account_id=? AND message_id=?`,
+    ).get(input.accountId, input.messageId) as { status: string; case_id: string | null } | undefined
+    if (seen && seen.status !== 'DISCOVERED') {
+      const linked = seen.case_id ?? (input.threadId ? findActiveCaseByThread(db, input.threadId)?.case_id : undefined)
+      return linked
+        ? { outcome: 'LINKED_DUPLICATE', caseId: linked, messageStatus: seen.status }
+        : { outcome: 'ALREADY_PROCESSED', messageStatus: seen.status }
+    }
+
     claimMessage(db, input.accountId, input.messageId, now)
 
     if (input.threadId) {

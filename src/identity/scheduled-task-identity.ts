@@ -126,6 +126,15 @@ export const SCHEDULED_TASK_GRANTS: readonly ScheduledTaskGrant[] = Object.freez
       + 'grant boundary is where that separation stops being a convention and becomes enforced.',
   },
   {
+    task: 'cos-recovery-queue',
+    capabilities: Object.freeze(['READ', 'WRITE_LOCAL'] as Capability[]),
+    onBehalfOf: 'istvan',
+    rationale:
+      'Reconciles the W12 recovery queue over local rows. Deliberately WITHOUT '
+      + 'EXTERNAL_EFFECT: Istvan ruled that W12 adds no new notification channel, and a '
+      + 'grant boundary enforces that where a comment would only ask.',
+  },
+  {
     task: 'cos-deadline-audit',
     capabilities: Object.freeze(['READ', 'WRITE_LOCAL'] as Capability[]),
     onBehalfOf: 'istvan',
