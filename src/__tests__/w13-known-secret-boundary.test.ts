@@ -7,7 +7,7 @@ import { initDatabase, getDb } from '../db.js'
 import { setSecret, getSecret, deleteSecret } from '../web/vault.js'
 import {
   registerKnownSecret, scrubKnownSecrets, containsKnownSecret, clearKnownSecrets,
-  knownSecretCount, KNOWN_SECRET_REDACTED,
+  knownSecretCount, KNOWN_SECRET_REDACTED, isKnownSecret, KNOWN_SECRET_MAX_ENTRIES,
 } from '../known-secrets.js'
 import { logRedactionFormatter } from '../logger.js'
 import { makeLogMethodHook, hardenChild } from '../log-redaction.js'
@@ -172,5 +172,78 @@ describe('W13 — the boundary is provenance, with its limits stated', () => {
     registerKnownSecret(REAL_LOOKING_SECRET)
     const plain = 'cycle finished: 4 batches, 0 closed'
     expect(scrubKnownSecrets(plain)).toBe(plain)
+  })
+})
+
+// ── credential LIFECYCLE (Istvan, 2026-08-26) ───────────────────────────────
+//
+// "A known-secret registry ne csak hozzáadni tudjon." Four requirements, four
+// tests: the new value is protected at once, the old one can no longer act, the
+// old one is still scrubbable, and the registry cannot grow without bound.
+
+describe('W13 — credential lifecycle: rotation and revocation', () => {
+  let dir: string
+
+  beforeEach(() => {
+    clearKnownSecrets()
+    dir = mkdtempSync(join(tmpdir(), 'w13-rotate-'))
+    initDatabase(join(dir, 'db.sqlite'))
+  })
+  afterEach(() => {
+    try { deleteSecret('W13_ROTATE') } catch { /* already gone */ }
+    clearKnownSecrets()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  const OLD = 'sk-old-11112222333344445555666677778888'
+  const NEW = 'sk-new-99998888777766665555444433332222'
+
+  it('1. the NEW credential is protected immediately — at the write, not at the next read', () => {
+    setSecret('W13_ROTATE', 'rotating', OLD)
+    expect(isKnownSecret(OLD)).toBe(true)
+    setSecret('W13_ROTATE', 'rotating', NEW)
+    // No getSecret() in between: a log line written between the rotation and
+    // the next read must already be covered.
+    expect(isKnownSecret(NEW)).toBe(true)
+  })
+
+  it('2. the OLD credential can no longer ACT: the vault hands out the new one', () => {
+    setSecret('W13_ROTATE', 'rotating', OLD)
+    setSecret('W13_ROTATE', 'rotating', NEW)
+    expect(getSecret('W13_ROTATE')).toBe(NEW)
+    // and after revocation there is nothing to act with at all
+    deleteSecret('W13_ROTATE')
+    expect(getSecret('W13_ROTATE')).toBeNull()
+  })
+
+  it('3. the OLD value is STILL scrubbable — a revoked key is not a safe string', () => {
+    setSecret('W13_ROTATE', 'rotating', OLD)
+    setSecret('W13_ROTATE', 'rotating', NEW)
+    deleteSecret('W13_ROTATE')
+    // It may already sit in a log line or an SDK error from before the
+    // rotation. Losing protection at rotation time would leak it there.
+    const out = capture(l => l.error({ err: new Error('401 with ' + OLD) }, 'old key rejected'))
+    expect(out).not.toContain(OLD)
+    expect(scrubKnownSecrets('previous value was ' + OLD)).not.toContain(OLD)
+  })
+
+  it('4. the registry is BOUNDED — rotation cannot grow it without limit', () => {
+    // Registering past the cap evicts the oldest, so a process that rotates
+    // forever does not accumulate forever. The bound asserted here is the
+    // SHIPPED constant, not a copy of it.
+    for (let i = 0; i < KNOWN_SECRET_MAX_ENTRIES + 25; i++) {
+      registerKnownSecret('secret-value-number-' + String(i).padStart(6, '0'))
+    }
+    expect(knownSecretCount()).toBe(KNOWN_SECRET_MAX_ENTRIES)
+    // FIFO: the newest survive, the oldest were evicted.
+    expect(isKnownSecret('secret-value-number-000000')).toBe(false)
+    expect(isKnownSecret('secret-value-number-000280')).toBe(true)
+  })
+
+  it('re-registering the same value neither grows the set nor renews its position', () => {
+    registerKnownSecret(OLD)
+    const first = knownSecretCount()
+    for (let i = 0; i < 50; i++) registerKnownSecret(OLD)
+    expect(knownSecretCount()).toBe(first)
   })
 })

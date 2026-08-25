@@ -146,6 +146,38 @@ export function isEgressBlocked(toolName, toolInput, runtimeList = { domains: []
   return true
 }
 
+/**
+ * W13 / §7.3 — the destination's TRUST CLASS, in the shared vocabulary.
+ *
+ * §7.3 asks for four classes (trusted internal / approved external / restricted
+ * external / unknown-untrusted). Until now this gate had a two-valued answer
+ * (allowed or blocked) and the LLM path had a different two-valued answer
+ * (contracted or third-party), so no caller could ask ONE question about a
+ * destination. This function is that question for the WebFetch boundary, and it
+ * returns the SAME four strings `src/cos/disclosure.ts` uses — asserted by
+ * w13-egress-trust-vocabulary.test.ts, which imports both sides and compares
+ * them rather than trusting that two lists were kept in step.
+ *
+ * It is DERIVED from the same lists `isEgressBlocked` decides with, so the class
+ * and the allow/deny answer cannot disagree; the test pins that too.
+ *
+ *   TRUSTED_INTERNAL     the machine itself: the dashboard, the local model
+ *   APPROVED_EXTERNAL    a built-in provider API this install talks to by design
+ *   RESTRICTED_EXTERNAL  a host the OPERATOR added at runtime — approved, but no
+ *                        data-processing relationship is claimed for it
+ *   UNKNOWN_UNTRUSTED    everything else, which is also everything that is blocked
+ */
+export function trustClassOfUrl(url, runtimeList = { domains: [], prefixes: [] }) {
+  const u = String(url ?? '')
+  if (!u) return 'UNKNOWN_UNTRUSTED'
+  const local = ALLOWED_PREFIXES.filter((p) => p.startsWith('http://localhost') || p.startsWith('http://127.0.0.1'))
+  if (local.some((p) => u.startsWith(p))) return 'TRUSTED_INTERNAL'
+  if (ALLOWED_PREFIXES.some((p) => u.startsWith(p))) return 'APPROVED_EXTERNAL'
+  // Anything the operator allowed at runtime is approved but not contracted.
+  if (!isEgressBlocked('WebFetch', { url: u }, runtimeList)) return 'RESTRICTED_EXTERNAL'
+  return 'UNKNOWN_UNTRUSTED'
+}
+
 function logBlocked(url, reason) {
   try {
     mkdirSync(join(REPO_ROOT, 'store'), { recursive: true })

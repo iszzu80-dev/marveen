@@ -37,6 +37,25 @@
 /** Below this length a value is too short to be matched safely against prose. */
 const MIN_LENGTH = 8
 
+/**
+ * How many values stay under protection at once (Istvan, 2026-08-26: "registry
+ * lifecycle nem eredményez kontrollálatlan, végtelen növekedést").
+ *
+ * The cap is FIFO on registration order, and it is set far above real usage: the
+ * vault holds tens of secrets, and a rotation adds one entry each time. At 256 a
+ * credential would have to be rotated hundreds of times inside a single process
+ * lifetime before the oldest value is evicted — and an evicted value is one that
+ * has not been read from a credential source in a very long time.
+ *
+ * The eviction IS a real loss of protection for that value, which is why it is a
+ * cap and not a "keep the last N": a bounded set whose bound is never reached in
+ * practice is the honest shape. Nothing here persists across a restart, so the
+ * registry starts empty and refills from the accessors on first use.
+ */
+const MAX_ENTRIES = 256
+
+/** Insertion-ordered. A JS Set preserves insertion order, which is what makes
+ *  FIFO eviction a one-liner rather than a second data structure. */
 const known = new Set<string>()
 
 export const KNOWN_SECRET_REDACTED = '[REDACTED:KNOWN_SECRET]'
@@ -53,9 +72,45 @@ export function registerKnownSecret(value: unknown): boolean {
   if (typeof value !== 'string') return false
   const v = value.trim()
   if (v.length < MIN_LENGTH) return false
+  // Re-registering an existing value must not move it to the back of the queue
+  // and must not grow the set: a secret read on every cycle would otherwise be
+  // the newest entry forever, and the eviction order would mean nothing.
+  if (known.has(v)) return true
   known.add(v)
+  if (known.size > MAX_ENTRIES) {
+    // FIFO: drop the oldest registration. Set iteration is insertion order.
+    const oldest = known.values().next().value
+    if (oldest !== undefined) known.delete(oldest)
+  }
   return true
 }
+
+/**
+ * ROTATION, as a single call: the new value becomes protected and the old value
+ * STAYS protected.
+ *
+ * Istvan's lifecycle requirement (2026-08-26) is precise about this, and it is
+ * the part that is easy to get wrong: a rotated-out credential must remain
+ * scrubbable, "ha már korábbi process-memoryban vagy hibaszövegben megjelent".
+ * A revoked key does not become safe to print — it is still a real credential in
+ * a log somebody may read later. So rotation ADDS; it never removes.
+ *
+ * What DOES stop is the credential's power to act, and that is not this
+ * module's job: the vault returns the new value, so every consumer that asks
+ * for the secret gets the new one. Nothing here can hand out either.
+ */
+export function rotateKnownSecret(oldValue: unknown, newValue: unknown): void {
+  registerKnownSecret(oldValue)
+  registerKnownSecret(newValue)
+}
+
+/** For diagnostics and the lifecycle tests: is this exact value protected? */
+export function isKnownSecret(value: string): boolean {
+  return known.has(value)
+}
+
+/** The cap, exported so a test asserts the SHIPPED bound rather than a copy. */
+export const KNOWN_SECRET_MAX_ENTRIES = MAX_ENTRIES
 
 /** How many values are under protection. For diagnostics; never the values. */
 export function knownSecretCount(): number {

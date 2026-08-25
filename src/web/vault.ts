@@ -111,10 +111,20 @@ export function setSecret(id: string, label: string, value: string): void {
   const entry: VaultEntry = { id, label, encrypted: encrypt(value), createdAt: now, updatedAt: now }
   if (idx >= 0) {
     entry.createdAt = store.entries[idx].createdAt
+    // ROTATION (W13 lifecycle, Istvan 2026-08-26): the OLD value stays
+    // protected. It has stopped being usable — the vault now returns the new
+    // one — but it has not stopped being a credential: it may already sit in a
+    // log line or an SDK error string from before the rotation, and printing it
+    // there would be exactly the leak this registry exists to prevent.
+    try { registerKnownSecret(decrypt(store.entries[idx].encrypted)) } catch { /* unreadable old value: nothing to protect */ }
     store.entries[idx] = entry
   } else {
     store.entries.push(entry)
   }
+  // The NEW value is protected from the moment it is written, not from the
+  // first read: a rotation followed by a log line before anyone re-reads the
+  // vault would otherwise print it.
+  registerKnownSecret(value)
   writeVault(store)
 }
 
