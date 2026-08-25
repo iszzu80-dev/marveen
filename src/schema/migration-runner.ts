@@ -120,6 +120,46 @@ export function ensureColumnStrict(
   return true
 }
 
+/**
+ * Drop a column that may or may not be there, WITHOUT swallowing anything.
+ *
+ * The counterpart to `ensureColumnStrict` for a retirement. Same principle:
+ * "is it there" is answered by LOOKING (`PRAGMA table_info`), so absence is an
+ * ordinary `false` and any error that then occurs is a real error.
+ *
+ * The old pattern here read `catch { /* column absent or SQLite pre-3.35 *\/ }`,
+ * which is two different facts sharing one silence. They are separated:
+ * absence is a return value, and an old SQLite is an explicit, named throw --
+ * because a build that cannot drop the column has NOT retired it, and reporting
+ * success would leave a revoked column in place while the code believes it is
+ * gone.
+ */
+export function dropColumnIfPresentStrict(
+  db: Database.Database, table: string, column: string,
+): boolean {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+  if (!cols.length) throw new Error(`dropColumnIfPresentStrict: table ${table} does not exist`)
+  if (!cols.some(c => c.name === column)) return false
+
+  const version = (db.prepare('SELECT sqlite_version() AS v').get() as { v: string }).v
+  if (!sqliteAtLeast(version, 3, 35)) {
+    throw new Error(
+      `dropColumnIfPresentStrict: ${table}.${column} still exists but SQLite ${version} cannot DROP COLUMN `
+      + '(needs 3.35). The column is NOT retired; refusing to report success.')
+  }
+  db.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`)
+  return true
+}
+
+/** Compare a `sqlite_version()` string against a minimum. Its own function so
+ *  the parse is testable rather than inlined into an error path nobody runs. */
+export function sqliteAtLeast(version: string, major: number, minor: number): boolean {
+  const parts = version.split('.').map(n => Number.parseInt(n, 10))
+  const [maj, min] = [parts[0] ?? 0, parts[1] ?? 0]
+  if (!Number.isFinite(maj) || !Number.isFinite(min)) return false
+  return maj > major || (maj === major && min >= minor)
+}
+
 function alreadyApplied(db: Database.Database, id: string): boolean {
   const row = db.prepare(
     `SELECT state FROM store_schema_migrations WHERE migration_id = ?`).get(id) as { state: string } | undefined

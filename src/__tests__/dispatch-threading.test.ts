@@ -93,8 +93,36 @@ describe('P2-A origin (d) worker', () => {
 })
 
 describe('P2-A db wiring', () => {
-  it('agent_messages gains a nullable dispatch_id column via idempotent ALTER', () => {
-    expect(DB).toMatch(/ALTER TABLE agent_messages ADD COLUMN dispatch_id TEXT/)
+  // REWRITTEN 2026-08-25 (MIP-v1.0 / §5 / W11 closure), and the change is a
+  // STRENGTHENING, not an adaptation. It used to grep db.ts for the literal SQL
+  // `ALTER TABLE agent_messages ADD COLUMN dispatch_id TEXT`. That matched a
+  // string in a source file -- it could not tell whether the column ever
+  // appeared, and it passed for the whole period when the surrounding
+  // `catch { /* exists */ }` could silently swallow a real ALTER failure.
+  //
+  // W11 replaced that call site with `ensureColumnStrict`, so the literal is
+  // gone and the grep went red. The right response is to assert the FACT the
+  // test was always trying to state: the column exists after init, and adding
+  // it again is an idempotent no-op rather than an error.
+  it('agent_messages gains a nullable dispatch_id column, idempotently', async () => {
+    const Database = (await import('better-sqlite3')).default
+    const { ensureColumnStrict } = await import('../schema/migration-runner.js')
+    const db = new Database(':memory:')
+    db.exec('CREATE TABLE agent_messages (id INTEGER PRIMARY KEY)')
+
+    expect(ensureColumnStrict(db, 'agent_messages', 'dispatch_id', 'TEXT')).toBe(true)
+    const cols = db.prepare('PRAGMA table_info(agent_messages)').all() as Array<{ name: string; notnull: number }>
+    const col = cols.find(c => c.name === 'dispatch_id')
+    expect(col, 'dispatch_id was not added').toBeDefined()
+    expect(col!.notnull, 'dispatch_id must stay nullable').toBe(0)
+
+    // Idempotent: a second init does not throw and does not duplicate.
+    expect(ensureColumnStrict(db, 'agent_messages', 'dispatch_id', 'TEXT')).toBe(false)
+    db.close()
+
+    // And db.ts really does call it -- so this test measures the live path,
+    // not a helper nobody uses.
+    expect(DB).toMatch(/ensureColumnStrict\(db, 'agent_messages', 'dispatch_id'/)
   })
   it('createAgentMessage carries dispatchId into the insert', () => {
     expect(DB).toMatch(/dispatchId\?:\s*string\s*\|\s*null/)

@@ -651,6 +651,49 @@ Legyen egyértelmű source of truth:
 
 ---
 
+## 5.6b ACCEPTED_DESIGN_DEVIATION — §5.2 on a relational store
+
+**Accepted by Istvan, 2026-08-25, in review of the W11 packet. Recorded here in
+his words, in the canonical spec, so it is a decision and not an implementer's
+narrowing.**
+
+> A store-level schema version + row-level version only where independently
+> meaningful megoldást elfogadom. Rögzítsd ACCEPTED_DESIGN_DEVIATION-ként a
+> canonical MIP-ben; ez teljesíti a §5.2 szándékát relációs store esetén.
+>
+> A future-schema → read-only döntést és az unversioned legacy-store verified
+> adoption megoldást szintén elfogadom.
+
+What this means concretely, and what it does NOT license:
+
+- **Store level.** One authoritative `schema_version` for the whole store, plus
+  the migration ledger. This is the level at which "a newer-than-supported schema
+  must fail closed" is expressible at all, because that decision happens once, at
+  open time, before any row is read.
+- **Entity level.** A per-row `schema_version` **only** where a row carries its
+  own migration state — records that outlive schema changes and may need per-row
+  forward repair.
+- **Not licensed:** skipping versioning altogether, or deciding per-table at
+  implementation time without recording why. A new durable entity that needs
+  per-row migration state and does not get a `schema_version` is a defect, not an
+  instance of this deviation.
+
+Measured basis for the deviation (2026-08-25): 128 tables, 2 carrying
+`schema_version`. Retrofitting the other 126 would be a single breaking change
+across the whole database — the "big-bang breaking migration" §5.4 forbids.
+
+Two further decisions accepted in the same review:
+
+- **future schema → read-only, not a crash.** Refusing to boot is also
+  fail-closed and is the wrong trade: it takes the owner's entire case board away
+  to protect it from a write nobody was making.
+- **unversioned legacy store → verified adoption.** Every store written before
+  versioning reads as version 0 — which is every existing installation. Failing
+  closed on that would be a gate that takes the system down on first contact with
+  reality.
+
+---
+
 ## 5.7 W11 acceptance criteria
 
 - minden durable core state verziózott;

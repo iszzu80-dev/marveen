@@ -10,6 +10,7 @@ import { initCosSchema } from './cos/schema.js'
 import {
   adoptUnversionedStore, checkStoreSchema, markVerified, setStoreReadOnly,
 } from './schema/store-schema.js'
+import { ensureColumnStrict, dropColumnIfPresentStrict } from './schema/migration-runner.js'
 
 let db: Database.Database
 
@@ -457,14 +458,14 @@ export function initDatabase(dbPathOverride?: string): void {
   // trace_id: root trace identifier spanning an entire agent chain (e.g. morning-chain).
   // span_id: this message's own span identifier (nanoid).
   // parent_span_id: sender's span_id -- links child back to parent in the waterfall.
-  try { db.exec('ALTER TABLE agent_messages ADD COLUMN trace_id TEXT') } catch { /* exists */ }
-  try { db.exec('ALTER TABLE agent_messages ADD COLUMN span_id TEXT') } catch { /* exists */ }
-  try { db.exec('ALTER TABLE agent_messages ADD COLUMN parent_span_id TEXT') } catch { /* exists */ }
+  ensureColumnStrict(db, 'agent_messages', 'trace_id', "TEXT")
+  ensureColumnStrict(db, 'agent_messages', 'span_id', "TEXT")
+  ensureColumnStrict(db, 'agent_messages', 'parent_span_id', "TEXT")
   // P2-A (CostOps Dispatch & Outcome Attribution): the opaque dispatch_id a
   // kanban/scheduler/worker origin minted, carried on the queued message so the
   // router can thread it to sendPromptToSession. Nullable, forward-only; a
   // message enqueued without one (channel-inbound, un-instrumented) stays NULL.
-  try { db.exec('ALTER TABLE agent_messages ADD COLUMN dispatch_id TEXT') } catch { /* exists */ }
+  ensureColumnStrict(db, 'agent_messages', 'dispatch_id', "TEXT")
 
   // INVARIANT: a row that says 'delivered' must carry a delivered_at.
   //
@@ -532,7 +533,7 @@ export function initDatabase(dbPathOverride?: string): void {
     )
   `)
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_pcr_agent_channel ON pending_channel_requests(agent, channel_id) WHERE status = 'pending'`)
-  try { db.exec('ALTER TABLE pending_channel_requests ADD COLUMN resolved_at INTEGER') } catch { /* already exists */ }
+  ensureColumnStrict(db, 'pending_channel_requests', 'resolved_at', "INTEGER")
 
   // --- Task Run History ---
   // Log every scheduled-task firing so the dashboard overview's "tasksToday"
@@ -548,7 +549,7 @@ export function initDatabase(dbPathOverride?: string): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_task_runs_ts ON task_runs(ts)`)
   // Migration: add status column to task_runs (introduced 2026-06-13)
-  try { db.exec(`ALTER TABLE task_runs ADD COLUMN status TEXT NOT NULL DEFAULT 'fired'`) } catch { /* already present */ }
+  ensureColumnStrict(db, 'task_runs', 'status', "TEXT NOT NULL DEFAULT 'fired'")
 
   // --- Pending Scheduled Task Retries ---
   // Busy-skipped scheduled tasks used to live in an in-memory Map. On a
@@ -613,8 +614,8 @@ export function initDatabase(dbPathOverride?: string): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_token_usage_ts ON token_usage(timestamp)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_token_usage_agent_ts ON token_usage(agent, timestamp)`)
   // Migrations for columns added after initial release
-  try { db.exec('ALTER TABLE token_usage ADD COLUMN thinking_tokens INTEGER NOT NULL DEFAULT 0') } catch { /* already exists */ }
-  try { db.exec('ALTER TABLE token_usage ADD COLUMN model TEXT') } catch { /* already exists */ }
+  ensureColumnStrict(db, 'token_usage', 'thinking_tokens', "INTEGER NOT NULL DEFAULT 0")
+  ensureColumnStrict(db, 'token_usage', 'model', "TEXT")
 
   // Deduplicate existing rows before creating unique index
   try {
@@ -654,8 +655,8 @@ export function initDatabase(dbPathOverride?: string): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_idea_box_status ON idea_box(status)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_idea_box_category ON idea_box(category)`)
   // impact/effort scoring -- added after initial release; safe ALTER on existing DBs
-  try { db.exec('ALTER TABLE idea_box ADD COLUMN impact INTEGER') } catch { /* already exists */ }
-  try { db.exec('ALTER TABLE idea_box ADD COLUMN effort INTEGER') } catch { /* already exists */ }
+  ensureColumnStrict(db, 'idea_box', 'impact', "INTEGER")
+  ensureColumnStrict(db, 'idea_box', 'effort', "INTEGER")
 
   // --- Idea Comments ---
   db.exec(`
@@ -750,7 +751,7 @@ export function initDatabase(dbPathOverride?: string): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_store_file_audit_ts ON store_file_audit(created_at)`)
   // Migration: add agent column to installs that created the table before this column existed.
-  try { db.exec(`ALTER TABLE store_file_audit ADD COLUMN agent TEXT`) } catch { /* column already exists */ }
+  ensureColumnStrict(db, 'store_file_audit', 'agent', "TEXT")
 
   // --- Data-sensitivity audit log (card 6bf535bf) ---
   // Gate observe/enforce events persisted to SQLite so a daily false-positive
@@ -875,11 +876,11 @@ export function initDatabase(dbPathOverride?: string): void {
   // Drop legacy per-server key columns that are no longer written or read.
   // On older installs these were added via ALTER TABLE; fresh installs never had them.
   // SQLite 3.35+ is required; try-catch makes this a no-op on either scenario.
-  try { db.exec('ALTER TABLE vault_ssh_servers DROP COLUMN key_type') } catch { /* column absent or SQLite pre-3.35 */ }
-  try { db.exec('ALTER TABLE vault_ssh_servers DROP COLUMN fingerprint') } catch { /* column absent or SQLite pre-3.35 */ }
-  try { db.exec('ALTER TABLE vault_ssh_servers DROP COLUMN vault_key_id') } catch { /* column absent or SQLite pre-3.35 */ }
-  try { db.exec('ALTER TABLE vault_ssh_servers DROP COLUMN key_expires_at') } catch { /* column absent or SQLite pre-3.35 */ }
-  try { db.exec('ALTER TABLE vault_ssh_servers ADD COLUMN ssh_key_id TEXT REFERENCES vault_ssh_keys(id)') } catch { /* already exists */ }
+  dropColumnIfPresentStrict(db, 'vault_ssh_servers', 'key_type')
+  dropColumnIfPresentStrict(db, 'vault_ssh_servers', 'fingerprint')
+  dropColumnIfPresentStrict(db, 'vault_ssh_servers', 'vault_key_id')
+  dropColumnIfPresentStrict(db, 'vault_ssh_servers', 'key_expires_at')
+  ensureColumnStrict(db, 'vault_ssh_servers', 'ssh_key_id', "TEXT REFERENCES vault_ssh_keys(id)")
   db.exec(`CREATE INDEX IF NOT EXISTS idx_vault_ssh_servers_key ON vault_ssh_servers(ssh_key_id)`)
 
   // --- Approvals (HITL) ---
@@ -955,7 +956,7 @@ export function initDatabase(dbPathOverride?: string): void {
   // Bridge pairing (AUTHPLAN1 #2): links a device key to the SSH enrollment's
   // marveen-remote:<uuid> so revoking the key can drop the authorized_keys
   // line in the same step. Null for keys minted outside the pairing flow.
-  try { db.exec(`ALTER TABLE device_keys ADD COLUMN install_id TEXT`) } catch { /* column already exists */ }
+  ensureColumnStrict(db, 'device_keys', 'install_id', "TEXT")
 
   // --- OTel Distributed Tracing (card def5a189) ---
   // SQLite-native span store. No external OTel SDK: spans are written via

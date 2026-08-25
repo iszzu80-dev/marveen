@@ -2,7 +2,7 @@
 
 ```text
 PACKET: MIP-v1.0 / §5 / W11_DURABLE_SCHEMA_MIGRATION
-Status: VERIFIED_DONE
+Status: VERIFIED_DONE  (closure applied 2026-08-25 after Istvan's review)
 Date:   2026-08-25
 ```
 
@@ -131,12 +131,12 @@ diff.
 
 ## No regression (criterion 7), measured
 
-Full suite: **563 files, 7572 passed, 4 skipped, 2 failed.**
+Full suite after closure: **564 files, 7586 passed, 4 skipped, 1 failed** — the single failure is one half of the known `memory-performance` pair (live Ollama, load-dependent; passes 11/11 in isolation).
 
-The two failures are `memory-performance.test.ts` — the known pre-existing pair
-(a live Ollama plus a hardcoded 100 ms per row against a 5 s vitest timeout, so
-they fail under load). Run in isolation they pass 11/11, both with W11 and with
-W11 stashed.
+That pair — `backfillEmbeddings` — is pre-existing and load-dependent: a live
+Ollama plus a hardcoded 100 ms per row against a 5 s vitest timeout. It has
+flipped between 0, 1 and 2 failures across runs all day. In isolation it passes
+11/11, both with W11 and with W11 stashed.
 
 I did not leave it at "known flaky", because W11 touches `db.ts` and a slower
 `initDatabase` would be a real cause with an innocent-looking symptom. Measured
@@ -159,11 +159,61 @@ difference between two runs of that file is Ollama latency, not the gate.
 
 ---
 
-## Named limitation, carried forward
+## Closure — the limitation that was NOT allowed to be carried forward
 
-`db.ts` still has 21 `try { ALTER TABLE ... } catch { /* exists */ }` sites. The
-catch swallows every error, so a real failure is indistinguishable from "already
-applied". `ensureColumnStrict()` is the replacement and migrating those call
-sites is a separate job with its own proof — doing it inside this packet would be
-the big-bang §5.4 warns against. Named here so it is a work item and not an
-invisible weakness.
+The first version of this report ended with a "named limitation": the 21
+swallowing catches in `db.ts`, deferred to a later packet. Istvan refused the
+verdict on exactly that, and he was right — carrying it forward *"közvetlenül
+ugyanazt a hibát hagyja bent, amelyet W11-nek meg kell szüntetnie"*. Naming a
+defect in a report is not a mitigation; it is the same defect with a paragraph
+attached.
+
+The verdict was withdrawn and the work done. Full detail in the audit §7.
+
+**Inventory (measured, per line).** 21 catches, of which **17 are schema
+mutations**: 13 `ADD COLUMN`, 4 `DROP COLUMN`. The other four are `db.close()`,
+two `renameSync()` of a consumed legacy file, and a JSON-parse guard — excluded
+for what they are, not to shrink the number, and each named individually.
+
+**Classification.** All 17 live inside `initDatabase()`, which runs on every
+process start. **Executed core path: 17. Legacy reachable: 0. Dead: 0.** There
+was no dead path to remove; the "do not rewrite for the count" allowance applied
+to nothing.
+
+**Conversion.** 13 → `ensureColumnStrict`, 4 → `dropColumnIfPresentStrict`. The
+drop helper splits a comment that had been carrying two facts in one silence:
+`catch { /* column absent or SQLite pre-3.35 */ }`. Absence is now a return
+value; an old SQLite is an explicit throw, because a build that cannot drop the
+column has **not** retired it and reporting success would leave a revoked column
+in place.
+
+**Proof — 13 tests, every negative paired with its positive twin**, because a
+helper that threw on everything would satisfy half the review and break every
+restart. Permission failure (read-only handle), malformed DDL, unexpected DB
+error (closed handle), and the motivating case: a `NOT NULL` column added to a
+**non-empty** table. SQLite refuses that; under the old catch the refusal was
+indistinguishable from "already there", so the column would have been **missing
+forever** while every run reported success. The test asserts both halves — it
+throws, *and* the column is absent afterwards.
+
+A pattern guard greps `db.ts` for any swallowing catch on a schema-mutating line
+and requires the list empty, with a control assertion so it cannot pass by the
+calls disappearing.
+
+**The live path, exercised.** `initDatabase()` run three times against a copy of
+the live store (`agent_messages` 14 cols, `dispatch_id` present, version 1 each
+time) and twice against a brand-new file (121 tables, version 1). Greps and unit
+tests do not prove a real boot survives; this does.
+
+**One pre-existing test strengthened, disclosed.** `dispatch-threading.test.ts`
+grepped `db.ts` for the literal `ALTER TABLE agent_messages ADD COLUMN
+dispatch_id TEXT`. That matched a string in a source file — it could not tell
+whether the column ever appeared, and it passed throughout the period when the
+surrounding catch could swallow a real failure. Rewritten to assert the fact it
+was always trying to state, plus a check that `db.ts` calls the strict helper so
+it measures the live path.
+
+**Accepted design deviation recorded.** §5.2's per-entity versioning on a
+relational store is now `MIP-v1.0 §5.6b ACCEPTED_DESIGN_DEVIATION` in the
+canonical spec, in Istvan's words, together with the accepted future-schema
+read-only and legacy-adoption decisions.
