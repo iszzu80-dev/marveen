@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import pino from 'pino'
 import { REDACTED } from '../cos/store-security.js'
 import { logger, logRedactionFormatter } from '../logger.js'
+import { makeLogMethodHook, hardenChild, scrubSecretText } from '../log-redaction.js'
 
 // W13 / §7.2 + §7.6 — "secret nem logban" / "log redaction".
 //
@@ -9,27 +12,47 @@ import { logger, logRedactionFormatter } from '../logger.js'
 // with `src/logger.ts` a bare pino instance carrying no `redact` option. The
 // claim in its header was true of the function and false of the system.
 //
-// These tests are about the SYSTEM. They build a pino logger with the same
-// formatter src/logger.ts installs, write to a memory sink, and read the bytes
-// that would have hit the log file. A test that only calls the helper proves
-// the helper — which is exactly the state the audit found.
+// Istvan's acceptance point (2026-08-25): "a végső log-safety proof ne csak a
+// formatters.log objektumútját bizonyítsa. Negatív teszttel ellenőrizd az összes
+// tényleges logging surface-t ... Ha valamelyik nem releváns az aktuális
+// Pino-konfigurációban, azt runtime/repo evidence-szel zárd ki, ne
+// feltételezéssel."
+//
+// He was right that one surface is not the logger. Two REAL holes turned up when
+// the others were probed, and both are pinned below by a test that fails without
+// the fix:
+//
+//   - CHILD BINDINGS bypassed `formatters.log` entirely. `logger.child({ token })`
+//     printed the token on every line that child ever wrote.
+//   - An Error's MESSAGE and STACK went out verbatim, because the first fix
+//     deliberately passed Errors through so the stack would survive — and the
+//     stack is exactly where a credential-bearing URL ends up.
+//
+// Every describe below is one surface. The last one asserts that the REAL
+// application logger carries all three mechanisms, because "the helper works"
+// and "the system uses it" are different claims and only the second was ever in
+// doubt.
 
-/** A logger built from THE formatter src/logger.ts installs — imported, not
- *  re-declared. Rebuilding an equivalent formatter here would test a copy, and
- *  a copy passing says nothing about the logger the system actually uses. The
- *  wiring itself is asserted separately, at the bottom of this file. */
+/** A logger built from THE pieces src/logger.ts installs — imported, not
+ *  re-declared. Rebuilding equivalents here would test copies. */
 function loggerWith(sink: { write: (s: string) => void }) {
-  return pino({ level: 'info', formatters: { log: logRedactionFormatter } }, sink as never)
+  return hardenChild(pino({
+    level: 'info',
+    formatters: { log: logRedactionFormatter },
+    hooks: { logMethod: makeLogMethodHook() },
+  }, sink as never))
 }
 
-function capture(fn: (log: pino.Logger) => void): string {
+function capture(fn: (log: ReturnType<typeof loggerWith>) => void): string {
   let out = ''
   const log = loggerWith({ write: (s: string) => { out += s } })
   fn(log)
   return out
 }
 
-describe('W13 §7.2 — a secret cannot reach a log line through the object', () => {
+// ── surface 1: the log object ───────────────────────────────────────────────
+
+describe('W13 §7.2 surface 1 — the log OBJECT', () => {
   it('redacts credential-shaped keys at the top level', () => {
     const out = capture(l => l.info({ token: 'tg-invite-abc123', apiKey: 'sk-live-XYZ' }, 'invite approved'))
     expect(out).not.toContain('tg-invite-abc123')
@@ -65,23 +88,130 @@ describe('W13 §7.2 — a secret cannot reach a log line through the object', ()
     expect(out).toContain('send:daily')
     expect(out).toContain('s-1')
   })
+})
 
-  it('an Error still carries its message and stack', () => {
-    // The redactor walks objects with Object.entries, and an Error's message and
-    // stack are non-enumerable: without the preserve hook every logged error
-    // would arrive as `{}`. That would be a worse bug than the one being fixed.
-    const out = capture(l => l.error({ err: new Error('boom-marker') }, 'failed'))
-    expect(out).toContain('boom-marker')
-    expect(out).toContain('stack')
+// ── surface 2: the message string ───────────────────────────────────────────
+
+describe('W13 §7.2 surface 2 — the MESSAGE STRING', () => {
+  it('a token in a URL inside the message is scrubbed', () => {
+    const out = capture(l => l.info('calling https://api.example.com/v1/x?access_token=abc123XYZ&page=2'))
+    expect(out).not.toContain('abc123XYZ')
+    expect(out).toContain('page=2')            // the diagnostic part survives
   })
 
-  it('the choke point covers a call site nobody edited — that is the whole point', () => {
-    // A shape no existing code writes. Nothing had to be added anywhere for this
-    // to be redacted, which is the difference between a guard and a convention.
-    const out = capture(l => l.warn({ brandNewSubsystem: { nested: { refresh_token: 'rt-9999' } } }, 'new thing'))
-    expect(out).not.toContain('rt-9999')
+  it('an Authorization header quoted into the message is scrubbed', () => {
+    const out = capture(l => l.warn('retrying with Authorization: Bearer eyJhbGciOiJIUzI1NiJ9'))
+    expect(out).not.toContain('eyJhbGciOiJIUzI1NiJ9')
+    expect(out).toContain('Bearer')            // the SHAPE is still legible
+  })
+
+  it('URL userinfo credentials are scrubbed', () => {
+    const out = capture(l => l.info('connecting to postgres://app:s3cr3tpass@db.internal:5432/marveen'))
+    expect(out).not.toContain('s3cr3tpass')
+    expect(out).toContain('db.internal')
+  })
+
+  it('THE STATED LIMIT: a bare secret in prose is NOT covered', () => {
+    // Documented in log-redaction.ts rather than hidden. The scrubber matches
+    // secret-carrying SHAPES; a list of prefixes that "look like" keys would be
+    // a blocklist of the leaks we happen to have seen. This test exists so the
+    // limit is a MEASURED fact a reader can find, not a surprise discovered
+    // during an incident.
+    const out = capture(l => l.info('the key is abc-123-secret'))
+    expect(out).toContain('abc-123-secret')
   })
 })
+
+// ── surface 3: child bindings ───────────────────────────────────────────────
+
+describe('W13 §7.2 surface 3 — CHILD BINDINGS (a real hole, measured)', () => {
+  it('a secret in child bindings never reaches the line', () => {
+    // WITHOUT hardenChild this printed `"token":"CHILDTOK"` on every line the
+    // child wrote, and the formatter never saw it: pino applies child bindings
+    // outside the per-call object the formatter receives.
+    const out = capture(l => l.child({ token: 'CHILDTOK', component: 'poller' }).info({ a: 1 }, 'from child'))
+    expect(out).not.toContain('CHILDTOK')
+    expect(out).toContain('poller')            // ordinary bindings still work
+    expect(out).toContain('"a":1')
+  })
+
+  it('a GRANDCHILD stays hardened — the level nobody looks at', () => {
+    const out = capture(l => l.child({ component: 'a' }).child({ apiKey: 'GRANDKEY' }).info('deep'))
+    expect(out).not.toContain('GRANDKEY')
+    expect(out).toContain('deep')
+  })
+
+  it('secret-shaped TEXT in a binding is scrubbed too, not only secret-named keys', () => {
+    const out = capture(l => l.child({ endpoint: 'https://h/api?api_key=BINDINGKEY' }).info('call'))
+    expect(out).not.toContain('BINDINGKEY')
+  })
+})
+
+// ── surface 4: errors, stacks, causes ───────────────────────────────────────
+
+describe('W13 §7.2 surface 4 — Error, stack and cause', () => {
+  it('a secret in the error MESSAGE is scrubbed, and the error is still an error', () => {
+    const err = new Error('GET https://api.example.com/x?token=ERRTOKEN failed with 401')
+    const out = capture(l => l.error({ err }, 'call failed'))
+    expect(out).not.toContain('ERRTOKEN')
+    expect(out).toContain('401')               // the diagnosis survives
+    expect(out).toContain('Error')             // the type survives
+    expect(out).toContain('stack')             // and so does the stack
+  })
+
+  it('a secret in the STACK is scrubbed', () => {
+    const err = new Error('boom')
+    err.stack = 'Error: boom\n    at fetch (https://svc/x?access_token=STACKTOKEN)'
+    const out = capture(l => l.error({ err }, 'failed'))
+    expect(out).not.toContain('STACKTOKEN')
+    expect(out).toContain('at fetch')
+  })
+
+  it('a nested CAUSE is walked, not trusted', () => {
+    const inner = new Error('inner https://svc/x?api_key=CAUSEKEY')
+    const err = new Error('outer', { cause: inner })
+    const out = capture(l => l.error({ err }, 'failed'))
+    expect(out).not.toContain('CAUSEKEY')
+    expect(out).toContain('outer')
+    expect(out).toContain('inner')
+  })
+
+  it('the error still carries its message — redaction is not deletion', () => {
+    const out = capture(l => l.error({ err: new Error('boom-marker') }, 'failed'))
+    expect(out).toContain('boom-marker')
+  })
+})
+
+// ── surface 5: serializers ──────────────────────────────────────────────────
+
+describe('W13 §7.2 surface 5 — serializers, excluded by evidence not assumption', () => {
+  it('REPO EVIDENCE: the application logger configures no custom serializers', () => {
+    // Istvan: exclude an irrelevant surface with evidence, not assumption. The
+    // only serializer that can run is pino's built-in error serializer, and
+    // surface 4 above shows it receives an ALREADY-RENDERED plain object,
+    // because the formatter converts Errors before it is reached.
+    const src = readFileSync(join(__dirname, '..', 'logger.ts'), 'utf-8')
+    expect(src).not.toMatch(/serializers\s*:/)
+  })
+
+  it('RUNTIME EVIDENCE: a custom serializer would run AFTER the formatter, so it cannot un-redact', () => {
+    // Measured rather than reasoned: install a serializer that would leak, and
+    // observe what it is handed. It receives the redacted value, not the
+    // original — the formatter has already run.
+    let sawByCustomSerializer: unknown
+    let out = ''
+    const log = pino({
+      level: 'info',
+      formatters: { log: logRedactionFormatter },
+      serializers: { payload: (v: unknown) => { sawByCustomSerializer = v; return v } },
+    }, { write: (s: string) => { out += s } } as never)
+    log.info({ payload: { token: 'SERIALIZERTOKEN' } }, 'x')
+    expect(JSON.stringify(sawByCustomSerializer)).not.toContain('SERIALIZERTOKEN')
+    expect(out).not.toContain('SERIALIZERTOKEN')
+  })
+})
+
+// ── failure behaviour ───────────────────────────────────────────────────────
 
 describe('W13 §7.2 — a redaction FAILURE must not print the secret', () => {
   it('an object that explodes on enumeration logs a marker, never the raw value', () => {
@@ -111,26 +241,35 @@ describe('W13 §7.2 — a redaction FAILURE must not print the secret', () => {
     })
     expect(() => capture(l => l.warn(bomb, 'still running'))).not.toThrow()
   })
-})
 
-describe('W13 §7.2 — the stated limit is real, and stated', () => {
-  it('a secret interpolated into the MESSAGE STRING is not covered', () => {
-    // Documented in src/logger.ts rather than hidden: key-name redaction cannot
-    // see inside free text. This test exists so the limit is a MEASURED fact a
-    // reader can find, not a surprise discovered during an incident.
-    const out = capture(l => l.info(`token=abc-123-secret`))
-    expect(out).toContain('abc-123-secret')
+  it('a scrubber applied to ordinary text changes nothing', () => {
+    const plain = 'cycle finished: 4 batches, 0 closed'
+    expect(scrubSecretText(plain)).toBe(plain)
   })
 })
 
+// ── the wiring ──────────────────────────────────────────────────────────────
 
-describe('W13 §7.2 — and the REAL logger is the one carrying it', () => {
-  it('src/logger.ts installs this exact formatter', () => {
-    // Without this, every test above could pass while the application logger
-    // stayed the bare pino instance the audit found. "The helper works" and
-    // "the system uses it" are different claims, and only the second one was
-    // ever in doubt.
+describe('W13 §7.2 — and the REAL logger carries all three mechanisms', () => {
+  it('installs the object formatter', () => {
     const formatters = (logger as unknown as Record<symbol, { log?: unknown }>)[pino.symbols.formattersSym]
     expect(formatters?.log).toBe(logRedactionFormatter)
+  })
+
+  it('installs the message hook', () => {
+    const hooks = (logger as unknown as Record<symbol, { logMethod?: unknown }>)[pino.symbols.hooksSym]
+    expect(typeof hooks?.logMethod).toBe('function')
+  })
+
+  it('hardens .child() — asked of the REAL logger, at runtime', () => {
+    // Not a source check: the actual application logger is asked for a child
+    // with a secret binding, and the child is asked what bindings it kept.
+    const child = logger.child({ token: 'REALTOKEN', component: 'w13-test' })
+    const bindings = child.bindings()
+    expect(JSON.stringify(bindings)).not.toContain('REALTOKEN')
+    expect(bindings.component).toBe('w13-test')
+    // and the hardening survives one more level down
+    const grandchild = child.child({ apiKey: 'REALGRANDKEY' })
+    expect(JSON.stringify(grandchild.bindings())).not.toContain('REALGRANDKEY')
   })
 })
