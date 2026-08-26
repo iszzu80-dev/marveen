@@ -42,7 +42,8 @@ function main(): void {
   const before = detectProjectionDrift(db, now)
   console.log(`Drift before: ${before.total} `
     + `(behind ${before.behind.length}, never-reconciled ${before.neverReconciled.length}, `
-    + `conflicted ${before.conflicted.length}, unenrolled ${before.unenrolled.length})`)
+    + `conflicted ${before.conflicted.length}, unenrolled ${before.unenrolled.length}, `
+    + `engine-off ${before.disabled.length})`)
 
   const sweep = reconcileProjections(db, now, { dryRun: !apply })
   console.log(`\nSweep: examined ${sweep.examined}, `
@@ -59,8 +60,10 @@ function main(): void {
     const after = detectProjectionDrift(db, now)
     console.log(`Drift after: ${after.total} `
       + `(behind ${after.behind.length}, never-reconciled ${after.neverReconciled.length}, `
-      + `conflicted ${after.conflicted.length}, unenrolled ${after.unenrolled.length})`)
+      + `conflicted ${after.conflicted.length}, unenrolled ${after.unenrolled.length}, `
+      + `engine-off ${after.disabled.length})`)
     for (const u of after.unenrolled) console.log(`  UNENROLLED ${u.domain}/${u.caseId} [${u.status}]`)
+    for (const d of after.disabled) console.log(`  ENGINE-OFF ${d.domain}/${d.caseId} [${d.status}] ${d.runs} futás`)
     for (const v of [...evaluateInvariantA(db, 'personal').violations,
       ...evaluateInvariantA(db, 'zst').violations]) {
       console.log(`  VIOLATION ${v.domain}/${v.caseId} [${v.status}] ${v.reason}`)
