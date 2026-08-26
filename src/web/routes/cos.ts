@@ -25,6 +25,7 @@ import {
 import { validateSkillMd, validateSkillPermissions } from '../../cos/skill-permission-validator.js'
 import { getMissionControlProgressionView, runProgressionCycle } from '../../cos/progression-pipeline.js'
 import { evaluateInvariantA, detectProjectionDrift } from '../../cos/case-projection.js'
+import { reopenCase } from '../../cos/case-reopen.js'
 import { semanticQualityMetrics, qualityConcerns, QUALITY_THRESHOLDS } from '../../cos/progression-quality.js'
 import { tryClaimProgression, releaseProgressionClaim } from '../../cos/progression-scheduler.js'
 import { storeDocument, documentsForCase, readDocumentBytes, resolveShareableAttachments } from '../../cos/cos-documents.js'
@@ -312,6 +313,37 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     } catch (e) {
       json(res, { error: String((e as Error).message) }, 400)
     }
+    return true
+  }
+
+  // §10.7 REOPEN. The owner-initiated half, and the only half that exists:
+  // something contradicts a completion and a human says so, naming what.
+  //
+  // The automatic half -- a detector that notices contradicting evidence
+  // arriving on a closed case -- is NOT built, and is named as missing in
+  // PHASE_1_P5_REOPEN.md rather than implied by this endpoint's existence.
+  if (path === '/api/cos/cases/reopen' && method === 'POST') {
+    let b: {
+      caseId?: string; domain?: string; reason?: string; actor?: string
+      sourceSystem?: string; sourceReference?: string; force?: boolean
+    }
+    try { b = JSON.parse((await readBody(req)).toString()) }
+    catch { json(res, { error: 'invalid JSON' }, 400); return true }
+    if (!b.caseId) { json(res, { error: 'caseId required' }, 400); return true }
+    const r = reopenCase(getDb(), {
+      domain: b.domain === 'zst' ? 'zst' : 'personal',
+      caseId: b.caseId,
+      reason: b.reason ?? '',
+      actor: b.actor ?? 'istvan',
+      evidence: {
+        sourceSystem: b.sourceSystem ?? '',
+        sourceReference: b.sourceReference ?? '',
+      },
+      force: b.force === true,
+    }, Math.floor(Date.now() / 1000))
+    // A refusal is a 409, not a 500 and not a silent 200: the caller asked for
+    // something the state machine will not do, and needs to be told which one.
+    json(res, r, r.ok ? 200 : (r.refusal === 'NO_SUCH_CASE' ? 404 : 409))
     return true
   }
 
