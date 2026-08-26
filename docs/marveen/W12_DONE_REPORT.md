@@ -229,6 +229,16 @@ transaction, the failed attempt leaves the message id taken, so the retry answer
    nothing on the run where it is green**, which is why this is written down
    rather than retried until it passed.
 
+   > **CLOSED 2026-08-26** (Phase 0 owner gate, FRESH_STORE_CONCURRENT_BOOT_SAFETY).
+   > Not by hardening the remaining sites — that path cannot be proven, only
+   > not-observed-to-fail — but at the infrastructure level: the whole DDL
+   > bootstrap now runs under a cross-process SQLite RESERVED lock on a sidecar
+   > database (`src/db-bootstrap-lock.ts`). Evidence in
+   > `docs/marveen/W14_FRESH_BOOT_PROOF.md`; guard in
+   > `src/__tests__/db-fresh-boot-single-writer.test.ts`, which asserts mutual
+   > exclusion from the lock's own ledger and fails if the unlocked race stops
+   > breaking.
+
 ## 7. Test results
 
 ```text
