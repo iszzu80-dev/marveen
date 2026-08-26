@@ -510,6 +510,39 @@ describe('P1 — the three columns the projection must NOT touch', () => {
   })
 })
 
+describe('P1 — a check that cannot run must not be able to pass', () => {
+  // The reason this block exists: the FIRST live dry run of this module printed
+  // `active 0, satisfied 0, violations []` against a board holding 146 active
+  // cases. The script had not initialised the database, every query threw, and a
+  // bare `catch {}` turned the throw into a perfectly reconciled board. The
+  // packet's own code produced the exact failure class the packet exists to end.
+  beforeEach(() => { fresh() })
+
+  it('a broken query THROWS instead of reporting a clean board', () => {
+    const db = getDb()
+    seedCase(db, 'c1', { nba: SAFE_NBA })
+    // Not "no such table: personal_cases" -- a different failure entirely, which
+    // the forgiving branch must not absorb.
+    db.exec('DROP TABLE case_progression_state')
+    expect(() => detectProjectionDrift(db, T0)).toThrow()
+    expect(() => reconcileProjections(db, T0)).toThrow()
+    expect(() => evaluateInvariantA(db, 'personal')).toThrow()
+  })
+
+  it('an unmigrated namespace IS forgiven, and only that', () => {
+    // The one condition the catch is for: this install has no ZST tables.
+    const db = getDb()
+    seedCase(db, 'c1', { nba: SAFE_NBA })
+    db.exec('DROP TABLE zst_cases')
+    const r = evaluateInvariantA(db, 'zst')
+    expect(r.active).toBe(0)
+    // ...and the personal side still answers truthfully rather than being
+    // dragged down with it.
+    reconcileProjections(db, T0 + 10)
+    expect(evaluateInvariantA(db, 'personal').satisfied).toBe(1)
+  })
+})
+
 describe('P1 — the sweep as restart recovery', () => {
   beforeEach(() => { fresh() })
 

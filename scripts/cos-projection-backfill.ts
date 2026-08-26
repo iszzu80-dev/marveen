@@ -30,7 +30,12 @@ function main(): void {
   const args = process.argv.slice(2)
   const apply = args.includes('--apply')
   const dbFlag = args.indexOf('--db')
-  if (dbFlag !== -1 && args[dbFlag + 1]) initDatabase(args[dbFlag + 1])
+  // ALWAYS init. The first version of this line only called initDatabase when
+  // --db was given, so the default (live) invocation ran every query against an
+  // undefined handle -- and the module's own catch blocks turned the resulting
+  // throw into `active 0, satisfied 0, violations []`. The report said the board
+  // was perfectly reconciled. It had never been read.
+  initDatabase(dbFlag !== -1 && args[dbFlag + 1] ? args[dbFlag + 1] : undefined)
   const db = getDb()
   const now = Math.floor(Date.now() / 1000)
 

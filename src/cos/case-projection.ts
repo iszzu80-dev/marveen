@@ -93,6 +93,23 @@ export function caseTableFor(domain: ProjectionDomain): string {
   return domain === 'personal' ? 'personal_cases' : 'zst_cases'
 }
 
+/** The ONE failure these read paths are allowed to treat as "nothing to say":
+ *  a namespace that has not been migrated on this install.
+ *
+ *  Written narrow, and driven red, after the first live dry run of this very
+ *  module reported `active 0, satisfied 0, violations []` on a board with 146
+ *  active cases. The catch was a bare `catch {}` around the query, the database
+ *  handle was undefined because the caller never initialised it, and every
+ *  query threw -- so a broken instrument printed a perfectly reconciled board.
+ *
+ *  That is the failure class this entire packet exists to end, produced by the
+ *  packet's own code, and it is why the catch now has to NAME what it forgives.
+ *  Anything else rethrows: a check that cannot run must not be able to pass. */
+function isMissingTable(e: unknown, table: string): boolean {
+  const msg = String((e as Error)?.message ?? '')
+  return msg.includes('no such table') && msg.includes(table)
+}
+
 /** Terminal statuses, taken from the engine that defines them rather than
  *  retyped here. A status added to a namespace tomorrow is covered without
  *  anyone remembering this file. */
@@ -478,8 +495,9 @@ export function reconcileProjections(
         `SELECT case_id FROM ${caseTableFor(domain)}
           WHERE archived_at IS NULL AND status NOT IN (${ph})`,
       ).all(...terminal) as Array<{ case_id: string }>
-    } catch {
-      continue // namespace not migrated on this install
+    } catch (e) {
+      if (isMissingTable(e, caseTableFor(domain))) continue
+      throw e
     }
     for (const r of rows) {
       out.examined += 1
@@ -550,7 +568,8 @@ export function evaluateInvariantA(
          FROM ${caseTableFor(domain)} c
         WHERE c.archived_at IS NULL AND c.status NOT IN (${ph})`,
     ).all(domain, ...terminal) as typeof rows
-  } catch {
+  } catch (e) {
+    if (!isMissingTable(e, caseTableFor(domain))) throw e
     return { active: 0, satisfied: 0, violations: [], unenrolled: 0 }
   }
 
@@ -632,8 +651,9 @@ export function detectProjectionDrift(db: Database.Database, now: number): Drift
              ON s.domain = ? AND s.case_id = c.case_id
           WHERE c.archived_at IS NULL AND c.status NOT IN (${ph})`,
       ).all(domain, domain, ...terminal) as typeof rows
-    } catch {
-      continue
+    } catch (e) {
+      if (isMissingTable(e, caseTableFor(domain))) continue
+      throw e
     }
     for (const r of rows) {
       if (r.canonical_revision === null) {
