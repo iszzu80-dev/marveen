@@ -61,6 +61,7 @@ import { createHash } from 'node:crypto'
 import { internalPlanLabels } from './progression-pipeline.js'
 import { PERSONAL_STATUS_SETS } from './case-engine-core.js'
 import { ZST_STATUS_SETS } from './zst-case-store.js'
+import { activeWaitCondition } from './wait-condition.js'
 
 export type ProjectionDomain = 'personal' | 'zst'
 
@@ -127,6 +128,10 @@ export interface CanonicalRow {
   blocked_reason: string | null
   wait_system_json: string | null
   progression_enabled: number
+  /** The live §10.4 typed wait condition, when the case has one. Read from its
+   *  own table rather than from the canonical row, because a wait is a fact
+   *  with a lifecycle and the canonical row holds only its current shadow. */
+  wait?: { kind: string; subject: string; expected_by: number | null; stale_review_at: number } | null
 }
 
 export interface ProjectedFields {
@@ -179,12 +184,26 @@ export function deriveProjection(c: CanonicalRow): ProjectedFields {
       kind = null; step = null; text = null
     }
   }
+  // §10.4 (P2): when the case carries a TYPED wait condition, the board reads
+  // THAT rather than the free-text `waiting_on` and the poll timer.
+  //
+  // This is what the P1 proof recorded as still-not-true. `next_progression_at`
+  // carries two meanings written by two functions -- "arm this wait" and "come
+  // back later" -- and in practice every value is the poller's five-minute
+  // re-check, so `proj_next_review_at` was a poll timer wearing the name of a
+  // review appointment. A typed condition has an actual expected-by and an
+  // actual stale review, so it can say when this case is genuinely next due a
+  // look. Falls back to the old pair when there is no condition, which is what
+  // every case looked like before this packet.
+  const wait = c.wait ?? null
   return {
     proj_next_action: text,
     proj_next_action_kind: kind,
     proj_next_action_step: step,
-    proj_wait_condition: c.waiting_on,
-    proj_next_review_at: c.next_progression_at,
+    proj_wait_condition: wait ? `${wait.kind}: ${wait.subject}` : c.waiting_on,
+    proj_next_review_at: wait
+      ? (wait.expected_by ?? wait.stale_review_at)
+      : c.next_progression_at,
     proj_blocked_reason: c.blocked_reason,
   }
 }
@@ -233,11 +252,17 @@ interface ProjectOptions {
 function readCanonical(
   db: Database.Database, domain: ProjectionDomain, caseId: string,
 ): CanonicalRow | undefined {
-  return db.prepare(
+  const row = db.prepare(
     `SELECT domain, case_id, canonical_revision, next_best_action_json, next_progression_at,
             waiting_on, blocked_reason, wait_system_json, progression_enabled
        FROM case_progression_state WHERE domain = ? AND case_id = ?`,
   ).get(domain, caseId) as CanonicalRow | undefined
+  if (!row) return undefined
+  const w = activeWaitCondition(db, domain, caseId)
+  row.wait = w
+    ? { kind: w.kind, subject: w.subject, expected_by: w.expected_by, stale_review_at: w.stale_review_at }
+    : null
+  return row
 }
 
 interface BoardRow extends ProjectedFields {

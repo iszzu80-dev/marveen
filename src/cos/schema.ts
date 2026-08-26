@@ -2071,6 +2071,107 @@ export function initProgressionSchema(db: Database.Database): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cesc_case ON case_escalations(domain, case_id, created_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cesc_status ON case_escalations(domain, resolution_status, created_at)`)
 
+  // ── case_wait_conditions (§10.4, P2) ──────────────────────────────────
+  //
+  // WHY A NEW TABLE AND NOT `wait_system_json`, which the P1 audit called an
+  // unwritten wake system. That call was wrong, and how it was wrong is the
+  // reason this table exists.
+  //
+  // `wait_system_json` has a writer, a reader and a clearer, all in
+  // capability-preflight.ts, and it means ONE thing: this case is parked because
+  // a CAPABILITY is unavailable -- a dead connector, a missing credential. It is
+  // 0/167 on the live store because that branch is unreachable: `preflight`
+  // returns ok immediately when no capabilities are declared, and no caller
+  // anywhere declares any. Built at both ends, inert in the middle.
+  //
+  // A §10.4 wait condition is a different fact. "Waiting on the machine" and
+  // "waiting on the world" resolve differently, wake differently and mean
+  // different things to the owner, and putting both in one column is the exact
+  // conflation P1 found three times in three board columns. So: its own table.
+  //
+  // ONE ACTIVE CONDITION PER CASE, enforced by a partial unique index rather
+  // than by convention. Two live waits on one case is a case that can be woken
+  // twice for the same reason.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS case_wait_conditions (
+      wait_id          TEXT PRIMARY KEY,
+      domain           TEXT NOT NULL,
+      case_id          TEXT NOT NULL,
+      /* Which of §10.4's triggers this wait is. */
+      kind             TEXT NOT NULL,
+      /* WHO or WHAT is being waited on, in words a person can read. */
+      subject          TEXT NOT NULL,
+      /* When the thing is expected. NULL only for an event-only wait, which
+         must then carry stale_review_at instead -- see the CHECK below. */
+      expected_by      INTEGER,
+      /* What would SATISFY it, as a machine-checkable predicate. */
+      evidence_predicate_json TEXT NOT NULL,
+      /* TIMER: the clock alone resolves it. EVENT_ONLY: only evidence does.
+         EITHER: whichever comes first. */
+      wake_policy      TEXT NOT NULL,
+      /* §10.2 Invariant C: a wait with no timer is allowed ONLY when it carries
+         its own stale review, so an event that never arrives cannot park a case
+         for ever in silence. */
+      stale_review_at  INTEGER NOT NULL,
+      /* The case event id at arming time. Everything after it is new. */
+      armed_event_id   INTEGER,
+      armed_at         INTEGER NOT NULL,
+      armed_run_id     TEXT,
+      resolved_at      INTEGER,
+      resolution       TEXT,
+      resolution_detail TEXT,
+      /* IDEMPOTENCY. The run that consumed this wake. A second attempt to
+         resolve an already-resolved condition is a no-op, not a second wake. */
+      resolved_run_id  TEXT,
+      CHECK (domain IN ('personal','zst')),
+      CHECK (kind IN ('EVENT','NEW_EVIDENCE','SCHEDULED_REVIEW','DEADLINE',
+                      'COMMITMENT','EXTERNAL_RESPONSE','POLICY_CHANGE')),
+      CHECK (wake_policy IN ('TIMER','EVENT_ONLY','EITHER')),
+      CHECK (resolution IS NULL OR resolution IN ('SATISFIED','EXPIRED','SUPERSEDED','CANCELLED')),
+      /* A TIMER or EITHER wait without a deadline is a wait nothing can end. */
+      CHECK (wake_policy = 'EVENT_ONLY' OR expected_by IS NOT NULL)
+    )
+  `)
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cwc_one_active
+             ON case_wait_conditions(domain, case_id) WHERE resolved_at IS NULL`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_cwc_due
+             ON case_wait_conditions(stale_review_at) WHERE resolved_at IS NULL`)
+
+  // THE WAIT CONDITION IS A PROJECTION INPUT, SO IT MUST MOVE THE REVISION.
+  //
+  // The projection reads the live condition for `proj_wait_condition` and
+  // `proj_next_review_at`. `canonical_revision` lives on case_progression_state
+  // and its trigger watches that table only -- so without these two, arming or
+  // resolving a wait would change what the board OUGHT to say while the revision
+  // insisted the board was current. Stale drift wearing the badge of freshness,
+  // which is the one failure case-projection's own oracle test exists to make
+  // impossible.
+  //
+  // Same shape as the canonical trigger, and for the same reason: a trigger is
+  // the table's choke point and covers writers that do not exist yet.
+  db.exec(`DROP TRIGGER IF EXISTS trg_cwc_revision_insert`)
+  db.exec(`
+    CREATE TRIGGER trg_cwc_revision_insert AFTER INSERT ON case_wait_conditions
+    FOR EACH ROW BEGIN
+      UPDATE case_progression_state SET canonical_revision = canonical_revision + 1
+       WHERE domain = NEW.domain AND case_id = NEW.case_id;
+    END
+  `)
+  db.exec(`DROP TRIGGER IF EXISTS trg_cwc_revision_update`)
+  db.exec(`
+    CREATE TRIGGER trg_cwc_revision_update AFTER UPDATE ON case_wait_conditions
+    FOR EACH ROW WHEN
+         (NEW.resolved_at     IS NOT OLD.resolved_at)
+      OR (NEW.expected_by     IS NOT OLD.expected_by)
+      OR (NEW.stale_review_at IS NOT OLD.stale_review_at)
+      OR (NEW.subject         IS NOT OLD.subject)
+      OR (NEW.kind            IS NOT OLD.kind)
+    BEGIN
+      UPDATE case_progression_state SET canonical_revision = canonical_revision + 1
+       WHERE domain = NEW.domain AND case_id = NEW.case_id;
+    END
+  `)
+
   // LAST in this function: the projection seam needs both case tables AND
   // case_progression_state to exist, and this is the first point where all
   // three are guaranteed.

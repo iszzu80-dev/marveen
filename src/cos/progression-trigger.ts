@@ -17,6 +17,7 @@
 // deadline; a pure "is it due?" check is what we have now.
 import type Database from 'better-sqlite3'
 import { readWaitSystem, capabilityRecovered } from './capability-preflight.js'
+import { evaluateWaitCondition } from './wait-condition.js'
 import { createHash } from 'node:crypto'
 
 /** §10.8's trigger list. `SCHEDULED` is deliberately NOT here: "the clock came
@@ -183,6 +184,34 @@ export function decideTrigger(
       ? yes('CAPABILITY_RECOVERED', `capability:${wait.capability}`,
           `the capability came back: ${wait.capability}`)
       : no(`waiting on a capability: ${wait.capability}`)
+  }
+
+  // §10.4 (P2): a case wakes when its typed WAIT CONDITION is satisfied or
+  // expired — not only when a clock fires.
+  //
+  // BEFORE the deadline rule and before the hash, for the same reason the
+  // capability wait is: a case waiting on the world does not change its own
+  // effective state while it waits. Same version, same deadlines, same hash. A
+  // reply arriving is a change to the case's EVENTS, and the hash does carry
+  // last_event_id — but an EXPIRY is not an event at all, and under the hash
+  // rule alone a wait nobody ever answered would sit for ever, silently. That
+  // is precisely the state §10.2's Invariant C forbids, and the reason every
+  // condition is required to carry a stale review.
+  //
+  // The evaluation is READ-ONLY. The wake is consumed by the run itself, which
+  // is what makes it idempotent: two sweeps can both see a satisfied condition,
+  // and exactly one of them resolves it.
+  const waitVerdict = evaluateWaitCondition(db, domain, caseId, now)
+  if (waitVerdict.verdict === 'SATISFIED') {
+    return yes('NEW_RELEVANT_EVENT', `wait:${waitVerdict.waitId?.slice(0, 8) ?? ''}`,
+      `the wait condition was met: ${waitVerdict.detail}`)
+  }
+  if (waitVerdict.verdict === 'EXPIRED') {
+    return yes('FOLLOW_UP_DUE', `wait-expired:${waitVerdict.waitId?.slice(0, 8) ?? ''}`,
+      `the wait condition expired unmet: ${waitVerdict.detail}`)
+  }
+  if (waitVerdict.verdict === 'WAITING') {
+    return no(`waiting on a typed condition (${waitVerdict.kind})`)
   }
 
   // A DUE deadline that has not been handled yet fires, whatever the hash says.

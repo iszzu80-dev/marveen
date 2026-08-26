@@ -64,6 +64,9 @@ import { CASE_STATUSES } from './schema.js'
 import { evaluateCaseTemporalConsistency } from './temporal-consistency-gate.js'
 // Two-node ESM cycle with case-projection, deliberate: see that module's header.
 import { projectCase } from './case-projection.js'
+import {
+  armWaitCondition, evaluateWaitCondition, resolveWaitCondition, type ArmResult,
+} from './wait-condition.js'
 
 // ── Valid progression decisions (plan §13) ──────────────────────────────
 
@@ -1731,6 +1734,47 @@ function runProgressionCycleInner(
     ).run(currentVersion, runId)
   }
 
+  // ── 13b. P2 §10.4 — the typed wait condition ───────────────────────────────
+  //
+  // TWO ACTS, in this order, and the order is the point.
+  //
+  // FIRST, consume the wake this run is answering. If the case's live condition
+  // was satisfied or expired, this run IS the wake, and saying so is what makes
+  // the wake idempotent: `resolveWaitCondition` records the run id and a second
+  // runner is told the condition was already consumed rather than being allowed
+  // to believe it woke the case too.
+  //
+  // THEN, if this run decided to wait again, arm a NEW condition. A WAIT
+  // decision that arms nothing is a silent park -- the case sits in
+  // WAITING_EXTERNAL with a free-text `waiting_on` and nothing that can ever
+  // say the wait was met, which is the state §10.4 exists to end. So a failure
+  // to arm downgrades the run rather than passing quietly: the owner's words
+  // for this packet were that filling a column is not acceptance.
+  try {
+    const pending = evaluateWaitCondition(db, domain, caseId, now)
+    if (pending.verdict === 'SATISFIED' || pending.verdict === 'EXPIRED') {
+      resolveWaitCondition(db, domain, caseId, pending.verdict, pending.detail, runId, now)
+    }
+    if (decision === 'WAIT_EXTERNAL' || decision === 'WAIT_TIME') {
+      const waitFacts = db.prepare(
+        `SELECT waiting_on, follow_up_at, due_at
+           FROM ${domain === 'personal' ? 'personal_cases' : 'zst_cases'} WHERE case_id = ?`,
+      ).get(caseId) as { waiting_on: string | null; follow_up_at: number | null; due_at: number | null }
+      const armed = armWaitFor(db, domain, caseId, decision, context, waitFacts, runId, now)
+      if (!armed.ok) {
+        // Recorded on the run, not thrown: the decision itself is sound and
+        // already durable. What is not sound is calling it a typed wait.
+        reason = `${reason} — FIGYELEM: a tipizált várakozás nem lett felállítva `
+          + `(${armed.refusal}: ${armed.detail ?? ''})`
+        safetyViolations.push({
+          assertion: 'WAIT_WITHOUT_TYPED_CONDITION',
+          case_id: caseId, domain,
+          detail: `${decision} döntés tipizált várakozás nélkül: ${armed.refusal}`,
+        })
+      }
+    }
+  } catch { /* a wait-condition fault must not lose a completed decision */ }
+
   // ── 14. P1 — project the canonical decision onto the case board ────────────
   //
   // HERE, inside the run's transaction, and at the ONE place every progression
@@ -1766,6 +1810,49 @@ function runProgressionCycleInner(
     goalVersion,
   }
 }
+
+/** Turn a WAIT decision into a typed §10.4 condition.
+ *
+ *  WAIT_TIME is a clock we already hold, so it becomes a SCHEDULED_REVIEW with
+ *  a TIMER policy. WAIT_EXTERNAL is the world, so it becomes an
+ *  EXTERNAL_RESPONSE with EITHER: whichever arrives first, the reply or the
+ *  deadline, ends the wait -- and if neither does, the stale review does.
+ *
+ *  The subject comes from what the case already says it is waiting on. If it
+ *  says nothing, this refuses rather than inventing a party: "waiting for
+ *  someone" is the free-text park this packet replaces.
+ */
+function armWaitFor(
+  db: Database.Database,
+  domain: 'personal' | 'zst',
+  caseId: string,
+  decision: string,
+  context: ResolvedContext,
+  caseRow: { waiting_on?: string | null; follow_up_at?: number | null; due_at?: number | null },
+  runId: string,
+  now: number,
+): ArmResult {
+  if (decision === 'WAIT_TIME') {
+    return armWaitCondition(db, {
+      domain, caseId, kind: 'SCHEDULED_REVIEW',
+      subject: 'ütemezett felülvizsgálat',
+      expectedBy: context.nextWakeAt,
+      wakePolicy: 'TIMER', runId,
+    }, now)
+  }
+  const subject = (caseRow.waiting_on ?? '').trim() || 'külső fél válasza'
+  const expectedBy = caseRow.follow_up_at ?? caseRow.due_at ?? (now + EXTERNAL_WAIT_HORIZON_SEC)
+  return armWaitCondition(db, {
+    domain, caseId, kind: 'EXTERNAL_RESPONSE',
+    subject, expectedBy, wakePolicy: 'EITHER', runId,
+  }, now)
+}
+
+/** How long an external wait runs before its own deadline, when the case
+ *  carries no follow-up date of its own. Seven days, matching the escalation
+ *  clock in `decide()` -- two different numbers here would mean a wait that
+ *  expires after the engine has already escalated it. */
+export const EXTERNAL_WAIT_HORIZON_SEC = 7 * 86400
 
 // ── Mission Control read view (read-only projection) ────────────────────
 
