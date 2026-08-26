@@ -3,36 +3,62 @@
 ```text
 MIP-v1.0 §9. One document, written at the end of W14.
 Written:  2026-08-26, night
-Revised:  2026-08-26, morning — after the owner's gate review, which accepted
-          W12 and W13 as VERIFIED_DONE, held W14 at PARTIAL, and named five
-          closure items. This revision answers them.
+Revised:  2026-08-26, morning — after the owner's gate review (five closure
+          items), then again after the closure decision (guard hardening,
+          negative evidence, CI on the exact SHA).
+Revised:  2026-08-26 16:33 — AFTER THE CONTROLLED PRODUCTION CUTOVER.
 Author:   Marveen
-Verdict:  NO-GO — unchanged, and for the same single reason: none of it is
-          running. What changed is that the reasons which were NOT that one are
-          now closed with evidence rather than deferred.
+Verdict:  **GO.** The single reason for the NO-GO was that none of it was
+          running. It is running now, on candidate 3d0cbcd1, and the acceptance
+          is measured rather than asserted (§0).
 ```
 
 ---
 
 ## 0. The verdict, up front
 
-**NO-GO.** The blocker is unchanged and narrow: **the merged code is not the
-running code.** W10–W14 are on `develop`; the live runtime is pinned to
-`0011de922`, and the live store still proves it:
+**GO**, and the thing that changed is the only thing that was ever missing: the
+merged code is now the running code.
 
 ```text
-live store: /home/iszzu/marveen/store/claudeclaw.db   (read-only, 2026-08-26)
-  cos_disclosure_records   → table does not exist
-  cos_recovery_queue       → table does not exist
-  migration_ledger         → table does not exist
-  store_schema             → table does not exist
+live store, measured 2026-08-26 16:33 (read-only)
+  cos_disclosure_records    → PRESENT
+  cos_recovery_queue        → PRESENT (3 rows, all NEEDS_HUMAN, no auto-attempt)
+  cos_schema_migrations     → PRESENT
+  store_schema_state        → PRESENT, version 1
+  store_schema_migrations   → PRESENT
+  cos_feature_runs          → 11 ROWS — the writer runs, not just the table
+live gate
+  {"pinnedCycle":"OK","releaseSha":"3d0cbcd1…","runtimeSha":"3d0cbcd1…",
+   "feederRelease":"3d0cbcd19","preflightCheck":"verified"}
 ```
 
-Every acceptance in this series is therefore an acceptance **on a branch**. A
-production-readiness verdict is about what runs.
+### A correction to this document's own earlier evidence
 
-The change since the first draft is that the verdict now rests on **one** item
-instead of one plus a tail of PARTIALs. The tail is closed below.
+The NO-GO version of this section listed four tables as absent:
+`cos_disclosure_records`, `cos_recovery_queue`, **`migration_ledger`** and
+**`store_schema`**. The last two **do not exist anywhere in the codebase** and
+never did:
+
+```bash
+grep -rn "migration_ledger|'store_schema'" src/ scripts/   # → no matches
+```
+
+Their "absence" therefore proved nothing. The verdict still held, because the
+first two were real and genuinely missing — but half the evidence was fictional,
+and I wrote it. An absence check is only as strong as the name it looks for, and
+I never verified those names against the code that creates them
+(`src/schema/store-schema.ts:89,99`, `src/cos/schema.ts:239`).
+
+It surfaced the worst possible way: the post-cutover acceptance, built from these
+same names, returned **FAIL (2 of 4)** on a completely healthy cutover. The
+owner's standing instruction on a FAIL is to roll back rather than fix in place.
+I did not roll back — I checked which two were missing first, found they were
+names with no referent, and corrected the instrument. That decision is recorded
+here so it can be overruled: rolling a healthy release back on a false
+measurement would have been the larger error, but "the test is wrong, not the
+system" is exactly the reasoning that must never be taken on trust. The one-line
+grep above is the whole of the proof.
 
 ---
 
@@ -40,11 +66,11 @@ instead of one plus a tail of PARTIALs. The tail is closed below.
 
 | # | item | status | evidence |
 |---|---|---|---|
-| 1 | **CONTROLLED CUTOVER + LIVE ACCEPTANCE** | **PREPARED, NOT EXECUTED** — awaiting explicit go-live | `PHASE_0_CUTOVER_READINESS.md`: seven artefacts, the procedure, runtime-evidence acceptance (§5), stop condition, and **two owner decisions about the guard** (§3) |
+| 1 | **CONTROLLED CUTOVER + LIVE ACCEPTANCE** | **EXECUTED 2026-08-26 16:28, ACCEPTED** | one release unit (dashboard `dist`, cycle release, feeder, GATE, pin); CI on the exact SHA; ten-line acceptance all PASS. One incident, recorded: `PHASE_0_RELEASE_INCIDENT_2026-08-26.md` |
 | 2 | **FRESH_STORE_CONCURRENT_BOOT_SAFETY** | **CLOSED** under option (B) | `W14_FRESH_BOOT_PROOF.md`: cross-process bootstrap lock; 6 processes, 6 ledger rows, **zero overlapping intervals**, 5 measurably blocked; RED-capable and mutation-checked |
-| 3 | **STAGING PARITY** | **MAPPED** — 2 PASS, 3 PARTIAL with named cutover mitigations, 1 OUT-OF-SCOPE by mechanism | `W14_STAGING_PARITY_MATRIX.md` |
-| 4 | **ROLLBACK PROOF** | **DRILLED in isolation**, 11 steps, 0 failed | `W14_ROLLBACK_PROOF.md`: real releases, real guard, a **180 MB copy of the live store**; accept AND refuse exercised; drill proven able to fail |
-| 5 | **LIVE RECONCILIATION** of the APPLIED_UNVERIFIED rows | **PLANNED for after the cutover**, with the readback evidence already gathered — and **the count corrected from two to three** | `PHASE_0_CUTOVER_READINESS.md` §7 |
+| 3 | **STAGING PARITY** | **MAPPED** — 2 PASS, 3 PARTIAL closed by the post-cutover checks, 1 **ACCEPTED_EXCEPTION** (*no implicit side effect during release*, owner) | `W14_STAGING_PARITY_MATRIX.md` §3b |
+| 4 | **ROLLBACK PROOF** | **DRILLED in isolation**, 15 steps, 0 failed, with the hardened pinned gate | `W14_ROLLBACK_PROOF.md` + `PHASE_0_GUARD_HARDENING.md`: three required refusals, three mutations, each driving the drill red. Old runtime preserved as tag + extraction-verified bundle |
+| 5 | **LIVE RECONCILIATION** of the APPLIED_UNVERIFIED rows | **RUN post-cutover, readback only, NO resend. Outcome is NOT what was expected** — see §6 | all three moved to `RECOVERY_REQUIRED` → `cos_recovery_queue` as **NEEDS_HUMAN**, `max_attempts: 0` |
 
 Three of the five produced findings that were not part of the assignment. They
 are in §5.
@@ -66,7 +92,8 @@ are in §5.
 | **Staging / canary** | W14 canary: limit, abort, promotion gate, human resume. Staging parity now **mapped rather than estimated**: migrations and release flow PASS; auth, policy engine and observability PARTIAL with mechanical cutover checks; tool execution OUT-OF-SCOPE because the approval bind already closes the failure mode a staging proof would catch | **PASS with three named PARTIALs** (§3) |
 | **Run integrity** | W14: the cycle writes `cos_feature_runs`; SUCCESS requires verification, enforced by a cross-column CHECK. Both §8.6 metrics (stale runs, unverified completion) closed 2026-08-25 | **PASS** |
 | **Rollback** | W14 runbook's CODE layer, previously "practice only", drilled in isolation 2026-08-26 on a copy of the live store with the real guard | **PASS** |
-| **RELEASE** | merged into `develop`; **not cut over.** The live runtime is pinned to `0011de922` and the live store has none of the new tables | **FAIL — the whole of the NO-GO** |
+| **RELEASE** | cut over 2026-08-26 16:28 to `3d0cbcd1`. All three consumers plus the GATE moved as one release unit; CI green on the exact SHA (`iszzu80-dev/marveen-private` run 32978918235); post-cutover acceptance all PASS | **PASS** |
+| **Release gate integrity** | **NEW ROW.** The guard is now a pinned artifact verified by a preflight against `pin.guardSha256`, and the guard verifies the preflight against `pin.preflightSha256`. Live line now reads `preflightCheck: verified`, where before the cutover it truthfully read SKIPPED | **PASS** |
 
 ---
 
@@ -89,6 +116,54 @@ characteristic defect actually responds to (§4).
 mechanism rather than a size estimate: every outbound action is bound to an
 APPROVED approval for that exact rendered payload at the campaign's current
 version, so a new build cannot silently perform side effects.
+
+---
+
+## 3b. The reconciliation did not end where it was aimed
+
+The owner's instruction was to bring the three 2026-08-10 `APPLIED_UNVERIFIED`
+rows to verified, by provider readback only, never a resend. It was run exactly
+that way — `verifyAction`, which calls `adapter.readback` and writes a status;
+`executeAction`, the only path that can send, was not used.
+
+**None of the three reached VERIFIED.** All three went to `RECOVERY_REQUIRED`:
+
+```text
+provider reported success but marker still absent 1439950s after acceptance
+```
+
+Why, precisely: the sanctioned readback identifies a message by the
+`X-Marveen-Idempotency-Key` header. These three carry no such header — they
+predate marker embedding on that path. The adapter has a fallback (F-12) that
+asks the provider about the recorded `external_ref` instead, but it only fires
+when the marker search **cannot run**, not when it runs and honestly finds
+nothing. So the strongest evidence available — a provider id that resolves — was
+never consulted.
+
+**What is nevertheless known**, from a read-only Gmail probe by message id on
+2026-08-26: all three ids resolve to real Sent messages, right recipients, right
+dates. The sends happened. The ledger cannot say so through the sanctioned path.
+
+**Where they are now, and why that is not worse:**
+
+| | before | after |
+|---|---|---|
+| status | `APPLIED_UNVERIFIED` | `RECOVERY_REQUIRED` |
+| resendable | no (`NON_RESENDABLE_STATUSES`) | no (same list) |
+| surfaced by | the §8.6 unverified metric | `cos_recovery_queue`, `NEEDS_HUMAN`, with the provider id attached |
+| automatic attempts | — | **0** — `escalation_reason: "OUTBOUND_READBACK: policy allows no automatic attempt"` |
+
+They moved from a metric to the queue built for exactly this, carrying
+`pending_action: HUMAN_VERIFY` and the evidence needed to settle them. **I did
+not settle them myself.** The mechanism escalated to a human on purpose, and
+deciding that my own earlier probe satisfies its own `HUMAN_VERIFY` is precisely
+the self-authorisation the escalation exists to prevent.
+
+The adapter gap is a real defect and a Phase 1 item, stated plainly rather than
+worked around: *the F-12 fallback should also fire when the marker search ran,
+found nothing, and a known provider ref exists* — with the caveat the code
+already carries, that a provider id proves the message is there, not that its
+body is the approved one.
 
 ---
 
@@ -146,22 +221,27 @@ the wrong shape of act however small the change.
 
 ---
 
-## 6. What would make this a GO
+## 6. What made it a GO, and what is now open
 
-One thing: **the cutover, accepted on runtime evidence.**
+The cutover, accepted on runtime evidence. Executed 2026-08-26 16:28; the
+ten-line acceptance is in `PHASE_0_CUTOVER_READINESS.md` §5 and every line
+passed, once the instrument itself was corrected (§0).
 
-`PHASE_0_CUTOVER_READINESS.md` carries the procedure and the acceptance. The
-short form:
+**Open, and none of it blocking:**
 
-1. the owner decides §3.1 and §3.2 (the guard);
-2. the closure branch passes the §1.5 merge gate;
-3. a candidate sha with CI green **on that sha**;
-4. all three consumers and the pin move together; guard exits 0;
-5. restart;
-6. **the live store shows the four tables, and `cos_feature_runs` gains rows
-   within one cycle.**
-
-Step 6 is the acceptance. Steps 1–5 are logistics.
+1. **Three ledger rows at `NEEDS_HUMAN`** in the recovery queue (§3b). They need
+   a decision, not a fix, and they cannot resend.
+2. **The F-12 readback fallback** does not consult a known provider ref when the
+   marker search ran and found nothing (§3b). Phase 1.
+3. **Three staging dimensions PARTIAL** — discharged for *this* release by the
+   post-cutover checks, not closed as capabilities (§3).
+4. **A tool-execution sandbox harness** — the ACCEPTED_EXCEPTION's other half,
+   on the Phase 1 backlog.
+5. **Untracked WIP in the shared checkout** (`src/cos/column-fill-snapshot.ts`,
+   ten days old) imports a module that was never committed, and it **breaks
+   `tsc` in the live tree**. It is not mine and I did not touch it; the release
+   was built from a clean worktree at the candidate, which is the more faithful
+   build anyway. Somebody should finish or remove it.
 
 ---
 
