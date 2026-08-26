@@ -26,6 +26,22 @@ import { validateSkillMd, validateSkillPermissions } from '../../cos/skill-permi
 import { getMissionControlProgressionView, runProgressionCycle } from '../../cos/progression-pipeline.js'
 import { evaluateInvariantA, detectProjectionDrift } from '../../cos/case-projection.js'
 import { reopenCase } from '../../cos/case-reopen.js'
+import { renderActionKind } from '../../cos/case-action-label.js'
+
+/** Attach the owner-readable rendering of the engine's next-action KIND.
+ *
+ *  ON THE READ PATH ONLY, and never written back. The engine's own next-action
+ *  text is internal English plan vocabulary that `isUsableRecommendation`
+ *  refuses to show Istvan -- on the live store that is 76 cases out of 76 -- so
+ *  without this the board can say a next step EXISTS and nothing about it.
+ *
+ *  It is deliberately NOT stored: a stored rendering would become a second
+ *  representation of a fact the engine already owns, which is the drift P1 spent
+ *  a packet removing, and it must never reach `case-link`'s trusted fields. */
+function withRenderedAction<T extends { proj_next_action_kind: string | null }>(rows: T[]):
+Array<T & { rendered_action: ReturnType<typeof renderActionKind> }> {
+  return rows.map(r => ({ ...r, rendered_action: renderActionKind(r.proj_next_action_kind) }))
+}
 import { semanticQualityMetrics, qualityConcerns, QUALITY_THRESHOLDS } from '../../cos/progression-quality.js'
 import { tryClaimProgression, releaseProgressionClaim } from '../../cos/progression-scheduler.js'
 import { storeDocument, documentsForCase, readDocumentBytes, resolveShareableAttachments } from '../../cos/cos-documents.js'
@@ -410,14 +426,14 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
   }
 
   if (path === '/api/cos/cases' && method === 'GET') {
-    const cases = listActiveCases(getDb())
+    const cases = withRenderedAction(listActiveCases(getDb()))
     json(res, { cases, count: cases.length })
     return true
   }
 
   if (path === '/api/cos/today' && method === 'GET') {
     const horizon = endOfTodaySec(new Date())
-    const cases = listTodayCases(getDb(), horizon)
+    const cases = withRenderedAction(listTodayCases(getDb(), horizon))
     json(res, { cases, count: cases.length, horizon })
     return true
   }

@@ -135,6 +135,14 @@ export interface CaseListItem {
   follow_up_at: number | null
   source_system: string | null
   updated_at: number
+  // P1 projection (engine-owned, read-only here). `proj_next_action` is NULL
+  // whenever the engine's own text is internal machine vocabulary, which on the
+  // live store is every case -- so the KIND is what a reader has to render.
+  proj_next_action: string | null
+  proj_next_action_kind: string | null
+  proj_wait_condition: string | null
+  proj_next_review_at: number | null
+  last_reconciled_at: number | null
 }
 
 export interface ClaimResult {
@@ -146,7 +154,8 @@ export interface ClaimResult {
 // Priority sort rank (urgent-first) for the read views.
 const PRIORITY_ORDER = `CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 WHEN 'P3' THEN 3 ELSE 4 END`
 const LIST_COLUMNS = `case_id, title, case_type, category, status, priority, sensitivity,
-  next_action, next_action_owner, waiting_on, due_at, follow_up_at, source_system, updated_at`
+  next_action, next_action_owner, waiting_on, due_at, follow_up_at, source_system, updated_at,
+  proj_next_action, proj_next_action_kind, proj_wait_condition, proj_next_review_at, last_reconciled_at`
 const PATCHABLE_COLUMNS: readonly TransitionPatchKey[] = [
   'next_action', 'next_action_owner', 'waiting_on', 'blocked_reason',
   'due_at', 'follow_up_at', 'next_wake_at', 'closure_reason',
