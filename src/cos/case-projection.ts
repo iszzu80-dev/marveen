@@ -241,6 +241,46 @@ function readBoard(
 }
 
 /**
+ * The fenced write, on its own so it can be driven red on its own.
+ *
+ * `projectCase` checks the revision before it computes anything, and this
+ * statement checks it again in its WHERE clause. That is not belt-and-braces
+ * for its own sake: the early check answers "is this projection stale as of my
+ * read", and only the WHERE clause can answer "did somebody land a newer one
+ * while I was working". A mutation that deletes either one alone is invisible
+ * to a test that exercises only the first scenario, which is exactly what the
+ * first version of this file's test suite did.
+ *
+ * Returns false when the fence refused, i.e. zero rows changed.
+ */
+export function writeProjection(
+  db: Database.Database,
+  domain: ProjectionDomain,
+  caseId: string,
+  want: ProjectedFields,
+  rev: number,
+  conflictReason: string | null,
+  now: number,
+): boolean {
+  const info = db.prepare(
+    `UPDATE ${caseTableFor(domain)}
+        SET proj_next_action = @proj_next_action,
+            proj_next_action_kind = @proj_next_action_kind,
+            proj_next_action_step = @proj_next_action_step,
+            proj_wait_condition = @proj_wait_condition,
+            proj_next_review_at = @proj_next_review_at,
+            proj_blocked_reason = @proj_blocked_reason,
+            projected_revision = @rev,
+            projection_fingerprint = @fingerprint,
+            projection_conflict_reason = @conflictReason,
+            last_reconciled_at = @now
+      WHERE case_id = @caseId
+        AND (projected_revision IS NULL OR projected_revision <= @rev)`,
+  ).run({ ...want, rev, fingerprint: projectionFingerprint(want), conflictReason, now, caseId })
+  return info.changes > 0
+}
+
+/**
  * Project one case's canonical state onto its board row.
  *
  * WHAT IT NEVER DOES, because "no side effects from reconciliation" is an
@@ -342,28 +382,13 @@ export function projectCase(
     appendProjectionInputEvent(db, domain, caseId, board.version, current, foreignFields, now)
   }
 
-  const fingerprint = projectionFingerprint(want)
-  const info = db.prepare(
-    `UPDATE ${caseTableFor(domain)}
-        SET proj_next_action = @proj_next_action,
-            proj_next_action_kind = @proj_next_action_kind,
-            proj_next_action_step = @proj_next_action_step,
-            proj_wait_condition = @proj_wait_condition,
-            proj_next_review_at = @proj_next_review_at,
-            proj_blocked_reason = @proj_blocked_reason,
-            projected_revision = @rev,
-            projection_fingerprint = @fingerprint,
-            projection_conflict_reason = @conflictReason,
-            last_reconciled_at = @now
-      WHERE case_id = @caseId
-        AND (projected_revision IS NULL OR projected_revision <= @rev)`,
-  ).run({ ...want, rev, fingerprint, conflictReason, now, caseId })
+  const landed = writeProjection(db, domain, caseId, want, rev, conflictReason, now)
 
-  // The WHERE clause is the fence a second time, at the statement level: if a
-  // concurrent projection landed a newer revision between our read and our
-  // write, zero rows change and we say FENCED rather than reporting a success
-  // that did not happen.
-  if (info.changes === 0) {
+  // The statement-level fence, which is the ONLY one that can see the race the
+  // early check cannot: a concurrent projection landing a newer revision
+  // BETWEEN our read and our write. Zero rows changed means we say FENCED
+  // rather than report a success that did not happen.
+  if (!landed) {
     return {
       ...base, outcome: 'FENCED', canonicalRevision: rev, previousProjectedRevision: prevRev,
       conflictReason: `STALE_PROJECTION: lost the write race at revision ${rev}`,

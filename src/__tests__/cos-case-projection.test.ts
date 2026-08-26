@@ -17,7 +17,7 @@ import { initDatabase, getDb } from '../db.js'
 import { createCase } from '../cos/case-store.js'
 import { initProgressionSchema, initCaseProjectionSchema } from '../cos/schema.js'
 import {
-  projectCase, reconcileProjections, evaluateInvariantA, detectProjectionDrift,
+  projectCase, writeProjection, reconcileProjections, evaluateInvariantA, detectProjectionDrift,
   deriveProjection, projectionFingerprint, isOwnerSafeActionText,
   CANONICAL_PROJECTION_INPUTS, PROJECTED_COLUMNS,
 } from '../cos/case-projection.js'
@@ -179,20 +179,60 @@ describe('P1 — the projection itself', () => {
   })
 
   it('FENCES a stale writer instead of walking the board backwards', () => {
+    // GUARD ONE, the pre-check: stale as of the read.
     const db = getDb()
     seedCase(db, 'c1', { nba: SAFE_NBA })
     projectCase(db, 'personal', 'c1', T0 + 10)
     // A newer projection landed (concurrent runner), and now an older one
     // arrives carrying revision N while the row already reflects N+5.
-    db.prepare(`UPDATE personal_cases SET projected_revision = ? WHERE case_id='c1'`)
-      .run(revisionOf(db, 'c1') + 5)
+    const rev = revisionOf(db, 'c1')
+    db.prepare(`UPDATE personal_cases SET projected_revision = ? WHERE case_id='c1'`).run(rev + 5)
     const before = boardRow(db, 'c1')
     const r = projectCase(db, 'personal', 'c1', T0 + 20)
     expect(r.outcome).toBe('FENCED')
-    expect(r.conflictReason).toContain('STALE_PROJECTION')
+    // The exact reason, not merely "some refusal": the two fences produce
+    // different sentences and a test that accepted either could not tell which
+    // one fired -- or notice that only one of them still exists.
+    expect(r.conflictReason).toBe(`STALE_PROJECTION: canonical_revision ${rev} < projected_revision ${rev + 5}`)
     const after = boardRow(db, 'c1')
     for (const col of PROJECTED_COLUMNS) expect(after[col]).toEqual(before[col])
     expect(after.last_reconciled_at).toBe(before.last_reconciled_at)
+  })
+
+  it('FENCES at the STATEMENT too -- the race the pre-check cannot see', () => {
+    // GUARD TWO, and the reason it is tested separately: a mutation deleting
+    // either fence alone was invisible to the test above, because the other one
+    // caught the same scenario and produced a similar-looking refusal. The two
+    // guards answer different questions. This one answers "did somebody land a
+    // newer projection between my read and my write", which no amount of
+    // checking beforehand can cover.
+    const db = getDb()
+    seedCase(db, 'c1', { nba: SAFE_NBA })
+    projectCase(db, 'personal', 'c1', T0 + 10)
+    const rev = revisionOf(db, 'c1')
+    db.prepare(`UPDATE personal_cases SET projected_revision = ? WHERE case_id='c1'`).run(rev + 5)
+    const before = boardRow(db, 'c1')
+
+    const landed = writeProjection(
+      db, 'personal', 'c1',
+      { proj_next_action: 'elavult', proj_next_action_kind: 'EXECUTE', proj_next_action_step: 1,
+        proj_wait_condition: null, proj_next_review_at: null, proj_blocked_reason: null },
+      rev, null, T0 + 20,
+    )
+    expect(landed).toBe(false)
+    const after = boardRow(db, 'c1')
+    for (const col of PROJECTED_COLUMNS) expect(after[col]).toEqual(before[col])
+    expect(after.last_reconciled_at).toBe(before.last_reconciled_at)
+
+    // ...and the same write at the CURRENT revision does land, so the test is
+    // measuring the fence and not a write that never works.
+    expect(writeProjection(
+      db, 'personal', 'c1',
+      { proj_next_action: 'friss', proj_next_action_kind: 'EXECUTE', proj_next_action_step: 1,
+        proj_wait_condition: null, proj_next_review_at: null, proj_blocked_reason: null },
+      rev + 5, null, T0 + 30,
+    )).toBe(true)
+    expect(boardRow(db, 'c1').proj_next_action).toBe('friss')
   })
 
   it('records a CONFLICT REASON and ingests the foreign write as an input event', () => {
