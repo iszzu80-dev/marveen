@@ -67,9 +67,17 @@ function runWorker(dbPath: string, tag: string): Promise<WorkerLine> {
     child.stderr.on('data', (d) => { err += String(d) })
     child.on('error', reject)
     child.on('close', (code) => {
-      const line = out.trim().split('\n').filter(Boolean).pop()
-      if (!line) return reject(new Error(`worker produced no JSON (exit ${code}): ${err.slice(-800)}`))
-      try { resolve(JSON.parse(line) as WorkerLine) } catch (e) { reject(new Error(`bad JSON: ${line}\n${String(e)}`)) }
+      // The worker's verdict is the last line that PARSES and carries the
+      // worker's own shape -- not simply the last line. The logger shares
+      // stdout, and since the bootstrap lock landed (2026-08-26) the losing
+      // worker logs its contention there, which broke a `.pop()` that assumed
+      // the process printed nothing else.
+      const parsed = out.split('\n')
+        .map((l) => { try { return JSON.parse(l.trim()) as WorkerLine } catch { return null } })
+        .filter((v): v is WorkerLine => v !== null && typeof v.pid === 'number' && v.outcomes !== undefined)
+        .pop()
+      if (!parsed) return reject(new Error(`worker produced no verdict (exit ${code}): ${err.slice(-800)}`))
+      resolve(parsed)
     })
   })
 }
@@ -89,11 +97,13 @@ describe('W12 §6.8/§6.9 — two processes, one message', () => {
     // ALTER TABLE; index creation ordered against tables another process has
     // not made yet), and three different startup errors were observed --
     // `duplicate column name: channel`, `duplicate column name: dispatch_id`,
-    // `no such table: main.memories`. Two of those are now guarded
-    // (db.ts's WAL retry, schema.ts's ensureColumns), the rest are named as a
-    // gap in W12_DONE_REPORT.md rather than fixed inside a test that is about
-    // the INGEST race. A flaky test proves nothing on the run where it is
-    // green, so the boot is serialised here on purpose.
+    // `no such table: main.memories`. Two of those were guarded in W12
+    // (db.ts's WAL retry, schema.ts's ensureColumns) and the rest stayed a named
+    // gap; that gap is CLOSED as of 2026-08-26 by the cross-process bootstrap
+    // lock (src/db-bootstrap-lock.ts, proven in
+    // db-fresh-boot-single-writer.test.ts). The parent still boots the store
+    // here because this test's subject is the INGEST race and serialising the
+    // boot keeps that subject single -- not because the boot is still unsafe.
     initDatabase(dbPath)
     getDb().close()
   })

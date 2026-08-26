@@ -35,7 +35,11 @@ const SYSTEM_FILES = new Set([
 
 // Regex for system-generated filename patterns.
 // Also covers atomic-write temp files (keep in sync with settings-store.ts).
-const SYSTEM_RE = /\.pid$|\.tmp$|\.tmp\.[a-f0-9]+$|\.migrated$|\.bak$|^\.DS_Store$/
+// `.bootlock` (+ its rollback journal) is the fresh-boot single-writer sidecar
+// created next to the database by db-bootstrap-lock.ts. It is a database
+// sidecar like -wal/-shm, not an operator file, and would otherwise raise an
+// audit row on every fresh install.
+const SYSTEM_RE = /\.pid$|\.tmp$|\.tmp\.[a-f0-9]+$|\.migrated$|\.bak$|\.bootlock$|\.bootlock-journal$|^\.DS_Store$/
 
 // Filenames whose presence is sensitive; the audit row is flagged so the UI
 // can show a sanitised label instead of hinting at secret values.

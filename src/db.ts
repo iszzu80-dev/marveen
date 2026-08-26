@@ -11,6 +11,7 @@ import {
   adoptUnversionedStore, checkStoreSchema, markVerified, setStoreReadOnly,
 } from './schema/store-schema.js'
 import { ensureColumnStrict, dropColumnIfPresentStrict } from './schema/migration-runner.js'
+import { withBootstrapLock } from './db-bootstrap-lock.js'
 
 let db: Database.Database
 
@@ -110,6 +111,18 @@ export function initDatabase(dbPathOverride?: string): void {
       }
     }
   }
+  // FRESH_STORE_CONCURRENT_BOOT_SAFETY (Phase 0 closure, 2026-08-26). Everything
+  // from the connection open to the schema gate is DDL, and DDL run by two
+  // processes against the same brand-new store is check-then-act at ~970
+  // statements. Serialised across processes by an OS file lock, so a concurrent
+  // first boot is not made survivable -- it is made impossible.
+  withBootstrapLock(dbPath, () => { bootstrapStore(dbPath, isMemory) })
+}
+
+/** The store's whole DDL bootstrap. Called ONLY through `withBootstrapLock`, and
+ *  written on the assumption that no other process is inside it at the same
+ *  time; that assumption is enforced by the lock, not by convention. */
+function bootstrapStore(dbPath: string, isMemory: boolean): void {
   db = new Database(dbPath)
   enterWalMode(db, dbPath)
   // Performance pragmas: safe with WAL, applied after journal_mode is set.

@@ -56,12 +56,48 @@ REL_INO="$(stat -c '%i' "$RELEASE/store/claudeclaw.db" 2>/dev/null || true)"
 [ "$LIVE_INO" = "$REL_INO" ] || fail "the release store is NOT the live database (inode $REL_INO vs $LIVE_INO); a cycle here would report an empty store as healthy"
 
 # 4. The feeder must come from the same sha too, so all three consumers agree.
+#
+#    CONTENT, then PROVENANCE -- and the second half is not decoration.
+#    Until 2026-08-26 this check hashed the feeder file and stopped there, which
+#    answers a weaker question than the pin's own stated purpose. The rollback
+#    drill measured it: between 0011de922 and 1adf2a23 `email-triage-fetch.py` is
+#    BYTE-IDENTICAL, so a feeder release left behind at the OLD candidate passed
+#    under the NEW one. Behaviourally harmless -- identical bytes run identically
+#    -- but "all three consumers are on this sha" was not what the green meant,
+#    and the pin file's own correction note is explicit that "functionally
+#    equivalent" is not "the same sha".
+#
+#    So the feeder release now carries a `.release-sha` marker of its own, and
+#    the marker is checked as well as the content. Two independent ways to be
+#    wrong, two checks.
 FEEDER_WANT="$(git -C "$REPO" show "$RELEASE_SHA:scripts/email-triage-fetch.py" 2>/dev/null | sha256sum | cut -d' ' -f1)"
 FEEDER_HAVE="$(sha256sum "$FEEDER" 2>/dev/null | cut -d' ' -f1)"
 [ "$FEEDER_WANT" = "$FEEDER_HAVE" ] || fail "pinned feeder is not from $RELEASE_SHA (feeder hash differs)"
 
-printf '{"pinnedCycle":"OK","releaseSha":"%s","runtimeSha":"%s","feederSha256":"%s","storeInode":"%s"}\n' \
-  "$RELEASE_SHA" "$RUNTIME_SHA" "${FEEDER_HAVE:0:16}" "$LIVE_INO" >&2
+FEEDER_DIR="$(dirname "$FEEDER")"
+FEEDER_SHA="$(cat "$FEEDER_DIR/.release-sha" 2>/dev/null || true)"
+[ -n "$FEEDER_SHA" ] || fail "the pinned feeder release carries no .release-sha; it cannot say WHICH release it is, and identical bytes are not identical provenance"
+[ "$FEEDER_SHA" = "$RELEASE_SHA" ] || fail "pinned feeder declares release $FEEDER_SHA but the cycle release is $RELEASE_SHA"
+
+# 5. The guard checks the PREFLIGHT that launched it.
+#
+#    The preflight hashes this guard before exec'ing it; this closes the other
+#    half, so neither of the two can drift without the other noticing. Both
+#    digests live in the pin file, which makes the pin -- not either script --
+#    the single statement of what the release-gate IS.
+#
+#    This is a closed circle, not an infinite chain of trust, and its boundary is
+#    write access to the repository. Said plainly rather than dressed up: anyone
+#    who can rewrite the pin AND both scripts is already past every gate here.
+#    What it does buy is that a change to EITHER script alone fails loudly.
+PREFLIGHT_WANT="$(python3 -c "import json;print(json.load(open('$RUNTIME_PIN')).get('preflightSha256',''))" 2>/dev/null || true)"
+if [ -n "$PREFLIGHT_WANT" ]; then
+  PREFLIGHT_HAVE="$(sha256sum "$REPO/scripts/cos-cycle-preflight.sh" 2>/dev/null | cut -d' ' -f1)"
+  [ "$PREFLIGHT_WANT" = "$PREFLIGHT_HAVE" ] || fail "preflight launcher does not match the pin (want ${PREFLIGHT_WANT:0:12}, have ${PREFLIGHT_HAVE:0:12})"
+fi
+
+printf '{"pinnedCycle":"OK","releaseSha":"%s","runtimeSha":"%s","feederSha256":"%s","feederRelease":"%s","storeInode":"%s"}\n' \
+  "$RELEASE_SHA" "$RUNTIME_SHA" "${FEEDER_HAVE:0:16}" "${FEEDER_SHA:0:9}" "$LIVE_INO" >&2
 
 # --verify-only exists so the checks can be exercised (and their refusals proven)
 # without paying for a full cycle. A guard nobody can cheaply drive into the red
