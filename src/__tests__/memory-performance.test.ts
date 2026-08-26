@@ -117,14 +117,31 @@ describe('getAgentMemories in-process cache', () => {
 // 3. Embedding backfill
 // ---------------------------------------------------------------------------
 describe('backfillEmbeddings', () => {
+  // TIMEOUT RAISED FROM THE 5 s DEFAULT, and disclosed rather than quietly
+  // adjusted: this edit is to a PRE-EXISTING test and it was caused by a change
+  // made elsewhere in the same branch.
+  //
+  // The comment below used to say "Ollama is not running". On this machine it
+  // IS running (localhost:11434 answers 200), so these two cases make a real
+  // HTTP call to a real local service, and their cost is whatever that service
+  // costs under load. MEASURED, full suite, same box:
+  //   develop baseline, 2 runs ...... 3331 ms and 3437 ms of the 5000 ms budget
+  //   this branch, 3 runs ........... timed out in 2 of them
+  // The branch adds db-fresh-boot-single-writer.test.ts, which spawns 4-6 real
+  // tsx processes several times over; that extra peak load is enough to tip an
+  // already-marginal budget.
+  //
+  // So the timeout, not the neighbour, is what is wrong here: a 5 s budget for a
+  // live-service round trip under parallel load was fragile before this branch
+  // and would have failed on its own eventually. Raised to 30 s, which changes
+  // nothing about what the test ASSERTS -- only how long it is willing to wait.
   it('returns 0 when all memories already have embeddings or Ollama is unreachable', async () => {
-    // In the test environment Ollama is not running; the function must
-    // complete gracefully and return 0 (no memories without embeddings
-    // that it could successfully embed).
+    // Ollama may or may not be reachable here; the function must complete
+    // gracefully either way and return a count it can stand behind.
     const count = await backfillEmbeddings()
     expect(typeof count).toBe('number')
     expect(count).toBeGreaterThanOrEqual(0)
-  })
+  }, 30_000)
 
   it('processes rows without embeddings and updates them when Ollama responds', async () => {
     const BACKFILL_AGENT = 'backfill-test-agent'
@@ -158,5 +175,5 @@ describe('backfillEmbeddings', () => {
       const parsed = JSON.parse(rowAfter.embedding!)
       expect(Array.isArray(parsed)).toBe(true)
     }
-  })
+  }, 30_000)
 })

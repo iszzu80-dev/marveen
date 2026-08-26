@@ -112,7 +112,15 @@ try {
   problems.push(`boot threw: ${String((e as Error)?.message ?? e)}`)
 } finally {
   report.booted = booted
-  if (!KEEP) { try { rmSync(stage, { force: true }); rmSync(stage + '-wal', { force: true }); rmSync(stage + '-shm', { force: true }) } catch { /* best effort */ } }
+  // `.bootlock` is the fresh-boot single-writer sidecar (db-bootstrap-lock.ts).
+  // It is a sidecar of THIS temporary store like -wal/-shm, and it is listed
+  // here because the first run after the lock landed left one behind in
+  // store/backups/ -- a real, if small, consequence of the change.
+  if (!KEEP) {
+    for (const sfx of ['', '-wal', '-shm', '.bootlock', '.bootlock-journal']) {
+      try { rmSync(stage + sfx, { force: true }) } catch { /* best effort */ }
+    }
+  }
   else report.stage = stage
 }
 

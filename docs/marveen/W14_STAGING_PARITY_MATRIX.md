@@ -42,10 +42,10 @@ a size estimate where a mapping was owed. It is replaced below.
 | 3 | **auth path** | **PARTIAL** | **Partly.** The auth *logic* must be proven; proving it in a deployed staging instance is a different thing | `auth-routes`, `auth-gate`, `auth-sessions`, `auth-device-keys`, `auth-recovery` tests drive the real route handlers and the real session/throttle code. What is missing is exercising them against a **deployed** artifact. Mitigation carried into the cutover: post-cutover auth readback (§2.1) |
 | 4 | **policy engine** | **PARTIAL** | **Partly, and the risk is wiring rather than logic** | The gates are heavily tested (`cos-egress-tier`, `data-sensitivity-gate`, `w13-disclosure-precedes-egress`, `cos-*-sensitivity-gate`). W13's own finding is the relevant risk: a correct function **with no caller**. That is checkable on the shipped artifact by its OUTPUT, not by a staging environment. Mitigation carried into the cutover: `cos_disclosure_records` must gain rows (§2.2) |
 | 5 | **observability** | **PARTIAL** | **Partly.** The criterion needs a release to be *observable*, not a staging telemetry stack | `src/cos/operational-health.ts` (incl. the two §8.6 metrics closed on 2026-08-26), `/api/cos/monitoring`, `cos_feature_runs` written by `scripts/cos-cycle.ts`, unit-tested. The release-level check is the **post-cutover readback**, which is part of cutover acceptance (§2.3) — after the release rather than before it |
-| 6 | **tool execution** | **OUT-OF-SCOPE for Phase 0** | **No** — see §3 | Executor is approval-bound: `makeApprovalEngine` refuses with `campaign_not_approved` / "no APPROVED approval for this template + rendered payload at the campaign current version". A release cannot silently perform new outbound side effects. A sandbox-adapter staging harness is new capability |
+| 6 | **tool execution** | **ACCEPTED_EXCEPTION** — *no implicit side effect during release* (owner, 2026-08-26) | **No** — see §3 | Executor is approval-bound: `makeApprovalEngine` refuses with `campaign_not_approved` / "no APPROVED approval for this template + rendered payload at the campaign current version". A release cannot silently perform new outbound side effects. A sandbox-adapter staging harness is new capability |
 
-**Score: 2 PASS, 3 PARTIAL with named cutover mitigations, 1 OUT-OF-SCOPE with a
-reason that is a mechanism and not an estimate.**
+**Score: 2 PASS, 3 PARTIAL with named cutover mitigations, 1 ACCEPTED_EXCEPTION
+whose justification is a mechanism and not an estimate (§3b).**
 
 ---
 
@@ -98,7 +98,7 @@ shows.
 
 ---
 
-## 3. Why tool execution is OUT-OF-SCOPE — mechanism, not size
+## 3. Tool execution — ACCEPTED_EXCEPTION, on a mechanism rather than a size
 
 The gate rejected "Phase 1 sized" as an argument, correctly. The argument here
 is different in kind:
@@ -120,6 +120,44 @@ What a sandbox harness would genuinely add is the ability to rehearse
 *multi-step action flows* end to end without an owner in the loop. That is a
 capability the system does not have and has never claimed, and it is worth
 having — as Phase 1 work, on the backlog, not as a Phase 0 blocker.
+
+### 3b. The exception, as the owner recorded it
+
+```text
+status:   ACCEPTED_EXCEPTION
+claim:    no implicit side effect during release
+decided:  Istvan, 2026-08-26 (Phase 0 closure decision)
+```
+
+The claim is not "we tested it enough". It is that a release **cannot** cause an
+outbound side effect, and the evidence is two mechanisms in the code:
+
+**1. The approval bind (payload-hash).** `makeApprovalEngine` resolves an
+approval by `(template, rendered payload hash, campaign_version)` and refuses
+otherwise:
+
+```
+refuse('campaign_not_approved', `campaign status ${c.status} (not APPROVED)`)
+...
+'no APPROVED approval for this template + rendered payload at the campaign current version'
+```
+
+A new build carries no approvals and cannot inherit them: the hash is of the
+*rendered payload*, so even the same template with different content misses.
+
+**2. The broker.** Every send is routed through `brokerExternalAction` with
+`mutating: true`, a risk class, a classification, and `approval:
+authorisationBasisFor(decision, …)` — *which* authorisation applied, read off
+the decision rather than asserted. `DENIED` returns before the effect runs.
+
+So the failure mode a staging tool-execution proof would catch — a release
+quietly performing side effects — is closed by the binding, not by coverage.
+That is what makes this an exception that can be *accepted* rather than a gap
+that is merely tolerated.
+
+**What the exception does NOT cover**, stated so it is not read wider than it
+is: it says nothing about whether an action flow is *correct* end to end. It
+says a release cannot fire one on its own.
 
 **Backlog item (Phase 1):** sandbox adapter set + executor rehearsal harness for
 Gmail / Calendar / Telegram, so an action flow can be driven end to end without

@@ -74,8 +74,11 @@ function sha256(buf: Buffer | string): string {
   return createHash('sha256').update(buf).digest('hex')
 }
 
-/** Run the REAL guard against the mirror. Returns its exit code and the JSON
- *  line it printed on stderr (OK or REFUSED, with the reason). */
+/** Run the REAL release gate against the mirror -- through the PREFLIGHT, which
+ *  is how production invokes it. Returns the exit code and the JSON line printed
+ *  on stderr. Exit 90 = the guard refused; 91 = the preflight refused before the
+ *  guard ever ran. The drill asserts on WHICH of the two spoke, because "it said
+ *  no" is a weaker claim than "the right check said no". */
 function runGuard(mirror: string, guardPath: string): { code: number; out: string } {
   try {
     const out = execFileSync('bash', [guardPath, '--verify-only'], {
@@ -90,8 +93,22 @@ function runGuard(mirror: string, guardPath: string): { code: number; out: strin
 }
 
 /** Deploy one candidate into the mirror the way production does: a release
- *  archive per consumer, `current` symlinks moved together, pin file rewritten. */
-function deploy(mirror: string, sha: string): void {
+ *  archive per consumer, `current` symlinks moved together, pin file rewritten.
+ *
+ *  `gateSha` is deliberately SEPARATE from the payload sha. The release gate
+ *  (preflight + guard) is versioned independently of what it polices, for a
+ *  reason the drill discovered rather than assumed: **the currently pinned
+ *  runtime `0011de922` does not contain `scripts/run-pinned-cos-cycle.sh` at
+ *  all** -- the guard was added to develop AFTER that candidate was cut
+ *  (fa88bb94). So a gate that rolled back with the payload would roll back to no
+ *  gate.
+ *
+ *  The invariant this encodes: **a gate only ever REFUSES, so keeping the
+ *  stricter gate across a rollback cannot cause a bad release -- only block
+ *  one.** The `.release-sha` marker the hardened gate requires is deployment
+ *  metadata written by THIS function for every candidate, including a rollback
+ *  target, so an older payload does not become unrunnable under a newer gate. */
+function deploy(mirror: string, sha: string, gateSha: string): void {
   const releases = join(mirror, 'releases')
   const cycleDir = join(releases, `cos-cycle-${sha.slice(0, 9)}`)
   const feederDir = join(releases, `scheduled-scripts-${sha.slice(0, 9)}`)
@@ -116,9 +133,20 @@ function deploy(mirror: string, sha: string): void {
       symlinkSync(p.endsWith('store') ? join(mirror, 'store') : join(LIVE_REPO, 'node_modules'), p)
     }
   }
+  // PROVENANCE, not just content. Between two candidates that ship an identical
+  // feeder the hash check cannot discriminate; the marker can.
+  writeFileSync(join(feederDir, '.release-sha'), `${sha}\n`)
+
+  // The guard is itself a pinned artifact from THIS sha, not develop's copy.
+  const guardDir = join(releases, `guard-${gateSha.slice(0, 9)}`)
+  if (!existsSync(guardDir)) mkdirSync(guardDir, { recursive: true })
+  writeFileSync(join(guardDir, 'run-pinned-cos-cycle.sh'),
+    git(mirror, ['show', `${gateSha}:scripts/run-pinned-cos-cycle.sh`]))
+
   relink(join(releases, 'cos-cycle-current'), cycleDir)
   relink(join(releases, 'scheduled-scripts-current'), feederDir)
-  writePin(mirror, sha)
+  relink(join(releases, 'guard-current'), guardDir)
+  writePin(mirror, sha, gateSha)
 }
 
 function relink(link: string, target: string): void {
@@ -126,11 +154,19 @@ function relink(link: string, target: string): void {
   symlinkSync(target, link)
 }
 
-function writePin(mirror: string, sha: string): void {
+/** The pin is the single statement of what the release-gate IS: it carries the
+ *  candidate sha AND the digests of the two halves of the gate. Neither script
+ *  can verify itself; each verifies the other against these values. */
+function writePin(mirror: string, sha: string, gateSha: string): void {
+  const guard = join(mirror, 'releases', `guard-${gateSha.slice(0, 9)}`, 'run-pinned-cos-cycle.sh')
+  const preflight = join(mirror, 'scripts', 'cos-cycle-preflight.sh')
   writeFileSync(join(mirror, 'releases', 'dashboard-runtime-pin.json'), JSON.stringify({
     note: 'rollback drill mirror — not a production pin',
     deployedAt: new Date(0).toISOString(),
     activationCandidateSha: sha,
+    gateSha,
+    guardSha256: existsSync(guard) ? sha256(readFileSync(guard)) : '',
+    preflightSha256: existsSync(preflight) ? sha256(readFileSync(preflight)) : '',
   }, null, 1))
 }
 
@@ -175,43 +211,82 @@ async function main(): Promise<void> {
   record('1. mirror store is isolated from the live store', 'different-inode',
     liveIno === mirrorIno ? 'SAME-INODE' : 'different-inode', `live=${liveIno} mirror=${mirrorIno}`)
 
-  const guardPath = join(mirror, 'scripts', 'run-pinned-cos-cycle.sh')
+  // Both halves of the release gate, installed the way production has them: the
+  // PREFLIGHT at a stable path, the GUARD only as a pinned release artifact
+  // (deploy() writes it). The drill invokes the preflight, never the guard
+  // directly -- driving the guard directly would skip the very check the owner
+  // asked for.
   mkdirSync(join(mirror, 'scripts'), { recursive: true })
-  writeFileSync(guardPath, git(mirror, ['show', `${to}:scripts/run-pinned-cos-cycle.sh`]))
+  const preflightPath = join(mirror, 'scripts', 'cos-cycle-preflight.sh')
+  writeFileSync(preflightPath, git(mirror, ['show', `${to}:scripts/cos-cycle-preflight.sh`]))
+  const guardPath = preflightPath
 
   const baseline = caseCounts(mirrorStore)
   record('2. store baseline readable', 'ok', baseline.integrity,
     `personal=${baseline.personal} zst=${baseline.zst}`)
 
   // --- 3. deploy A, guard green ----------------------------------------------
-  deploy(mirror, from)
+  deploy(mirror, from, to)
   record('3. candidate A deployed, guard accepts', '0', String(runGuard(mirror, guardPath).code))
 
   // --- 4. roll forward to B ---------------------------------------------------
-  deploy(mirror, to)
+  deploy(mirror, to, to)
   record('4. rolled forward to B, guard accepts', '0', String(runGuard(mirror, guardPath).code))
 
   // --- 5. the RED half of the drill ------------------------------------------
   // A rollback that moves the PIN and forgets a consumer is the failure the
   // real cutover already made once (see the pin file's own correction note).
   // The drill has to show the guard catches it, not assume it.
-  writePin(mirror, from)
+  writePin(mirror, from, to)
   const halfPin = runGuard(mirror, guardPath)
   record('5a. pin rolled back, consumers not: guard REFUSES', '90', String(halfPin.code),
     /!=/.test(halfPin.out) ? 'reason names the sha mismatch' : `unexpected reason: ${halfPin.out.slice(0, 160)}`)
 
-  writePin(mirror, to)
+  writePin(mirror, to, to)
   relink(join(mirror, 'releases', 'scheduled-scripts-current'), join(mirror, 'releases', `scheduled-scripts-${from.slice(0, 9)}`))
   const halfFeeder = runGuard(mirror, guardPath)
-  const feederDiffers = git(mirror, ['show', `${from}:scripts/email-triage-fetch.py`]) !==
+  const feederIdentical = git(mirror, ['show', `${from}:scripts/email-triage-fetch.py`]) ===
     git(mirror, ['show', `${to}:scripts/email-triage-fetch.py`])
-  record('5b. feeder rolled back, cycle not: guard REFUSES', feederDiffers ? '90' : '0',
+  // THE case the owner required: byte-identical feeder, WRONG release provenance.
+  // Before the hardening this passed, because the check hashed content only.
+  record('5b. feeder rolled back (identical BYTES, wrong release): guard REFUSES', '90',
     String(halfFeeder.code),
-    feederDiffers ? 'feeder content differs between A and B, so the hash check must bite'
-      : 'A and B ship an IDENTICAL feeder, so no hash check can tell them apart — see the drill report')
+    feederIdentical
+      ? 'A and B ship a byte-identical feeder, so ONLY the .release-sha marker can tell them apart -- this is the discriminating case'
+      : 'A and B ship different feeder content; the hash check also bites here')
+  record('5b-reason. the refusal names the feeder RELEASE, not its bytes', 'true',
+    String(/declares release/.test(halfFeeder.out)), halfFeeder.out.slice(0, 200))
+  relink(join(mirror, 'releases', 'scheduled-scripts-current'), join(mirror, 'releases', `scheduled-scripts-${to.slice(0, 9)}`))
+
+  // 5c. Consumers and pin all correct -- but the GUARD ARTIFACT is not the pinned
+  // one. The preflight must refuse BEFORE the guard runs (91, not 90).
+  const guardArtifact = join(mirror, 'releases', 'guard-current', 'run-pinned-cos-cycle.sh')
+  const guardGood = readFileSync(guardArtifact)
+  writeFileSync(guardArtifact, `${guardGood.toString()}\n# mutated by the drill\n`)
+  const mutatedGuard = runGuard(mirror, guardPath)
+  record('5c. correct consumers/pin, MUTATED guard artifact: PREFLIGHT refuses', '91',
+    String(mutatedGuard.code),
+    /does not match the pin/.test(mutatedGuard.out) ? 'refusal names the pin mismatch' : mutatedGuard.out.slice(0, 160))
+
+  // 5d. ...and the same when the hardened guard is REMOVED rather than edited.
+  rmSync(guardArtifact, { force: true })
+  const missingGuard = runGuard(mirror, guardPath)
+  record('5d. hardened guard REMOVED: PREFLIGHT refuses', '91', String(missingGuard.code),
+    /no pinned guard artifact/.test(missingGuard.out) ? 'refusal names the missing artifact' : missingGuard.out.slice(0, 160))
+  writeFileSync(guardArtifact, guardGood)
+
+  // 5e. The other half of the circle: the PREFLIGHT is tampered with, and the
+  // guard -- which the preflight has just exec'd -- refuses on its behalf.
+  const preflightGood = readFileSync(preflightPath)
+  writeFileSync(preflightPath, `${preflightGood.toString()}\n# mutated by the drill\n`)
+  const mutatedPreflight = runGuard(mirror, guardPath)
+  record('5e. MUTATED preflight: the guard refuses (the circle closes)', '90',
+    String(mutatedPreflight.code),
+    /preflight launcher does not match/.test(mutatedPreflight.out) ? 'refusal names the preflight' : mutatedPreflight.out.slice(0, 160))
+  writeFileSync(preflightPath, preflightGood)
 
   // --- 6. complete the rollback ------------------------------------------------
-  deploy(mirror, from)
+  deploy(mirror, from, to)
   record('6. full rollback to A, guard accepts', '0', String(runGuard(mirror, guardPath).code))
 
   // --- 7. the code really moved, by content and not by label -------------------

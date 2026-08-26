@@ -6,6 +6,10 @@ Phase 0 owner gate, 2026-08-26:
    végre CSAK explicit go-live jóváhagyás után."
   "A cutover elfogadása runtime evidence legyen, ne merge-status."
 
+Owner's closure decision, 2026-08-26: CONTROLLED PRODUCTION CUTOVER —
+        CONDITIONAL GO APPROVED. No further "mehet" is required IF every
+        precondition in §3b is PASS. Any one of them RED means stop.
+
 Status: PREPARED. NOT EXECUTED. Nothing in this document has been run against
         the live install; the drill in §6 ran entirely on a copy.
 ```
@@ -15,9 +19,13 @@ Status: PREPARED. NOT EXECUTED. Nothing in this document has been run against
 ## 0. What this document is, and the one thing it is not
 
 It is the runnable procedure, its evidence requirements, and its stop
-conditions. **It is not permission.** No step below is executed until the owner
-says go-live, and the two decisions in §3 are the owner's to make first, because
-both concern the guard that decides whether a cutover is legitimate.
+conditions.
+
+The owner has given a **conditional** go: the permission is real, and it is
+conditional on evidence rather than on judgement. So the honest reading of this
+document is not "we may proceed" but **"we may proceed exactly as far as the
+preconditions in §3b are green, and not one step further."** A precondition that
+is merely *probably* fine is a stop.
 
 ---
 
@@ -71,44 +79,47 @@ same sha"*.
 
 ---
 
-## 3. Two owner decisions, both about the guard
+## 3. The two guard findings — CLOSED, not deferred
 
-Found by the rollback drill (`W14_ROLLBACK_PROOF.md` §4). **Deliberately not
-fixed by me**: changing the gate while preparing to pass it is the wrong shape
-of act, however small the change.
+Both were left as owner decisions in the first draft. The owner decided
+(2026-08-26): implement both as a separate, narrow guard-hardening change. Done,
+with proof in `PHASE_0_GUARD_HARDENING.md`.
 
-### 3.1 The feeder check proves content, not provenance
+| finding | closure | refusal proven |
+|---|---|---|
+| feeder check proved CONTENT, not provenance | feeder release carries `.release-sha`; the guard checks the marker as well as the bytes | `5b` — byte-identical feeder, wrong release → guard refuses (exit 90) |
+| the guard ran from moving `develop` code | the guard is a pinned artifact (`releases/guard-current/`); a ~20-line preflight hashes it against `pin.guardSha256` and execs it; the guard checks the preflight against `pin.preflightSha256` | `5c`/`5d` — mutated or missing guard → preflight refuses (91); `5e` — mutated preflight → guard refuses (90) |
 
-Guard check 4 hashes the pinned feeder against
-`git show <sha>:scripts/email-triage-fetch.py`. Between `0011de922` and
-`1adf2a23` that file is byte-identical, so a feeder left at the OLD candidate
-passes under the NEW one. The drill demonstrated it.
+Each hardening check was removed one at a time and the drill went red every
+time (`PHASE_0_GUARD_HARDENING.md` §4).
 
-*Harmless behaviourally* — identical bytes run identically — but the guard's
-green does not mean "all three consumers are on this sha", which is what the pin
-exists to assert.
+**One invariant the drill forced into the open**: the gate is versioned
+**independently of the payload**, because the currently pinned candidate
+`0011de922` does not contain the guard script at all — it entered the tree
+afterwards (`fa88bb94`). A gate that rolled back with the payload would roll
+back to no gate. A gate can only refuse, so carrying the stricter gate across a
+rollback can block a release but never cause a bad one.
 
-**Option A** (recommended): give each feeder release a `.release-sha` marker and
-have check 4 compare it too. Small, contained, and makes the guard's claim match
-its description.
-**Option B**: leave it, and correct the guard's stated purpose to "content
-agreement" so nobody reasons from it to provenance.
+---
 
-### 3.2 The guard that enforces the pin is not itself pinned
+## 3b. The seven preconditions (owner, 2026-08-26)
 
-`scripts/run-pinned-cos-cycle.sh` runs from `$REPO/scripts/`, i.e. from the live
-checkout, which sits on `develop`. Every consumer it polices is pinned; the
-policeman moves whenever `develop` moves — including at the merge in §1, before
-any cutover.
+The conditional GO stands only while every line is PASS. Each is a measurement,
+not an opinion.
 
-This is not a hole in the pin (the guard can only ever *refuse*), but "the whole
-chain is pinned" is currently false.
+| # | precondition | how it is evidenced |
+|---|---|---|
+| 1 | hardened release guard PASS | `bash scripts/cos-cycle-preflight.sh --verify-only` → exit 0, plus the drill's five refusals (`PHASE_0_GUARD_HARDENING.md` §3) |
+| 2 | **exact final merge SHA** CI PASS | CI green on the merge commit itself. **A branch-SHA proof does not substitute** — owner's explicit condition |
+| 3 | migration proof PASS | `scripts/w14-merge-migration-proof.ts` on a copy of the live store, `problems: []` |
+| 4 | rollback drill PASS | `scripts/w14-rollback-drill.ts` with the hardened pinned guard, `ok: true` |
+| 5 | fresh current backup/checkpoint | `scripts/cos-maintenance.ts` run immediately before, with a live receipt |
+| 6 | current pinned runtime preflight PASS | the gate green on the CURRENT pin, before anything moves |
+| 7 | rollback artifact + procedure available | `dist.pre-<sha>-<stamp>` present, §4's rollback path readable, drill result at hand |
 
-**Option A** (recommended): record the guard's sha256 in the pin file and have
-the readiness check compare it, so a changed guard is visible.
-**Option B**: pin the guard alongside the cycle release and invoke it from
-there.
-**Option C**: accept and document.
+**The cutover invariant** (owner's words): under live traffic there must be no
+mixed-consumer release state. Dashboard runtime, cos-cycle artifact, feeder,
+gate and pin move as **one controlled release unit**.
 
 ---
 
@@ -136,20 +147,28 @@ ln -s ~/marveen/store        releases/cos-cycle-<short>/store
 ln -s ~/marveen/node_modules releases/cos-cycle-<short>/node_modules
 ln -s ~/marveen/.env         releases/cos-cycle-<short>/.env
 
-# 4. feeder release
+# 4. feeder release -- WITH its provenance marker, which the hardened guard requires
 git archive <SHA> scripts/email-triage-fetch.py | \
   (mkdir -p releases/scheduled-scripts-<short> && tar -x -C releases/scheduled-scripts-<short>)
 cp releases/scheduled-scripts-<short>/scripts/email-triage-fetch.py \
    releases/scheduled-scripts-<short>/
+printf '%s\n' <SHA> > releases/scheduled-scripts-<short>/.release-sha
 
-# 5. move the pointers TOGETHER, then the pin
+# 4b. the GATE, as a pinned artifact of its own
+mkdir -p releases/guard-<short>
+git show <SHA>:scripts/run-pinned-cos-cycle.sh > releases/guard-<short>/run-pinned-cos-cycle.sh
+
+# 5. move ALL pointers TOGETHER, then the pin
 ln -sfn releases/cos-cycle-<short>          releases/cos-cycle-current
 ln -sfn scheduled-scripts-<short>           releases/scheduled-scripts-current
+ln -sfn guard-<short>                       releases/guard-current
 $EDITOR releases/dashboard-runtime-pin.json   # activationCandidateSha, deployedAt,
-                                              # previousRuntime, ciEvidence
+                                              # previousRuntime, ciEvidence,
+                                              # guardSha256, preflightSha256
 
-# 6. the guard, BEFORE the restart
-bash scripts/run-pinned-cos-cycle.sh --verify-only   # must exit 0
+# 6. the gate, BEFORE the restart -- through the PREFLIGHT, never the guard directly
+bash scripts/cos-cycle-preflight.sh --verify-only   # must exit 0 (91 = preflight refused,
+                                                     # 90 = guard refused)
 
 # 7. restart
 systemctl --user restart marveen-dashboard.service
@@ -168,7 +187,26 @@ session out** (send the re-auth link afterwards), and `/api/costs/*` can hang
 
 ## 5. Acceptance — runtime evidence, not merge status
 
-The cutover is accepted only when every line below is true **on the live store**.
+The owner's post-cutover list, in full. Every line must be PASS before the
+cutover is accepted; the sub-sections after it give the exact measurement for
+the ones that are not self-evident.
+
+| # | must be true | measurement |
+|---|---|---|
+| 1 | service healthy | `/api/kanban` answers 200/401 after the restart |
+| 2 | pinned guard PASS | `cos-cycle-preflight.sh --verify-only` → 0 |
+| 3 | runtime SHA == release SHA | pin `activationCandidateSha` == the cycle release's `.release-sha` |
+| 4 | all three consumers on the same release | dashboard `dist` built from it, cycle release marker, feeder `.release-sha` — the third is new and is what §3 closed |
+| 5 | store integrity PASS | `PRAGMA integrity_check` = `ok` |
+| 6 | the four Phase 0 tables exist | §5.1 |
+| 7 | run-ledger / metrics write | §5.2 — **rows, not tables** |
+| 8 | W10 restricted credential enforcement actually active | §5.6 |
+| 9 | policy counters / liveness work | §5.3 |
+| 10 | no new security / failure / regression signal | first pinned cycle `problems: []`, §5.4 |
+
+**If any critical guard, migration, integrity or consumer-alignment line FAILS:
+do not improvise a fix in place. Execute the proven rollback** (§5.5). That is
+the owner's instruction and it is also the only path with evidence behind it.
 
 ### 5.1 The tables that prove W10–W14 are actually running
 
@@ -224,6 +262,31 @@ procedure is drilled (`W14_ROLLBACK_PROOF.md`) and its data safety is measured:
 a code rollback left 119/70 cases and `integrity_check: ok` untouched.
 
 ---
+
+
+### 5.6 W10 restricted credential enforcement — active, not merely present
+
+W10's identity enforcement is **deliberately OFF** by the owner's own activation
+condition, and that is recorded as PASS-with-enforcement-off in the gate table.
+So line 8 must not be read as "enforcement is on". What it asserts is narrower
+and checkable: the **restricted credential** path refuses, which is the part that
+was never gated on the owner's switch.
+
+```bash
+# a credential kind outside the allowlist must be refused, not merely logged
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $(cat store/.dashboard-token)" \
+     localhost:3420/api/auth/users            # 200 for the token principal
+```
+
+covered in-suite by `auth-gate` / `auth-routes`' "credential-kind allowlists
+(default-deny for future kinds)" cases — four of them, all green on the
+candidate. If the live probe and the suite disagree, the live probe wins and the
+cutover is rolled back.
+
+**Stated plainly**: if the owner intended line 8 to mean *identity enforcement
+switched ON*, that is a different act — a policy change, not a cutover — and I
+will not perform it inside a release. Say the word and it becomes its own,
+separately gated change.
 
 ## 6. What has already been proven, and on what
 
