@@ -20,7 +20,7 @@ import { initProgressionSchema } from '../cos/schema.js'
 import { seedCaseProgressionState } from '../cos/case-progression-seed.js'
 import {
   armWaitCondition, activeWaitCondition, evaluateWaitCondition, resolveWaitCondition,
-  dueWaitConditions, WAIT_KINDS, EVALUABLE_KINDS, DEFAULT_STALE_REVIEW_SEC,
+  dueWaitConditions, resolveWaitById, WAIT_KINDS, EVALUABLE_KINDS, DEFAULT_STALE_REVIEW_SEC,
 } from '../cos/wait-condition.js'
 import { decideTrigger } from '../cos/progression-trigger.js'
 import { detectProjectionDrift, projectCase } from '../cos/case-projection.js'
@@ -150,6 +150,35 @@ describe('P2 — the evaluator', () => {
     expect(evaluateWaitCondition(db, 'personal', 'c1', T0 + 2 * DAY).verdict).toBe('SATISFIED')
   })
 
+  it('EVENT_ONLY ignores a deadline it HAS — the policy decides, not the absence of a date', () => {
+    // The earlier EVENT_ONLY test armed with no deadline at all, so the clock
+    // branch could not fire whatever the policy said. A mutation making
+    // EVENT_ONLY honour the clock survived it. Here the deadline exists and has
+    // passed, and the wait must still be open until the stale review.
+    const db = getDb(); seed(db)
+    armWaitCondition(db, {
+      domain: 'personal', caseId: 'c1', kind: 'EXTERNAL_RESPONSE', subject: 'a szerviz',
+      expectedBy: T0 + DAY, wakePolicy: 'EVENT_ONLY', staleReviewAt: T0 + 30 * DAY,
+    }, T0)
+    expect(evaluateWaitCondition(db, 'personal', 'c1', T0 + 2 * DAY).verdict).toBe('WAITING')
+  })
+
+  it('TIMER ignores an event it COULD see — same reason, other direction', () => {
+    // The earlier TIMER test used SCHEDULED_REVIEW, a kind that has no event
+    // predicate at all, so the policy check was never the thing enforcing it. A
+    // mutation making TIMER honour events survived. EXTERNAL_RESPONSE DOES have
+    // an event predicate, so here the policy is the only thing standing between
+    // the event and a wrong SATISFIED.
+    const db = getDb(); seed(db)
+    armWaitCondition(db, {
+      domain: 'personal', caseId: 'c1', kind: 'EXTERNAL_RESPONSE', subject: 'a szerviz',
+      expectedBy: T0 + 5 * DAY, wakePolicy: 'TIMER',
+    }, T0)
+    appendCaseEvent(db, { caseId: 'c1', caseVersion: 1, actor: 'x', eventType: 'NOTE' }, T0 + DAY)
+    expect(evaluateWaitCondition(db, 'personal', 'c1', T0 + DAY + 1).verdict).toBe('WAITING')
+    expect(evaluateWaitCondition(db, 'personal', 'c1', T0 + 5 * DAY).verdict).toBe('SATISFIED')
+  })
+
   it('an EVENT_ONLY wait ignores its clock and waits for evidence', () => {
     const db = getDb(); seed(db)
     arm(db, { wakePolicy: 'EVENT_ONLY', expectedBy: null, staleReviewAt: T0 + 30 * DAY })
@@ -209,6 +238,26 @@ describe('P2 — the idempotent wake', () => {
       .get() as { resolved_run_id: string; resolution: string }
     expect(row.resolved_run_id).toBe('run-A')
     expect(row.resolution).toBe('SATISFIED')
+  })
+
+  it('the RACE: two callers that both already read the row — exactly one wins', () => {
+    // The test above exercises the lookup-first early return, and a mutation
+    // that deleted the statement's WHERE clause survived it, because the second
+    // call never reached the statement at all. This is the guard that answers
+    // the actual race: two sweeps evaluating the same satisfied condition at the
+    // same moment, both holding the row they read a millisecond ago.
+    const db = getDb(); seed(db)
+    const armed = arm(db)
+    const waitId = armed.waitId!
+    const a = resolveWaitById(db, waitId, 'SATISFIED', 'runner A', 'run-A', T0 + DAY)
+    const b = resolveWaitById(db, waitId, 'SATISFIED', 'runner B', 'run-B', T0 + DAY)
+    expect(a.resolved).toBe(true)
+    expect(b.resolved).toBe(false)
+    expect(b.alreadyResolved).toBe(true)
+    const row = db.prepare(`SELECT resolved_run_id, resolution_detail FROM case_wait_conditions`)
+      .get() as { resolved_run_id: string; resolution_detail: string }
+    expect(row.resolved_run_id).toBe('run-A')
+    expect(row.resolution_detail).toBe('runner A')
   })
 
   it('a resolved wait stops being the case\'s live condition', () => {

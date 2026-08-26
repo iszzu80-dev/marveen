@@ -330,16 +330,42 @@ export function resolveWaitCondition(
 ): ResolveResult {
   const w = activeWaitCondition(db, domain, caseId)
   if (!w) return { resolved: false, alreadyResolved: true }
+  return resolveWaitById(db, w.wait_id, resolution, detail, runId, now)
+}
+
+/**
+ * Resolve a condition the caller has ALREADY READ, by id.
+ *
+ * Extracted so the idempotency guard can be driven on its own. There are two of
+ * them: `resolveWaitCondition` looks the row up first and returns early if it is
+ * gone, and this statement's WHERE clause refuses a row that was resolved
+ * between the read and the write. A mutation removing the WHERE clause survived
+ * the first test suite, because the only test for idempotency called the
+ * lookup-first path twice and never reached the statement.
+ *
+ * The two answer different questions. The early return answers "was it already
+ * resolved when I looked". Only the WHERE clause answers "did somebody resolve
+ * it while I was deciding" -- which is the actual race, because two sweeps can
+ * evaluate the same satisfied condition at the same moment.
+ */
+export function resolveWaitById(
+  db: Database.Database,
+  waitId: string,
+  resolution: 'SATISFIED' | 'EXPIRED' | 'CANCELLED',
+  detail: string,
+  runId: string | null,
+  now: number,
+): ResolveResult {
   const info = db.prepare(
     `UPDATE case_wait_conditions
         SET resolved_at = @now, resolution = @resolution, resolution_detail = @detail,
             resolved_run_id = @runId
       WHERE wait_id = @waitId AND resolved_at IS NULL`,
-  ).run({ now, resolution, detail, runId, waitId: w.wait_id })
+  ).run({ now, resolution, detail, runId, waitId })
   return {
     resolved: info.changes === 1,
     alreadyResolved: info.changes === 0,
-    waitId: w.wait_id,
+    waitId,
     resolution,
   }
 }
