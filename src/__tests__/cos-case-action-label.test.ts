@@ -10,15 +10,15 @@ import { describe, it, expect } from 'vitest'
 import { renderActionKind, renderableActionKinds } from '../cos/case-action-label.js'
 import { buildRollingPlan, internalPlanLabels } from '../cos/progression-pipeline.js'
 import { CASE_STATUSES } from '../cos/schema.js'
-import type { OutcomeContract } from '../cos/progression-pipeline.js'
-import type { DeepResolvedContext as ResolvedContext } from '../cos/progression-resolver.js'
 
 /** Every kind the PLANNER can emit, enumerated by driving it -- not retyped.
  *  A kind added to the switch tomorrow is in this set the moment it exists. */
 function plannerKinds(): Set<string> {
   const kinds = new Set<string>()
-  const c = {} as OutcomeContract
-  const ctx = {} as ResolvedContext
+  // Stubs typed off the function itself, so a signature change is a compile
+  // error here rather than a silently narrower enumeration.
+  const c = {} as Parameters<typeof buildRollingPlan>[0]
+  const ctx = {} as Parameters<typeof buildRollingPlan>[1]
   for (const status of [...CASE_STATUSES, '__NO_SUCH_STATUS__']) {
     for (const step of buildRollingPlan(c, ctx, status)) kinds.add(step.kind)
   }
