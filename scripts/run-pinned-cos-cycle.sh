@@ -33,6 +33,41 @@ FEEDER="$REPO/releases/scheduled-scripts-current/email-triage-fetch.py"
 
 fail() { printf '{"pinnedCycle":"REFUSED","reason":%s}\n' "$(printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')" >&2; exit 90; }
 
+# 0. FIRST: the guard checks the PREFLIGHT that launched it.
+#
+#    ORDER IS THE POINT, and it was wrong until 2026-08-26. This check used to
+#    sit LAST, after the four release checks -- so a tampered preflight was only
+#    noticed when the release state happened to be valid. Any release problem
+#    would mask it: the guard would report the release fault and never look at
+#    the gate it is half of. Found by writing the acceptance test for exactly
+#    this control, which could not reach the check in a fixture with no release.
+#
+#    A gate verifies ITSELF before it verifies anything else.
+#
+#    The preflight hashes this guard before exec'ing it; this closes the other
+#    half, so neither of the two can drift without the other noticing. Both
+#    digests live in the pin file, which makes the pin -- not either script --
+#    the single statement of what the release-gate IS.
+#
+#    This is a closed circle, not an infinite chain of trust, and its boundary is
+#    write access to the repository. Said plainly rather than dressed up: anyone
+#    who can rewrite the pin AND both scripts is already past every gate here.
+#    What it does buy is that a change to EITHER script alone fails loudly.
+#    A pin written BEFORE this hardening carries no `preflightSha256`, and the
+#    check tolerates that so the live cycle keeps running across the merge. But
+#    the skip is REPORTED, not silent: an absent check that looks identical to a
+#    passing one is this codebase's signature defect, and the whole point of the
+#    exercise is to stop producing it. `preflightCheck` in the OK line says which
+#    of the two happened, every run.
+PREFLIGHT_WANT="$(python3 -c "import json;print(json.load(open('$RUNTIME_PIN')).get('preflightSha256',''))" 2>/dev/null || true)"
+if [ -n "$PREFLIGHT_WANT" ]; then
+  PREFLIGHT_HAVE="$(sha256sum "$REPO/scripts/cos-cycle-preflight.sh" 2>/dev/null | cut -d' ' -f1)"
+  [ "$PREFLIGHT_WANT" = "$PREFLIGHT_HAVE" ] || fail "preflight launcher does not match the pin (want ${PREFLIGHT_WANT:0:12}, have ${PREFLIGHT_HAVE:0:12})"
+  PREFLIGHT_STATE="verified"
+else
+  PREFLIGHT_STATE="SKIPPED_PIN_DECLARES_NO_PREFLIGHT"
+fi
+
 [ -d "$RELEASE" ] || fail "no pinned cycle release at $RELEASE"
 RELEASE_SHA="$(cat "$RELEASE/.release-sha" 2>/dev/null || true)"
 [ -n "$RELEASE_SHA" ] || fail "the release carries no .release-sha; it cannot say what it is"
@@ -78,32 +113,6 @@ FEEDER_DIR="$(dirname "$FEEDER")"
 FEEDER_SHA="$(cat "$FEEDER_DIR/.release-sha" 2>/dev/null || true)"
 [ -n "$FEEDER_SHA" ] || fail "the pinned feeder release carries no .release-sha; it cannot say WHICH release it is, and identical bytes are not identical provenance"
 [ "$FEEDER_SHA" = "$RELEASE_SHA" ] || fail "pinned feeder declares release $FEEDER_SHA but the cycle release is $RELEASE_SHA"
-
-# 5. The guard checks the PREFLIGHT that launched it.
-#
-#    The preflight hashes this guard before exec'ing it; this closes the other
-#    half, so neither of the two can drift without the other noticing. Both
-#    digests live in the pin file, which makes the pin -- not either script --
-#    the single statement of what the release-gate IS.
-#
-#    This is a closed circle, not an infinite chain of trust, and its boundary is
-#    write access to the repository. Said plainly rather than dressed up: anyone
-#    who can rewrite the pin AND both scripts is already past every gate here.
-#    What it does buy is that a change to EITHER script alone fails loudly.
-#    A pin written BEFORE this hardening carries no `preflightSha256`, and the
-#    check tolerates that so the live cycle keeps running across the merge. But
-#    the skip is REPORTED, not silent: an absent check that looks identical to a
-#    passing one is this codebase's signature defect, and the whole point of the
-#    exercise is to stop producing it. `preflightCheck` in the OK line says which
-#    of the two happened, every run.
-PREFLIGHT_WANT="$(python3 -c "import json;print(json.load(open('$RUNTIME_PIN')).get('preflightSha256',''))" 2>/dev/null || true)"
-if [ -n "$PREFLIGHT_WANT" ]; then
-  PREFLIGHT_HAVE="$(sha256sum "$REPO/scripts/cos-cycle-preflight.sh" 2>/dev/null | cut -d' ' -f1)"
-  [ "$PREFLIGHT_WANT" = "$PREFLIGHT_HAVE" ] || fail "preflight launcher does not match the pin (want ${PREFLIGHT_WANT:0:12}, have ${PREFLIGHT_HAVE:0:12})"
-  PREFLIGHT_STATE="verified"
-else
-  PREFLIGHT_STATE="SKIPPED_PIN_DECLARES_NO_PREFLIGHT"
-fi
 
 printf '{"pinnedCycle":"OK","releaseSha":"%s","runtimeSha":"%s","feederSha256":"%s","feederRelease":"%s","preflightCheck":"%s","storeInode":"%s"}\n' \
   "$RELEASE_SHA" "$RUNTIME_SHA" "${FEEDER_HAVE:0:16}" "${FEEDER_SHA:0:9}" "$PREFLIGHT_STATE" "$LIVE_INO" >&2
