@@ -552,6 +552,29 @@ describe('P1 — the heartbeat leaves nothing behind', () => {
   // watches. Every run, every case, exactly one revision behind.
   beforeEach(() => { fresh() })
 
+  it('a SKIPPED case is left level too, not just one that ran', async () => {
+    // Cycle two of the P1 cutover: `projected: 89` while the heartbeat ran ZERO
+    // progressions. Every one of those was this loop deferring a case it had
+    // decided NOT to reason about -- a path that moves next_progression_at and,
+    // before deferAndProject, projected nothing.
+    const db = getDb()
+    seedCase(db, 'c1', { nba: SAFE_NBA })
+    db.prepare(`UPDATE case_progression_state SET next_progression_at = ?
+                WHERE domain='personal' AND case_id='c1'`).run(T0)
+    const { runProgressionHeartbeat } = await import('../cos/progression-heartbeat.js')
+    runProgressionHeartbeat(db, T0 + 10)          // first pass: runs the case
+    const afterRun = runProgressionHeartbeat(db, T0 + 20)  // second: nothing changed, so it skips
+    expect(afterRun.personal + afterRun.zst).toBe(0)
+    expect(detectProjectionDrift(db, T0 + 20).behind).toEqual([])
+    const board = boardRow(db, 'c1')
+    const canonical = db.prepare(
+      `SELECT next_progression_at, canonical_revision FROM case_progression_state
+        WHERE domain='personal' AND case_id='c1'`,
+    ).get() as { next_progression_at: number | null; canonical_revision: number }
+    expect(board.proj_next_review_at).toBe(canonical.next_progression_at)
+    expect(board.projected_revision).toBe(canonical.canonical_revision)
+  })
+
   it('a full heartbeat pass leaves the board level with the engine', async () => {
     const db = getDb()
     seedCase(db, 'c1', { nba: SAFE_NBA })

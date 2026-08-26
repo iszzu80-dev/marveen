@@ -89,6 +89,40 @@ export interface HeartbeatResult {
  *
  *  The heartbeat is SAFE to call from a cron running every few minutes.
  *  Idempotent claim + lease means no case is double-processed. */
+/**
+ * Defer a case's next check AND project the result.
+ *
+ * WHY THE TWO ARE ONE FUNCTION, measured on the first two pinned cycles after
+ * the P1 cutover. `deferProgression` moves `next_progression_at`, which the
+ * projection reads and the revision trigger watches. This loop calls it in
+ * THREE places -- no trigger, temporally blocked, and after a run -- and the
+ * first two do not run the pipeline at all, so nothing projected on those paths.
+ *
+ * Cycle one reported `projected: 92` right after a fully reconciled board.
+ * Cycle two, with only the post-run path fixed, still reported 89 while running
+ * ZERO progressions: every one of those was this loop deferring a case it had
+ * decided not to reason about.
+ *
+ * Nothing was broken either time -- the sweep repaired them seconds later and
+ * drift ended at zero. What was broken was the SIGNAL. A `projected` counter
+ * dominated by the poller's own five-minute re-check cannot also tell anyone
+ * that canonical state moved somewhere unexpected, which is the only reason to
+ * read it. Binding the two together is what makes a non-zero count mean
+ * something.
+ */
+function deferAndProject(
+  db: Database.Database,
+  domain: 'personal' | 'zst',
+  caseId: string,
+  nextProgressionAt: number,
+  now: number,
+): void {
+  deferProgression(db, domain, caseId, nextProgressionAt, now)
+  // A projection failure must never cost the deferral: without the deferral the
+  // case is due again immediately and the loop spins. The sweep reconciles.
+  try { projectCase(db, domain, caseId, now) } catch { /* reconcileProjections */ }
+}
+
 export function runProgressionHeartbeat(
   db: Database.Database,
   now: number = Math.floor(Date.now() / 1000),
@@ -166,7 +200,7 @@ export function runProgressionHeartbeat(
       const trig = decideTrigger(db, domain, dc.case_id, now)
       if (!trig.shouldRun) {
         result.skippedNoTrigger++
-        deferProgression(db, domain, dc.case_id, now + NO_TRIGGER_BACKOFF_SEC, now)
+        deferAndProject(db, domain, dc.case_id, now + NO_TRIGGER_BACKOFF_SEC, now)
         releaseProgressionClaim(db, domain, dc.case_id, runId, now)
         continue
       }
@@ -195,7 +229,7 @@ export function runProgressionHeartbeat(
           // Do not record the state hash: resolving/verifying the temporal fact
           // must make this case eligible again even if no legacy case column
           // changed. A short defer prevents a tight retry loop meanwhile.
-          deferProgression(db, domain, dc.case_id, now + POST_RUN_RECHECK_SEC, now)
+          deferAndProject(db, domain, dc.case_id, now + POST_RUN_RECHECK_SEC, now)
           continue
         }
 
@@ -210,7 +244,7 @@ export function runProgressionHeartbeat(
         // And schedule the next check. A case that ran is not due again until
         // the next sweep — the COMPLETE path clears next_progression_at, and
         // deferProgression deliberately cannot undo that.
-        deferProgression(db, domain, dc.case_id, now + POST_RUN_RECHECK_SEC, now)
+        deferAndProject(db, domain, dc.case_id, now + POST_RUN_RECHECK_SEC, now)
         // Recorded AFTER the run, and RE-DERIVED after it — not the hash from
         // before. The cycle mutates the case (version, goal version, wait), so
         // the pre-run hash never matches the post-run state, and recording it
@@ -220,26 +254,6 @@ export function runProgressionHeartbeat(
         recordProgressionState(db, domain, dc.case_id,
           decideTrigger(db, domain, dc.case_id, now).effectiveStateHash, now,
           dueDeadline(db, domain, dc.case_id, now))
-
-        // PROJECT AGAIN, AFTER the post-run scheduling — and this line is here
-        // because the first pinned cycle of P1 measured why.
-        //
-        // The pipeline projects inside its own transaction, at the end of the
-        // run. Then THIS loop calls deferProgression, which moves
-        // next_progression_at — a field the projection reads and the revision
-        // trigger watches. So every heartbeat run left the board exactly one
-        // revision behind its case, systematically, on every case, every cycle.
-        // The sweep repaired all 92 of them seconds later and the drift ended at
-        // zero, so nothing was broken; it just meant the sweep's "projected"
-        // counter measured the heartbeat's own scheduling rather than anything
-        // worth knowing.
-        //
-        // With this line, a non-zero `projected` in the reconcile step means
-        // canonical state moved somewhere OTHER than a progression run — which
-        // is a fact worth reading. A counter that is always large says nothing.
-        try {
-          projectCase(db, domain, dc.case_id, now)
-        } catch { /* the sweep reconciles it; see reconcileProjections */ }
 
         if (domain === 'personal') result.personal++
         else result.zst++
