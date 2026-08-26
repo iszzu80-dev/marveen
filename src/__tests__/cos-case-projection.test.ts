@@ -334,6 +334,26 @@ describe('P1 — drift is detectable', () => {
     expect(detectProjectionDrift(db, T0 + 30).behind.map(x => x.caseId)).toEqual(['c1'])
   })
 
+  it('an active case with the engine SWITCHED OFF is its own bucket, not health', () => {
+    // The 166/167 outlier this packet was told to close: a state row exists, so
+    // nothing is unenrolled; zero runs, so nothing is behind; the projection of
+    // an all-NULL canonical row is exact, so nothing is in conflict. Every
+    // counter reads healthy and the engine has never looked at the case.
+    const db = getDb()
+    seedCase(db, 'frozen')
+    db.prepare(`UPDATE case_progression_state SET progression_enabled = 0
+                WHERE domain='personal' AND case_id='frozen'`).run()
+    reconcileProjections(db, T0 + 10)
+    const d = detectProjectionDrift(db, T0 + 20)
+    expect(d.behind).toEqual([])
+    expect(d.neverReconciled).toEqual([])
+    expect(d.conflicted).toEqual([])
+    expect(d.unenrolled).toEqual([])
+    expect(d.disabled.map(x => x.caseId)).toEqual(['frozen'])
+    expect(d.disabled[0].runs).toBe(0)
+    expect(d.total).toBe(1)
+  })
+
   it('an active case the engine was never asked about is UNENROLLED, not merely behind', () => {
     // The 166/167 outlier on the live store was exactly this: a case created
     // outside the intake path, progression disabled, zero runs, silent.

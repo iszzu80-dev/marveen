@@ -636,12 +636,13 @@ const projectionDrift: Check = (db, now) => {
   if (d.total === 0) return null
   const parts: string[] = []
   if (d.unenrolled.length) parts.push(`${d.unenrolled.length} progression state nélkül`)
+  if (d.disabled.length) parts.push(`${d.disabled.length} kikapcsolt motorral`)
   if (d.neverReconciled.length) parts.push(`${d.neverReconciled.length} sosem egyeztetve`)
   if (d.behind.length) parts.push(`${d.behind.length} lemaradt vetület`)
   if (d.conflicted.length) parts.push(`${d.conflicted.length} ütközés`)
-  const worst = d.unenrolled.length || d.behind.length ? 'CRITICAL' : 'WARNING'
-  const sample = [...d.unenrolled.map(x => x.caseId), ...d.behind.map(x => x.caseId),
-    ...d.neverReconciled.map(x => x.caseId)].slice(0, 4).join(' · ')
+  const worst = d.unenrolled.length || d.behind.length || d.disabled.length ? 'CRITICAL' : 'WARNING'
+  const sample = [...d.unenrolled.map(x => x.caseId), ...d.disabled.map(x => x.caseId),
+    ...d.behind.map(x => x.caseId), ...d.neverReconciled.map(x => x.caseId)].slice(0, 4).join(' · ')
   return {
     id: 'projection_drift', severity: worst as Severity, ref: '§10.1/§10.2, P1',
     title: 'A tábla és a motor nem ugyanazt mondja az ügyről',

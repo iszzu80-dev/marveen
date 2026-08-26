@@ -1072,7 +1072,7 @@ export function listMonitoring(db: ReturnType<typeof getDb>): {
   health: { stale: unknown[]; unverified: unknown[]; clean: boolean; checkedAt: number }
   projection: {
     invariantA: Record<string, { active: number; satisfied: number; violating: number; unenrolled: number }>
-    drift: { behind: number; neverReconciled: number; conflicted: number; unenrolled: number; total: number }
+    drift: { behind: number; neverReconciled: number; conflicted: number; unenrolled: number; disabled: number; total: number }
     oldestReconciledAt: number | null
   }
 } {
@@ -1160,6 +1160,7 @@ export function listMonitoring(db: ReturnType<typeof getDb>): {
       drift: {
         behind: drift.behind.length, neverReconciled: drift.neverReconciled.length,
         conflicted: drift.conflicted.length, unenrolled: drift.unenrolled.length,
+        disabled: drift.disabled.length,
         total: drift.total,
       },
       oldestReconciledAt: oldest?.t ?? null,

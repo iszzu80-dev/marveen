@@ -584,6 +584,16 @@ export interface DriftReport {
   /** Active cases with no progression state at all — the engine is not merely
    *  behind on them, it has never been asked. */
   unenrolled: Array<{ domain: ProjectionDomain; caseId: string; status: string }>
+  /** Active cases whose progression state exists but is SWITCHED OFF.
+   *
+   *  Its own bucket, and the reason is the outlier this packet was told to
+   *  close. PRI-TRIP-2026-001 had a state row, zero runs, and
+   *  `progression_enabled = 0`: nothing was behind, nothing was in conflict,
+   *  nothing had ever been reconciled wrongly — the engine had simply been
+   *  turned off for it, and every other bucket read that as health. "The engine
+   *  has nothing to say" and "the engine was switched off" are opposite
+   *  conditions that look identical from every surface that counts rows. */
+  disabled: Array<{ domain: ProjectionDomain; caseId: string; status: string; runs: number }>
   total: number
 }
 
@@ -597,7 +607,7 @@ export interface DriftReport {
  */
 export function detectProjectionDrift(db: Database.Database, now: number): DriftReport {
   const out: DriftReport = {
-    at: now, behind: [], neverReconciled: [], conflicted: [], unenrolled: [], total: 0,
+    at: now, behind: [], neverReconciled: [], conflicted: [], unenrolled: [], disabled: [], total: 0,
   }
   for (const domain of ['personal', 'zst'] as ProjectionDomain[]) {
     const terminal = terminalStatusesFor(domain)
@@ -608,16 +618,20 @@ export function detectProjectionDrift(db: Database.Database, now: number): Drift
       projection_conflict_reason: string | null
       last_reconciled_at: number | null
       canonical_revision: number | null
+      progression_enabled: number | null
+      runs: number
     }>
     try {
       rows = db.prepare(
         `SELECT c.case_id, c.status, c.projected_revision, c.projection_conflict_reason,
-                c.last_reconciled_at, s.canonical_revision
+                c.last_reconciled_at, s.canonical_revision, s.progression_enabled,
+                (SELECT COUNT(*) FROM case_progression_runs r
+                  WHERE r.domain = ? AND r.case_id = c.case_id) AS runs
            FROM ${caseTableFor(domain)} c
            LEFT JOIN case_progression_state s
              ON s.domain = ? AND s.case_id = c.case_id
           WHERE c.archived_at IS NULL AND c.status NOT IN (${ph})`,
-      ).all(domain, ...terminal) as typeof rows
+      ).all(domain, domain, ...terminal) as typeof rows
     } catch {
       continue
     }
@@ -625,6 +639,9 @@ export function detectProjectionDrift(db: Database.Database, now: number): Drift
       if (r.canonical_revision === null) {
         out.unenrolled.push({ domain, caseId: r.case_id, status: r.status })
         continue
+      }
+      if (!r.progression_enabled) {
+        out.disabled.push({ domain, caseId: r.case_id, status: r.status, runs: r.runs })
       }
       if (r.last_reconciled_at === null) {
         out.neverReconciled.push({ domain, caseId: r.case_id })
@@ -640,6 +657,6 @@ export function detectProjectionDrift(db: Database.Database, now: number): Drift
     }
   }
   out.total = out.behind.length + out.neverReconciled.length
-    + out.conflicted.length + out.unenrolled.length
+    + out.conflicted.length + out.unenrolled.length + out.disabled.length
   return out
 }

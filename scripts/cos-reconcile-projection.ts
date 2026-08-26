@@ -45,6 +45,16 @@ for (const u of drift.unenrolled) {
     error: `aktiv ugy [${u.status}] progression state NELKUL -- a motor soha nem kapta meg`,
   })
 }
+// A KIKAPCSOLT motor sajat sor. Egy aktiv ugy, aminek van state-sora, de
+// progression_enabled=0, minden szamlalon egeszsegesnek latszik: nincs lemaradva,
+// nincs utkozese, a vetulete pontos -- csak eppen a motor nem gondolkodik rola.
+// A 166/167 outlier (PRI-TRIP-2026-001) pontosan ez volt: nulla futas, mode='off'.
+for (const d of drift.disabled) {
+  failures.push({
+    caseId: `${d.domain}/${d.caseId}`,
+    error: `aktiv ugy [${d.status}] progression_enabled=0, ${d.runs} futas -- a motor KI VAN KAPCSOLVA ra`,
+  })
+}
 for (const v of [...personal.violations, ...zst.violations]) {
   if (v.reason === 'NO_PROGRESSION_STATE') continue // already reported as unenrolled
   failures.push({ caseId: `${v.domain}/${v.caseId}`, error: `Invariant A: ${v.reason} [${v.status}]` })
@@ -75,6 +85,7 @@ console.log(JSON.stringify({
     neverReconciled: drift.neverReconciled.length,
     conflicted: drift.conflicted.length,
     unenrolled: drift.unenrolled.length,
+    disabled: drift.disabled.length,
   },
   failures,
 }, null, 1))
