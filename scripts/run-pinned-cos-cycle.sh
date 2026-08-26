@@ -90,14 +90,23 @@ FEEDER_SHA="$(cat "$FEEDER_DIR/.release-sha" 2>/dev/null || true)"
 #    write access to the repository. Said plainly rather than dressed up: anyone
 #    who can rewrite the pin AND both scripts is already past every gate here.
 #    What it does buy is that a change to EITHER script alone fails loudly.
+#    A pin written BEFORE this hardening carries no `preflightSha256`, and the
+#    check tolerates that so the live cycle keeps running across the merge. But
+#    the skip is REPORTED, not silent: an absent check that looks identical to a
+#    passing one is this codebase's signature defect, and the whole point of the
+#    exercise is to stop producing it. `preflightCheck` in the OK line says which
+#    of the two happened, every run.
 PREFLIGHT_WANT="$(python3 -c "import json;print(json.load(open('$RUNTIME_PIN')).get('preflightSha256',''))" 2>/dev/null || true)"
 if [ -n "$PREFLIGHT_WANT" ]; then
   PREFLIGHT_HAVE="$(sha256sum "$REPO/scripts/cos-cycle-preflight.sh" 2>/dev/null | cut -d' ' -f1)"
   [ "$PREFLIGHT_WANT" = "$PREFLIGHT_HAVE" ] || fail "preflight launcher does not match the pin (want ${PREFLIGHT_WANT:0:12}, have ${PREFLIGHT_HAVE:0:12})"
+  PREFLIGHT_STATE="verified"
+else
+  PREFLIGHT_STATE="SKIPPED_PIN_DECLARES_NO_PREFLIGHT"
 fi
 
-printf '{"pinnedCycle":"OK","releaseSha":"%s","runtimeSha":"%s","feederSha256":"%s","feederRelease":"%s","storeInode":"%s"}\n' \
-  "$RELEASE_SHA" "$RUNTIME_SHA" "${FEEDER_HAVE:0:16}" "${FEEDER_SHA:0:9}" "$LIVE_INO" >&2
+printf '{"pinnedCycle":"OK","releaseSha":"%s","runtimeSha":"%s","feederSha256":"%s","feederRelease":"%s","preflightCheck":"%s","storeInode":"%s"}\n' \
+  "$RELEASE_SHA" "$RUNTIME_SHA" "${FEEDER_HAVE:0:16}" "${FEEDER_SHA:0:9}" "$PREFLIGHT_STATE" "$LIVE_INO" >&2
 
 # --verify-only exists so the checks can be exercised (and their refusals proven)
 # without paying for a full cycle. A guard nobody can cheaply drive into the red
