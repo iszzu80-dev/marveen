@@ -75,6 +75,18 @@ describe('§10.7 reopen — the happy path, end to end', () => {
     expect(reopened.source_reference).toBe('msg-19fe-contradicts')
     expect(JSON.parse(reopened.payload!).supersededCompletedAt).toBe(T0 + 100)
 
+    // THE BOARD ALREADY AGREES, before the engine has run again. The reopen
+    // moved a canonical field the projection reads (the review time), so a
+    // reopen that skipped its projection would leave the board describing the
+    // closed case until the next cycle -- a window in which the surface Istvan
+    // reads and the state machine disagree, which is the whole of P1.
+    const boardAtReopen = db.prepare(
+      `SELECT proj_next_review_at, last_reconciled_at FROM personal_cases WHERE case_id='c1'`,
+    ).get() as { proj_next_review_at: number | null; last_reconciled_at: number | null }
+    expect(boardAtReopen.proj_next_review_at).toBe(T0 + 200)
+    expect(boardAtReopen.last_reconciled_at).toBe(T0 + 200)
+    expect(detectProjectionDrift(db, T0 + 200).total).toBe(0)
+
     // A NEW NEXT ACTION. The reopen does not write one -- it re-arms the engine,
     // and the engine decides. This is the chain, driven.
     const state = db.prepare(
