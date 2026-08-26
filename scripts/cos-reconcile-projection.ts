@@ -68,6 +68,12 @@ for (const b of drift.behind) {
   })
 }
 
+// ONE LINE, deliberately. The cycle runner parses stdout LINE BY LINE, so a
+// pretty-printed payload never parses -- and when nothing parses, the runner
+// skips its whole failure-detection block. The first pinned run of this step
+// proved it: the report carried `raw: "{...}"` and `runStatus: UNKNOWN`, while
+// `failures: []` was never read at all. A reconcile failure would have exited 0
+// and said nothing.
 console.log(JSON.stringify({
   dryRun,
   examined: sweep.examined,
@@ -88,4 +94,4 @@ console.log(JSON.stringify({
     disabled: drift.disabled.length,
   },
   failures,
-}, null, 1))
+}))

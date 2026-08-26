@@ -342,6 +342,24 @@ for (const s of STEPS) {
   }
 
   const stepReport: Record<string, unknown> = parsed ? { ...parsed } : { raw: out.slice(-500) }
+
+  // A STEP WHOSE OUTPUT CANNOT BE PARSED IS A PROBLEM, not an UNKNOWN.
+  //
+  // Found on the P1 cutover's first pinned run, by this runner's own report.
+  // The new reconcile step pretty-printed its JSON; this parser reads stdout
+  // LINE BY LINE, so nothing parsed, `parsed` stayed null -- and the entire
+  // failure-detection block below is inside `if (p)`. The step reported
+  // `failures: []` and the runner never looked. A real reconcile failure would
+  // have exited 0 and said nothing, which is the exact shape the 2026-08-11
+  // `failures` fix was written to end, arriving through a different door.
+  //
+  // UNKNOWN was the right word for "ran and cannot say what it did". It is the
+  // WRONG word for "ran and I cannot read a word of it", because that second
+  // one also means every failure this step might report is invisible to me.
+  if (!parsed && r.status === 0 && !r.error) {
+    problems.push(`${s.name}: kimenete nem ertelmezheto (nincs egyetlen JSON sor sem), `
+      + 'tehat a lepes hibajelentese SEM olvashato -- a nulla problema itt nem allitas')
+  }
   const cpp = cppResult(s.name, parsed, null)
   stepReport.cpp = cpp
   stepReport.runStatus = recordRun(s, stepIdentity, cpp, parsed, startedAt)
