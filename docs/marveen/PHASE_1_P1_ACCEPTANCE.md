@@ -100,8 +100,8 @@ than `!=` because half these columns are NULL most of the time and
 | 5 | `last_reconciled_at` | Column on both case tables; its ABSENCE is its own bucket (`neverReconciled`), because a row nothing ever projected looks identical to one that agrees. |
 | 6 | conflict reason | `projection_conflict_reason` on the row, plus a `CASE_INPUT_OBSERVED` event carrying the observed values. Canonical wins — never silently. |
 | 7 | backfill dry-run | Default mode. Test asserts a dry run leaves the row byte-identical, not even a `last_reconciled_at` stamp. |
-| 8 | no side effects | Live, measured against a pre-P1 backup after the apply: case version sums 326/118 **unchanged**, event counts 680/280 **unchanged**, progression runs 17 343 **unchanged**, `next_wake_at` fill 0 **unchanged**. |
-| 9 | all active cases satisfy Invariant A | Live board, before: **0 of 146**. After: **145 of 146**. The one exception is the outlier below. |
+| 8 | no side effects | Live, measured against a pre-P1 backup: case version sums 326/118 **unchanged** across 235 projections, `next_wake_at` fill 0 **unchanged**, and **zero** events written by the projection. (The event count moved 680 → 683: one PROGRESSION_ENABLED I wrote deliberately, and two the ENGINE wrote during the outlier's first run. Each one identified, none from the sweep.) |
+| 9 | all active cases satisfy Invariant A | Live board, before: **0 of 146**. After: **146 of 146**, drift 0, both namespaces. |
 | 10 | the 166/167 outlier identified and closed | §4. |
 
 ---
@@ -137,8 +137,51 @@ this packet, decides what happens to the case. Rehearsed on a copy of the live
 store first: one run, `CONTINUE_AUTONOMOUSLY`, **status untouched** (no
 surprise auto-close), Invariant A violations 0, drift 0.
 
+**Closed on live, and it worked.** The pinned engine picked the case up on its
+next cycle and gave it its first-ever progression run. Invariant A on the board
+is now **146 of 146** in both namespaces, drift 0, engine-off 0.
+
 **One thing for Istvan, not for the engine:** the trip ended on 2026-08-23 and
 the case is still `EXECUTING`. Whether it is finished is his call, not mine.
+
+---
+
+## 4b. The drift detector, proven on live data by accident
+
+Between the first backfill and the second, one pinned CoS cycle ran. The pinned
+release (`3d0cbcd1`) does not contain the projection, so it advanced the
+canonical state of 90 cases and the board could not follow.
+
+The detector reported exactly **90 BEHIND**, and the sweep closed all 90.
+
+That is the packet's whole thesis demonstrated on the live store without being
+staged: before P1 those 90 cases would have diverged in silence, because nothing
+compared the two views and no row carried a timestamp saying when they last
+agreed.
+
+---
+
+## 4c. A finding that is NOT closed: 0 of 76 next actions are readable
+
+Measured after reconciliation, live:
+
+```text
+personal_cases.proj_next_action_kind IS NOT NULL   76 of 76
+personal_cases.proj_next_action      IS NOT NULL    0 of 76
+```
+
+Every single next-action text the engine currently produces is an internal
+English plan label that `isUsableRecommendation` forbids showing the owner. Not
+most of them — all of them.
+
+Two things follow. First, it retroactively settles §1: the naive P1 would have
+written 76 rows of banned machine text onto Istvan's board, which is not a
+judgement call but a measurement. Second, and this is the open part: **Invariant
+A now holds as a FACT while the board still cannot show Istvan a sentence he can
+read.** The kind and the review time are there; the words are not. Turning
+`kind` into Hungarian is a rendering problem, it is small, and it belongs in
+Phase 1 — I am recording it here rather than quietly satisfying the invariant
+and calling the surface finished.
 
 ---
 
