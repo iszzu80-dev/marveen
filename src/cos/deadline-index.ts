@@ -47,6 +47,8 @@ export type DeadlineType =
   | 'CONTRACT_EXPIRY'
   | 'INITIATIVE_DECISION_DUE'
   | 'ESCALATION_DUE'
+  | 'WAIT_EXPECTED_BY'
+  | 'WAIT_STALE_REVIEW'
 
 /** §10.3's documentation shape, as data rather than as a YAML file nobody
  *  parses. Being data is what lets the standing check compare it against the
@@ -80,6 +82,40 @@ export interface DeadlineConcept {
  * the one a person should see first.
  */
 export const DEADLINE_ONTOLOGY: readonly DeadlineConcept[] = [
+  {
+    field: 'case_wait_conditions.expected_by',
+    semanticOwner: '§10.4 tipizált várakozás',
+    sourceOfTruth: 'case_wait_conditions',
+    readers: ['wait-condition.ts', 'case-projection.ts', 'progression-trigger.ts', 'deadline-index.ts'],
+    writers: ['wait-condition.ts'],
+    normalizedType: 'WAIT_EXPECTED_BY',
+    precedenceIfConflict: 45,
+    status: 'ADAPTED_TO_INDEX',
+    rationale:
+      'Mikorra VÁRJUK azt, amire az ügy vár. Ez az első olyan oszlop a rendszerben, ami tényleges '
+      + 'felülvizsgálati időpontot jelent: a next_progression_at két jelentést visz (ütemezett '
+      + 'ébresztés ÉS a poller ötperces visszanézése), és a gyakorlatban mindig a másodikat. '
+      + 'Kevésbé kötelező, mint egy jogi határidő, kötelezőbb, mint egy magunknak hagyott emlékeztető.',
+    migrationOrAdapter: 'közvetlen epoch, nincs átalakítás',
+    storage: 'EPOCH',
+  },
+  {
+    field: 'case_wait_conditions.stale_review_at',
+    semanticOwner: '§10.2 Invariáns C',
+    sourceOfTruth: 'case_wait_conditions',
+    readers: ['wait-condition.ts', 'case-projection.ts', 'deadline-index.ts'],
+    writers: ['wait-condition.ts'],
+    normalizedType: 'WAIT_STALE_REVIEW',
+    precedenceIfConflict: 60,
+    status: 'ADAPTED_TO_INDEX',
+    rationale:
+      'A HATÁR, ameddig egy megválaszolatlan várakozás csendben ülhet. Nem azt mondja, mikor '
+      + 'esedékes valami, hanem hogy mikor kell valakinek RÁNÉZNI, ha semmi nem történt. Ezért van '
+      + 'külön az expected_by-tól: az egyik a világról szól, ez a rendszer saját fegyelméről, és '
+      + 'egy esemény-vezérelt várakozásnak, aminek nincs határideje, EZ az egyetlen kijárata.',
+    migrationOrAdapter: 'közvetlen epoch, nincs átalakítás',
+    storage: 'EPOCH',
+  },
   {
     field: 'zst_contracts.termination_deadline',
     semanticOwner: 'ZST szerződéskezelés',
@@ -444,6 +480,13 @@ export const INTERNAL_SAFE_LEAD_SEC: Record<DeadlineType, number> = {
   FOLLOW_UP_DUE: 0,
   WATCH_DUE: 0,
   WAKE: 0,
+  // A wait's own deadline needs no lead: nothing has to be PREPARED for the
+  // moment a reply was expected -- the engine simply has to look. The stale
+  // review is the same, and deliberately so: giving either a lead would make
+  // the case surface early and then again on time, which is how a real signal
+  // gets trained out of somebody.
+  WAIT_EXPECTED_BY: 0,
+  WAIT_STALE_REVIEW: 0,
 }
 
 /** §10.1's record, in this store's conventions (epoch seconds, not ISO). */
@@ -516,6 +559,10 @@ const PROJECTIONS: readonly Projection[] = [
   { table: 'zst_cases', column: 'due_at', type: 'CASE_DUE', domain: 'zst', caseIdColumn: 'case_id', idColumn: 'case_id', labelColumn: 'title', parse: false, where: `status NOT IN ('COMPLETED','CANCELLED','ARCHIVED') AND archived_at IS NULL` },
   { table: 'zst_cases', column: 'follow_up_at', type: 'FOLLOW_UP_DUE', domain: 'zst', caseIdColumn: 'case_id', idColumn: 'case_id', labelColumn: 'title', parse: false, where: `status NOT IN ('COMPLETED','CANCELLED','ARCHIVED') AND archived_at IS NULL` },
   { table: 'zst_cases', column: 'next_wake_at', type: 'WAKE', domain: 'zst', caseIdColumn: 'case_id', idColumn: 'case_id', labelColumn: 'title', parse: false, where: `status NOT IN ('COMPLETED','CANCELLED','ARCHIVED') AND archived_at IS NULL` },
+  { table: 'case_wait_conditions', column: 'expected_by', type: 'WAIT_EXPECTED_BY', domain: 'personal', caseIdColumn: 'case_id', idColumn: 'wait_id', labelColumn: 'subject', parse: false, where: `resolved_at IS NULL AND domain = 'personal'` },
+  { table: 'case_wait_conditions', column: 'expected_by', type: 'WAIT_EXPECTED_BY', domain: 'zst', caseIdColumn: 'case_id', idColumn: 'wait_id', labelColumn: 'subject', parse: false, where: `resolved_at IS NULL AND domain = 'zst'` },
+  { table: 'case_wait_conditions', column: 'stale_review_at', type: 'WAIT_STALE_REVIEW', domain: 'personal', caseIdColumn: 'case_id', idColumn: 'wait_id', labelColumn: 'subject', parse: false, where: `resolved_at IS NULL AND domain = 'personal'` },
+  { table: 'case_wait_conditions', column: 'stale_review_at', type: 'WAIT_STALE_REVIEW', domain: 'zst', caseIdColumn: 'case_id', idColumn: 'wait_id', labelColumn: 'subject', parse: false, where: `resolved_at IS NULL AND domain = 'zst'` },
   { table: 'radar_items', column: 'next_check_at', type: 'WATCH_DUE', domain: 'personal', caseIdColumn: 'case_id', idColumn: 'radar_id', labelColumn: 'label', parse: false, where: `status = 'ACTIVE'` },
   { table: 'zst_obligations', column: 'follow_up_at', type: 'FOLLOW_UP_DUE', domain: 'zst', caseIdColumn: null, idColumn: 'rowid', labelColumn: 'rowid', parse: false },
   { table: 'zst_contracts', column: 'termination_deadline', type: 'TERMINATION_DEADLINE', domain: 'zst', caseIdColumn: 'case_id', idColumn: 'contract_id', labelColumn: 'title', parse: true },

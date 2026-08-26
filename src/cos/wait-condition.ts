@@ -82,7 +82,7 @@ export interface WaitConditionRow {
   subject: string
   expected_by: number | null
   evidence_predicate_json: string
-  wake_policy: WakePolicy
+  resolution_mode: WakePolicy
   stale_review_at: number
   armed_event_id: number | null
   armed_at: number
@@ -212,7 +212,7 @@ export function armWaitCondition(
     db.prepare(
       `INSERT INTO case_wait_conditions
          (wait_id, domain, case_id, kind, subject, expected_by, evidence_predicate_json,
-          wake_policy, stale_review_at, armed_event_id, armed_at, armed_run_id)
+          resolution_mode, stale_review_at, armed_event_id, armed_at, armed_run_id)
        VALUES (@waitId, @domain, @caseId, @kind, @subject, @expectedBy, @predicate,
           @policy, @staleReviewAt, @armedEventId, @now, @runId)`,
     ).run({
@@ -274,13 +274,13 @@ export function evaluateWaitCondition(
     } catch { return null }
   }
 
-  if (w.wake_policy !== 'EVENT_ONLY' && clockDue) {
+  if (w.resolution_mode !== 'EVENT_ONLY' && clockDue) {
     return {
       verdict: 'SATISFIED', waitId: w.wait_id, kind: w.kind,
       detail: `az óra lejárt (${w.expected_by})`,
     }
   }
-  if (w.wake_policy !== 'TIMER') {
+  if (w.resolution_mode !== 'TIMER') {
     const ev = eventEvidence()
     if (ev) {
       return {

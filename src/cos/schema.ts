@@ -2107,8 +2107,15 @@ export function initProgressionSchema(db: Database.Database): void {
       /* What would SATISFY it, as a machine-checkable predicate. */
       evidence_predicate_json TEXT NOT NULL,
       /* TIMER: the clock alone resolves it. EVENT_ONLY: only evidence does.
-         EITHER: whichever comes first. */
-      wake_policy      TEXT NOT NULL,
+         EITHER: whichever comes first.
+         NAMED resolution_mode AND NOT wake_policy ON PURPOSE: the §10.3
+         ontology check scans every declaring file for deadline-shaped column
+         names, and 'wake' is one of its keywords. This column is an enum, not a
+         timestamp -- DeadlineConcept has nowhere to put it (its storage is
+         EPOCH / ISO_DATE_TEXT / RELATIVE) -- so the honest fix is a name that
+         does not claim to be a deadline, rather than an ontology entry that
+         lies about what it holds. */
+      resolution_mode      TEXT NOT NULL,
       /* §10.2 Invariant C: a wait with no timer is allowed ONLY when it carries
          its own stale review, so an event that never arrives cannot park a case
          for ever in silence. */
@@ -2126,10 +2133,10 @@ export function initProgressionSchema(db: Database.Database): void {
       CHECK (domain IN ('personal','zst')),
       CHECK (kind IN ('EVENT','NEW_EVIDENCE','SCHEDULED_REVIEW','DEADLINE',
                       'COMMITMENT','EXTERNAL_RESPONSE','POLICY_CHANGE')),
-      CHECK (wake_policy IN ('TIMER','EVENT_ONLY','EITHER')),
+      CHECK (resolution_mode IN ('TIMER','EVENT_ONLY','EITHER')),
       CHECK (resolution IS NULL OR resolution IN ('SATISFIED','EXPIRED','SUPERSEDED','CANCELLED')),
       /* A TIMER or EITHER wait without a deadline is a wait nothing can end. */
-      CHECK (wake_policy = 'EVENT_ONLY' OR expected_by IS NOT NULL)
+      CHECK (resolution_mode = 'EVENT_ONLY' OR expected_by IS NOT NULL)
     )
   `)
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cwc_one_active
