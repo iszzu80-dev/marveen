@@ -44,7 +44,7 @@ export interface CaseStatusSets {
 }
 
 // Personal defaults, used when a caller omits statusSets (keeps existing behaviour).
-const PERSONAL_STATUS_SETS: CaseStatusSets = {
+export const PERSONAL_STATUS_SETS: CaseStatusSets = {
   terminal: ['COMPLETED', 'CANCELLED', 'ARCHIVED'],
   attention: ['INFO_REQUIRED', 'FOLLOW_UP_DUE', 'CALL_REQUIRED', 'AWAITING_SELECTION', 'RECOVERY_REQUIRED'],
 }

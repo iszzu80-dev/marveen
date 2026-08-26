@@ -24,6 +24,7 @@ import {
 } from '../../cos/zst-productlab.js'
 import { validateSkillMd, validateSkillPermissions } from '../../cos/skill-permission-validator.js'
 import { getMissionControlProgressionView, runProgressionCycle } from '../../cos/progression-pipeline.js'
+import { evaluateInvariantA, detectProjectionDrift } from '../../cos/case-projection.js'
 import { semanticQualityMetrics, qualityConcerns, QUALITY_THRESHOLDS } from '../../cos/progression-quality.js'
 import { tryClaimProgression, releaseProgressionClaim } from '../../cos/progression-scheduler.js'
 import { storeDocument, documentsForCase, readDocumentBytes, resolveShareableAttachments } from '../../cos/cos-documents.js'
@@ -1069,6 +1070,11 @@ export function listMonitoring(db: ReturnType<typeof getDb>): {
   alerts: { findings: unknown[]; counts: Record<string, number>; clean: boolean }
   recovery: { needsHuman: unknown[]; pendingRetry: unknown[]; counts: Record<string, number> }
   health: { stale: unknown[]; unverified: unknown[]; clean: boolean; checkedAt: number }
+  projection: {
+    invariantA: Record<string, { active: number; satisfied: number; violating: number; unenrolled: number }>
+    drift: { behind: number; neverReconciled: number; conflicted: number; unenrolled: number; total: number }
+    oldestReconciledAt: number | null
+  }
 } {
   const connectors = db.prepare(
     `SELECT connector_id, kind, mode, status, consecutive_failures, last_ok_at, last_error_at, last_error
@@ -1119,11 +1125,45 @@ export function listMonitoring(db: ReturnType<typeof getDb>): {
   // directions, so a surface carrying only one of them can be green while the
   // other is the outage.
   const health = operationalHealth(db, Math.floor(Date.now() / 1000))
+  // P1 §10.2 — Invariant A on the surface the owner actually reads, AS NUMBERS
+  // and not only as an alert. `alerts` already carries the projection-drift
+  // finding, but a finding is silent when things are fine, and this view's own
+  // output-floor doctrine says why that is not enough: a page that speaks only
+  // about problems reads as calm when nothing is happening at all. Before this
+  // packet the honest value of `satisfied` here was 0 of 146.
+  const nowSec = Math.floor(Date.now() / 1000)
+  const invariantA: Record<string, { active: number; satisfied: number; violating: number; unenrolled: number }> = {}
+  for (const domain of ['personal', 'zst'] as const) {
+    const r = evaluateInvariantA(db, domain)
+    invariantA[domain] = {
+      active: r.active, satisfied: r.satisfied,
+      violating: r.violations.length, unenrolled: r.unenrolled,
+    }
+  }
+  const drift = detectProjectionDrift(db, nowSec)
+  // The OLDEST reconciliation, not the newest: one fresh row proves nothing
+  // about the other hundred, and a sweep that silently stopped covering part of
+  // the board would leave the newest timestamp looking perfectly current.
+  const oldest = db.prepare(
+    `SELECT MIN(t) AS t FROM (
+       SELECT MIN(last_reconciled_at) AS t FROM personal_cases WHERE last_reconciled_at IS NOT NULL
+       UNION ALL
+       SELECT MIN(last_reconciled_at) AS t FROM zst_cases WHERE last_reconciled_at IS NOT NULL)`,
+  ).get() as { t: number | null } | undefined
   return { connectors, outboundHealth: { byStatus, needsAttention }, quotas,
     outputFloors, breached: breachedFloors(outputFloors),
     alerts: { findings: rec.findings, counts: rec.counts, clean: rec.clean },
     recovery: { needsHuman, pendingRetry, counts: recoveryCounts },
-    health }
+    health,
+    projection: {
+      invariantA,
+      drift: {
+        behind: drift.behind.length, neverReconciled: drift.neverReconciled.length,
+        conflicted: drift.conflicted.length, unenrolled: drift.unenrolled.length,
+        total: drift.total,
+      },
+      oldestReconciledAt: oldest?.t ?? null,
+    } }
 }
 
 

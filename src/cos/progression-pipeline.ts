@@ -62,6 +62,8 @@ import {
 import { answerIntentOf, type AnswerIntent } from './answer-options.js'
 import { CASE_STATUSES } from './schema.js'
 import { evaluateCaseTemporalConsistency } from './temporal-consistency-gate.js'
+// Two-node ESM cycle with case-projection, deliberate: see that module's header.
+import { projectCase } from './case-projection.js'
 
 // ── Valid progression decisions (plan §13) ──────────────────────────────
 
@@ -1728,6 +1730,27 @@ function runProgressionCycleInner(
       `UPDATE case_progression_runs SET case_version_after = ? WHERE progression_run_id = ?`,
     ).run(currentVersion, runId)
   }
+
+  // ── 14. P1 — project the canonical decision onto the case board ────────────
+  //
+  // HERE, inside the run's transaction, and at the ONE place every progression
+  // run passes through. There are four callers of runProgressionCycle; asking
+  // each of them to remember to project is the shape of defect this codebase
+  // has logged most often (built at both ends, dead in the middle).
+  //
+  // Inside the transaction means the canonical write and its projection commit
+  // together, so the ordinary path cannot produce the "canonical advanced, board
+  // did not" state at all. It can still arise from the canonical writers that do
+  // not live in this pipeline (the scheduler, completion, the owner-question
+  // path) and from a crash; `reconcileProjections` is what closes that window,
+  // idempotently and fenced.
+  //
+  // A projection failure must not lose the run. The decision is already durable
+  // at this point and the sweep will re-project; throwing here would roll back a
+  // completed piece of reasoning to fix a view of it.
+  try {
+    projectCase(db, domain, caseId, now)
+  } catch { /* the sweep reconciles it; see reconcileProjections */ }
 
   return {
     runId,

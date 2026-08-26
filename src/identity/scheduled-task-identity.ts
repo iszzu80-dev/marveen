@@ -135,6 +135,16 @@ export const SCHEDULED_TASK_GRANTS: readonly ScheduledTaskGrant[] = Object.freez
       + 'grant boundary enforces that where a comment would only ask.',
   },
   {
+    task: 'cos-reconcile-projection',
+    capabilities: Object.freeze(['READ', 'WRITE_LOCAL'] as Capability[]),
+    onBehalfOf: 'istvan',
+    rationale:
+      'P1 projection sweep. Writes ONLY the engine-owned proj_* columns and their reconciliation '
+      + 'metadata on the case board -- no status, no version bump, no scheduling, nothing outbound. '
+      + 'WRITE_LOCAL rather than READ because it does write, and a step that under-declares its '
+      + 'grant is a worse lie than one that over-declares it.',
+  },
+  {
     task: 'cos-deadline-audit',
     capabilities: Object.freeze(['READ', 'WRITE_LOCAL'] as Capability[]),
     onBehalfOf: 'istvan',

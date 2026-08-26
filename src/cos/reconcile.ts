@@ -20,6 +20,7 @@
 
 import type Database from 'better-sqlite3'
 import { evaluateOutputFloors, breachedFloors } from './output-floor.js'
+import { detectProjectionDrift } from './case-projection.js'
 import { numericCursorSql } from './email-ingest.js'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -605,6 +606,53 @@ const awaitingOwnerTooLong: Check = (db) => {
   }
 }
 
+/** P1 §10.2 — the board and the engine disagreeing about the same case.
+ *
+ *  This is the finding the store could not produce at all before 2026-08-26.
+ *  Invariant A held 166/167 inside `case_progression_state` and 0/146 on the
+ *  case board, and nothing anywhere carried a `last_reconciled_at`, so the
+ *  disagreement had no surface and no age.
+ *
+ *  FOUR BUCKETS, DELIBERATELY NOT ONE NUMBER. They are different failures with
+ *  opposite fixes, and summing them would hide the worst one inside the
+ *  harmless one:
+ *
+ *    unenrolled      — the engine has never been asked about this case at all.
+ *                      An active case with no progression state looks exactly
+ *                      like one the engine has nothing to say about.
+ *    never-reconciled— the board row has never been projected. Indistinguishable
+ *                      from agreement, and the opposite condition.
+ *    behind          — projected from an older canonical revision than the
+ *                      engine currently holds. The sweep should have closed
+ *                      this; still being here means it was refused.
+ *    conflicted      — somebody other than the projection wrote an engine-owned
+ *                      column. Ingested as an input event, never silently
+ *                      erased. */
+const projectionDrift: Check = (db, now) => {
+  let d: ReturnType<typeof detectProjectionDrift>
+  try {
+    d = detectProjectionDrift(db, now)
+  } catch { return null }
+  if (d.total === 0) return null
+  const parts: string[] = []
+  if (d.unenrolled.length) parts.push(`${d.unenrolled.length} progression state nélkül`)
+  if (d.neverReconciled.length) parts.push(`${d.neverReconciled.length} sosem egyeztetve`)
+  if (d.behind.length) parts.push(`${d.behind.length} lemaradt vetület`)
+  if (d.conflicted.length) parts.push(`${d.conflicted.length} ütközés`)
+  const worst = d.unenrolled.length || d.behind.length ? 'CRITICAL' : 'WARNING'
+  const sample = [...d.unenrolled.map(x => x.caseId), ...d.behind.map(x => x.caseId),
+    ...d.neverReconciled.map(x => x.caseId)].slice(0, 4).join(' · ')
+  return {
+    id: 'projection_drift', severity: worst as Severity, ref: '§10.1/§10.2, P1',
+    title: 'A tábla és a motor nem ugyanazt mondja az ügyről',
+    detail: `${d.total} ügy: ${parts.join(', ')}${sample ? ` — ${sample}` : ''}`,
+    action: 'Futtasd a vetület-egyeztetést (scripts/cos-reconcile-projection.ts). '
+      + 'Ami utána is marad: a progression state nélküli ügyeket be kell vonni a motorba, '
+      + 'az ütközéseket pedig valaki KÉZZEL írta felül — a motor döntése vetül vissza, '
+      + 'de az a kéz-írás egy bemenet, amit meg kell nézni.',
+  }
+}
+
 export const CHECKS: Check[] = [
   stuckLocalApplied, openBatches, missingCheckpoint,
   outboundNeedsHuman, outcomeUnknown, stuckSending, failedRetryableStranded,
@@ -616,6 +664,8 @@ export const CHECKS: Check[] = [
   zstFrozenCases, zstStuckSending, zstStaleClaims, zstMessagesWithoutThread,
   // stagnation, both domains (2026-08-10)
   stagnantCases, awaitingOwnerTooLong,
+  // P1: one case, one truth (2026-08-26)
+  projectionDrift,
 ]
 
 /** Run every check. Order of findings: CRITICAL first — a report that buries the

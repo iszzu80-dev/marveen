@@ -2070,4 +2070,144 @@ export function initProgressionSchema(db: Database.Database): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cesc_case ON case_escalations(domain, case_id, created_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cesc_status ON case_escalations(domain, resolution_status, created_at)`)
+
+  // LAST in this function: the projection seam needs both case tables AND
+  // case_progression_state to exist, and this is the first point where all
+  // three are guaranteed.
+  initCaseProjectionSchema(db)
+}
+
+/** P1 §10.1/§10.2 — the projection seam between the canonical state machine and
+ *  the case board.
+ *
+ *  Measured 2026-08-26, before any of this existed: Invariant A (every active
+ *  case carries a next action, or a wait condition plus a review time) held
+ *  166 of 167 in `case_progression_state` and failed 90 of 147 on the case
+ *  board. Not because the board was WRONG about a case — because it was silent
+ *  about it, and nothing reconciled the two views or noticed the gap.
+ *
+ *  WHY NEW COLUMNS INSTEAD OF FILLING THE OBVIOUS ONES
+ *
+ *  The audit that opened this packet said `next_wake_at` (0/122) was the board's
+ *  unwritten twin of `next_progression_at` (166/167), and that the fix was to
+ *  fill it. Three separate live consumers say otherwise, and each one would have
+ *  broken quietly:
+ *
+ *    `next_wake_at` is an APPOINTMENT, not a poll time. `alertWokenCases` posts
+ *    every due case to the owner and then CLEARS the column, by design. Filling
+ *    it from `next_progression_at` (a five-minute engine cadence, usually in the
+ *    past) would have alerted ~120 cases at once and then re-armed them on the
+ *    next cycle: a permanent alert loop, built by a reconciliation whose whole
+ *    purpose was to stop drift.
+ *
+ *    `waiting_on` is where `followup-autodraft` finds the RECIPIENT — it regexes
+ *    an address out of it. Overwriting it with the engine's free-text wait
+ *    reason would silently disarm follow-up drafting, or worse, redirect one.
+ *
+ *    `next_action` is in `case-link`'s TRUSTED_CASE_FIELDS, and it is also
+ *    exactly what `isUsableRecommendation` REFUSES to show the owner: the
+ *    engine's next-best-action text is a closed set of internal English plan
+ *    labels ("Execute first recovery action"), banned from owner-facing surfaces
+ *    after that string shipped to Istvan once already.
+ *
+ *  So the projection gets its own, engine-owned columns. One writer each, no
+ *  meaning borrowed from a column that already had one. That is also the whole
+ *  point of the packet: two writers on one fact is how the two representations
+ *  drifted apart in the first place.
+ *
+ *  `proj_next_action_kind` rather than the text carries Invariant A. The
+ *  invariant asks whether a next action EXISTS, which is a fact; the English
+ *  label is a rendering, and a banned rendering does not make the fact absent.
+ */
+export function initCaseProjectionSchema(db: Database.Database): void {
+  const projectionColumns = {
+    /** Owner-safe action text, or NULL when the engine's label is internal
+     *  machine vocabulary. NULL here is not a missing action — see the kind. */
+    proj_next_action:      'TEXT',
+    /** VERIFY | GATHER_INFO | EXECUTE | AWAIT_EXTERNAL | AWAIT_DECISION |
+     *  RECOVER | COMMUNICATE — the machine fact Invariant A reads. */
+    proj_next_action_kind: 'TEXT',
+    proj_next_action_step: 'INTEGER',
+    /** The engine's wait reason. Deliberately NOT `waiting_on`. */
+    proj_wait_condition:   'TEXT',
+    /** The engine's `next_progression_at`. Deliberately NOT `next_wake_at`. */
+    proj_next_review_at:   'INTEGER',
+    proj_blocked_reason:   'TEXT',
+    /** Fence: the `canonical_revision` this row reflects. A projection carrying
+     *  an older revision is refused rather than allowed to overwrite a newer
+     *  one. */
+    projected_revision:    'INTEGER',
+    /** Hash of the values this projection last wrote. A mismatch means somebody
+     *  other than the projection changed them — a conflict, not a drift. */
+    projection_fingerprint: 'TEXT',
+    projection_conflict_reason: 'TEXT',
+    /** When the two views were last confirmed to agree. Its ABSENCE is the
+     *  finding: a case nothing has reconciled cannot report that it drifted. */
+    last_reconciled_at:    'INTEGER',
+  }
+  ensureColumns(db, 'personal_cases', projectionColumns)
+  ensureColumns(db, 'zst_cases', projectionColumns)
+
+  // Partial indexes: every query here asks "which rows are behind / in
+  // conflict", never "which are fine".
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_pcases_unreconciled ON personal_cases(last_reconciled_at)
+           WHERE last_reconciled_at IS NULL`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_zcases_unreconciled ON zst_cases(last_reconciled_at)
+           WHERE last_reconciled_at IS NULL`)
+
+  // ── canonical_revision, and why it is a TRIGGER ──────────────────────────
+  //
+  // The fence needs a monotonic version of the canonical row. Bumping it from
+  // application code would mean editing every canonical writer — there are
+  // eleven of them across seven modules today, and the twelfth one written next
+  // month would silently not bump, which is the exact failure mode this column
+  // exists to catch. A trigger is the table's choke point: it covers writers
+  // that do not exist yet.
+  //
+  // It watches ONLY the fields the projection reads, so the revision means
+  // "the projection's input changed" and not merely "the row was touched".
+  // A goal rewrite that changes nothing projectable must not make every board
+  // row look stale.
+  //
+  // `IS NOT` rather than `!=`: half these columns are NULL most of the time and
+  // `NULL != NULL` is NULL, so `!=` would miss every transition into and out of
+  // NULL. Verified against better-sqlite3 before writing it: a no-op UPDATE
+  // does not bump, a NULL->value and a value->NULL both do, and
+  // `recursive_triggers` is OFF so the trigger's own UPDATE does not re-fire.
+  ensureColumns(db, 'case_progression_state', {
+    canonical_revision: 'INTEGER NOT NULL DEFAULT 0',
+  })
+  db.exec(`DROP TRIGGER IF EXISTS trg_cps_canonical_revision`)
+  db.exec(`
+    CREATE TRIGGER trg_cps_canonical_revision
+    AFTER UPDATE ON case_progression_state
+    FOR EACH ROW WHEN
+         (NEW.next_best_action_json IS NOT OLD.next_best_action_json)
+      OR (NEW.next_progression_at   IS NOT OLD.next_progression_at)
+      OR (NEW.waiting_on            IS NOT OLD.waiting_on)
+      OR (NEW.blocked_reason        IS NOT OLD.blocked_reason)
+      OR (NEW.wait_system_json      IS NOT OLD.wait_system_json)
+    BEGIN
+      UPDATE case_progression_state SET canonical_revision = OLD.canonical_revision + 1
+       WHERE domain = NEW.domain AND case_id = NEW.case_id;
+    END
+  `)
+  // An INSERT that already carries projectable content starts at revision 1, so
+  // a freshly enrolled case is never mistaken for "projected and up to date"
+  // by a board row whose projected_revision defaults to NULL.
+  db.exec(`DROP TRIGGER IF EXISTS trg_cps_canonical_revision_insert`)
+  db.exec(`
+    CREATE TRIGGER trg_cps_canonical_revision_insert
+    AFTER INSERT ON case_progression_state
+    FOR EACH ROW WHEN
+         NEW.next_best_action_json IS NOT NULL
+      OR NEW.next_progression_at   IS NOT NULL
+      OR NEW.waiting_on            IS NOT NULL
+      OR NEW.blocked_reason        IS NOT NULL
+      OR NEW.wait_system_json      IS NOT NULL
+    BEGIN
+      UPDATE case_progression_state SET canonical_revision = 1
+       WHERE domain = NEW.domain AND case_id = NEW.case_id;
+    END
+  `)
 }

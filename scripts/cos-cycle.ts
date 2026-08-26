@@ -52,6 +52,12 @@ interface Step { name: string; args: string[]; task: string }
 
 const STEPS: Step[] = [
   { name: 'progression', args: ['scripts/progression-heartbeat-runner.ts'], task: 'progression' },
+  // P1: a tabla es a motor UGYANARROL az ugyrol ugyanazt mondja-e. Az elso
+  // meresen az Invariant A a motorban 166/167-en allt, a tablan 0/146-on --
+  // nem azert, mert a tabla tevedett az ugyrol, hanem mert HALLGATOTT rola, es
+  // semmi nem egyeztette a kettot. A lepes ELOL van: minden utana kovetkezo
+  // meres a tablarol olvas, es egy nem-egyeztetett tabla hazudik nekik.
+  { name: 'reconcile', args: ['scripts/cos-reconcile-projection.ts'], task: 'cos-reconcile-projection' },
   { name: 'batches', args: ['scripts/cos-close-batches.ts'], task: 'cos-close-batches' },
   { name: 'threads', args: ['scripts/cos-fetch-threads.ts', '--limit', '10'], task: 'cos-fetch-threads' },
   { name: 'followups', args: ['scripts/cos-draft-followups.ts', '--limit', '5'], task: 'cos-draft-followups' },

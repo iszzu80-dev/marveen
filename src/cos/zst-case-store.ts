@@ -46,7 +46,7 @@ const ZST_DEFAULTS: CaseDefaults = {
 // / REVIEW_REQUIRED / AWAITING_INTERNAL_INPUT want attention (note the different
 // spelling from Personal's INFO_REQUIRED — this is why the read-view sets are
 // per-namespace).
-const ZST_STATUS_SETS: CaseStatusSets = {
+export const ZST_STATUS_SETS: CaseStatusSets = {
   terminal: ['COMPLETED', 'CANCELLED', 'ARCHIVED', 'FAILED_TERMINAL'],
   attention: ['INFORMATION_REQUIRED', 'FOLLOW_UP_DUE', 'CALL_REQUIRED', 'AWAITING_SELECTION',
     'RECOVERY_REQUIRED', 'REVIEW_REQUIRED', 'AWAITING_INTERNAL_INPUT'],
