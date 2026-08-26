@@ -26,6 +26,7 @@ import {
   deferProgression,
 } from './progression-scheduler.js'
 import { runProgressionCycle, type PipelineOptions } from './progression-pipeline.js'
+import { projectCase } from './case-projection.js'
 import { acquireClaim, releaseClaim } from './case-store.js'
 import { decideTrigger, recordProgressionState, dueDeadline } from './progression-trigger.js'
 import { killSwitchRefusal } from './kill-switch.js'
@@ -219,6 +220,26 @@ export function runProgressionHeartbeat(
         recordProgressionState(db, domain, dc.case_id,
           decideTrigger(db, domain, dc.case_id, now).effectiveStateHash, now,
           dueDeadline(db, domain, dc.case_id, now))
+
+        // PROJECT AGAIN, AFTER the post-run scheduling — and this line is here
+        // because the first pinned cycle of P1 measured why.
+        //
+        // The pipeline projects inside its own transaction, at the end of the
+        // run. Then THIS loop calls deferProgression, which moves
+        // next_progression_at — a field the projection reads and the revision
+        // trigger watches. So every heartbeat run left the board exactly one
+        // revision behind its case, systematically, on every case, every cycle.
+        // The sweep repaired all 92 of them seconds later and the drift ended at
+        // zero, so nothing was broken; it just meant the sweep's "projected"
+        // counter measured the heartbeat's own scheduling rather than anything
+        // worth knowing.
+        //
+        // With this line, a non-zero `projected` in the reconcile step means
+        // canonical state moved somewhere OTHER than a progression run — which
+        // is a fact worth reading. A counter that is always large says nothing.
+        try {
+          projectCase(db, domain, dc.case_id, now)
+        } catch { /* the sweep reconciles it; see reconcileProjections */ }
 
         if (domain === 'personal') result.personal++
         else result.zst++

@@ -543,6 +543,35 @@ describe('P1 — a check that cannot run must not be able to pass', () => {
   })
 })
 
+describe('P1 — the heartbeat leaves nothing behind', () => {
+  // Measured on the first pinned cycle after the P1 cutover: the sweep reported
+  // `projected: 92` on a board that had been fully reconciled minutes earlier.
+  // The cause was not drift -- it was the heartbeat's own post-run scheduling.
+  // The pipeline projects at the end of the run; `deferProgression` then moves
+  // `next_progression_at`, which the projection reads and the revision trigger
+  // watches. Every run, every case, exactly one revision behind.
+  beforeEach(() => { fresh() })
+
+  it('a full heartbeat pass leaves the board level with the engine', async () => {
+    const db = getDb()
+    seedCase(db, 'c1', { nba: SAFE_NBA })
+    db.prepare(`UPDATE case_progression_state SET next_progression_at = ?
+                WHERE domain='personal' AND case_id='c1'`).run(T0)
+    const { runProgressionHeartbeat } = await import('../cos/progression-heartbeat.js')
+    runProgressionHeartbeat(db, T0 + 10)
+    // The assertion that matters: nothing is behind AFTER the whole pass, not
+    // merely after the pipeline's half of it.
+    expect(detectProjectionDrift(db, T0 + 10).behind).toEqual([])
+    const board = boardRow(db, 'c1')
+    const canonical = db.prepare(
+      `SELECT next_progression_at, canonical_revision FROM case_progression_state
+        WHERE domain='personal' AND case_id='c1'`,
+    ).get() as { next_progression_at: number | null; canonical_revision: number }
+    expect(board.proj_next_review_at).toBe(canonical.next_progression_at)
+    expect(board.projected_revision).toBe(canonical.canonical_revision)
+  })
+})
+
 describe('P1 — the sweep as restart recovery', () => {
   beforeEach(() => { fresh() })
 
