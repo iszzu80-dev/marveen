@@ -328,6 +328,11 @@ export type InvariantECode =
   | 'invariant_e_high_risk_unproven_confidence'
   /** LOW confidence and an action that changes something. */
   | 'invariant_e_low_confidence_side_effect'
+  /** The evidence about this case contradicts itself, and the action is not
+   *  read-only. Owner's closure, 2026-08-27: "high-risk/mutating executionnél a
+   *  contradiction legyen execution blocker, amíg nincs feloldva vagy explicit
+   *  human approval." Read-only reasoning is explicitly allowed to continue. */
+  | 'invariant_e_unresolved_contradiction'
 
 export interface InvariantEResult {
   allowed: boolean
@@ -373,7 +378,31 @@ export function invariantE(a: {
   confidence: DecisionLevel
   risk: DecisionLevel
   sideEffect: SideEffectClass
+  /** The required-input proof set, so the contradiction rule can read the one
+   *  fact it is about rather than being handed a boolean somebody else derived.
+   *  Optional: a caller assessing a hypothetical pair has no proof set, and
+   *  absence means "no contradiction was found", not "there is none" -- the
+   *  confidence half already refuses to call an unchecked case certain. */
+  requiredInputs?: readonly RequiredInputFact[]
 }): InvariantEResult {
+  // The contradiction rule runs FIRST, and deliberately before the confidence
+  // rules. Contradictory evidence is not a low number to be argued with: the two
+  // readings of the case disagree, and an action that reaches outside on top of
+  // that disagreement acts on one of two incompatible pictures. Read-only work
+  // continues -- that is the owner's explicit carve-out, and it is what keeps
+  // this from stopping the engine on the 141-of-168 population that carries a
+  // contradiction today.
+  const contradiction = (a.requiredInputs ?? [])
+    .find(f => f.input === 'evidence_non_conflicting' && f.status === 'FAIL')
+  if (contradiction && a.sideEffect !== 'READ_ONLY') {
+    return {
+      allowed: false,
+      code: 'invariant_e_unresolved_contradiction',
+      reason: `Invariáns E: feloldatlan bizonyíték-ellentmondás mellett ${a.sideEffect} `
+        + `művelet nem hajtható végre automatikusan (${contradiction.detail})`,
+      assertionRestricted: true,
+    }
+  }
   if (a.risk === 'HIGH' && a.confidence !== 'HIGH') {
     return {
       allowed: false,

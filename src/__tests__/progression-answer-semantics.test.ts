@@ -295,7 +295,14 @@ describe('the buttons Mission Control renders mean what they say', () => {
     answer(db, 'c-go', runId, 'OWNER_DECISION', { choice: 'GO' }, T + 10)
 
     const r = cycle(db, 'c-go', T + 11)
-    expect(r.decision).toBe('CONTINUE_AUTONOMOUSLY')
+    // P4 CLOSURE, owner 2026-08-27: an answer is not an approval. The step still
+    // ADVANCES on the answer -- which is what this test is about -- but the
+    // EXECUTE step it advances to is HIGH_RISK, and Invariant E gates it while
+    // the engine's own confidence is below HIGH. Asserting the gate's code here
+    // rather than only the decision keeps the test measuring answer handling: a
+    // regression in answer consumption would produce REQUEST_DECISION, not this.
+    expect(r.decision).toBe('MANUAL_ACTION_REQUIRED')
+    expect(r.safetyViolations.map(v => v.assertion)).toContain('INVARIANT_E_REFUSAL')
     expect(completedStep(db, 'c-go')).toBeGreaterThan(2)
   })
 })

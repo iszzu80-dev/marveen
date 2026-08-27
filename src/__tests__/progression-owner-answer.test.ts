@@ -138,8 +138,14 @@ describe('OWNER_DECISION with YES', () => {
     releaseProgressionClaim(db, 'personal', 'c-yes', 'runner', t + 60)
     const r3 = runProgressionCycle(db, 'personal', 'c-yes', t + 11, MANUAL_OPTS)
     expect(r3.decision).not.toBe('REQUEST_DECISION')
-    // Step 3 is EXECUTE which is autonomous → CONTINUE_AUTONOMOUSLY
-    expect(r3.decision).toBe('CONTINUE_AUTONOMOUSLY')
+    // P4 CLOSURE, owner 2026-08-27: an answer is not an approval. The step still
+    // ADVANCES on the answer -- which is what this test is about -- but the
+    // EXECUTE step it advances to is HIGH_RISK, and Invariant E gates it while
+    // the engine's own confidence is below HIGH. Asserting the gate's code here
+    // rather than only the decision keeps the test measuring answer handling: a
+    // regression in answer consumption would produce REQUEST_DECISION, not this.
+    expect(r3.decision).toBe('MANUAL_ACTION_REQUIRED')
+    expect(r3.safetyViolations.map(v => v.assertion)).toContain('INVARIANT_E_REFUSAL')
 
     // completed_plan_step should advance: step 2 (answered) + step 3 (EXECUTE
     // completed in the same run) = 3
@@ -164,7 +170,14 @@ describe('OWNER_DECISION with YES', () => {
     // Run 3: should pick up the already-existing answer
     releaseProgressionClaim(db, 'personal', 'c-retro', 'runner', t + 60)
     const r3 = runProgressionCycle(db, 'personal', 'c-retro', t + 11, MANUAL_OPTS)
-    expect(r3.decision).toBe('CONTINUE_AUTONOMOUSLY')
+    // P4 CLOSURE, owner 2026-08-27: an answer is not an approval. The step still
+    // ADVANCES on the answer -- which is what this test is about -- but the
+    // EXECUTE step it advances to is HIGH_RISK, and Invariant E gates it while
+    // the engine's own confidence is below HIGH. Asserting the gate's code here
+    // rather than only the decision keeps the test measuring answer handling: a
+    // regression in answer consumption would produce REQUEST_DECISION, not this.
+    expect(r3.decision).toBe('MANUAL_ACTION_REQUIRED')
+    expect(r3.safetyViolations.map(v => v.assertion)).toContain('INVARIANT_E_REFUSAL')
     // Step 2 answered + step 3 auto-completed = completed_plan_step 3
     expect(getState(db, 'c-retro').completed_plan_step).toBe(3)
   })
@@ -297,7 +310,14 @@ describe('stale answer (question changed)', () => {
     // Run 4: answer matches current question → consumed → advances
     releaseProgressionClaim(db, 'personal', 'c-oldrun', 'runner', t + 60)
     const r4 = runProgressionCycle(db, 'personal', 'c-oldrun', t + 11, MANUAL_OPTS)
-    expect(r4.decision).toBe('CONTINUE_AUTONOMOUSLY')
+    // P4 CLOSURE, owner 2026-08-27: an answer is not an approval. The step still
+    // ADVANCES on the answer -- which is what this test is about -- but the
+    // EXECUTE step it advances to is HIGH_RISK, and Invariant E gates it while
+    // the engine's own confidence is below HIGH. Asserting the gate's code here
+    // rather than only the decision keeps the test measuring answer handling: a
+    // regression in answer consumption would produce REQUEST_DECISION, not this.
+    expect(r4.decision).toBe('MANUAL_ACTION_REQUIRED')
+    expect(r4.safetyViolations.map(v => v.assertion)).toContain('INVARIANT_E_REFUSAL')
   })
 })
 
@@ -321,7 +341,14 @@ describe('OWNER_INFORMATION', () => {
     releaseProgressionClaim(db, 'personal', 'c-info', 'runner', t + 60)
     const r3 = runProgressionCycle(db, 'personal', 'c-info', t + 11, MANUAL_OPTS)
     expect(r3.decision).not.toBe('REQUEST_DECISION')
-    expect(r3.decision).toBe('CONTINUE_AUTONOMOUSLY')
+    // P4 CLOSURE, owner 2026-08-27: an answer is not an approval. The step still
+    // ADVANCES on the answer -- which is what this test is about -- but the
+    // EXECUTE step it advances to is HIGH_RISK, and Invariant E gates it while
+    // the engine's own confidence is below HIGH. Asserting the gate's code here
+    // rather than only the decision keeps the test measuring answer handling: a
+    // regression in answer consumption would produce REQUEST_DECISION, not this.
+    expect(r3.decision).toBe('MANUAL_ACTION_REQUIRED')
+    expect(r3.safetyViolations.map(v => v.assertion)).toContain('INVARIANT_E_REFUSAL')
     // Step 2 answered + step 3 auto-completed = completed_plan_step 3
     expect(getState(db, 'c-info').completed_plan_step).toBe(3)
   })
@@ -346,7 +373,14 @@ describe('OWNER_CONFIRMATION', () => {
     releaseProgressionClaim(db, 'personal', 'c-confirm', 'runner', t + 60)
     const r3 = runProgressionCycle(db, 'personal', 'c-confirm', t + 11, MANUAL_OPTS)
     expect(r3.decision).not.toBe('REQUEST_DECISION')
-    expect(r3.decision).toBe('CONTINUE_AUTONOMOUSLY')
+    // P4 CLOSURE, owner 2026-08-27: an answer is not an approval. The step still
+    // ADVANCES on the answer -- which is what this test is about -- but the
+    // EXECUTE step it advances to is HIGH_RISK, and Invariant E gates it while
+    // the engine's own confidence is below HIGH. Asserting the gate's code here
+    // rather than only the decision keeps the test measuring answer handling: a
+    // regression in answer consumption would produce REQUEST_DECISION, not this.
+    expect(r3.decision).toBe('MANUAL_ACTION_REQUIRED')
+    expect(r3.safetyViolations.map(v => v.assertion)).toContain('INVARIANT_E_REFUSAL')
     // Step 2 answered + step 3 auto-completed = completed_plan_step 3
     expect(getState(db, 'c-confirm').completed_plan_step).toBe(3)
   })
@@ -402,6 +436,9 @@ describe('REQUEST_APPROVAL via AWAITING_APPROVAL', () => {
     // Run 3: YES → transition to READY → plan rebuilds → autonomous progress
     releaseProgressionClaim(db, 'personal', 'c-approve', 'runner', t + 60)
     const r3 = runProgressionCycle(db, 'personal', 'c-approve', t + 11, MANUAL_OPTS)
+    // NOT gated, and this is the control that keeps the P4 change honest: the
+    // step this answer advances to is not an outward-classed one, so Invariant E
+    // has nothing to refuse. A blanket gate would have caught this too.
     expect(r3.decision).toBe('CONTINUE_AUTONOMOUSLY')
     expect(getCaseStatus(db, 'c-approve')).toBe('READY')
   })

@@ -72,6 +72,7 @@ import { resolveExecutionDependency, withResolvedDependency } from './capability
 import {
   assessDecision, invariantE, gatherRequiredInputs, type DecisionSignals,
 } from './decision-confidence.js'
+import { resolveHumanAnswer } from './human-answer-class.js'
 import {
   armWaitCondition, evaluateWaitCondition, resolveWaitCondition, type ArmResult,
 } from './wait-condition.js'
@@ -451,6 +452,10 @@ interface OwnerAnswer {
   answeredRunId: string
   /** The NBA step that was being asked about (from the referenced run). */
   answeredNbaStep: number
+  /** The event payload verbatim. Carried because the P4 closure has to ask a
+   *  question of it that this function has no business knowing about: does the
+   *  owner's answer name a scoped action approval? */
+  payload: string | null
 }
 
 /** When did this case last ENTER the given status?
@@ -593,6 +598,7 @@ function consumeOwnerAnswer(
     intent: answerIntent(answerEvent.event_type, choice),
     answeredRunId: answerEvent.source_reference,
     answeredNbaStep: referencedNbaStep,
+    payload: answerEvent.payload,
   }
 }
 
@@ -2013,7 +2019,10 @@ function runProgressionCycleInner(
     }, now),
   }
   const assessment = assessDecision(decisionSignals)
-  const eGate = invariantE({ ...assessment, sideEffect: capClass })
+  const eGate = invariantE({
+    ...assessment, sideEffect: capClass,
+    requiredInputs: decisionSignals.requiredInputs,
+  })
   // NOT APPLIED TO A COMPLETION, and this is the one branch worth arguing for.
   // Invariant E governs executing an ACTION. A completion is not an outward act:
   // the gate that owns it is the DoD completion gate a few hundred lines above,
@@ -2037,15 +2046,45 @@ function runProgressionCycleInner(
   // bypass. It cannot become a standing hole: `consumeOwnerAnswer` refuses an
   // event any run of this case already named, so the exemption is single-use and
   // the next run without a fresh answer is autonomous again.
-  const ownerAuthorised = consumedAnswerEventId !== null
+  //
+  // WHAT THIS USED TO BE, AND WHY IT WAS WRONG. My first version exempted a step
+  // whenever the run consumed ANY owner answer, on the argument that a step
+  // running on his answer is not autonomous. The owner overturned it, 2026-08-27:
+  //
+  //   "A human answer önmagában NEM teszi az utána következő high-risk actiont
+  //    non-autonomous / exempt állapotúvá."
+  //
+  // He is right, and the flaw is that "the owner spoke" is three different facts.
+  // "Igen, a cím 12/B" is a FACT. "Az A opciót választom" is a DECISION, which
+  // feeds reasoning. Only "küldd el EZT ENNEK EZZEL a tartalommal" is an approval
+  // of the operation, and only that can pass the autonomous-execution branch.
+  // `resolveHumanAnswer` draws the line, and for the third class it does not take
+  // the answer's word: it consumes a scoped, single-use §22.2 ticket bound to this
+  // exact action, or refuses and says which check refused.
+  const humanVerdict = ownerAnswer
+    ? resolveHumanAnswer(db, {
+        eventType: ownerAnswer.eventType, choice: ownerAnswer.choice,
+        intent: ownerAnswer.intent, payload: ownerAnswer.payload,
+      }, {
+        domain, caseId, caseVersion: caseRow.version, goalVersion,
+        planStep: nba.planStep, description: nba.description,
+        actionType: nba.kind, recipient: null,
+        riskClasses: assessment.riskClasses,
+      }, now)
+    : null
+  const ownerAuthorised = humanVerdict?.executionExemption === true
   const eApplies = decision !== 'COMPLETE' && !ownerAuthorised
-  if (!eGate.allowed && ownerAuthorised) {
+  if (humanVerdict) {
+    // Recorded on EVERY answered run, exempt or not. The three classes are the
+    // whole point of the correction, and a class that is only written down when
+    // it grants something would leave the two that grant nothing invisible --
+    // which is how "the owner answered" became one fact in the first place.
     safetyViolations.push({
-      assertion: 'INVARIANT_E_OWNER_AUTHORISED',
+      assertion: ownerAuthorised ? 'INVARIANT_E_OWNER_AUTHORISED' : 'HUMAN_ANSWER_NOT_APPROVAL',
       case_id: caseId, domain,
-      detail: `${eGate.code} nem alkalmazandó: a lépés a tulajdonos ebben a futásban `
-        + `felhasznált válaszán fut (esemény ${consumedAnswerEventId}) — `
-        + `confidence=${assessment.confidence} risk=${assessment.risk}`,
+      detail: `${humanVerdict.answerClass}: ${humanVerdict.reason}`
+        + (humanVerdict.authorizationId ? ` [jegy ${humanVerdict.authorizationId.slice(0, 12)}…]` : '')
+        + ` — confidence=${assessment.confidence} risk=${assessment.risk}`,
     })
   }
   if (!eGate.allowed && eApplies) {

@@ -1123,6 +1123,14 @@ export function listMonitoring(db: ReturnType<typeof getDb>): {
     drift: { behind: number; neverReconciled: number; conflicted: number; unenrolled: number; disabled: number; total: number }
     oldestReconciledAt: number | null
   }
+  /** P4 closure, owner's instruction 2026-08-27: the contradiction population is
+   *  not something P4 tries to FIX, and it is not allowed to stay invisible
+   *  either -- "legyen explicit Phase 1 health metric". Measured 2026-08-27:
+   *  141 of 168 active cases carried a contradiction on their latest evidence
+   *  packet (the reader and the deterministic policy reached different
+   *  decisions). Read-only reasoning continues at MEDIUM confidence; a high-risk
+   *  or mutating execution is BLOCKED by Invariant E while it stands. */
+  contradictions: { active: number; contradicted: number; clean: number; share: number }
 } {
   const connectors = db.prepare(
     `SELECT connector_id, kind, mode, status, consecutive_failures, last_ok_at, last_error_at, last_error
@@ -1212,7 +1220,48 @@ export function listMonitoring(db: ReturnType<typeof getDb>): {
         total: drift.total,
       },
       oldestReconciledAt: oldest?.t ?? null,
-    } }
+    },
+    contradictions: contradictionHealth(db),
+  }
+}
+
+/**
+ * How many active cases are deciding on evidence that contradicts itself.
+ *
+ * ONE ROW PER CASE, the LATEST packet only: an old disagreement a later run
+ * settled is history, and history that never expires would report a permanent
+ * emergency. A case with no packet at all is not counted as contradicted -- it
+ * is counted in neither column, because "nobody has read it" is a different
+ * health problem and confidence already refuses to call such a case certain.
+ */
+function contradictionHealth(
+  db: ReturnType<typeof getDb>,
+): { active: number; contradicted: number; clean: number; share: number } {
+  try {
+    const rows = db.prepare(
+      `SELECT p.conflict_reason AS c
+         FROM case_progression_state s
+         JOIN case_evidence_packets p
+           ON p.domain = s.domain AND p.case_id = s.case_id
+          AND p.created_at = (
+                SELECT MAX(created_at) FROM case_evidence_packets
+                 WHERE domain = s.domain AND case_id = s.case_id)
+        WHERE s.progression_enabled = 1`,
+    ).all() as Array<{ c: string | null }>
+    const contradicted = rows.filter(r => r.c).length
+    const active = (db.prepare(
+      `SELECT COUNT(*) AS n FROM case_progression_state WHERE progression_enabled = 1`,
+    ).get() as { n: number }).n
+    return {
+      active, contradicted, clean: rows.length - contradicted,
+      share: active > 0 ? Math.round((contradicted / active) * 100) / 100 : 0,
+    }
+  } catch {
+    // A store without the packet table cannot answer. Reported as zeros with a
+    // zero share rather than thrown: a monitoring surface that takes the page
+    // down is the outage it exists to report.
+    return { active: 0, contradicted: 0, clean: 0, share: 0 }
+  }
 }
 
 

@@ -377,47 +377,6 @@ describe('Invariant E — the refusal reaches the durable record', () => {
     expect(parsed).toHaveProperty('riskClasses')
   })
 
-  it('a step the owner just authorised is NOT refused -- and the record says so', () => {
-    // Found by the suite, not by my reasoning: widening the gate made six tests
-    // red, all of them "engine asks -> Istvan answers -> engine refuses because
-    // a person must decide". The person had just decided. An action running on
-    // an answer consumed by this run is not autonomous, so the gate does not
-    // apply to it -- and the fact that it did not is written down.
-    const db = getDb()
-    seedAwaitingSelection('oa1')
-    runProgressionCycle(db, 'personal', 'oa1', NOW, { triggerType: 'MANUAL', triggerReference: 't0' })
-    runProgressionCycle(db, 'personal', 'oa1', NOW + 10, { triggerType: 'MANUAL', triggerReference: 't1' })
-    const asked = lastRun('oa1')
-    expect(asked.decision).toBe('REQUEST_DECISION')
-
-    recordOwnerAnswer('oa1', NOW + 30)
-    runProgressionCycle(db, 'personal', 'oa1', NOW + 60, { triggerType: 'MANUAL', triggerReference: 't2' })
-    const acted = lastRun('oa1')
-    expect(acted.decision).not.toBe('MANUAL_ACTION_REQUIRED')
-    expect(acted.sa).toMatch(/INVARIANT_E_OWNER_AUTHORISED/)
-  })
-
-  it('and the exemption is SINGLE-USE -- the next run with no fresh answer is refused', () => {
-    // The control for the test above. Without it, "the owner answered once" and
-    // "the owner is answering every step" would be the same state, and one
-    // answer would buy permanent autonomy on a case.
-    const db = getDb()
-    seedAwaitingSelection('oa2')
-    runProgressionCycle(db, 'personal', 'oa2', NOW, { triggerType: 'MANUAL', triggerReference: 't0' })
-    runProgressionCycle(db, 'personal', 'oa2', NOW + 10, { triggerType: 'MANUAL', triggerReference: 't1' })
-    recordOwnerAnswer('oa2', NOW + 30)
-    runProgressionCycle(db, 'personal', 'oa2', NOW + 60, { triggerType: 'MANUAL', triggerReference: 't2' })
-    // One more turn of the same case with NO new answer: the same EXECUTE-class
-    // work, now genuinely autonomous.
-    db.prepare(
-      `UPDATE case_progression_state SET completed_plan_step = 2 WHERE domain='personal' AND case_id='oa2'`,
-    ).run()
-    runProgressionCycle(db, 'personal', 'oa2', NOW + 120, { triggerType: 'MANUAL', triggerReference: 't3' })
-    const row = lastRun('oa2')
-    expect(row.decision).toBe('MANUAL_ACTION_REQUIRED')
-    expect(row.sa).toMatch(/INVARIANT_E_REFUSAL/)
-  })
-
   it('fill rate matches the DECISION count, not the refusal count', () => {
     const db = getDb()
     for (const id of ['f1', 'f2', 'f3']) {

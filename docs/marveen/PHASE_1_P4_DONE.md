@@ -255,3 +255,110 @@ visible in the durable record.
 P5 is closed (`PHASE_1_P5_DISCOVERY.md`). P6 — the end-to-end lifecycle harness and
 the mid-flight restart — is the remaining packet, and it now has a durable decision
 record to assert against, which it did not have an hour ago.
+
+---
+
+# Addendum — owner's policy correction, 2026-08-27 (P4 = VERIFIED_LOCAL)
+
+> *"A human answer önmagában NEM teszi az utána következő high-risk actiont
+> non-autonomous / exempt állapotúvá."*
+
+He overturned the one judgement call this packet flagged as worth his
+disagreement, and he was right. My version exempted a step whenever the run
+consumed **any** owner answer. The argument — a step running on his answer is not
+autonomous — holds for exactly one of the three things an answer can be.
+
+## The three classes
+
+| class | example | what it authorises |
+|---|---|---|
+| `HUMAN_INFORMATION` | "Igen, a cím 12/B." | nothing |
+| `HUMAN_DECISION` | "Az A opciót választom." | reasoning — **not** an external side effect |
+| `HUMAN_ACTION_APPROVAL` | "Igen, küldd el EZT az emailt ENNEK a címzettnek EZZEL a tartalommal." | this action, once |
+
+**The intent decides, not the event label.** The first version had both — an
+`OWNER_INFORMATION` special case *and* the intent — and the mutation harness
+proved the consequence: deleting the label branch changed nothing any test could
+see, because every fixture's `OWNER_INFORMATION` also carried `INFORM`. Two
+guards, neither proven. It was **deleted** rather than propped up with a test:
+this engine already rules that the choice decides when there is one, and
+classifying by envelope would contradict the rule the rest of it follows.
+
+## No parallel approval system
+
+His instruction was explicit, and none was needed. `action_authorizations`
+(§22.2) already carries every field he required, as columns:
+
+| his requirement | the column |
+|---|---|
+| concrete action / type | `action_id`, `action_type` |
+| target / recipient | `target_reference`, `recipient` |
+| payload / parameters or hash | `payload_hash` |
+| case / run | `case_id`, `case_version`, `goal_version` |
+| single use | `single_use` + `consumed_at`, via an atomic conditional UPDATE |
+| expiry / freshness | `expires_at` |
+| not reusable for another action | `policy_evaluation_hash` — all of the above in one comparison, re-derived at consumption |
+
+A progression step is bound as `personal:<case>:plan-step:<n>`, with the step's
+own text inside the payload hash — so a re-planned step does not inherit an old
+approval.
+
+**The approval is CONSUMED, not peeked at.** A check that looked without spending
+would let one approval authorise every later run, which is precisely his fourth
+counter-example.
+
+**The stricter rules survive it.** `APPROVAL_CANNOT_WAIVE` —
+FINANCIAL_CONTRACTUAL, CREDENTIAL_SECURITY, DESTRUCTIVE, ACCESS_CONTROL — refuse
+*before* consumption, so a payment attempt cannot silently burn a live approval.
+`IRREVERSIBLE_EXTERNAL` is deliberately absent: "this reaches outside" is the one
+class an explicit action approval exists for.
+
+## The honest state
+
+**Nothing currently issues such a ticket for a progression step.** An
+`OWNER_DECISION` payload carries one field, the choice. `HUMAN_ACTION_APPROVAL`
+is a built and tested path with no live producer, and in practice every high-risk
+step stays gated after an answer. That follows from the owner's rule, he was told
+before this was written, and building a producer is separate work not smuggled in
+here.
+
+## Contradiction: a health metric and an execution blocker
+
+Per his instruction, P4 does **not** try to fix the 141-of-168 contradiction
+population. Two things instead:
+
+* `/api/cos/monitoring` now reports `contradictions: {active, contradicted,
+  clean, share}` — latest packet per case only, so a settled old disagreement is
+  history rather than a permanent emergency.
+* A third Invariant E rule, `invariant_e_unresolved_contradiction`, refuses any
+  non-READ_ONLY action while the contradiction stands. It runs **first**, before
+  the confidence rules, so a HIGH/HIGH pair cannot walk past it. Read-only
+  reasoning continues — his explicit carve-out.
+
+## Pre-existing tests I edited, and why
+
+Six assertions in `progression-owner-answer.test.ts` and one in
+`progression-answer-semantics.test.ts` asserted `CONTINUE_AUTONOMOUSLY` after an
+owner answer. Under the corrected policy the step still **advances** — which is
+what those tests are about — but the EXECUTE step it advances to is gated. Each
+now asserts `MANUAL_ACTION_REQUIRED` **and** `INVARIANT_E_REFUSAL`, so a
+regression in answer *handling* still shows up as `REQUEST_DECISION` rather than
+hiding behind the new expectation.
+
+One of them was **not** re-pointed: the `REQUEST_APPROVAL via AWAITING_APPROVAL`
+path still expects `CONTINUE_AUTONOMOUSLY`, because the step it advances to is
+not outward-classed. It is the control proving the gate is not blanket — and I
+had over-patched it on the first pass, which the suite caught.
+
+## Evidence
+
+592 test files, **8007 passed**, 4 skipped. Ten mutations driven red across the
+two rounds; the one that SURVIVED (the redundant classifier branch) is documented
+above and was removed rather than tested around.
+
+One unrelated failure in a full-suite run:
+`db-fresh-boot-single-writer > RED: with the lock disabled, the same race breaks
+the boot again`. It is a probabilistic race *reproducer* — it asserts the race
+still breaks an unlocked bootstrap — and it passes on its own and passed in the
+full run six minutes earlier. It touches nothing this packet changed. Reported
+rather than re-run until green.
