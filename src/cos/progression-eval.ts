@@ -10,6 +10,7 @@
 //   4. RED-PROOF: at least one assertion demonstrably catches a violation.
 
 import type Database from 'better-sqlite3'
+import { isExcused } from './policy-exception.js'
 import { randomUUID } from 'crypto'
 import { evaluateDoDCompleteness } from './progression-completion.js'
 import { validateEscalationPayload } from './progression-escalation.js'
@@ -508,6 +509,14 @@ export const HARD_SAFETY_ASSERTIONS: SafetyAssertion[] = [
         ).all(ctx.caseId) as never
       } catch { return null }
       for (const r of rows) {
+        // AN EXPLICIT, ROW-BOUND EXCEPTION -- and nothing weaker (owner,
+        // 2026-08-27). Three live rows are mail the owner sent by hand before
+        // tickets existed; the assertion is right about them and always will be,
+        // so they were RECORDED rather than fixed, silenced or back-dated. The
+        // exception names the row AND the status it was examined in: a legacy
+        // row that starts moving again is no longer the thing that was excused,
+        // and the alarm returns on its own.
+        if (isExcused(ctx.db, 'policy_bypass', 'OUTBOUND_LEDGER_ROW', r.ledger_id, r.status)) continue
         if (!r.auth) return `outbound ${r.ledger_id} (${r.status}) has no action authorization`
         if (r.consumed_at === null) {
           return `outbound ${r.ledger_id} (${r.status}) carries an authorization that was never consumed`

@@ -2353,6 +2353,50 @@ export function initProgressionSchema(db: Database.Database): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_caar_open
              ON cos_action_approval_requests(domain, case_id, decided_at)`)
 
+  // ── cos_policy_exceptions (Phase 1 final gate, owner 2026-08-27) ─────────
+  //
+  // THE PROBLEM, and the shape of the wrong fix. The `policy_bypass` assertion
+  // reads the outbound ledger and reports any non-PLANNED row with no consumed
+  // §22.2 authorization. Three rows on the live store are exactly that, and they
+  // are RIGHT to be reported: they are mail Istvan sent by hand from Gmail,
+  // recorded in the ledger afterwards, from before tickets existed. There is no
+  // ticket to find, and inventing one retroactively would put a forged
+  // authorisation in the audit trail to silence a true finding.
+  //
+  // The owner ruled out both easy answers -- "ne kapjon visszamenőleges
+  // authorizationt", "ne kapcsold ki vagy gyengítsd a detektort" -- and named
+  // the third: an explicit, row-bound exception carrying its evidence and its
+  // date, so three known historical cases stop generating an alarm every ten
+  // minutes while any NEW bypass is still seen immediately.
+  //
+  // WHY ROW-BOUND AND NOT A RULE. A rule ("ledger rows older than X") would
+  // cover rows nobody has looked at, including ones written tomorrow by a bug
+  // with an old timestamp. A row id covers exactly the row somebody examined.
+  // The recorded status is bound too: if the row MOVES -- a legacy row that
+  // starts sending again -- the exception stops applying and the alarm returns,
+  // because the thing that was excused is no longer the thing in the table.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cos_policy_exceptions (
+      exception_id   TEXT PRIMARY KEY,
+      assertion      TEXT NOT NULL,
+      domain         TEXT NOT NULL,
+      subject_kind   TEXT NOT NULL,
+      subject_id     TEXT NOT NULL,
+      /* The state the subject was in when it was examined. The exception
+         applies ONLY while this still holds. */
+      subject_state  TEXT,
+      reason         TEXT NOT NULL,
+      evidence       TEXT NOT NULL,
+      recorded_at    INTEGER NOT NULL,
+      recorded_by    TEXT NOT NULL,
+      revoked_at     INTEGER,
+      CHECK (domain IN ('personal','zst')),
+      UNIQUE (assertion, subject_kind, subject_id)
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_cpe_live
+             ON cos_policy_exceptions(assertion, subject_id, revoked_at)`)
+
   // LAST in this function: the projection seam needs both case tables AND
   // case_progression_state to exist, and this is the first point where all
   // three are guaranteed.

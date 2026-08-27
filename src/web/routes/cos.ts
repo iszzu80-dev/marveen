@@ -25,6 +25,8 @@ import {
 import { validateSkillMd, validateSkillPermissions } from '../../cos/skill-permission-validator.js'
 import { getMissionControlProgressionView, runProgressionCycle } from '../../cos/progression-pipeline.js'
 import { evaluateInvariantA, detectProjectionDrift } from '../../cos/case-projection.js'
+import { stageGapReport, type StageGapReport } from '../../cos/progress-stage.js'
+import { listPolicyExceptions } from '../../cos/policy-exception.js'
 import { reopenCase } from '../../cos/case-reopen.js'
 import { renderActionKind } from '../../cos/case-action-label.js'
 
@@ -1131,6 +1133,17 @@ export function listMonitoring(db: ReturnType<typeof getDb>): {
    *  decisions). Read-only reasoning continues at MEDIUM confidence; a high-risk
    *  or mutating execution is BLOCKED by Invariant E while it stands. */
   contradictions: { active: number; contradicted: number; clean: number; share: number }
+  /** Phase 1 final gate, owner 2026-08-27: "Aktív progress_stage=null ne legyen
+   *  silent green." A case the engine has nothing to say about is a real state
+   *  and must be COUNTED, NAMED and EXPLAINED -- not smoothed into ACTIONABLE,
+   *  and not left off the page because it is not an error. The counts are read
+   *  from the durable projection column; the reasons are derived from the same
+   *  facts that produced the null. */
+  stages: StageGapReport
+  /** The live, row-bound exceptions. An excused finding nobody can see is the
+   *  same silence the exception exists to avoid: the alarm stops, and so does
+   *  the knowledge that it was ever there. */
+  policyExceptions: ReturnType<typeof listPolicyExceptions>
 } {
   const connectors = db.prepare(
     `SELECT connector_id, kind, mode, status, consecutive_failures, last_ok_at, last_error_at, last_error
@@ -1222,6 +1235,8 @@ export function listMonitoring(db: ReturnType<typeof getDb>): {
       oldestReconciledAt: oldest?.t ?? null,
     },
     contradictions: contradictionHealth(db),
+    stages: stageGapReport(db, nowSec),
+    policyExceptions: listPolicyExceptions(db),
   }
 }
 

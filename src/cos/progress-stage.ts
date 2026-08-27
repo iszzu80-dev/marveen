@@ -47,6 +47,7 @@ import type Database from 'better-sqlite3'
 import { CASE_STATUSES, ZST_CASE_STATUSES, type CaseStatus, type ZstCaseStatus } from './schema.js'
 import { canCompleteCase } from './progression-completion.js'
 import { activeWaitCondition } from './wait-condition.js'
+import { terminalStatusesFor } from './case-projection.js'
 
 export const PROGRESS_STAGES = [
   'ACTIONABLE', 'WAITING', 'NEEDS_USER', 'MONITORING', 'COMPLETED',
@@ -338,4 +339,147 @@ export function stageForCase(
   db: Database.Database, domain: CaseDomain, caseId: string, now: number,
 ): ProgressStage | null {
   return deriveStage(readStageFacts(db, domain, caseId, now))
+}
+
+// ── Why a case has NO stage (Phase 1 final gate, owner 2026-08-27) ─────────
+//
+// `deriveStage` returns null for a real state: nothing is closed, nobody owes
+// anything, there is no wait, nothing is monitored, and there is no executable
+// next action. The owner's ruling on the Phase 1 acceptance is that this state
+// must not be a silent green:
+//
+//   "Aktív progress_stage=null ne legyen silent green. Ne mapeld őket
+//    mesterségesen ACTIONABLE-re."
+//
+// Both halves matter. A count alone would say how many cases the engine has
+// nothing to say about; it would not say WHY, and "why" is the actionable part.
+// The reasons below are progression FACTS, in the order they are missing, so a
+// null cell is triage-able rather than merely visible.
+export type StageGapReason =
+  /** No `case_progression_state` row at all: the case was never enrolled, so
+   *  there is no plan and no next action for a stage to be derived from. */
+  | 'NOT_ENROLLED'
+  /** Enrolled, but no next-best-action has ever been written. The engine has
+   *  not reasoned about this case yet. */
+  | 'NO_NEXT_BEST_ACTION'
+  /** There IS a next action and the engine cannot perform it -- an AWAIT_*
+   *  step with no typed wait armed behind it. This is the one that usually
+   *  means something is wrong: the case is waiting on the world and nothing
+   *  recorded what for. */
+  | 'NEXT_ACTION_NOT_EXECUTABLE'
+
+export interface StageGap {
+  domain: CaseDomain
+  caseId: string
+  status: string
+  reason: StageGapReason
+  /** The fact in words, for the person reading the monitoring page at 3am. */
+  detail: string
+}
+
+/**
+ * Explain a null stage, or return null when the case HAS a stage.
+ *
+ * Deliberately re-derives from the live facts rather than reading the projected
+ * column: the column answers "what does the board show", this answers "why",
+ * and a reason computed from the same row that produced the null cannot drift
+ * away from it. The COUNTS in the monitoring surface come from the durable
+ * column -- see `stageGapReport` -- so the two are not the same instrument.
+ */
+export function explainStageGap(
+  db: Database.Database, domain: CaseDomain, caseId: string, now: number,
+): StageGap | null {
+  const facts = readStageFacts(db, domain, caseId, now)
+  if (deriveStage(facts) !== null) return null
+
+  const state = safe(() => db.prepare(
+    `SELECT next_best_action_json AS nba FROM case_progression_state
+      WHERE domain = ? AND case_id = ?`,
+  ).get(domain, caseId) as { nba: string | null } | undefined, undefined)
+
+  if (!state) {
+    return { domain, caseId, status: facts.status, reason: 'NOT_ENROLLED',
+      detail: 'nincs case_progression_state sor: az ügy nincs beléptetve a motorba' }
+  }
+  if (!state.nba) {
+    return { domain, caseId, status: facts.status, reason: 'NO_NEXT_BEST_ACTION',
+      detail: 'be van léptetve, de még soha nem született next-best-action' }
+  }
+  let kind = 'ismeretlen'
+  try { kind = String((JSON.parse(state.nba) as { kind?: string }).kind ?? 'ismeretlen') } catch { /* unreadable */ }
+  return { domain, caseId, status: facts.status, reason: 'NEXT_ACTION_NOT_EXECUTABLE',
+    detail: `a következő lépés (${kind}) nem hajtható végre, és nincs mögötte tipizált várakozás` }
+}
+
+export interface StageGapReport {
+  /** Null-stage cases that are NOT closed. The number the owner asked to see. */
+  activeStageNullCount: number
+  /** Every null-stage case, closed ones included. */
+  totalStageNullCount: number
+  /** Per-reason breakdown of the ACTIVE ones. */
+  byReason: Record<string, number>
+  /** The active ones, named. Bounded, and the bound is REPORTED rather than
+   *  silently applied -- a truncated list that says it is complete is how a
+   *  monitoring surface starts lying. */
+  cases: StageGap[]
+  omitted: number
+  /** The health signal. A null-stage active case is not an emergency, but it is
+   *  never "fine": `clean` is false whenever one exists. */
+  clean: boolean
+}
+
+/**
+ * The monitoring surface for null stages.
+ *
+ * THE COUNTS COME FROM THE DURABLE COLUMN, not from re-deriving the stage. The
+ * owner's acceptance says so in as many words -- "monitoring/readback a
+ * tényleges durable store-ból dolgozik" -- and the reason is the one this
+ * codebase keeps paying for: a monitor that recomputes what it monitors will
+ * report health for a value the board never received. If the projection stopped
+ * writing, this must go red, and it can only do that by reading what was
+ * written.
+ */
+export function stageGapReport(
+  db: Database.Database, now: number, limit = 50,
+): StageGapReport {
+  const rows: Array<{ domain: CaseDomain; caseId: string; status: string }> = []
+  let total = 0
+  for (const [domain, table] of [['personal', 'personal_cases'], ['zst', 'zst_cases']] as const) {
+    const terminal = terminalStatusesFor(domain)
+    const marks = terminal.map(() => '?').join(',')
+    try {
+      total += (db.prepare(
+        `SELECT COUNT(*) AS n FROM ${table} WHERE proj_progress_stage IS NULL`,
+      ).get() as { n: number }).n
+      const active = db.prepare(
+        `SELECT case_id AS caseId, status FROM ${table}
+          WHERE proj_progress_stage IS NULL AND status NOT IN (${marks})
+          ORDER BY updated_at DESC`,
+      ).all(...terminal) as Array<{ caseId: string; status: string }>
+      for (const r of active) rows.push({ domain, caseId: r.caseId, status: r.status })
+    } catch { /* a store without the projection column reports what it can */ }
+  }
+
+  const byReason: Record<string, number> = {}
+  const cases: StageGap[] = []
+  for (const r of rows) {
+    const gap = explainStageGap(db, r.domain, r.caseId, now)
+      ?? { domain: r.domain, caseId: r.caseId, status: r.status,
+           reason: 'NEXT_ACTION_NOT_EXECUTABLE' as StageGapReason,
+           // The projection says null and a fresh derivation says otherwise:
+           // the board is behind its own facts. Named rather than smoothed
+           // over, because the disagreement is the finding.
+           detail: 'a tárolt stage null, de a friss levezetés adna stage-et: a projekció elmaradt' }
+    byReason[gap.reason] = (byReason[gap.reason] ?? 0) + 1
+    if (cases.length < limit) cases.push(gap)
+  }
+
+  return {
+    activeStageNullCount: rows.length,
+    totalStageNullCount: total,
+    byReason,
+    cases,
+    omitted: Math.max(0, rows.length - cases.length),
+    clean: rows.length === 0,
+  }
 }
