@@ -272,21 +272,38 @@ export interface CoverageReport {
  */
 export function capabilityCoverage(): CoverageReport {
   const kinds = Object.keys(SIDE_EFFECT_CLASS) as PlanStepKind[]
-  const rows: CoverageRow[] = kinds.map(kind => {
+  return summariseCoverage(kinds.map(kind => {
     const c = declareForPlanStep(kind)
     return {
       kind, sideEffect: SIDE_EFFECT_CLASS[kind],
       declared: c.source === 'DECLARED' ? 1 : 0, total: 1,
     }
-  })
-  const sum = (rs: CoverageRow[]) => ({
+  }))
+}
+
+/**
+ * The gate itself, separated from where the rows come from.
+ *
+ * SPLIT BECAUSE A MUTATION SURVIVED. Hardwiring `enforcementReady: true` left the
+ * whole suite green: the tests asserted the gate says *ready* on a surface that
+ * IS complete, and checked the incomplete case against a hand-built object
+ * instead of this function. So the one branch that decides whether enforcement
+ * runs at all was the one branch nothing drove red — in a file whose entire
+ * argument is that a gate must be able to refuse.
+ *
+ * Pure, and takes its rows, so an INCOMPLETE surface can be handed to the real
+ * gate rather than imagined next to it.
+ */
+export function summariseCoverage(rows: readonly CoverageRow[]): CoverageReport {
+  const sum = (rs: readonly CoverageRow[]) => ({
     declared: rs.reduce((n, r) => n + r.declared, 0),
     total: rs.reduce((n, r) => n + r.total, 0),
   })
-  const riskyRows = rows.filter(r => r.sideEffect !== 'READ_ONLY')
-  const risky = sum(riskyRows)
+  const risky = sum(rows.filter(r => r.sideEffect !== 'READ_ONLY'))
   return {
-    rows, overall: sum(rows), risky,
+    rows: [...rows], overall: sum(rows), risky,
+    // `risky.total > 0` is not pedantry: without it, DELETING the risk
+    // classification would produce "100% of zero" and arm the gate.
     enforcementReady: risky.total > 0 && risky.declared === risky.total,
   }
 }

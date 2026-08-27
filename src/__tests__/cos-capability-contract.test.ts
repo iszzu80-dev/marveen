@@ -9,7 +9,8 @@ import { createCase } from '../cos/case-store.js'
 import { initProgressionSchema } from '../cos/schema.js'
 import {
   SIDE_EFFECT_CLASS, capabilityCoverage, declareForPlanStep,
-  enforceCapabilityContract, undeclaredContract, type CapabilityContract,
+  enforceCapabilityContract, summariseCoverage, undeclaredContract,
+  type CapabilityContract, type CoverageRow,
 } from '../cos/capability-contract.js'
 import { armWaitCondition, evaluateWaitCondition, WAIT_KINDS, EVALUABLE_KINDS } from '../cos/wait-condition.js'
 import { registerConnector, recordSuccess, recordFailure, DOWN_THRESHOLD, DEGRADED_THRESHOLD } from '../cos/connector-health.js'
@@ -169,11 +170,38 @@ describe('capability contract — coverage is the enforcement gate', () => {
     expect(c.enforcementReady).toBe(true)
   })
 
-  it('a coverage report with no risky rows is NOT enforcement-ready', () => {
-    // The counter-case, and the one that matters: "100% of zero" must not read as
-    // ready, or deleting the classification would arm the gate.
-    const empty = { rows: [], overall: { declared: 0, total: 0 }, risky: { declared: 0, total: 0 } }
-    expect(empty.risky.total > 0 && empty.risky.declared === empty.risky.total).toBe(false)
+  // These three go through the REAL gate with rows handed to it. An earlier
+  // version checked the incomplete case against a hand-built object, and a
+  // mutation that hardwired `enforcementReady: true` survived the whole suite --
+  // the one branch that decides whether enforcement runs at all was the one
+  // branch nothing could drive red.
+  const row = (kind: string, sideEffect: CoverageRow['sideEffect'], declared: number): CoverageRow =>
+    ({ kind: kind as CoverageRow['kind'], sideEffect, declared, total: 1 })
+
+  it('HEADLINE: ONE undeclared high-risk kind disarms the gate', () => {
+    const r = summariseCoverage([
+      row('VERIFY', 'READ_ONLY', 1),
+      row('EXECUTE', 'HIGH_RISK', 1),
+      row('COMMUNICATE', 'HIGH_RISK', 0),   // the one nobody declared
+    ])
+    expect(r.risky).toEqual({ declared: 1, total: 2 })
+    expect(r.enforcementReady).toBe(false)
+  })
+
+  it('an undeclared READ_ONLY kind does NOT disarm it', () => {
+    // Read-only gaps are a backlog item, not a reason to stop enforcing the
+    // risky paths -- the owner drew that line explicitly.
+    const r = summariseCoverage([
+      row('GATHER_INFO', 'READ_ONLY', 0),
+      row('EXECUTE', 'HIGH_RISK', 1),
+    ])
+    expect(r.enforcementReady).toBe(true)
+    expect(r.overall).toEqual({ declared: 1, total: 2 })
+  })
+
+  it('"100% of zero" is NOT ready — deleting the classification must not arm it', () => {
+    expect(summariseCoverage([row('VERIFY', 'READ_ONLY', 1)]).enforcementReady).toBe(false)
+    expect(summariseCoverage([]).enforcementReady).toBe(false)
   })
 })
 
