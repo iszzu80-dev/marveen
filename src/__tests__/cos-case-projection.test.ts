@@ -216,7 +216,8 @@ describe('P1 — the projection itself', () => {
     const landed = writeProjection(
       db, 'personal', 'c1',
       { proj_next_action: 'elavult', proj_next_action_kind: 'EXECUTE', proj_next_action_step: 1,
-        proj_wait_condition: null, proj_next_review_at: null, proj_blocked_reason: null },
+        proj_wait_condition: null, proj_next_review_at: null, proj_blocked_reason: null,
+        proj_progress_stage: 'ACTIONABLE' },
       rev, null, T0 + 20,
     )
     expect(landed).toBe(false)
@@ -229,7 +230,8 @@ describe('P1 — the projection itself', () => {
     expect(writeProjection(
       db, 'personal', 'c1',
       { proj_next_action: 'friss', proj_next_action_kind: 'EXECUTE', proj_next_action_step: 1,
-        proj_wait_condition: null, proj_next_review_at: null, proj_blocked_reason: null },
+        proj_wait_condition: null, proj_next_review_at: null, proj_blocked_reason: null,
+        proj_progress_stage: 'ACTIONABLE' },
       rev + 5, null, T0 + 30,
     )).toBe(true)
     expect(boardRow(db, 'c1').proj_next_action).toBe('friss')

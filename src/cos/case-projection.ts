@@ -62,6 +62,7 @@ import { internalPlanLabels } from './progression-pipeline.js'
 import { PERSONAL_STATUS_SETS } from './case-engine-core.js'
 import { ZST_STATUS_SETS } from './zst-case-store.js'
 import { activeWaitCondition } from './wait-condition.js'
+import { stageFor } from './progress-stage.js'
 
 export type ProjectionDomain = 'personal' | 'zst'
 
@@ -88,6 +89,11 @@ export const PROJECTED_COLUMNS = [
   'proj_wait_condition',
   'proj_next_review_at',
   'proj_blocked_reason',
+  // P3: the coarse "whose move is it" stage, DERIVED from the case's own status
+  // and written here rather than replacing anything. The 17 + 21 statuses stay
+  // exactly as they are -- the owner reads them, and they carry meaning a
+  // five-value vocabulary cannot.
+  'proj_progress_stage',
 ] as const
 
 export function caseTableFor(domain: ProjectionDomain): string {
@@ -132,6 +138,11 @@ export interface CanonicalRow {
    *  own table rather than from the canonical row, because a wait is a fact
    *  with a lifecycle and the canonical row holds only its current shadow. */
   wait?: { kind: string; subject: string; expected_by: number | null; stale_review_at: number } | null
+  /** The case's own lifecycle status, read from the case row. P3's stage is
+   *  derived from it, and it is listed here as an explicit INPUT rather than
+   *  smuggled in: the status is the case engine's, not the progression state's,
+   *  and blurring that is how a projection starts believing it owns a column. */
+  status?: string
 }
 
 export interface ProjectedFields {
@@ -141,6 +152,10 @@ export interface ProjectedFields {
   proj_wait_condition: string | null
   proj_next_review_at: number | null
   proj_blocked_reason: string | null
+  /** ACTIONABLE | WAITING | NEEDS_USER | MONITORING | COMPLETED, or null when the
+   *  case's status is outside the mapped vocabulary -- which is a fault, not a
+   *  state, and must not be given a plausible-looking stage. */
+  proj_progress_stage: string | null
 }
 
 /** True when this text may be shown to the owner.
@@ -205,6 +220,11 @@ export function deriveProjection(c: CanonicalRow): ProjectedFields {
       ? (wait.expected_by ?? wait.stale_review_at)
       : c.next_progression_at,
     proj_blocked_reason: c.blocked_reason,
+    // Derived, every projection, from the status the case ALREADY has. Null when
+    // the status is unmapped: the row should not have been writable at all
+    // (the CHECK), so a plausible stage here would hide a migration fault behind
+    // an ordinary-looking board cell.
+    proj_progress_stage: c.status ? stageFor(c.domain, c.status) : null,
   }
 }
 
@@ -268,6 +288,8 @@ function readCanonical(
 interface BoardRow extends ProjectedFields {
   case_id: string
   version: number
+  /** The case's lifecycle status, an INPUT to the stage derivation. */
+  status: string
   projected_revision: number | null
   projection_fingerprint: string | null
 }
@@ -276,7 +298,10 @@ function readBoard(
   db: Database.Database, domain: ProjectionDomain, caseId: string,
 ): BoardRow | undefined {
   return db.prepare(
-    `SELECT case_id, version, ${PROJECTED_COLUMNS.join(', ')},
+    // `status` comes along because P3's stage is DERIVED from it. The status is
+    // not engine state -- the case engine's transitions own it -- so the
+    // projection reads it as an input rather than pretending it is canonical.
+    `SELECT case_id, version, status, ${PROJECTED_COLUMNS.join(', ')},
             projected_revision, projection_fingerprint
        FROM ${caseTableFor(domain)} WHERE case_id = ?`,
   ).get(caseId) as BoardRow | undefined
@@ -304,14 +329,21 @@ export function writeProjection(
   conflictReason: string | null,
   now: number,
 ): boolean {
+  // THE SET CLAUSE IS BUILT FROM `PROJECTED_COLUMNS`, not typed out again.
+  //
+  // It used to list the six columns by hand while the READ a few lines above
+  // built its list from the constant -- two definitions of the same set, and P3
+  // walked straight into the gap: `proj_progress_stage` was added to the
+  // constant, to the type, to the schema and to the deriver, the whole mapping
+  // suite went green, and the column was never written, because the one place
+  // that actually writes had its own copy of the list.
+  //
+  // Three tests caught it, and only because they read the DATABASE rather than
+  // the returned object -- the same lesson the capability trail taught four
+  // hours earlier, in a different file, on the same day.
   const info = db.prepare(
     `UPDATE ${caseTableFor(domain)}
-        SET proj_next_action = @proj_next_action,
-            proj_next_action_kind = @proj_next_action_kind,
-            proj_next_action_step = @proj_next_action_step,
-            proj_wait_condition = @proj_wait_condition,
-            proj_next_review_at = @proj_next_review_at,
-            proj_blocked_reason = @proj_blocked_reason,
+        SET ${PROJECTED_COLUMNS.map(c => `${c} = @${c}`).join(',\n            ')},
             projected_revision = @rev,
             projection_fingerprint = @fingerprint,
             projection_conflict_reason = @conflictReason,
@@ -360,7 +392,7 @@ export function projectCase(
   const board = readBoard(db, domain, caseId)
   if (!board) return { ...base, outcome: 'NO_CASE', canonicalRevision: canonical.canonical_revision }
 
-  const want = deriveProjection(canonical)
+  const want = deriveProjection({ ...canonical, status: board.status })
   const rev = canonical.canonical_revision
   const prevRev = board.projected_revision
 
@@ -390,6 +422,7 @@ export function projectCase(
     proj_wait_condition: board.proj_wait_condition,
     proj_next_review_at: board.proj_next_review_at,
     proj_blocked_reason: board.proj_blocked_reason,
+    proj_progress_stage: board.proj_progress_stage,
   }
   const foreignFields: string[] = []
   if (board.projection_fingerprint && projectionFingerprint(current) !== board.projection_fingerprint) {

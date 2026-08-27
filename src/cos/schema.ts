@@ -33,6 +33,30 @@ export const CASE_STATUSES = [
 ] as const
 export type CaseStatus = (typeof CASE_STATUSES)[number]
 
+// The 21 lifecycle states of a ZST corporate case (§8.3).
+//
+// EXPORTED FOR THE SAME REASON THE PERSONAL SET IS, and it took P3 to notice the
+// asymmetry: until 2026-08-27 this vocabulary existed ONLY as a literal inside
+// the zst_cases CHECK string, so anything that needed to KNOW the ZST statuses
+// had to re-declare them -- which is precisely the duplication the comment above
+// `CASE_STATUSES` says it exists to prevent. P3's acceptance requires the
+// stage mapping to be derived from the code that DEFINES the statuses; on the
+// ZST side there was no such code, only a string.
+//
+// The spellings deliberately differ from Personal (INFORMATION_REQUIRED vs
+// INFO_REQUIRED, TRIAGE_REQUIRED vs TRIAGE). That is not an inconsistency to be
+// tidied away: the two namespaces are separate vocabularies with separate
+// meanings, and collapsing them is how a ZST case would start being read with
+// personal semantics.
+export const ZST_CASE_STATUSES = [
+  'NEW', 'TRIAGE_REQUIRED', 'INFORMATION_REQUIRED', 'READY', 'PLANNING',
+  'AWAITING_INTERNAL_INPUT', 'AWAITING_APPROVAL', 'EXECUTING', 'WAITING_EXTERNAL',
+  'FOLLOW_UP_DUE', 'CALL_REQUIRED', 'REVIEW_REQUIRED', 'AWAITING_SELECTION',
+  'SCHEDULED', 'BLOCKED', 'RECOVERY_REQUIRED', 'FAILED_RECOVERABLE',
+  'FAILED_TERMINAL', 'COMPLETED', 'CANCELLED', 'ARCHIVED',
+] as const
+export type ZstCaseStatus = (typeof ZST_CASE_STATUSES)[number]
+
 // P0.6 static data-sensitivity classes (fail-closed: unknown -> HIGHLY_SENSITIVE
 // is enforced by the sensitivity gate, not by this column default). Exported for
 // the same single-source-of-truth reason.
@@ -1190,10 +1214,7 @@ export function initZstSchema(db: Database.Database): void {
       completed_at       INTEGER,
       archived_at        INTEGER,
       CHECK (workspace IN ('OPERATIONS','PRODUCT_LAB')),
-      CHECK (status IN ('NEW','TRIAGE_REQUIRED','INFORMATION_REQUIRED','READY','PLANNING',
-        'AWAITING_INTERNAL_INPUT','AWAITING_APPROVAL','EXECUTING','WAITING_EXTERNAL','FOLLOW_UP_DUE',
-        'CALL_REQUIRED','REVIEW_REQUIRED','AWAITING_SELECTION','SCHEDULED','BLOCKED','RECOVERY_REQUIRED',
-        'FAILED_RECOVERABLE','FAILED_TERMINAL','COMPLETED','CANCELLED','ARCHIVED')),
+      CHECK (status IN (${ZST_CASE_STATUSES.map(x => `'${x}'`).join(',')})),
       CHECK (sensitivity IN ('PUBLIC','ZST_INTERNAL','ZST_CONFIDENTIAL','ZST_FINANCIAL','ZST_LEGAL',
         'ZST_PERSONAL_DATA','ZST_HIGHLY_SENSITIVE','UNKNOWN'))
     )
@@ -2298,6 +2319,13 @@ export function initCaseProjectionSchema(db: Database.Database): void {
     /** The engine's `next_progression_at`. Deliberately NOT `next_wake_at`. */
     proj_next_review_at:   'INTEGER',
     proj_blocked_reason:   'TEXT',
+    // P3: ACTIONABLE | WAITING | NEEDS_USER | MONITORING | COMPLETED, derived
+    // from the case's own status. No CHECK constraint on purpose: the value is
+    // computed by ONE function over a total map, so a constraint here would
+    // duplicate a guarantee the type system already gives -- and an unmapped
+    // status writes NULL, which a CHECK would turn into a crashed projection
+    // instead of a visibly missing stage.
+    proj_progress_stage:   'TEXT',
     /** Fence: the `canonical_revision` this row reflects. A projection carrying
      *  an older revision is refused rather than allowed to overwrite a newer
      *  one. */
