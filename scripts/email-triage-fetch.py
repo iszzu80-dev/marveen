@@ -191,12 +191,43 @@ SELFTEST = [
 ]
 
 
+def _selftest_trim():
+    """Drive the eviction bug red.
+
+    The old implementation was `list(ids)[-500:]` over a SET, so at the cap it
+    dropped twelve arbitrary ids instead of the twelve oldest -- and a mail
+    marked seen minutes earlier came back as a fresh candidate. Note which
+    assertion catches it: "everything just marked survives" is the SYMPTOM, and
+    it is the one the old code passes by luck about half the time, because which
+    ids the hash layout drops is arbitrary. The two below it are about the
+    MECHANISM and fail every run.
+    """
+    fails = []
+    previous = ["old%03d" % i for i in range(500)]
+    fresh = ["new%02d" % i for i in range(10)]
+    ids = set(previous) | set(fresh)
+    keep = trim_reported(previous, ids)
+    if len(keep) != 500:
+        fails.append("cap not honoured: %d" % len(keep))
+    missing = [i for i in fresh if i not in keep]
+    if missing:
+        fails.append("just-marked ids evicted: %s" % ",".join(missing))
+    if keep[:3] != ["old010", "old011", "old012"]:
+        fails.append("the head that was dropped was not the oldest: %s" % keep[:3])
+    if trim_reported(keep, set(keep)) != keep:
+        fails.append("a no-op save reordered the file")
+    return fails
+
+
 def selftest():
     bad = [(want, m) for want, m in SELFTEST if is_noise(m) != want]
     for want, m in bad:
         print("FAIL want_noise=%s got=%s :: %s | %s" % (want, not want, m["from"], m["subject"]))
-    print(json.dumps({"selftest": "FAIL" if bad else "PASS",
-                      "cases": len(SELFTEST), "failed": len(bad)}))
+    trim_fails = _selftest_trim()
+    for f in trim_fails:
+        print("FAIL trim :: %s" % f)
+    print(json.dumps({"selftest": "FAIL" if (bad or trim_fails) else "PASS",
+                      "cases": len(SELFTEST) + 1, "failed": len(bad) + len(trim_fails)}))
     sys.exit(1 if bad else 0)
 
 
@@ -209,11 +240,46 @@ def load_state():
         return set(), {}
 
 
+REPORTED_CAP = 500
+
+
+def trim_reported(previous, ids, cap=REPORTED_CAP):
+    """The order-preserving trim. Split out from save_state so it can be tested.
+
+    `previous` is the list as it was written last time (ordered); `ids` is the
+    current set. Ids that survive keep their position, newly marked ones go on
+    the end, and only then is the head dropped -- so the trim removes the OLDEST,
+    which is what its name has always claimed.
+    """
+    kept = [i for i in previous if i in ids]
+    seen_kept = set(kept)
+    fresh = sorted(i for i in ids if i not in seen_kept)
+    return (kept + fresh)[-cap:]
+
+
 def save_state(ids, prev):
-    # keep the most recent 500 ids so the file cannot grow without bound
-    keep = list(ids)[-500:]
+    """Persist the seen-set, keeping the MOST RECENT 500 ids.
+
+    THE BUG THIS FIXES, found live 2026-08-27. `ids` is a SET, and the old line
+    was `keep = list(ids)[-500:]`. A set has no order -- its iteration order is
+    the hash layout -- so once the file reached the 500 cap, every mark evicted
+    twelve ARBITRARY ids rather than the twelve oldest. Measured: a ChatGPT task
+    notification marked at 22:14 came back as an unseen candidate at 23:01, and
+    the id was gone from the file.
+
+    What that costs is quiet and cumulative. A resurfaced mail is triaged again
+    from scratch, so a settled thread can reopen as a Telegram report hours after
+    it was dealt with. The intake is idempotent per (account, message), so the
+    case store is protected -- but the judgement, the noise and the owner's
+    attention are not, and "the store did not corrupt" is not the same as "the
+    system worked".
+
+    The order lives in the FILE, not in the set: previous ids keep their
+    position, newly marked ones go on the end, and the trim finally means what
+    its own comment always claimed.
+    """
     prev = prev or {}
-    prev["reported_ids"] = keep
+    prev["reported_ids"] = trim_reported(prev.get("reported_ids", []), ids)
     prev["last_run_at"] = int(time.time())
     os.makedirs(os.path.dirname(STATE), exist_ok=True)
     with open(STATE, "w") as f:
