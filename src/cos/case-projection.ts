@@ -62,7 +62,7 @@ import { internalPlanLabels } from './progression-pipeline.js'
 import { PERSONAL_STATUS_SETS } from './case-engine-core.js'
 import { ZST_STATUS_SETS } from './zst-case-store.js'
 import { activeWaitCondition } from './wait-condition.js'
-import { stageFor } from './progress-stage.js'
+import { stageForCase } from './progress-stage.js'
 
 export type ProjectionDomain = 'personal' | 'zst'
 
@@ -138,11 +138,15 @@ export interface CanonicalRow {
    *  own table rather than from the canonical row, because a wait is a fact
    *  with a lifecycle and the canonical row holds only its current shadow. */
   wait?: { kind: string; subject: string; expected_by: number | null; stale_review_at: number } | null
-  /** The case's own lifecycle status, read from the case row. P3's stage is
-   *  derived from it, and it is listed here as an explicit INPUT rather than
-   *  smuggled in: the status is the case engine's, not the progression state's,
-   *  and blurring that is how a projection starts believing it owns a column. */
+  /** The case's own lifecycle status, read from the case row. ONE input to the
+   *  stage, and listed here explicitly rather than smuggled in: the status is
+   *  the case engine's, not the progression state's, and blurring that is how a
+   *  projection starts believing it owns a column. */
   status?: string
+  /** The P3 stage, already derived from the canonical facts by the caller.
+   *  Passed in rather than computed here because `deriveProjection` is pure by
+   *  contract and the derivation needs the database. */
+  progress_stage?: string | null
 }
 
 export interface ProjectedFields {
@@ -220,11 +224,13 @@ export function deriveProjection(c: CanonicalRow): ProjectedFields {
       ? (wait.expected_by ?? wait.stale_review_at)
       : c.next_progression_at,
     proj_blocked_reason: c.blocked_reason,
-    // Derived, every projection, from the status the case ALREADY has. Null when
-    // the status is unmapped: the row should not have been writable at all
-    // (the CHECK), so a plausible stage here would hide a migration fault behind
-    // an ordinary-looking board cell.
-    proj_progress_stage: c.status ? stageFor(c.domain, c.status) : null,
+    // P3 closure (owner, 2026-08-27): the stage is the summarised state of the
+    // canonical progression FACTS, not a table lookup on the status. It is
+    // computed by the caller and handed in, because `deriveProjection` is pure
+    // by contract -- same input, same output, no database -- and the facts need
+    // five reads. Null is a real answer: nothing closed, nobody owes anything,
+    // no wait, not monitored, nothing to do.
+    proj_progress_stage: c.progress_stage ?? null,
   }
 }
 
@@ -392,7 +398,10 @@ export function projectCase(
   const board = readBoard(db, domain, caseId)
   if (!board) return { ...base, outcome: 'NO_CASE', canonicalRevision: canonical.canonical_revision }
 
-  const want = deriveProjection({ ...canonical, status: board.status })
+  const want = deriveProjection({
+    ...canonical, status: board.status,
+    progress_stage: stageForCase(db, domain, caseId, now),
+  })
   const rev = canonical.canonical_revision
   const prevRev = board.projected_revision
 
