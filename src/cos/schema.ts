@@ -1844,6 +1844,12 @@ export function initProgressionSchema(db: Database.Database): void {
       error_summary        TEXT,
       -- Safety assertion results (JSON array of {assertion, passed, detail})
       safety_assertions_json TEXT,
+      /* §19 closure B (owner, 2026-08-27): planned action -> resolved target ->
+         required capability -> preflight verdict, for the run that decided.
+         Separate from safety_assertions_json because a violation means an
+         assertion BROKE and a trail means a check RAN, and rendering the second
+         as the first makes every healthy run look violated. */
+      capability_trail_json TEXT,
       CHECK (domain IN ('personal','zst')),
       CHECK (status IN ('STARTED','COMPLETED','FAILED','RECOVERY_REQUIRED','CANCELLED')),
       -- §10.8 named its own trigger vocabulary; the old six stay so existing
@@ -1859,6 +1865,25 @@ export function initProgressionSchema(db: Database.Database): void {
   // so a run triggered by NEW_RELEVANT_EVENT can actually be written.
   widenCheckConstraint(db, 'case_progression_runs', 'NEW_RELEVANT_EVENT', RUNS_DDL)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cpruns_case ON case_progression_runs(domain, case_id, started_at)`)
+
+  // ADDING A COLUMN NEEDS AN ALTER, NOT AN `IF NOT EXISTS`.
+  //
+  // The CREATE above is a no-op on a store that already has the table, so every
+  // store that existed before today would keep running WITHOUT
+  // capability_trail_json while the code, the tests and a fresh store all agreed
+  // it was there. That gap has its own entry in this codebase's history, and it
+  // is why the check reads the column list rather than trusting the CREATE.
+  //
+  // Found by the LIVE proof, not by a test: the trail was built, returned on the
+  // run result, and written nowhere. Built-and-never-consumed, committed by me
+  // inside the packet about built-and-never-consumed.
+  {
+    const cols = (db.prepare(`PRAGMA table_info(case_progression_runs)`).all() as Array<{ name: string }>)
+      .map(c => c.name)
+    if (!cols.includes('capability_trail_json')) {
+      db.exec(`ALTER TABLE case_progression_runs ADD COLUMN capability_trail_json TEXT`)
+    }
+  }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cpruns_status ON case_progression_runs(status, started_at)`)
 
   // Checkpoint C (card 53f1fd06): resolution audit trail (§10). Migrated in

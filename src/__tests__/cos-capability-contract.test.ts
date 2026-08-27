@@ -17,6 +17,8 @@ import {
 } from '../cos/capability-contract.js'
 import { armWaitCondition, evaluateWaitCondition, WAIT_KINDS, EVALUABLE_KINDS } from '../cos/wait-condition.js'
 import { resolveExecutionDependency, withResolvedDependency } from '../cos/capability-resolution.js'
+import { runProgressionCycle } from '../cos/progression-pipeline.js'
+import { seedCaseProgressionState } from '../cos/case-progression-seed.js'
 import { registerConnector, recordSuccess, recordFailure, DOWN_THRESHOLD, DEGRADED_THRESHOLD } from '../cos/connector-health.js'
 
 const NOW = 1_700_000_000
@@ -573,5 +575,76 @@ describe('capability resolution — planned action to concrete dependency', () =
     expect(src).toMatch(/capabilityTrail,/)
     expect(src).toMatch(/resolveExecutionDependency\(db, domain, caseId/)
     expect(src).toMatch(/withResolvedDependency\(capDeclared, capResolved\)/)
+  })
+})
+
+// ── The trail has to be WRITTEN DOWN, not merely returned ────────────────────
+//
+// Found by the LIVE proof on 2026-08-27, not by a test: every real run showed
+// `capability assertions: none`, because the trail was built, returned on the
+// run result, and persisted nowhere. Built-and-never-consumed -- this codebase's
+// signature defect -- committed by me inside the packet about it.
+describe('capability trail — persisted, and reaching an EXISTING store', () => {
+  it('HEADLINE: a real run writes the chain to the run row', () => {
+    initDatabase(':memory:')
+    const db = getDb()
+    createCase(db, { caseId: 'c1', title: 'T', caseType: 'X' }, NOW - 100)
+    seedCaseProgressionState(db, 'personal', 'c1', NOW - 100)
+    runProgressionCycle(db, 'personal', 'c1', NOW, { triggerType: 'MANUAL', triggerReference: 't' })
+
+    const row = db.prepare(
+      `SELECT capability_trail_json AS j FROM case_progression_runs WHERE case_id='c1'
+        ORDER BY started_at DESC LIMIT 1`,
+    ).get() as { j: string | null } | undefined
+    expect(row?.j).toBeTruthy()
+    const trail = JSON.parse(row!.j!)
+    // Every link of the chain the owner named, on the row.
+    expect(trail).toHaveProperty('action')
+    expect(trail).toHaveProperty('resolution')
+    expect(trail).toHaveProperty('required')
+    expect(trail).toHaveProperty('verdict')
+    expect(['RESOLVED', 'NOT_REQUIRED', 'UNRESOLVED']).toContain(trail.resolution)
+  })
+
+  it('the column reaches a store that already had the table', () => {
+    // `CREATE TABLE IF NOT EXISTS` is a no-op on an existing table, so a store
+    // created before today would run WITHOUT the column while a fresh store and
+    // the whole suite agreed it was there. Proven by DROPPING the column back
+    // out and booting -- a downgrade that must actually bite first.
+    initDatabase(':memory:')
+    const db = getDb()
+    expect(
+      (db.prepare(`PRAGMA table_info(case_progression_runs)`).all() as Array<{ name: string }>)
+        .map(c => c.name),
+    ).toContain('capability_trail_json')
+
+    // This SQLite build has no DROP COLUMN, so the downgrade is a rebuild from
+    // the stored DDL with the column cut out -- which is closer to the real
+    // "store created before today" shape anyway.
+    const ddl = (db.prepare(
+      `SELECT sql FROM sqlite_master WHERE type='table' AND name='case_progression_runs'`,
+    ).get() as { sql: string }).sql
+    db.exec(`DROP TABLE case_progression_runs`)
+    db.exec(ddl.split('\n').filter(l => !l.includes('capability_trail_json')).join('\n'))
+    expect(
+      (db.prepare(`PRAGMA table_info(case_progression_runs)`).all() as Array<{ name: string }>)
+        .map(c => c.name),
+    ).not.toContain('capability_trail_json')   // the downgrade bites
+
+    initProgressionSchema(db)
+    expect(
+      (db.prepare(`PRAGMA table_info(case_progression_runs)`).all() as Array<{ name: string }>)
+        .map(c => c.name),
+    ).toContain('capability_trail_json')
+  })
+
+  it('the migration is a no-op on a store that already has the column', () => {
+    initDatabase(':memory:')
+    const db = getDb()
+    initProgressionSchema(db)
+    initProgressionSchema(db)
+    const cols = (db.prepare(`PRAGMA table_info(case_progression_runs)`).all() as Array<{ name: string }>)
+      .filter(c => c.name === 'capability_trail_json')
+    expect(cols).toHaveLength(1)
   })
 })

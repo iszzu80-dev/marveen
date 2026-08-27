@@ -1837,6 +1837,22 @@ function runProgressionCycleInner(
     required: [...capContract.requiredCapabilities],
     verdict: capResult.verdict, reason: capResolved.reason,
   }
+  // WRITTEN DOWN, not merely returned. The first version put the trail on the
+  // result object and nothing persisted it -- built and never consumed, which is
+  // this codebase's signature defect, committed inside the packet about it. The
+  // live proof caught it: `capability assertions: none` on every real run.
+  //
+  // Updated rather than inserted, because the run row is written earlier (the
+  // same reason case_version_after is fixed up above): the trail cannot exist
+  // until the next action has been chosen.
+  try {
+    db.prepare(
+      `UPDATE case_progression_runs SET capability_trail_json = ? WHERE progression_run_id = ?`,
+    ).run(JSON.stringify(capabilityTrail), runId)
+  } catch {
+    // An audit write that can take the cycle down would be a monitoring surface
+    // causing the outage it records. The trail is still on the result.
+  }
   if (!coverage.enforcementReady) {
     // Recorded, and it degrades the readiness signal. It does NOT change the
     // verdict below by even one branch.
