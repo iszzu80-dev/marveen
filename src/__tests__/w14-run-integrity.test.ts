@@ -58,6 +58,60 @@ describe('W14 §8.7 — SUCCESS requires verification', () => {
     expect(status).toBe('SUCCESS')
   })
 
+  it('HEADLINE: a LOCAL-ONLY step that did work is SUCCESS, not PARTIAL', () => {
+    // Found live on 2026-08-27. The progression step's grant is READ+WRITE_LOCAL,
+    // so its verification is correctly NOT_APPLICABLE -- there is no external
+    // effect to read back. But NOT_APPLICABLE is not VERIFIED, and the old rule
+    // asked only "is it VERIFIED", so the run went PARTIAL the moment the step
+    // actually progressed a case. It could reach SUCCESS only by doing NOTHING.
+    //
+    // THE SCHEMA ALREADY SAID SO. The table's own CHECK is
+    //   run_status <> 'SUCCESS' OR verification_status IN ('VERIFIED','NOT_APPLICABLE')
+    // -- the function was stricter than the constraint it implements, and the
+    // constraint was the one that was right.
+    expect(deriveRunStatus(result({ examined: 1, matched: 1, acted: 1 }), 'NOT_APPLICABLE'))
+      .toBe('SUCCESS')
+  })
+
+  it('and the §8.7 rule still bites exactly where it should: UNVERIFIED is PARTIAL', () => {
+    // The counter-case. UNVERIFIED is reachable ONLY when the grant carries
+    // EXTERNAL_EFFECT and acted > 0, so the fix above cannot let an unconfirmed
+    // external action pass as SUCCESS.
+    expect(deriveRunStatus(result({ examined: 1, matched: 1, acted: 1 }), 'UNVERIFIED'))
+      .toBe('PARTIAL')
+    expect(deriveRunStatus(result({ examined: 1, matched: 1, acted: 1 }), 'VERIFIED'))
+      .toBe('SUCCESS')
+  })
+
+  it('the function and the table CHECK agree on every combination', () => {
+    // The oracle: whatever deriveRunStatus produces must be insertable. A
+    // function stricter than its constraint is how this defect lived; a function
+    // LOOSER than it would be an outage on the next write.
+    const db = getDb()
+    ensureFeatureRunSchema(db)
+    let n = 0
+    for (const verification of ['VERIFIED', 'UNVERIFIED', 'NOT_APPLICABLE'] as const) {
+      for (const r of [
+        result({ examined: 1, matched: 1, acted: 1 }),
+        result({ examined: 1, matched: 0, acted: 0 }),
+        result({ examined: 1, matched: 1, acted: 1, failed: 1 }),
+        result({ examined: 0, matched: 0, acted: 0, failed: 2 }),
+      ]) {
+        const status = deriveRunStatus(r, verification)
+        expect(() => db.prepare(`
+          INSERT INTO cos_feature_runs
+            (run_id, feature_id, domain, examined, matched, acted, failed, outcome, reason,
+             started_at, finished_at, verification_status, run_status)
+          VALUES ('oracle-${n}', 'f', 'personal', ${r.examined}, ${r.matched}, ${r.acted},
+             ${r.failed}, '${r.outcome}', 'oracle', ${NOW}, ${NOW + 1},
+             '${verification}', '${status}')
+        `).run()).not.toThrow()
+        n++
+      }
+    }
+    expect(n).toBe(12)
+  })
+
   it('a partial failure is PARTIAL and a total one is FAILED', () => {
     expect(deriveRunStatus(result({ acted: 2, failed: 1 }), 'VERIFIED')).toBe('PARTIAL')
     expect(deriveRunStatus(result({ acted: 0, failed: 3 }), 'NOT_APPLICABLE')).toBe('FAILED')

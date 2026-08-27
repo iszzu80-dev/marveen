@@ -99,6 +99,9 @@ describe('CPP normaliser — failure beats every counter', () => {
   })
 
   it('a non-empty failures array is FAILED, and acted>0 makes the run PARTIAL', () => {
+    // PARTIAL here comes from the FAILED branch (acted > 0 alongside a failure),
+    // not from the verification -- which is why it still holds after the
+    // 2026-08-27 fix that stopped NOT_APPLICABLE reading as a failed readback.
     const r = cppResult('channel', { pending: 1, sent: 1, failures: [{ caseId: 'c1', error: 'boom' }] }, null)
     expect(r.outcome).toBe('FAILED')
     expect(deriveRunStatus(r, 'NOT_APPLICABLE')).toBe('PARTIAL')

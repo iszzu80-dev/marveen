@@ -208,11 +208,43 @@ export interface RunIntegrity {
 export function deriveRunStatus(result: FeatureRunResult, verification: VerificationStatus): RunStatus {
   if (result.outcome === 'FAILED' || result.failed > 0) return result.acted > 0 ? 'PARTIAL' : 'FAILED'
   if (result.outcome === 'UNKNOWN') return 'UNKNOWN'
-  if (result.outcome === 'ACTED') return verification === 'VERIFIED' ? 'SUCCESS' : 'PARTIAL'
+  // NOT_APPLICABLE IS NOT A FAILED VERIFICATION, and reading it as one inverted
+  // this status for every local-only step.
+  //
+  // Found live 2026-08-27: the progression step's grant is READ + WRITE_LOCAL, so
+  // `verificationFor` correctly answers NOT_APPLICABLE -- there is no external
+  // effect to read back. But NOT_APPLICABLE is not VERIFIED, so the moment the
+  // step actually progressed a case the run landed PARTIAL. It could reach
+  // SUCCESS only by doing NOTHING: a quiet cycle passed, a working one did not.
+  // A status that gets worse as the system gets healthier is not a status.
+  //
+  // The three answers mean three different things and the comment on
+  // `verificationStatus` already says so:
+  //   VERIFIED        it acted outside and the effect was read back  -> SUCCESS
+  //   UNVERIFIED      it acted outside and nothing confirmed it      -> PARTIAL
+  //   NOT_APPLICABLE  there was no outside to confirm                -> SUCCESS
+  //
+  // The §8.7 rule is preserved exactly where it bites: UNVERIFIED is reachable
+  // ONLY when the grant includes EXTERNAL_EFFECT and `acted > 0`, so this cannot
+  // let an unconfirmed external action pass as SUCCESS.
+  if (result.outcome === 'ACTED') return verification === 'UNVERIFIED' ? 'PARTIAL' : 'SUCCESS'
   // NO_DATA / NO_MATCH / NO_ACTION: the run completed and did nothing. There is
   // nothing to verify, and calling that PARTIAL would make every quiet cycle
   // look half-broken.
-  return 'SUCCESS'
+  //
+  // EXCEPT when the caller still says UNVERIFIED. That pair is contradictory --
+  // nothing was done, yet something is outstanding -- and `verificationFor` cannot
+  // produce it, because UNVERIFIED needs `acted > 0`. But this function is
+  // EXPORTED, so "unreachable today" is a property of today's callers, not of the
+  // function. Returning SUCCESS there emits a row the table's own CHECK rejects,
+  // and a status helper whose output cannot be stored is a defect waiting for its
+  // first caller.
+  //
+  // Found by the oracle added alongside the 2026-08-27 fix above, which walks
+  // every (outcome, verification) pair against the real constraint. The fix and
+  // the hole in the fix arrived in the same hour, which is the argument for the
+  // oracle rather than for two more examples.
+  return verification === 'UNVERIFIED' ? 'PARTIAL' : 'SUCCESS'
 }
 
 export function recordFeatureRun(
