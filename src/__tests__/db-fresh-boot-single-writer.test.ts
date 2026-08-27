@@ -28,9 +28,22 @@ import Database from 'better-sqlite3'
 // measurably blocked. That is a claim about what the machine did, not about
 // what did not happen to go wrong.
 //
-// RED-CAPABILITY is not left to the reader either: the last case runs the same
-// race with the lock disabled by env and requires the failures to come back.
-// A guard nobody has driven into the red is a guard nobody has checked.
+// RED-CAPABILITY is not left to the reader either -- but it no longer lives in
+// this file, and the move is the owner's second Phase 1 blocker
+// (FRESH_BOOT_NEGATIVE_CONTROL, 2026-08-27):
+//
+//   "A terhelésfüggő »lock nélkül néha elromlik« teszt ne maradjon flaky gating
+//    test. Tedd determinisztikussá [...] VAGY minősítsd át külön
+//    stress/reproducer tesztté."
+//
+// BOTH, because they answer different questions. The DETERMINISTIC negative
+// control is `db-bootstrap-lock-rendezvous.test.ts`: two processes are made to
+// meet inside the check-then-act window, or provably fail to, so removing the
+// guard turns the suite red EVERY time rather than eventually. The probabilistic
+// four-way race over the REAL 970-line bootstrap moved to
+// `src/__tests__/stress/fresh-boot-race.stress.test.ts`, out of the release
+// gate: a test that fails 1 time in 48 also passes 47 times in 48, and a green
+// from it is indistinguishable from a green off fixed code.
 
 const TSX = join(process.cwd(), 'node_modules', '.bin', 'tsx')
 const WORKER = join(process.cwd(), 'src', '__tests__', 'helpers', 'fresh-boot-worker.ts')
@@ -130,28 +143,12 @@ describe('fresh store, concurrent first boot (Phase 0 blocker closure)', () => {
     // ...and they must have been genuinely contending. Zero blocked workers
     // would mean the processes never overlapped, which makes the run above a
     // test of nothing -- exactly the failure mode of W12's first race test.
+    //
+    // THIS LINE IS STILL LOAD-DEPENDENT, and it is now a corroboration rather
+    // than the proof. The deterministic version lives in
+    // `db-bootstrap-lock-rendezvous.test.ts`, where the holder sits in the
+    // critical section for a fixed three seconds so every contender MUST block.
     expect(rows.filter((r) => r.waited_ms > 0).length).toBeGreaterThanOrEqual(1)
   }, 120_000)
 
-  it('RED: with the lock disabled, the same race breaks the boot again', async () => {
-    // Same code, same processes, one env var. Anything green here would mean
-    // the two cases above pass for a reason other than the lock.
-    //
-    // The race is probabilistic by nature, so this retries the round rather than
-    // asserting a single run fails -- and it FAILS the test if the defect never
-    // reappears, instead of quietly accepting a lucky green.
-    let sawFailure: string | null = null
-    for (let round = 0; round < 6 && sawFailure === null; round++) {
-      const roundDir = mkdtempSync(join(tmpdir(), 'fresh-boot-red-'))
-      const roundDb = join(roundDir, 'claudeclaw.db')
-      try {
-        const results = await raceBoot(roundDb, { MARVEEN_BOOTSTRAP_LOCK_DISABLED: '1' })
-        const failure = results.find((r) => !r.ok)
-        if (failure) sawFailure = failure.error ?? 'unknown'
-      } finally {
-        rmSync(roundDir, { recursive: true, force: true })
-      }
-    }
-    expect(sawFailure, 'the unlocked bootstrap survived 6 rounds of a 4-way race; either the race got weaker or the guard is no longer what makes it safe').not.toBeNull()
-  }, 300_000)
 })

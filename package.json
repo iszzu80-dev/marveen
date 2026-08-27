@@ -16,7 +16,8 @@
     "test:scripts": "bash scripts/run-script-tests.sh",
     "typecheck": "tsc --noEmit",
     "syntax-check": "node --check web/app.js web/sw.js",
-    "smoke": "playwright test --config=playwright.config.ts"
+    "smoke": "playwright test --config=playwright.config.ts",
+    "test:stress": "vitest run --config vitest.stress.config.ts"
   },
   "engines": {
     "node": ">=20 <24"
