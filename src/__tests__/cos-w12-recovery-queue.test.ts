@@ -197,3 +197,77 @@ describe('W12 §6.7 recovery queue — the OUTBOUND surfaces', () => {
     expect(res.pendingRetry).toBe(1)
   })
 })
+
+// ── The counters that decide whether this step can speak ─────────────────────
+//
+// Added 2026-08-27, after the pinned cycle reported `recoveryQueue` as
+// runStatus UNKNOWN on two consecutive live cycles: "successful exit but
+// payload exposes no CPP counters". The step was not broken and the normaliser
+// was not wrong -- the reconcile returned four STATUS counts and nothing about
+// what it had LOOKED AT, so a run over an empty store and a run that never
+// queried were numerically identical.
+//
+// These tests are the reason the fix is not "teach the reader another name":
+// `enqueued: 0` is a true zero on a healthy store, and mapping it to `examined`
+// would have turned an honest "we don't know" into a confident "nothing to do"
+// without measuring anything. `examined` has to come from the loops.
+describe('W12 §6.7 recovery queue — reconcile reports what it examined', () => {
+  beforeEach(() => {
+    initDatabase(':memory:')
+    createCase(getDb(), { caseId: 'c1', title: 'T', caseType: 'X' }, NOW - 100)
+  })
+
+  it('an empty store is examined:0 -- and that zero is MEASURED, not assumed', () => {
+    const res = reconcileRecoveryQueue(getDb(), NOW)
+    expect(res.examined).toBe(0)
+    expect(res.inRecovery).toBe(0)
+    expect(res.reChecked).toBe(0)
+    // The point of the counter is that this zero and the ones below come from
+    // the same code path, so a reconcile that stopped querying would show 0
+    // here and 0 there -- which is exactly what the next tests forbid.
+    expect(res.enqueued).toBe(0)
+  })
+
+  it('source rows in a recovery state are counted, in BOTH passes of one run', () => {
+    ingestRow('m1')
+    ingestRow('m2')
+    outboundRow('l1', 'RECOVERY_REQUIRED', 'marker absent on readback')
+    const res = reconcileRecoveryQueue(getDb(), NOW)
+    expect(res.enqueued).toBe(3)
+    expect(res.inRecovery).toBe(3)
+    // Written expecting 1x3 and measured at 2x3. The two passes share ONE
+    // transaction, so the rows the enqueue pass had just inserted were already
+    // open when the closure pass queried. The counter is right and the
+    // expectation was wrong -- kept here in the shape that corrected it.
+    expect(res.reChecked).toBe(3)
+    expect(res.examined).toBe(6)
+  })
+
+  it('a later run re-checks the open rows even when it enqueues nothing', () => {
+    ingestRow('m1')
+    const db = getDb()
+    reconcileRecoveryQueue(db, NOW)
+
+    const second = reconcileRecoveryQueue(db, NOW + 60)
+    expect(second.enqueued).toBe(0)         // idempotent: nothing new
+    expect(second.inRecovery).toBe(1)
+    expect(second.reChecked).toBe(1)
+    expect(second.examined).toBe(2)
+  })
+
+  it('a reconcile that only CLOSES rows still reports work, not silence', () => {
+    ingestRow('m1')
+    const db = getDb()
+    reconcileRecoveryQueue(db, NOW)
+    // The source leaves its recovery state; the queue row must be closed.
+    sourceCommit(db, ACC, 'm1', NOW + 30)
+
+    const res = reconcileRecoveryQueue(db, NOW + 60)
+    expect(res.inRecovery).toBe(0)          // nothing parked any more
+    expect(res.reChecked).toBe(1)           // but the open row WAS re-checked
+    expect(res.examined).toBe(1)
+    expect(res.resolved).toBe(1)
+    // Without these counters this run and a run that never queried both
+    // reported enqueued:0 -- and the closure would have been invisible work.
+  })
+})

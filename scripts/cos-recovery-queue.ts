@@ -34,7 +34,28 @@ try {
     attempts: `${r.attemptCount}/${r.maxAttempts}`, since: r.escalatedAt,
     pendingAction: r.pendingAction, lastError: r.lastError,
   }))
-  console.log(JSON.stringify({ ...res, needsHumanRows: needsHuman }))
+  // CPP TRANSLATION, AT THE BOUNDARY ON PURPOSE (2026-08-27).
+  //
+  // The domain function speaks domain (`enqueued`, `resolved`, `inRecovery`);
+  // the cycle's normaliser speaks CPP (`examined`, `matched`, `acted`). Doing
+  // the mapping here keeps CPP vocabulary out of src/cos/ and keeps the
+  // normaliser free of a per-step table -- the thing its own comment warns
+  // against, because the step nobody remembered to add to that table reports
+  // UNKNOWN while looking exactly like a step that genuinely cannot say what it
+  // did. This step WAS that step: it reported UNKNOWN on every cycle from the
+  // pinned cutover (2026-08-24) until now, not because it could not speak but
+  // because nothing asked it in a language the reader knew.
+  //
+  // `acted` is enqueued + resolved: both are WRITES this reconcile made. A
+  // status count (needsHuman, pendingRetry) is state, not action, and putting
+  // state in `acted` would report work on every quiet cycle that has a single
+  // parked row.
+  console.log(JSON.stringify({
+    ...res,
+    matched: res.inRecovery,
+    acted: res.enqueued + res.resolved,
+    needsHumanRows: needsHuman,
+  }))
   process.exit(0)
 } catch (err) {
   console.log(JSON.stringify({ failed: true, error: err instanceof Error ? err.message : String(err) }))

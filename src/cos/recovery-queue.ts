@@ -399,6 +399,37 @@ export interface ReconcileResult {
   resolved: number
   needsHuman: number
   pendingRetry: number
+  /**
+   * WHAT THE RECONCILE LOOKED AT, added 2026-08-27.
+   *
+   * The four counters above are all STATE: how many rows are now in each
+   * status. None of them says whether the reconcile examined anything, so a
+   * run over an empty store and a run that never queried are numerically
+   * identical -- and the cycle's CPP normaliser, having no `examined` to read,
+   * correctly reported this step as UNKNOWN on every single cycle. That UNKNOWN
+   * was telling the truth about the READER, not about the step (the same
+   * distinction the 2026-08-24 normaliser comment draws), and the honest fix is
+   * for the step to say what it inspected rather than for the reader to guess.
+   *
+   * This counts ROW INSPECTIONS, not distinct rows, and it is the sum of
+   * `inRecovery` and `reChecked` -- both reported separately so the number can
+   * be taken apart instead of trusted. The two passes run in ONE transaction,
+   * so a row enqueued by the first pass is already open by the time the closure
+   * pass queries, and the same row is therefore inspected twice on the very run
+   * that discovers it. That is not double-counting a mistake: the passes ask
+   * different questions ("should this be enqueued?" and "has this left its
+   * recovery state?") and both do the work. A de-duplicated number would
+   * disagree with the loops it measures, and would hide that the closure pass
+   * ran at all.
+   */
+  examined: number
+  /** Source rows currently in a recovery state (ingest + both outbound
+   *  ledgers) -- the enqueue pass. */
+  inRecovery: number
+  /** Open queue rows re-checked against their source -- the closure pass.
+   *  Separate from `inRecovery` because a run that enqueues nothing and closes
+   *  three rows and a run that did not query at all both report `enqueued: 0`. */
+  reChecked: number
 }
 
 /**
@@ -420,6 +451,8 @@ export interface ReconcileResult {
 export function reconcileRecoveryQueue(db: Database.Database, now: number): ReconcileResult {
   let enqueued = 0
   let resolved = 0
+  let inRecovery = 0
+  let reChecked = 0
 
   const tx = db.transaction(() => {
     // ── INGEST ──────────────────────────────────────────────────────────
@@ -427,6 +460,7 @@ export function reconcileRecoveryQueue(db: Database.Database, now: number): Reco
       `SELECT gmail_account_id, message_id, batch_id, case_id, attempt, last_error
          FROM email_processing WHERE status='RECOVERY_REQUIRED'`
     ).all() as Array<{ gmail_account_id: string; message_id: string; batch_id: string; case_id: string | null; attempt: number; last_error: string | null }>
+    inRecovery += ingest.length
     for (const r of ingest) {
       const ref = `${r.gmail_account_id}/${r.message_id}`
       const before = getRecovery(db, 'INGEST', ref)
@@ -452,6 +486,7 @@ export function reconcileRecoveryQueue(db: Database.Database, now: number): Reco
         `SELECT ledger_id, case_id, action_type, status, internal_idempotency_key, external_ref, last_error
            FROM ${table} WHERE status IN ('RECOVERY_REQUIRED','OUTCOME_UNKNOWN')`
       ).all() as Array<{ ledger_id: string; case_id: string | null; action_type: string; status: string; internal_idempotency_key: string; external_ref: string | null; last_error: string | null }>
+      inRecovery += rows.length
       for (const r of rows) {
         const before = getRecovery(db, surface, r.ledger_id)
         enqueueRecovery(db, {
@@ -479,6 +514,7 @@ export function reconcileRecoveryQueue(db: Database.Database, now: number): Reco
     const open = (db.prepare(
       `SELECT ${SELECT_COLS} FROM cos_recovery_queue WHERE status IN ('PENDING_RETRY','NEEDS_HUMAN')`
     ).all() as RawRow[]).map(hydrate)
+    reChecked += open.length
     for (const q of open) {
       let stillOpen = false
       if (q.surface === 'INGEST') {
@@ -505,7 +541,10 @@ export function reconcileRecoveryQueue(db: Database.Database, now: number): Reco
     `SELECT status, COUNT(*) AS n FROM cos_recovery_queue GROUP BY status`
   ).all() as Array<{ status: RecoveryQueueStatus; n: number }>
   const by = (s: RecoveryQueueStatus) => counts.find(c => c.status === s)?.n ?? 0
-  return { enqueued, resolved, needsHuman: by('NEEDS_HUMAN'), pendingRetry: by('PENDING_RETRY') }
+  return {
+    enqueued, resolved, needsHuman: by('NEEDS_HUMAN'), pendingRetry: by('PENDING_RETRY'),
+    examined: inRecovery + reChecked, inRecovery, reChecked,
+  }
 }
 
 export function cancelRecovery(
