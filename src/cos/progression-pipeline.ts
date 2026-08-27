@@ -69,7 +69,9 @@ import {
   undeclaredContract, type CapabilityContract, type PlanStepKind,
 } from './capability-contract.js'
 import { resolveExecutionDependency, withResolvedDependency } from './capability-resolution.js'
-import { assessDecision, invariantE, type DecisionSignals } from './decision-confidence.js'
+import {
+  assessDecision, invariantE, gatherRequiredInputs, type DecisionSignals,
+} from './decision-confidence.js'
 import {
   armWaitCondition, evaluateWaitCondition, resolveWaitCondition, type ArmResult,
 } from './wait-condition.js'
@@ -1485,6 +1487,12 @@ function runProgressionCycleInner(
   }
 
   const runStatus = safetyViolations.length > 0 ? 'FAILED' : 'COMPLETED'
+  // How many violations the INSERT below is about to record. Everything pushed
+  // after this point -- the capability enforcement's and Invariant E's -- is
+  // appended by the finalisation at step 13c, because the row is written here
+  // and those gates run later.
+  const violationsAtInsert = safetyViolations.length
+  const decisionAtInsert = decision
 
   // The decision is NOT final here. Two places below still change it — plan
   // exhaustion can upgrade it to COMPLETE, and the §25 guard can downgrade it
@@ -1940,9 +1948,11 @@ function runProgressionCycleInner(
   const extra = ((): {
     interruptions: number; dod: string | null
     financialExposure: number | null; legalExposure: string | null
+    sensitivity: string | null; pendingActionTypes: string[]
   } => {
     const base = { interruptions: 0, dod: null as string | null,
-      financialExposure: null as number | null, legalExposure: null as string | null }
+      financialExposure: null as number | null, legalExposure: null as string | null,
+      sensitivity: null as string | null, pendingActionTypes: [] as string[] }
     try {
       const st = db.prepare(
         `SELECT interruption_count AS ic, dod_verification_json AS dod
@@ -1964,6 +1974,24 @@ function runProgressionCycleInner(
       // it", which the risk assessment reads as "no exposure evidence", NOT as
       // "no exposure". The distinction is why they are nullable rather than 0.
     }
+    // The owner's closure widened HIGH risk past money and law, so the risk read
+    // has to see WHAT THE CASE WILL DO and WHAT IT HOLDS, not only which kind of
+    // plan step is next.
+    try {
+      const sr = db.prepare(
+        `SELECT sensitivity AS s FROM ${domain === 'personal' ? 'personal_cases' : 'zst_cases'}
+          WHERE case_id = ?`,
+      ).get(caseId) as { s?: string | null } | undefined
+      base.sensitivity = sr?.s ?? null
+    } catch { /* namespace without a sensitivity column */ }
+    try {
+      const rows = db.prepare(
+        `SELECT DISTINCT action_type AS t
+           FROM ${domain === 'personal' ? 'outbound_ledger' : 'zst_outbound_ledger'}
+          WHERE case_id = ? AND status NOT IN ('VERIFIED','CANCELLED','FAILED')`,
+      ).all(caseId) as Array<{ t?: string | null }>
+      base.pendingActionTypes = rows.map(r => r.t).filter((t): t is string => !!t)
+    } catch { /* no ledger for this namespace */ }
     return base
   })()
   const decisionSignals: DecisionSignals = {
@@ -1975,10 +2003,52 @@ function runProgressionCycleInner(
     hasVerifiedDoD: hasVerifiedDoD(extra.dod),
     financialExposure: extra.financialExposure,
     legalExposure: extra.legalExposure,
+    sensitivity: extra.sensitivity,
+    pendingActionTypes: extra.pendingActionTypes,
+    // The proof set. Gathered rather than assumed: HIGH confidence is now
+    // something the run EARNS by having every required input come back PASS,
+    // and a check that could not run comes back UNKNOWN and caps it.
+    requiredInputs: gatherRequiredInputs(db, domain, caseId, {
+      verdict: capResult.verdict, degradations: capResult.degradations.length,
+    }, now),
   }
   const assessment = assessDecision(decisionSignals)
-  const eGate = invariantE(assessment)
-  if (!eGate.allowed) {
+  const eGate = invariantE({ ...assessment, sideEffect: capClass })
+  // NOT APPLIED TO A COMPLETION, and this is the one branch worth arguing for.
+  // Invariant E governs executing an ACTION. A completion is not an outward act:
+  // the gate that owns it is the DoD completion gate a few hundred lines above,
+  // which requires evidence per criterion and has already refused an unproven
+  // one by the time control reaches here. Letting E overwrite a COMPLETE would
+  // write a run record whose decision contradicts the case row that same run
+  // just transitioned -- a lie in the ledger, bought for no extra safety.
+  //
+  // NOR TO A STEP THE OWNER JUST AUTHORISED, and this one the full suite found
+  // rather than my reasoning. Six tests went red the moment the gate widened,
+  // all of one shape: the engine asks, Istvan answers, the cursor advances past
+  // the AWAIT_DECISION step, and the next action is the EXECUTE that acts on his
+  // answer -- HIGH risk, engine confidence below HIGH, refused. The refusal's
+  // remedy is "a person must decide", which the person had just done. Ask ->
+  // answer -> ask again is not a safety property, it is a loop.
+  //
+  // The owner's rule is about AUTONOMOUS execution ("nincs autonomous
+  // execution"), and a step running on an answer consumed by this very run is
+  // not autonomous. So the gate does not refuse it -- and it is RECORDED that it
+  // did not, with both numbers, because a bypass nobody can see is worse than no
+  // bypass. It cannot become a standing hole: `consumeOwnerAnswer` refuses an
+  // event any run of this case already named, so the exemption is single-use and
+  // the next run without a fresh answer is autonomous again.
+  const ownerAuthorised = consumedAnswerEventId !== null
+  const eApplies = decision !== 'COMPLETE' && !ownerAuthorised
+  if (!eGate.allowed && ownerAuthorised) {
+    safetyViolations.push({
+      assertion: 'INVARIANT_E_OWNER_AUTHORISED',
+      case_id: caseId, domain,
+      detail: `${eGate.code} nem alkalmazandó: a lépés a tulajdonos ebben a futásban `
+        + `felhasznált válaszán fut (esemény ${consumedAnswerEventId}) — `
+        + `confidence=${assessment.confidence} risk=${assessment.risk}`,
+    })
+  }
+  if (!eGate.allowed && eApplies) {
     // Refused BY THE INVARIANT, and the refusal names both numbers -- the
     // acceptance criterion's requirement that a test can tell WHICH gate fired.
     decision = 'MANUAL_ACTION_REQUIRED'
@@ -2000,7 +2070,7 @@ function runProgressionCycleInner(
               updated_at = ?
         WHERE domain = ? AND case_id = ?`,
     ).run(assessment.confidence, assessment.risk,
-      JSON.stringify({ ...assessment, signals: decisionSignals }), now, domain, caseId)
+      JSON.stringify({ ...assessment, gate: eGate, signals: decisionSignals }), now, domain, caseId)
   } catch {
     // Same posture as the capability trail: a judgement write that can take the
     // cycle down would be a monitoring surface causing the outage it records.
@@ -2046,6 +2116,48 @@ function runProgressionCycleInner(
       }
     }
   } catch { /* a wait-condition fault must not lose a completed decision */ }
+
+  // ── 13c. FINALISE THE RUN RECORD ──────────────────────────────────────────
+  //
+  // THE DEFECT THIS CLOSES, found by probing rather than by reading. The run row
+  // is INSERTed at step 9, and the comment above it says "the decision is NOT
+  // final here" and then names only two places that change it -- the two
+  // completion paths, both of which UPDATE the row themselves. But two more
+  // gates run AFTER the insert and change `decision` in a local variable only:
+  // the §19 capability enforcement (WAIT_SYSTEM / MANUAL_ACTION_REQUIRED) and
+  // Invariant E.
+  //
+  // Measured on a real run: Invariant E refused, the returned object carried
+  // decision=MANUAL_ACTION_REQUIRED and the INVARIANT_E_REFUSAL violation, and
+  // the durable row said CONTINUE_AUTONOMOUSLY with the refusal nowhere in it.
+  // The production caller -- progression-heartbeat -- DISCARDS the return value,
+  // so the refusal existed for the length of one function call and then did not.
+  // A gate whose verdict reaches no durable surface is the sentence this packet
+  // was supposed to stop being.
+  //
+  // ONE write, at the one point every path passes through, rather than a write
+  // at each gate: four gates each remembering to persist is the shape that
+  // produced this defect in the first place.
+  //
+  // STATUS IS DELIBERATELY NOT CHANGED. A refusal is the engine working, not the
+  // run failing, and a FAILED status would put every correct refusal into the
+  // cycle's `problems` -- an alarm that fires on correct behaviour teaches the
+  // reader to stop looking. The refusal is in `decision` and in the assertions.
+  if (decision !== decisionAtInsert || safetyViolations.length > violationsAtInsert) {
+    const lateAssertions = safetyViolations.slice(violationsAtInsert).map(v => ({
+      assertion: v.assertion, status: 'violated', passed: false, detail: v.detail,
+    }))
+    let merged: unknown[] = lateAssertions
+    try {
+      const prior = JSON.parse(safetyJson) as unknown[]
+      if (Array.isArray(prior)) merged = [...prior, ...lateAssertions]
+    } catch { /* keep the late ones rather than losing both */ }
+    db.prepare(
+      `UPDATE case_progression_runs
+          SET decision = ?, reason = ?, safety_assertions_json = ?
+        WHERE progression_run_id = ?`,
+    ).run(decision, reason, JSON.stringify(merged), runId)
+  }
 
   // ── 14. P1 — project the canonical decision onto the case board ────────────
   //
