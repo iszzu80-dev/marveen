@@ -65,6 +65,10 @@ import { evaluateCaseTemporalConsistency } from './temporal-consistency-gate.js'
 // Two-node ESM cycle with case-projection, deliberate: see that module's header.
 import { projectCase } from './case-projection.js'
 import {
+  SIDE_EFFECT_CLASS, capabilityCoverage, declareForPlanStep, enforceCapabilityContract,
+  undeclaredContract, type CapabilityContract, type PlanStepKind,
+} from './capability-contract.js'
+import {
   armWaitCondition, evaluateWaitCondition, resolveWaitCondition, type ArmResult,
 } from './wait-condition.js'
 
@@ -221,6 +225,21 @@ export interface RollingPlanStep {
   kind: 'GATHER_INFO' | 'AWAIT_EXTERNAL' | 'AWAIT_DECISION' | 'EXECUTE' | 'VERIFY' | 'COMMUNICATE' | 'RECOVER'
   /** Whether this step needs external input before it can proceed. */
   needsExternal: boolean
+  /** §19 hardening (owner, 2026-08-27): what this step DEPENDS ON, declared here
+   *  at plan-build time rather than inferred at run time from what happens to be
+   *  connected. The dependency is a property of the planned execution, not of the
+   *  case and not of the deployment. Optional on the type so a plan written
+   *  before this existed still parses; `contractFor` below supplies UNDECLARED,
+   *  which is a different statement from "requires nothing" and is treated as
+   *  one. */
+  capabilities?: CapabilityContract
+}
+
+/** The contract a step carries, or the explicit absence of one. Never invents a
+ *  requirement from the step's kind at READ time -- that would be the inference
+ *  this design exists to refuse. It reads what the planner declared. */
+export function contractFor(step: { capabilities?: CapabilityContract }): CapabilityContract {
+  return step.capabilities ?? undeclaredContract()
 }
 
 /** Build a rolling plan from the outcome contract + resolved context. Thin
@@ -299,7 +318,13 @@ export function buildRollingPlan(
     plan.push({ step: plan.length + 1, label: 'Review progress against Definition of Done', kind: 'VERIFY', needsExternal: false })
   }
 
-  return plan
+  // THE DECLARATION IS ATTACHED AT THE CHOKE POINT, not at each of the twenty-five
+  // `plan.push` sites above. A per-site declaration is a list someone extends
+  // without it -- and the step nobody remembered would carry no contract while
+  // looking exactly like a step that needs nothing, which is the precise
+  // confusion `source: UNDECLARED` exists to prevent. Attaching here covers the
+  // steps that do not exist yet.
+  return plan.map(step => ({ ...step, capabilities: declareForPlanStep(step.kind) }))
 }
 
 /**
@@ -1734,6 +1759,94 @@ function runProgressionCycleInner(
     ).run(currentVersion, runId)
   }
 
+  // ── 13a. §19 hardening — the CAPABILITY CONTRACT of the chosen action ──────
+  //
+  // Owner's decision, 2026-08-27: the dependency belongs to the NEXT ACTION, not
+  // to the case, and it is DECLARED at plan time rather than inferred from what
+  // is connected. This is where the declaration is enforced.
+  //
+  // GATED ON COVERAGE, not on intent. The owner's rollout order says enforcement
+  // waits until every mutating and high-risk path carries an explicit
+  // declaration -- so the gate READS that measurement instead of trusting that
+  // the work was finished. If a new high-risk kind lands without a declaration,
+  // enforcement switches itself off rather than half-applying, and the run says
+  // so. A partly-enforced gate is the worst of the three states: it looks on.
+  const coverage = capabilityCoverage()
+  // The contract is read from the PLAN STEP the next action names, not re-derived
+  // from the kind here: re-deriving would silently repair a plan that was built
+  // before contracts existed, and a repaired-on-read contract is an inference
+  // wearing a declaration's clothes. A step that carries none yields UNDECLARED.
+  const capStep = plan.find(st => st.step === nba.planStep)
+  const capContract = capStep ? contractFor(capStep) : undeclaredContract()
+  const capClass = SIDE_EFFECT_CLASS[nba.kind as PlanStepKind]
+  const capResult = coverage.enforcementReady
+    ? enforceCapabilityContract(db, capContract, capClass, now)
+    : null
+  if (!coverage.enforcementReady) {
+    safetyViolations.push({
+      assertion: 'CAPABILITY_ENFORCEMENT_OFF_COVERAGE_INCOMPLETE',
+      case_id: caseId, domain,
+      detail: `a kockázatos lépések ${coverage.risky.declared}/${coverage.risky.total} aránya nem teljes — `
+        + 'az enforcement kikapcsolva, mert egy félig alkalmazott kapu rosszabb, mint egy kikapcsolt',
+    })
+  } else if (capResult && capResult.verdict !== 'PROCEED') {
+    if (capResult.verdict === 'WAIT_CAPABILITY' && capResult.blocker) {
+      // A REQUIRED capability is missing. The engine does NOT continue in a
+      // degraded context -- that is the specific thing the owner forbade. It
+      // parks on a TYPED wait carrying the four facts: which capability, which
+      // action, what would end the wait (the probe, in the predicate), and when
+      // it is looked at again.
+      const b = capResult.blocker
+      const armedCap = armWaitCondition(db, {
+        domain, caseId, kind: 'CAPABILITY',
+        subject: `képesség hiányzik: ${b.capability}`,
+        // A non-retryable blocker is a deployment fault a person clears, so its
+        // review is the ordinary stale review rather than a fifteen-minute retry
+        // that would burn a queue slot on a state no probe can change.
+        expectedBy: now + (b.retryable ? CAPABILITY_REVIEW_SEC : DEFAULT_CAPABILITY_HUMAN_REVIEW_SEC),
+        wakePolicy: 'EITHER', runId,
+        capability: { capability: b.capability, action: nba.description, retryable: b.retryable },
+      }, now)
+      decision = 'WAIT_SYSTEM'
+      reason = `${capResult.detail} — a(z) "${nba.description}" lépés kötelező függősége`
+      if (!armedCap.ok) {
+        safetyViolations.push({
+          assertion: 'CAPABILITY_WAIT_WITHOUT_TYPED_CONDITION',
+          case_id: caseId, domain,
+          detail: `${b.capability}: ${armedCap.refusal} — ${armedCap.detail ?? ''}`,
+        })
+      }
+    } else if (capResult.verdict === 'DENY_UNDECLARED') {
+      // Undeclared high-risk or mutating work. Fail closed, and say which action.
+      // MANUAL_ACTION_REQUIRED is the vocabulary's "a person must do something",
+      // and an undeclared risky dependency is exactly that: the fix is a
+      // declaration, which no cycle can write for itself.
+      decision = 'MANUAL_ACTION_REQUIRED'
+      reason = `${capResult.detail}: ${nba.description}`
+      safetyViolations.push({
+        assertion: 'UNDECLARED_DEPENDENCY_ON_RISKY_ACTION',
+        case_id: caseId, domain, detail: `${capClass} / ${nba.description}`,
+      })
+    } else {
+      // CONTRACT_GAP: read-only work with no declaration. Not an outage, and the
+      // case is NOT stopped for it. It is recorded so the gap is a backlog item
+      // with a name rather than a silence.
+      safetyViolations.push({
+        assertion: 'CAPABILITY_CONTRACT_GAP',
+        case_id: caseId, domain, detail: `${capClass} / ${nba.description}: ${capResult.detail}`,
+      })
+    }
+  } else if (capResult?.degradations.length) {
+    // OPTIONAL capabilities missing. The case is NOT parked -- the owner was
+    // explicit -- and the degradation is recorded so the confidence/risk policy,
+    // which owns the blocking decision, has something to weigh.
+    safetyViolations.push({
+      assertion: 'CAPABILITY_DEGRADED_PROCEEDED',
+      case_id: caseId, domain,
+      detail: `${nba.description}: ${capResult.degradations.map(d => `${d.capability}=${d.state}`).join(', ')}`,
+    })
+  }
+
   // ── 13b. P2 §10.4 — the typed wait condition ───────────────────────────────
   //
   // TWO ACTS, in this order, and the order is the point.
@@ -1853,6 +1966,18 @@ function armWaitFor(
  *  clock in `decide()` -- two different numbers here would mean a wait that
  *  expires after the engine has already escalated it. */
 export const EXTERNAL_WAIT_HORIZON_SEC = 7 * 86400
+
+/** How long a case sleeps on a RETRYABLE missing capability before the probe is
+ *  read again. Matches `CAPABILITY_RETRY_SEC` in capability-preflight: two
+ *  different numbers here would mean the typed wait and the older wait_system
+ *  disagreed about when "again" is. */
+export const CAPABILITY_REVIEW_SEC = 900
+
+/** And how long on a NON-retryable one. A disabled connector or an unknown
+ *  capability name is a deployment fault only a person can clear, so re-probing
+ *  it every fifteen minutes would spend a bounded queue slot on a state no probe
+ *  can change. A day, and the stale review is what makes it visible meanwhile. */
+export const DEFAULT_CAPABILITY_HUMAN_REVIEW_SEC = 86400
 
 // ── Mission Control read view (read-only projection) ────────────────────
 

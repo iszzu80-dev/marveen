@@ -2132,13 +2132,45 @@ export function initProgressionSchema(db: Database.Database): void {
       resolved_run_id  TEXT,
       CHECK (domain IN ('personal','zst')),
       CHECK (kind IN ('EVENT','NEW_EVIDENCE','SCHEDULED_REVIEW','DEADLINE',
-                      'COMMITMENT','EXTERNAL_RESPONSE','POLICY_CHANGE')),
+                      'COMMITMENT','EXTERNAL_RESPONSE','POLICY_CHANGE',
+                      'CAPABILITY')),
       CHECK (resolution_mode IN ('TIMER','EVENT_ONLY','EITHER')),
       CHECK (resolution IS NULL OR resolution IN ('SATISFIED','EXPIRED','SUPERSEDED','CANCELLED')),
       /* A TIMER or EITHER wait without a deadline is a wait nothing can end. */
       CHECK (resolution_mode = 'EVENT_ONLY' OR expected_by IS NOT NULL)
     )
   `)
+  // WIDENING A CHECK NEEDS A REBUILD, NOT AN `IF NOT EXISTS`.
+  //
+  // `CREATE TABLE IF NOT EXISTS` above is a no-op on a store that already has the
+  // table, so a store created before 'CAPABILITY' joined the vocabulary keeps the
+  // OLD constraint and rejects every capability wait -- while the code, the tests
+  // and a fresh store all agree it works. That is the exact shape of this
+  // codebase's recurring defect: a fresh-database test proving something the live
+  // database cannot do.
+  //
+  // SQLite cannot ALTER a CHECK, so the table is rebuilt. Detection reads the
+  // stored DDL rather than trying an insert: a probe that writes a row to find
+  // out whether it can write a row is a probe with a side effect, and this runs
+  // on every boot.
+  const cwcDdl = (db.prepare(
+    `SELECT sql FROM sqlite_master WHERE type='table' AND name='case_wait_conditions'`,
+  ).get() as { sql?: string } | undefined)?.sql ?? ''
+  if (cwcDdl && !cwcDdl.includes("'CAPABILITY'")) {
+    db.exec('PRAGMA foreign_keys=OFF')
+    db.transaction(() => {
+      db.exec(`ALTER TABLE case_wait_conditions RENAME TO case_wait_conditions_pre_capability`)
+      // Recreate with the widened CHECK by re-running the DDL above verbatim.
+      db.exec(cwcDdl.replace(
+        "'COMMITMENT','EXTERNAL_RESPONSE','POLICY_CHANGE')",
+        "'COMMITMENT','EXTERNAL_RESPONSE','POLICY_CHANGE',\n                      'CAPABILITY')",
+      ))
+      db.exec(`INSERT INTO case_wait_conditions SELECT * FROM case_wait_conditions_pre_capability`)
+      db.exec(`DROP TABLE case_wait_conditions_pre_capability`)
+    })()
+    db.exec('PRAGMA foreign_keys=ON')
+  }
+
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cwc_one_active
              ON case_wait_conditions(domain, case_id) WHERE resolved_at IS NULL`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cwc_due

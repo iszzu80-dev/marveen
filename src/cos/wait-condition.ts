@@ -50,6 +50,7 @@
 // evaluator is the same thing one layer down.
 
 import type Database from 'better-sqlite3'
+import { checkCapabilities, type CapabilityPreflight } from './capability-preflight.js'
 import { randomUUID } from 'node:crypto'
 
 export type WaitDomain = 'personal' | 'zst'
@@ -58,6 +59,12 @@ export type WaitDomain = 'personal' | 'zst'
 export const WAIT_KINDS = [
   'EVENT', 'NEW_EVIDENCE', 'SCHEDULED_REVIEW', 'DEADLINE',
   'COMMITMENT', 'EXTERNAL_RESPONSE', 'POLICY_CHANGE',
+  // Not one of §10.4's seven. Added 2026-08-27 with the capability contract:
+  // "waiting on the machine" needed a typed wait of its own, and giving it one
+  // of the seven world-facing kinds would have re-created the conflation P2 was
+  // built to end. Its recheck condition is a PROBE, not an event and not a clock,
+  // which is why the evaluator below has a third branch.
+  'CAPABILITY',
 ] as const
 export type WaitKind = typeof WAIT_KINDS[number]
 
@@ -67,6 +74,7 @@ export type WaitKind = typeof WAIT_KINDS[number]
  *  be armed at all. */
 export const EVALUABLE_KINDS: readonly WaitKind[] = [
   'EVENT', 'NEW_EVIDENCE', 'SCHEDULED_REVIEW', 'DEADLINE', 'EXTERNAL_RESPONSE',
+  'CAPABILITY',
 ]
 
 export type WakePolicy = 'TIMER' | 'EVENT_ONLY' | 'EITHER'
@@ -102,10 +110,16 @@ export interface ArmInput {
   wakePolicy?: WakePolicy
   staleReviewAt?: number
   runId?: string
+  /** CAPABILITY waits only. The owner's four facts, 2026-08-27: which capability
+   *  is missing, which action it blocks, and (with expectedBy/staleReviewAt) when
+   *  it is looked at again. The recheck CONDITION is the probe itself, recorded
+   *  in the predicate so the row states it rather than implying it. */
+  capability?: { capability: string; action: string; retryable: boolean }
 }
 
 export type ArmRefusal =
   | 'UNEVALUABLE_KIND'
+  | 'NO_CAPABILITY_NAMED'
   | 'NO_SUBJECT'
   | 'NO_DEADLINE_FOR_TIMED_WAIT'
   | 'STALE_REVIEW_BEFORE_NOW'
@@ -135,8 +149,22 @@ function latestEventId(db: Database.Database, domain: WaitDomain, caseId: string
 /** The predicate, as data. Kept as JSON rather than code so a condition written
  *  today is still readable by an evaluator changed tomorrow, and so a human
  *  reading the row can see what the machine was waiting for. */
-function predicateFor(kind: WaitKind, subject: string, expectedBy: number | null): string {
+function predicateFor(
+  kind: WaitKind, subject: string, expectedBy: number | null,
+  capability?: { capability: string; action: string; retryable: boolean },
+): string {
   switch (kind) {
+    case 'CAPABILITY':
+      // The row says WHICH capability, WHICH action it blocks, and WHAT would end
+      // the wait. `retryable: false` is a deployment fault only a person clears,
+      // and it is recorded so a reader can tell "the machine will notice" from
+      // "someone has to do something" without re-deriving it from the name.
+      return JSON.stringify({
+        test: 'CAPABILITY_AVAILABLE',
+        capability: capability?.capability ?? subject,
+        action: capability?.action ?? 'unknown',
+        retryable: capability?.retryable ?? true,
+      })
     case 'EXTERNAL_RESPONSE':
       return JSON.stringify({ test: 'CASE_EVENT_AFTER_ARM', from: subject })
     case 'EVENT':
@@ -175,6 +203,15 @@ export function armWaitCondition(
   const subject = (input.subject ?? '').trim()
   if (!subject) {
     return { ok: false, refusal: 'NO_SUBJECT', detail: 'meg kell nevezni, MIRE várunk' }
+  }
+  // A CAPABILITY wait whose capability is unnamed cannot be probed, so nothing
+  // could ever end it. Refused at arm time for the same reason UNEVALUABLE_KIND
+  // is: a row that looks typed and can never resolve is worse than no row.
+  if (kind === 'CAPABILITY' && !input.capability?.capability) {
+    return {
+      ok: false, refusal: 'NO_CAPABILITY_NAMED',
+      detail: 'CAPABILITY várakozáshoz meg kell nevezni a képességet — enélkül nincs mit újraellenőrizni',
+    }
   }
   const policy: WakePolicy = input.wakePolicy ?? 'EITHER'
   const expectedBy = input.expectedBy ?? null
@@ -217,7 +254,7 @@ export function armWaitCondition(
           @policy, @staleReviewAt, @armedEventId, @now, @runId)`,
     ).run({
       waitId, domain, caseId, kind, subject, expectedBy,
-      predicate: predicateFor(kind, subject, expectedBy),
+      predicate: predicateFor(kind, subject, expectedBy, input.capability),
       policy, staleReviewAt,
       armedEventId: latestEventId(db, domain, caseId),
       now, runId: input.runId ?? null,
@@ -256,6 +293,27 @@ export interface WaitEvaluation {
  * due?" on every sweep without consuming anything, and a query with a side
  * effect would make the answer depend on who asked first.
  */
+
+/** The capability a CAPABILITY wait is parked on, read from the predicate the
+ *  arm wrote. Returns null rather than guessing from the subject: a subject is
+ *  prose for a human, and deriving machine behaviour from prose is how the
+ *  follow-up autodraft ended up regexing a recipient out of `waiting_on`. */
+function capabilityOf(w: { evidence_predicate_json: string | null }): string | null {
+  if (!w.evidence_predicate_json) return null
+  try {
+    const p = JSON.parse(w.evidence_predicate_json) as { capability?: unknown }
+    return typeof p.capability === 'string' && p.capability ? p.capability : null
+  } catch { return null }
+}
+
+/** Probe one capability. Never throws: an evaluator that can crash is an
+ *  evaluator that can strand every wait behind it. */
+function resolveCapabilityState(
+  db: Database.Database, capability: string, now: number,
+): CapabilityPreflight | null {
+  try { return checkCapabilities(db, [capability], now)[0] ?? null } catch { return null }
+}
+
 export function evaluateWaitCondition(
   db: Database.Database, domain: WaitDomain, caseId: string, now: number,
 ): WaitEvaluation {
@@ -280,6 +338,27 @@ export function evaluateWaitCondition(
       detail: `az óra lejárt (${w.expected_by})`,
     }
   }
+  // CAPABILITY: the recheck condition is a PROBE. Read-only and deterministic —
+  // `capability-preflight` never reaches outside — so evaluating it is as cheap
+  // and as replayable as reading a row, which is what lets it sit on the same
+  // path as the clock and the event.
+  //
+  // DEGRADED counts as back. `blocksProgression` already says DEGRADED does not
+  // block, and a wait that only ends on a perfect AVAILABLE would hold a case on
+  // a connector that is merely slow.
+  if (w.kind === 'CAPABILITY') {
+    const capability = capabilityOf(w)
+    if (capability) {
+      const p = resolveCapabilityState(db, capability, now)
+      if (p && p.state !== 'UNAVAILABLE') {
+        return {
+          verdict: 'SATISFIED', waitId: w.wait_id, kind: w.kind,
+          detail: `a képesség visszatért: ${capability} (${p.state})`,
+        }
+      }
+    }
+  }
+
   if (w.resolution_mode !== 'TIMER') {
     const ev = eventEvidence()
     if (ev) {

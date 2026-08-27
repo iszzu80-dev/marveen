@@ -82,13 +82,44 @@ describe('P2 — the writer', () => {
   })
 
   it('ORACLE: every declared kind is either evaluable or explicitly refused', () => {
+    // The oracle caught a real change on 2026-08-27 and was right to. CAPABILITY
+    // joined the vocabulary as an EVALUABLE kind that carries an ADDITIONAL arm
+    // requirement -- it must name the capability, or nothing could probe it. So
+    // "evaluable" no longer implies "armable from the generic input", and the
+    // oracle now says which of the two a refusal is. What it still forbids is the
+    // thing it was written for: a kind that can be armed and never resolved.
     const db = getDb(); seed(db)
+    /** Kinds that are evaluable but refuse a generic arm, with the refusal they
+     *  owe. Listed rather than defaulted: a kind added here without a reason is a
+     *  kind quietly exempted from the oracle. */
+    const EXTRA_ARM_REQUIREMENT: Record<string, string> = {
+      CAPABILITY: 'NO_CAPABILITY_NAMED',
+    }
     for (const kind of WAIT_KINDS) {
       const evaluable = EVALUABLE_KINDS.includes(kind)
       const r = arm(db, { kind, expectedBy: T0 + DAY })
-      expect(r.ok).toBe(evaluable)
-      if (!evaluable) expect(r.refusal).toBe('UNEVALUABLE_KIND')
+      if (!evaluable) {
+        expect(r.ok).toBe(false)
+        expect(r.refusal).toBe('UNEVALUABLE_KIND')
+      } else if (EXTRA_ARM_REQUIREMENT[kind]) {
+        expect(r.ok).toBe(false)
+        expect(r.refusal).toBe(EXTRA_ARM_REQUIREMENT[kind])
+      } else {
+        expect(r.ok).toBe(true)
+      }
     }
+  })
+
+  it('ORACLE 2: a kind with an extra arm requirement CAN still be armed when it is met', () => {
+    // The half the list above cannot prove on its own: an exemption that nothing
+    // ever satisfies would hide a kind that is simply unarmable.
+    const db = getDb(); seed(db)
+    const r = armWaitCondition(db, {
+      domain: 'personal', caseId: 'c1', kind: 'CAPABILITY',
+      subject: 'képesség hiányzik: RUN_LEDGER', expectedBy: T0 + DAY, runId: 'r1',
+      capability: { capability: 'RUN_LEDGER', action: 'record the run', retryable: true },
+    }, T0)
+    expect(r.ok).toBe(true)
   })
 
   it('refuses a timed wait with no deadline, and an unnamed subject', () => {
