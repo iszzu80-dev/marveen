@@ -160,14 +160,35 @@ array, 2026-08-26 was the unparseable payload, and this is the unread `errors`
 array. Every `problems: []` in this document is weaker than it looks until it is
 closed, and it is being closed in the hardening release rather than quietly.
 
-### B. A satisfied wait waits for the poller, and the poller takes one case a cycle
+### B. A satisfied wait sorts to the BACK of the due queue
 
-The wake evaluator and the queue disagree about *when*. `decideTrigger` returned
-`shouldRun: true, "the wait condition was met"` while the poller did not pick the
-case up, because arming had pushed `next_progression_at` forward, and later
-because 64 cases were due and `limit` is **1 per cycle**.
+**CORRECTED 2026-08-27 12:05, and the original error is left visible because it
+is the more useful half of this entry.** This section first said "the poller
+takes ONE case a cycle" and called a 64-case queue a ten-hour drain. That is
+wrong. `runProgressionHeartbeat(db, now, 50)` takes **50 per domain**, so a cycle
+examines up to a hundred cases.
 
-Not a deadlock and not a P2 defect — the case woke on the next tick that reached
-it. But at one case per ten-minute cycle, a 64-case due queue is a ten-hour
-drain, and a typed wait that is *satisfied now* is not the same thing as a case
-that *runs now*. Worth a number, not a shrug.
+Where the wrong number came from: the cycle report carries `limit: 1` inside the
+progression block, and I attributed it to the sweep. It belongs to
+**GoalEnrichment** — a different subsystem whose canary throttle lands in the
+same merged payload. That is precisely the merged-payload collision this
+runner's own history is built around, and I walked into it while documenting it.
+
+**The problem is real; the mechanism is different.** The due page is ordered
+`next_progression_at ASC`, and arming a wait pushes that value FORWARD. So a
+freshly satisfied wait sorts to the BACK of the queue it needs to be at the front
+of. Measured on the live store at 12:04:
+
+```text
+personal   49 due,  oldest due age 561s
+zst        50 due,  oldest due age 561s
+both active typed waits: 49 cases sort AHEAD of each
+```
+
+The manual `next_progression_at = 1` nudge needed at 09:22 to get an EXPIRED
+condition examined at all is the same finding from the other side: freshness
+ordering starves the freshly woken.
+
+Owner's closure C addresses this with bounded priority rather than a bigger
+limit — a bigger limit would not have helped, which is exactly why the wrong
+diagnosis mattered.
