@@ -36,6 +36,9 @@ const heartbeat = runProgressionHeartbeat(db, now, 50)
 console.log('Heartbeat:', JSON.stringify({
   personal: heartbeat.personal,
   zst: heartbeat.zst,
+  // §10.4 closure C: the selection metrics reach the cycle report, because a
+  // starvation counter nobody can read is the same as no starvation counter.
+  selection: heartbeat.selection,
   // §10.8: how many cases were due but had no reason to run. The number this
   // whole change exists to move, so it has to be visible.
   skippedNoTrigger: heartbeat.skippedNoTrigger,

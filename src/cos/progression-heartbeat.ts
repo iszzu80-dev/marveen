@@ -21,6 +21,7 @@ import type Database from 'better-sqlite3'
 import { randomUUID } from 'crypto'
 import {
   findDuePage,
+  type DueMetrics,
   tryClaimProgression,
   releaseProgressionClaim,
   deferProgression,
@@ -77,6 +78,10 @@ export interface HeartbeatResult {
   remainingDue: { personal: number; zst: number }
   /** True when either domain left work behind. */
   truncated: boolean
+  /** §10.4 closure C (owner, 2026-08-27): backlog, oldest due age, per-band
+   *  selection, and the starvation counter -- per domain, measured at selection
+   *  time. `null` for a domain whose page was never read. */
+  selection: { personal: DueMetrics | null; zst: DueMetrics | null }
   /** Set when the §22 master switch stopped the sweep before it started. */
   killSwitchEngaged?: string
 }
@@ -139,6 +144,7 @@ export function runProgressionHeartbeat(
     cycleErrors: 0,
     remainingDue: { personal: 0, zst: 0 },
     truncated: false,
+    selection: { personal: null, zst: null },
   }
 
   // §22 MASTER SWITCH, CHECKED BEFORE THE FIRST CASE IS TOUCHED.
@@ -170,6 +176,10 @@ export function runProgressionHeartbeat(
     // property of the read, not of how the sweep then went.
     result.remainingDue[domain] = page.remaining
     if (page.hasMore) result.truncated = true
+    // §10.4 closure C: the six numbers the owner asked for, per domain, taken at
+    // SELECTION time. A metric gathered after the loop cannot see what the page
+    // did not choose, and what it did not choose is the whole question.
+    result.selection[domain] = page.metrics
 
     for (const dc of page.cases) {
       // Skip cases already claimed by another runner

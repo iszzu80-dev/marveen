@@ -15,6 +15,7 @@
 // one of them can be perfectly green while the other is the outage.
 
 import type Database from 'better-sqlite3'
+import { capabilityCoverage } from './capability-contract.js'
 
 /** Six cycles of silence. The COS cycle runs every ten minutes, so anything
  *  that has not recorded a run in an hour has missed five in a row — long
@@ -131,17 +132,56 @@ export function unverifiedCompletions(
   return out.sort((a, b) => b.ageSeconds - a.ageSeconds)
 }
 
+/** §19 closure A (owner, 2026-08-27). Incomplete capability coverage is a
+ *  RELEASE/READINESS fact and belongs on a health surface -- it must never reach
+ *  the per-action enforcement, which runs unconditionally. This is the other half
+ *  of that separation: the place where incomplete coverage is allowed to be
+ *  loud. */
+export interface CapabilityCoverageHealth {
+  /** Declared / total over the MUTATING and HIGH_RISK action kinds. */
+  riskyDeclared: number
+  riskyTotal: number
+  /** Kinds that can touch the world and carry no declaration. Named, not counted:
+   *  "2/3" tells nobody which one to go and declare. */
+  undeclaredRisky: string[]
+  /** FAIL when a risky kind is undeclared. DEGRADED when only read-only kinds
+   *  are, which is a backlog item rather than a release blocker. */
+  status: 'PASS' | 'DEGRADED' | 'FAIL'
+}
+
 export interface OperationalHealth {
   stale: StaleRun[]
   unverified: UnverifiedCompletion[]
   /** Explicit zero semantics: a surface that renders nothing when both lists are
    *  empty cannot be told apart from one whose data stopped arriving. */
   clean: boolean
+  capabilityCoverage: CapabilityCoverageHealth
   checkedAt: number
+}
+
+export function capabilityCoverageHealth(): CapabilityCoverageHealth {
+  const c = capabilityCoverage()
+  const undeclaredRisky = c.rows
+    .filter(r => r.sideEffect !== 'READ_ONLY' && r.declared < r.total)
+    .map(r => r.kind)
+  const undeclaredReadOnly = c.rows.some(r => r.sideEffect === 'READ_ONLY' && r.declared < r.total)
+  return {
+    riskyDeclared: c.risky.declared, riskyTotal: c.risky.total, undeclaredRisky,
+    status: undeclaredRisky.length > 0 || c.risky.total === 0 ? 'FAIL'
+      : undeclaredReadOnly ? 'DEGRADED' : 'PASS',
+  }
 }
 
 export function operationalHealth(db: Database.Database, now: number): OperationalHealth {
   const stale = staleRuns(db, now)
   const unverified = unverifiedCompletions(db, now)
-  return { stale, unverified, clean: stale.length === 0 && unverified.length === 0, checkedAt: now }
+  const cov = capabilityCoverageHealth()
+  return {
+    stale, unverified,
+    // `clean` now answers the whole question it appears to answer. Leaving
+    // coverage out of it would have produced a green health surface over a
+    // release state the owner's rollout order calls not-ready.
+    clean: stale.length === 0 && unverified.length === 0 && cov.status === 'PASS',
+    capabilityCoverage: cov, checkedAt: now,
+  }
 }

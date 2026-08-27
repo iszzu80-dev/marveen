@@ -68,6 +68,7 @@ import {
   SIDE_EFFECT_CLASS, capabilityCoverage, declareForPlanStep, enforceCapabilityContract,
   undeclaredContract, type CapabilityContract, type PlanStepKind,
 } from './capability-contract.js'
+import { resolveExecutionDependency, withResolvedDependency } from './capability-resolution.js'
 import {
   armWaitCondition, evaluateWaitCondition, resolveWaitCondition, type ArmResult,
 } from './wait-condition.js'
@@ -686,6 +687,17 @@ export function decide(
 
 // ── Progression run result ──────────────────────────────────────────────
 
+/** The audit chain the owner asked for by name, 2026-08-27. */
+export interface CapabilityTrail {
+  action: string
+  kind: string
+  resolution: 'RESOLVED' | 'NOT_REQUIRED' | 'UNRESOLVED'
+  target: string | null
+  required: string[]
+  verdict: string
+  reason: string
+}
+
 export interface ProgressionRunResult {
   runId: string
   domain: 'personal' | 'zst'
@@ -699,6 +711,11 @@ export interface ProgressionRunResult {
   errorCode: string | null
   errorSummary: string | null
   safetyViolations: SafetyViolation[]
+  /** §19 closure B: planned action -> resolved target -> required capability ->
+   *  preflight verdict, for the run that made the decision. Present on every
+   *  successful run, including the ones that proceeded: a trail that appears
+   *  only on failure cannot show the check ran. */
+  capabilityTrail?: CapabilityTrail
   /** Set only when the pipeline ran successfully. */
   planVersion?: number
   goalVersion?: number
@@ -1765,31 +1782,72 @@ function runProgressionCycleInner(
   // to the case, and it is DECLARED at plan time rather than inferred from what
   // is connected. This is where the declaration is enforced.
   //
-  // GATED ON COVERAGE, not on intent. The owner's rollout order says enforcement
-  // waits until every mutating and high-risk path carries an explicit
-  // declaration -- so the gate READS that measurement instead of trusting that
-  // the work was finished. If a new high-risk kind lands without a declaration,
-  // enforcement switches itself off rather than half-applying, and the run says
-  // so. A partly-enforced gate is the worst of the three states: it looks on.
+  // COVERAGE GATES THE SIGNAL, NEVER THE ENFORCEMENT. Owner's closure A,
+  // 2026-08-27, and he was right about a defect I had also argued for.
+  //
+  // The first version skipped `enforceCapabilityContract` entirely when coverage
+  // was incomplete, and justified it with "a partly-enforced gate is the worst of
+  // the three states". That reasoning is backwards, and the consequence is the
+  // exact opposite of the rule it claimed to serve: adding ONE undeclared
+  // high-risk kind would have made coverage incomplete and therefore turned the
+  // DENY off for EVERY action, including the new undeclared one. A rollout gate
+  // that fails OPEN is not a rollout gate.
+  //
+  // So per-action enforcement runs ALWAYS. Incomplete coverage is a readiness /
+  // health / release fact -- it makes that signal FAIL, and it is recorded on the
+  // run -- but it can never widen what an action is allowed to do.
   const coverage = capabilityCoverage()
   // The contract is read from the PLAN STEP the next action names, not re-derived
   // from the kind here: re-deriving would silently repair a plan that was built
   // before contracts existed, and a repaired-on-read contract is an inference
   // wearing a declaration's clothes. A step that carries none yields UNDECLARED.
   const capStep = plan.find(st => st.step === nba.planStep)
-  const capContract = capStep ? contractFor(capStep) : undeclaredContract()
+  const capDeclared = capStep ? contractFor(capStep) : undeclaredContract()
   const capClass = SIDE_EFFECT_CLASS[nba.kind as PlanStepKind]
-  const capResult = coverage.enforcementReady
-    ? enforceCapabilityContract(db, capContract, capClass, now)
-    : null
+
+  // CLOSURE B: the CONCRETE dependency, resolved before execution rather than
+  // discovered inside the executor.
+  //
+  // The step-level declaration is a FLOOR -- RUN_LEDGER for anything that writes
+  // -- and the owner's objection was exactly that a floor is not a dependency
+  // list: "RUN_LEDGER önmagában nem teljes dependency declaration az EXECUTE /
+  // COMMUNICATE műveleteknél". So the channel or tool the action would actually
+  // drive is resolved here, deterministically and read-only, and folded on top.
+  //
+  // This does NOT move executor policy into the planner. The dispatch gate, the
+  // quota, the sensitivity profile and the approval all stay where they are and
+  // still run. What changes is that the answer to "what will this need" exists
+  // BEFORE the executor opens, and lands in the audit trail as a chain:
+  // planned action -> resolved target -> required capability -> preflight verdict.
+  const capResolved = resolveExecutionDependency(db, domain, caseId, nba.kind as PlanStepKind, capClass)
+  const capContract = withResolvedDependency(capDeclared, capResolved)
+  const capResult = enforceCapabilityContract(db, capContract, capClass, now)
+  // The chain, recorded whatever the verdict -- including PROCEED. A trail that
+  // only appears when something goes wrong cannot show that the check ran.
+  //
+  // ITS OWN FIELD, NOT `safetyViolations`. The first version pushed it there and
+  // six existing tests went red asserting "no safety violations" -- correctly. A
+  // safety violation means an assertion was BROKEN; an audit trail is a record
+  // that a check RAN. Putting the second in the list meant for the first would
+  // make every healthy run look like a violated one, which is the same
+  // signal-destroying move this packet keeps finding elsewhere.
+  const capabilityTrail: CapabilityTrail = {
+    action: nba.description, kind: nba.kind,
+    resolution: capResolved.status, target: capResolved.target,
+    required: [...capContract.requiredCapabilities],
+    verdict: capResult.verdict, reason: capResolved.reason,
+  }
   if (!coverage.enforcementReady) {
+    // Recorded, and it degrades the readiness signal. It does NOT change the
+    // verdict below by even one branch.
     safetyViolations.push({
-      assertion: 'CAPABILITY_ENFORCEMENT_OFF_COVERAGE_INCOMPLETE',
+      assertion: 'CAPABILITY_COVERAGE_INCOMPLETE',
       case_id: caseId, domain,
       detail: `a kockázatos lépések ${coverage.risky.declared}/${coverage.risky.total} aránya nem teljes — `
-        + 'az enforcement kikapcsolva, mert egy félig alkalmazott kapu rosszabb, mint egy kikapcsolt',
+        + 'a readiness-jelzés emiatt FAIL; az egyedi műveletek enforcementje ettől függetlenül fut',
     })
-  } else if (capResult && capResult.verdict !== 'PROCEED') {
+  }
+  if (capResult.verdict !== 'PROCEED') {
     if (capResult.verdict === 'WAIT_CAPABILITY' && capResult.blocker) {
       // A REQUIRED capability is missing. The engine does NOT continue in a
       // degraded context -- that is the specific thing the owner forbade. It
@@ -1836,7 +1894,7 @@ function runProgressionCycleInner(
         case_id: caseId, domain, detail: `${capClass} / ${nba.description}: ${capResult.detail}`,
       })
     }
-  } else if (capResult?.degradations.length) {
+  } else if (capResult.degradations.length) {
     // OPTIONAL capabilities missing. The case is NOT parked -- the owner was
     // explicit -- and the degradation is recorded so the confidence/risk policy,
     // which owns the blocking decision, has something to weigh.
@@ -1921,6 +1979,7 @@ function runProgressionCycleInner(
     safetyViolations,
     planVersion,
     goalVersion,
+    capabilityTrail,
   }
 }
 

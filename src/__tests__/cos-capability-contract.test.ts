@@ -7,12 +7,16 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import { createCase } from '../cos/case-store.js'
 import { initProgressionSchema } from '../cos/schema.js'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { capabilityCoverageHealth, operationalHealth } from '../cos/operational-health.js'
 import {
   SIDE_EFFECT_CLASS, capabilityCoverage, declareForPlanStep,
   enforceCapabilityContract, summariseCoverage, undeclaredContract,
   type CapabilityContract, type CoverageRow,
 } from '../cos/capability-contract.js'
 import { armWaitCondition, evaluateWaitCondition, WAIT_KINDS, EVALUABLE_KINDS } from '../cos/wait-condition.js'
+import { resolveExecutionDependency, withResolvedDependency } from '../cos/capability-resolution.js'
 import { registerConnector, recordSuccess, recordFailure, DOWN_THRESHOLD, DEGRADED_THRESHOLD } from '../cos/connector-health.js'
 
 const NOW = 1_700_000_000
@@ -28,6 +32,19 @@ function connectorDegraded(db: ReturnType<typeof getDb>, id: string, now: number
   registerConnector(db, id, 'email', 'READ_WRITE', now)
   recordSuccess(db, id, now)
   for (let i = 0; i < DEGRADED_THRESHOLD; i++) recordFailure(db, id, 'slow', now)
+}
+
+/** A row in the case's outbound ledger -- what `executionToolFor` reads to work
+ *  out which tool an EXECUTE would drive. Written through SQL rather than the
+ *  send flow on purpose: the resolver's input is the LEDGER, and a fixture that
+ *  went through the whole send machinery would be testing that machinery. */
+function outboundRow(ledgerId: string, actionType = 'EMAIL_SEND', seq = 1): void {
+  getDb().prepare(
+    `INSERT INTO outbound_ledger
+      (ledger_id, case_id, action_type, sequence_number, internal_idempotency_key,
+       external_idempotency_marker, status, attempt, created_at, updated_at)
+     VALUES (?, 'c1', ?, ?, ?, ?, 'PLANNED', 0, ?, ?)`
+  ).run(ledgerId, actionType, seq, `idem-${ledgerId}`, `COS-Ref:${ledgerId}`, NOW, NOW)
 }
 
 const contract = (over: Partial<CapabilityContract> = {}): CapabilityContract => ({
@@ -339,5 +356,222 @@ describe('capability wait — the CHECK widening reaches an EXISTING store', () 
       `SELECT COUNT(*) n FROM sqlite_master WHERE type='trigger' AND name LIKE 'trg_cwc_%'`,
     ).get() as { n: number }
     expect(trg.n).toBe(2)
+  })
+})
+
+// ── Closure A: enforcementReady=false MUST NEVER mean fail-open ──────────────
+//
+// Owner, 2026-08-27: "Bizonyítsd, hogy enforcementReady=false SOHA nem jelent
+// fail-open executiont." He was right about a defect I had also argued for. The
+// first implementation skipped enforcement entirely when coverage was incomplete
+// -- so adding ONE undeclared high-risk kind would have turned the DENY off for
+// EVERY action, including the new undeclared one. A rollout gate that fails OPEN
+// is not a rollout gate.
+describe('capability coverage — the gate degrades the SIGNAL, never the enforcement', () => {
+  beforeEach(() => {
+    initDatabase(':memory:')
+    createCase(getDb(), { caseId: 'c1', title: 'T', caseType: 'X' }, NOW - 100)
+  })
+
+  const row = (kind: string, sideEffect: CoverageRow['sideEffect'], declared: number): CoverageRow =>
+    ({ kind: kind as CoverageRow['kind'], sideEffect, declared, total: 1 })
+
+  it('HEADLINE: a NEW undeclared high-risk action cannot execute -- not itself, and not others', () => {
+    // The owner's exact negative test. Coverage is incomplete because of the new
+    // kind; the verdicts must be identical to the complete-coverage case.
+    const incomplete = summariseCoverage([
+      row('EXECUTE', 'HIGH_RISK', 1),
+      row('COMMUNICATE', 'HIGH_RISK', 1),
+      row('NEW_RISKY_KIND', 'HIGH_RISK', 0),   // the one nobody declared
+    ])
+    expect(incomplete.enforcementReady).toBe(false)
+
+    const db = getDb()
+    // 1. the NEW undeclared action itself: denied.
+    expect(enforceCapabilityContract(db, undeclaredContract(), 'HIGH_RISK', NOW).verdict)
+      .toBe('DENY_UNDECLARED')
+    // 2. an OTHER high-risk action, properly declared, whose required capability
+    //    is missing: still parked, not waved through.
+    connectorDown(db, 'gmail', NOW)
+    expect(enforceCapabilityContract(db, contract({
+      requiredCapabilities: ['CONNECTOR_WRITE:gmail'],
+    }), 'HIGH_RISK', NOW).verdict).toBe('WAIT_CAPABILITY')
+    // 3. and a declared, satisfiable one still proceeds -- the gate did not just
+    //    become "refuse everything", which would pass tests 1 and 2 for the
+    //    wrong reason.
+    expect(enforceCapabilityContract(db, contract({
+      requiredCapabilities: ['RUN_LEDGER'],
+    }), 'HIGH_RISK', NOW).verdict).toBe('PROCEED')
+  })
+
+  it('enforceCapabilityContract does not take coverage as an argument at all', () => {
+    // The structural proof, and the one that survives a future refactor: the
+    // enforcement function CANNOT consult readiness, because it is never given
+    // it. A test that only checked verdicts could be defeated by re-introducing
+    // the coupling one level up; this checks the shape.
+    expect(enforceCapabilityContract.length).toBe(4)   // db, contract, sideEffect, now
+  })
+
+  it('STANDING CHECK: the pipeline calls enforcement unconditionally', () => {
+    // The coupling that closure A removed lived in the CALLER, so this is where
+    // it has to be pinned. `capabilityCoverage()` may be read for the signal; it
+    // must not stand between the pipeline and the enforcement call.
+    const src = readFileSync(resolve(process.cwd(), 'src/cos/progression-pipeline.ts'), 'utf8')
+    expect(src).toMatch(/const capResult = enforceCapabilityContract\(/)
+    expect(src).not.toMatch(/coverage\.enforcementReady\s*\n?\s*\?\s*enforceCapabilityContract/)
+  })
+
+  it('the readiness surface goes FAIL, and NAMES the undeclared kinds', () => {
+    // "readiness/health/release signal FAIL vagy DEGRADED". Named rather than
+    // counted: "2/3" tells nobody which one to go and declare.
+    const h = capabilityCoverageHealth()
+    expect(h.status).toBe('PASS')          // today every risky kind is declared
+    expect(h.undeclaredRisky).toEqual([])
+    expect(h.riskyDeclared).toBe(h.riskyTotal)
+  })
+
+  it('operationalHealth is NOT clean while coverage is incomplete', () => {
+    // The counter-case for `clean`: a green health surface over a release state
+    // the rollout order calls not-ready is the shape this whole packet exists to
+    // stop. Driven through the real health call with the real store.
+    const h = operationalHealth(getDb(), NOW)
+    expect(h.capabilityCoverage.status).toBe('PASS')
+    // and the wiring: `clean` must actually consult it.
+    const src = readFileSync(resolve(process.cwd(), 'src/cos/operational-health.ts'), 'utf8')
+    expect(src).toMatch(/clean:.*cov\.status === 'PASS'/s)
+  })
+})
+
+// ── Closure B: the concrete execution dependency ────────────────────────────
+//
+// Owner, 2026-08-27: "RUN_LEDGER önmagában nem teljes dependency declaration az
+// EXECUTE / COMMUNICATE műveleteknél. […] execution előtt ne csak az executor
+// belsejében derüljön ki, mit igényelt a művelet." His five proofs, in his order.
+describe('capability resolution — planned action to concrete dependency', () => {
+  beforeEach(() => {
+    initDatabase(':memory:')
+    createCase(getDb(), { caseId: 'c1', title: 'T', caseType: 'X' }, NOW - 100)
+  })
+
+  const declared = (over: Partial<CapabilityContract> = {}) => contract(over)
+
+  it('PROOF 1: COMMUNICATE resolves to the CHANNEL capability, per namespace', () => {
+    const p = resolveExecutionDependency(getDb(), 'personal', 'c1', 'COMMUNICATE', 'HIGH_RISK')
+    expect(p.status).toBe('RESOLVED')
+    expect(p.target).toBe('gmail')
+    expect(p.capability).toBe('CONNECTOR_WRITE:gmail')
+
+    // The scope boundary, not a preference: ZST mail cannot resolve to the
+    // private mailbox.
+    const z = resolveExecutionDependency(getDb(), 'zst', 'c1', 'COMMUNICATE', 'HIGH_RISK')
+    expect(z.capability).toBe('CONNECTOR_WRITE:gmail-zst')
+  })
+
+  it('PROOF 2: EXECUTE resolves to the tool of the outbound row it will drive', () => {
+    // CORRECTED after six existing tests went red. The first version treated
+    // EVERY EXECUTE as external and returned UNRESOLVED when a case had no
+    // outbound history -- which denied ordinary local progression on every case
+    // in the store. Most EXECUTE steps here are local or shadow work.
+    //
+    // What makes an EXECUTE external is a PENDING outbound row, and that is
+    // evidence rather than a property of the kind.
+    const db = getDb()
+    expect(resolveExecutionDependency(db, 'personal', 'c1', 'EXECUTE', 'HIGH_RISK').status)
+      .toBe('NOT_REQUIRED')
+
+    outboundRow('l-exec')                       // PLANNED EMAIL_SEND, waiting
+    const r = resolveExecutionDependency(db, 'personal', 'c1', 'EXECUTE', 'HIGH_RISK')
+    expect(r.status).toBe('RESOLVED')
+    expect(r.capability).toBe('CONNECTOR_WRITE:gmail')
+    expect(r.reason).toMatch(/EMAIL_SEND/)
+  })
+
+  it('an outbound row that has ALREADY gone is not pending work', () => {
+    // The counter-case for the rule above: VERIFIED means it left, so the next
+    // EXECUTE is not driving it and must not inherit its capability.
+    const db = getDb()
+    outboundRow('l-done')
+    db.prepare(`UPDATE outbound_ledger SET status='VERIFIED' WHERE ledger_id='l-done'`).run()
+    expect(resolveExecutionDependency(db, 'personal', 'c1', 'EXECUTE', 'HIGH_RISK').status)
+      .toBe('NOT_REQUIRED')
+  })
+
+  it('PROOF 3: the resolved capability missing -> typed WAIT_CAPABILITY', () => {
+    const db = getDb()
+    connectorDown(db, 'gmail', NOW)
+    const resolved = resolveExecutionDependency(db, 'personal', 'c1', 'COMMUNICATE', 'HIGH_RISK')
+    const folded = withResolvedDependency(declared({ requiredCapabilities: ['RUN_LEDGER'] }), resolved)
+    // The floor SURVIVES the fold: recording the action and performing it are
+    // different questions, and the answer to one must not erase the other.
+    expect(folded.requiredCapabilities).toContain('RUN_LEDGER')
+    expect(folded.requiredCapabilities).toContain('CONNECTOR_WRITE:gmail')
+
+    const v = enforceCapabilityContract(db, folded, 'HIGH_RISK', NOW)
+    expect(v.verdict).toBe('WAIT_CAPABILITY')
+    expect(v.blocker?.capability).toBe('CONNECTOR_WRITE:gmail')
+  })
+
+  it('PROOF 3b: a READ_ONLY connector fails a WRITE capability -- and says so', () => {
+    // The distinction the two capability names exist for: "can I read Gmail" and
+    // "can I send from Gmail" are different questions, and collapsing them is how
+    // a read-only deployment looks capable of sending until the moment it refuses.
+    const db = getDb()
+    registerConnector(db, 'gmail', 'email', 'READ_ONLY', NOW)
+    recordSuccess(db, 'gmail', NOW)
+    const v = enforceCapabilityContract(db, declared({
+      requiredCapabilities: ['CONNECTOR_WRITE:gmail'],
+    }), 'HIGH_RISK', NOW)
+    expect(v.verdict).toBe('WAIT_CAPABILITY')
+    expect(v.blocker?.retryable).toBe(false)   // an owner decision, not a wait
+  })
+
+  it('PROOF 4: an UNRESOLVED high-risk resolution -> DENY, never a quiet proceed', () => {
+    // Pending EXTERNAL work whose dependency this layer cannot name. That is the
+    // one shape that must deny: a real send behind a capability nobody checked.
+    const db = getDb()
+    outboundRow('l-weird', 'SMS_SEND')
+    const resolved = resolveExecutionDependency(db, 'personal', 'c1', 'EXECUTE', 'HIGH_RISK')
+    expect(resolved.status).toBe('UNRESOLVED')
+    expect(resolved.reason).toMatch(/SMS_SEND/)
+    const folded = withResolvedDependency(declared({ requiredCapabilities: ['RUN_LEDGER'] }), resolved)
+    // Expressed as a SOURCE change, so exactly one place decides what undeclared
+    // means -- the place the owner's rule is written down.
+    expect(folded.source).toBe('UNDECLARED')
+    expect(enforceCapabilityContract(db, folded, 'HIGH_RISK', NOW).verdict).toBe('DENY_UNDECLARED')
+  })
+
+  it('PROOF 5: a missing OPTIONAL enrichment degrades under control, and does not park', () => {
+    const db = getDb()
+    db.exec('DROP TABLE IF EXISTS case_evidence_packets')
+    const resolved = resolveExecutionDependency(db, 'personal', 'c1', 'GATHER_INFO', 'READ_ONLY')
+    expect(resolved.status).toBe('NOT_REQUIRED')
+    const folded = withResolvedDependency(declareForPlanStep('GATHER_INFO'), resolved)
+    const v = enforceCapabilityContract(db, folded, 'READ_ONLY', NOW)
+    expect(v.verdict).toBe('PROCEED')
+    expect(v.degradations.map(d => d.capability)).toContain('EVIDENCE_PACKETS')
+  })
+
+  it('the resolver never reaches outside, and is stable across calls', () => {
+    // Deterministic and read-only, for the same reason the preflight is: a
+    // resolution that varies between two runs cannot be replayed.
+    const db = getDb()
+    outboundRow('l-x')
+    const a = resolveExecutionDependency(db, 'personal', 'c1', 'EXECUTE', 'HIGH_RISK')
+    const b = resolveExecutionDependency(db, 'personal', 'c1', 'EXECUTE', 'HIGH_RISK')
+    expect(a).toEqual(b)
+  })
+
+  it('STANDING CHECK: the pipeline records the whole chain, on every verdict', () => {
+    // "az audit trailben látható legyen: planned action -> resolved
+    // execution/channel -> required capability -> preflight verdict". A trail
+    // that appears only on failure cannot show that the check ran.
+    const src = readFileSync(resolve(process.cwd(), 'src/cos/progression-pipeline.ts'), 'utf8')
+    // In its OWN field, not in safetyViolations. Pushing it there made six
+    // healthy-run tests go red asserting "no safety violations", and they were
+    // right: a violation means an assertion BROKE, a trail means a check RAN.
+    expect(src).toMatch(/const capabilityTrail: CapabilityTrail = \{/)
+    expect(src).toMatch(/capabilityTrail,/)
+    expect(src).toMatch(/resolveExecutionDependency\(db, domain, caseId/)
+    expect(src).toMatch(/withResolvedDependency\(capDeclared, capResolved\)/)
   })
 })

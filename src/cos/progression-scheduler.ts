@@ -27,6 +27,7 @@
 //     owning pipeline sets it — see runProgressionCycle in progression-pipeline.ts)
 
 import type Database from 'better-sqlite3'
+import { evaluateWaitCondition } from './wait-condition.js'
 import type { ProgressionMode } from './outbound-mode-gate.js'
 import { domainGuard } from './progression-resolver.js'
 
@@ -90,6 +91,39 @@ export interface DueCase {
   next_progression_at: number
   /** True if currently claimed by another runner (and claim is not expired). */
   claimed_by_other: boolean
+  /** §10.4 closure C (owner, 2026-08-27). Which band this case was selected in.
+   *  Reported rather than inferred: "it ran" and "it ran because it had just
+   *  been woken" are different facts, and a starvation counter that cannot tell
+   *  them apart measures nothing. */
+  band?: DueBand
+}
+
+/**
+ * Selection bands, in priority order.
+ *
+ * WHY BANDS AND NOT A BIGGER LIMIT. The observed defect was NOT the size of the
+ * page. `next_progression_at ASC` orders by freshness, and ARMING a wait pushes
+ * that value FORWARD -- so a wait that has just been satisfied sorts to the BACK
+ * of the queue it most needs to be at the front of. Measured live on 2026-08-27:
+ * 49 and 50 cases due, and 49 sorting ahead of each active typed wait. Raising
+ * the bound moves the cliff; it does not move the ordering.
+ */
+export const DUE_BANDS = ['WOKEN', 'DEADLINE', 'NORMAL'] as const
+export type DueBand = typeof DUE_BANDS[number]
+
+/**
+ * How many of one page each band may take.
+ *
+ * BOUNDED AND FAIR, both deliberately. Unbounded priority is starvation with
+ * extra steps: a hundred satisfied waits would then fill every page and the
+ * ordinary queue would never move -- the same failure, pointed the other way.
+ * So each band has a floor of the page, and whatever a band does not use is
+ * given back to the ones below it rather than wasted.
+ */
+export const BAND_SHARE: Record<DueBand, number> = {
+  WOKEN: 0.5,
+  DEADLINE: 0.25,
+  NORMAL: 0.25,
 }
 
 /** Find cases that are due for progression (next_progression_at <= now,
@@ -126,6 +160,28 @@ export interface DuePage {
   hasMore: boolean
   /** Due cases this page did not return. Zero on a complete sweep. */
   remaining: number
+  /** §10.4 closure C metrics. The owner named all six; they are computed at
+   *  SELECTION time because that is where the starvation happens, and a metric
+   *  gathered afterwards cannot see what was not chosen. */
+  metrics: DueMetrics
+}
+
+export interface DueMetrics {
+  /** Due cases, ignoring the bound. */
+  backlog: number
+  /** Seconds since the oldest due case became due. 0 when nothing is due. */
+  oldestDueAgeSec: number
+  /** Selected this page, per band. */
+  selected: Record<DueBand, number>
+  /** Due in each band, ignoring the bound. */
+  due: Record<DueBand, number>
+  /** Cases with a satisfied or expired typed wait that this page did NOT take.
+   *  The starvation counter, and the one number this whole closure exists to
+   *  drive to zero. */
+  starvedWoken: number
+  /** Longest wait-to-selection latency in this page, in seconds: how long the
+   *  oldest WOKEN case had been woken before it was picked. */
+  wakeLatencySec: number
 }
 
 export function findDuePage(
@@ -134,7 +190,6 @@ export function findDuePage(
   now: number,
   limit: number = 50,
 ): DuePage {
-  const cases = queryDueCases(db, domain, now, limit)
   // Counted rather than inferred from `cases.length === limit`: a page that is
   // exactly full is the ambiguous case, and guessing there is how a backlog of
   // one gets reported the same as a backlog of a thousand.
@@ -143,8 +198,129 @@ export function findDuePage(
      WHERE domain = ? AND progression_enabled = 1
        AND next_progression_at IS NOT NULL AND next_progression_at <= ?`,
   ).get(domain, now) as { n: number }).n
-  const remaining = Math.max(0, totalDue - cases.length)
-  return { cases, totalDue, hasMore: remaining > 0, remaining }
+
+  const pools = bandPools(db, domain, now)
+  const picked: DueCase[] = []
+  const seen = new Set<string>()
+  const selected: Record<DueBand, number> = { WOKEN: 0, DEADLINE: 0, NORMAL: 0 }
+
+  // Each band takes its floor first, then the leftovers cascade DOWNWARD. A band
+  // that is empty must not hold its share hostage -- that would turn a fairness
+  // rule into an idle page, which is the same starvation from the other end.
+  let spare = 0
+  for (const band of DUE_BANDS) {
+    const share = Math.max(1, Math.floor(limit * BAND_SHARE[band]))
+    let room = share + spare
+    for (const c of pools[band]) {
+      if (picked.length >= limit || room <= 0) break
+      if (seen.has(c.case_id)) continue
+      seen.add(c.case_id)
+      picked.push({ ...c, band })
+      selected[band]++
+      room--
+    }
+    spare = Math.max(0, room)
+  }
+  // Any capacity still unused after the cascade goes back to the oldest-first
+  // order, so a quiet system behaves exactly as it did before the bands existed.
+  //
+  // THE BAND TRAVELS WITH THE CASE. The first version labelled everything picked
+  // here as NORMAL, which made two things false at once: the audit field said a
+  // freshly woken case ran as ordinary work, and `starvedWoken` counted it as
+  // left behind when it had in fact been selected. A test caught it (35 vs 30)
+  // and the number was right -- the labelling was wrong.
+  if (picked.length < limit) {
+    const rest: Array<[DueBand, DueCase]> = [
+      ...pools.NORMAL.map(c => ['NORMAL', c] as [DueBand, DueCase]),
+      ...pools.DEADLINE.map(c => ['DEADLINE', c] as [DueBand, DueCase]),
+      ...pools.WOKEN.map(c => ['WOKEN', c] as [DueBand, DueCase]),
+    ]
+    for (const [band, c] of rest) {
+      if (picked.length >= limit) break
+      if (seen.has(c.case_id)) continue
+      seen.add(c.case_id)
+      picked.push({ ...c, band })
+      selected[band]++
+    }
+  }
+
+  const oldest = pools.WOKEN.concat(pools.DEADLINE, pools.NORMAL)
+    .reduce<number | null>((m, c) => (m === null || c.next_progression_at < m ? c.next_progression_at : m), null)
+  const takenWoken = new Set(picked.filter(c => c.band === 'WOKEN').map(c => c.case_id))
+  const remaining = Math.max(0, totalDue - picked.length)
+  return {
+    cases: picked, totalDue, hasMore: remaining > 0, remaining,
+    metrics: {
+      backlog: totalDue,
+      oldestDueAgeSec: oldest === null ? 0 : Math.max(0, now - oldest),
+      selected,
+      due: { WOKEN: pools.WOKEN.length, DEADLINE: pools.DEADLINE.length, NORMAL: pools.NORMAL.length },
+      // Named by what it is: woken cases the page LEFT BEHIND. Zero is the goal
+      // and a non-zero value is the alarm the owner asked for.
+      starvedWoken: pools.WOKEN.filter(c => !takenWoken.has(c.case_id)).length,
+      wakeLatencySec: pools.WOKEN.length === 0 ? 0
+        : Math.max(0, now - Math.min(...pools.WOKEN.map(c => c.next_progression_at))),
+    },
+  }
+}
+
+/**
+ * The three pools, each already ordered oldest-due-first inside itself.
+ *
+ * WOKEN is computed by ASKING THE EVALUATOR, not by reading a flag: a wait is
+ * woken when its condition is satisfied or expired, and that is a live judgement
+ * about clocks, events and probes. A cached boolean would be a fourth place for
+ * the wake to be true, and this codebase has paid for those.
+ *
+ * The evaluator is read-only and cheap (a row plus, for CAPABILITY waits, a
+ * local probe), and it is only asked about cases that BOTH are due AND have an
+ * active condition -- so the cost is bounded by the number of live waits, not by
+ * the size of the board.
+ */
+function bandPools(
+  db: Database.Database, domain: 'personal' | 'zst', now: number,
+): Record<DueBand, DueCase[]> {
+  const all = queryDueCases(db, domain, now, MAX_SELECTION_SCAN)
+  const withWait = new Set(
+    (db.prepare(
+      `SELECT case_id FROM case_wait_conditions WHERE domain = ? AND resolved_at IS NULL`,
+    ).all(domain) as Array<{ case_id: string }>).map(r => r.case_id),
+  )
+  const pools: Record<DueBand, DueCase[]> = { WOKEN: [], DEADLINE: [], NORMAL: [] }
+  for (const c of all) {
+    if (withWait.has(c.case_id)) {
+      let verdict = 'NONE'
+      try { verdict = evaluateWaitCondition(db, domain, c.case_id, now).verdict } catch { verdict = 'NONE' }
+      if (verdict === 'SATISFIED' || verdict === 'EXPIRED') { pools.WOKEN.push(c); continue }
+    }
+    if (hasDueDeadline(db, domain, c.case_id, now)) { pools.DEADLINE.push(c); continue }
+    pools.NORMAL.push(c)
+  }
+  return pools
+}
+
+/** How deep the selection looks before banding.
+ *
+ *  Bounded, and LOUDLY so: a scan that silently stopped at the page size could
+ *  not see a woken case sitting at position 51, which is the entire defect this
+ *  closure fixes. Four pages deep is enough for a board an order of magnitude
+ *  larger than this one, and `hasMore` still reports what was left. */
+export const MAX_SELECTION_SCAN = 200
+
+/** Does this case have a deadline that has come due and not been handled?
+ *  Read from the case's own columns -- the same two the trigger contract uses,
+ *  so the band and the trigger cannot disagree about what "due" means. */
+function hasDueDeadline(
+  db: Database.Database, domain: 'personal' | 'zst', caseId: string, now: number,
+): boolean {
+  try {
+    const t = domain === 'personal' ? 'personal_cases' : 'zst_cases'
+    const r = db.prepare(
+      `SELECT due_at, follow_up_at FROM ${t} WHERE case_id = ?`,
+    ).get(caseId) as { due_at: number | null; follow_up_at: number | null } | undefined
+    if (!r) return false
+    return [r.due_at, r.follow_up_at].some(d => d !== null && d <= now)
+  } catch { return false }
 }
 
 function queryDueCases(
