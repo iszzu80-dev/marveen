@@ -16,13 +16,16 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { collectProblems } from '../cos/cycle-problems.js'
 
-/** The merge + detection logic of scripts/cos-cycle.ts, applied to fixture
- *  lines. Kept as a local re-implementation on purpose: the script is a
- *  top-level-await entry point that spawns four child processes on import, so
- *  importing it here would run a live cycle. The SHAPE it must handle is what
- *  these tests own; the last test pins that the script still contains the
- *  nested check itself. */
+/** The merge scripts/cos-cycle.ts performs on a step's stdout, applied to
+ *  fixture lines, then handed to the REAL detector.
+ *
+ *  The merge is still re-implemented here (the script is an entry point that
+ *  spawns thirteen processes on import), but the DETECTION no longer is: it was
+ *  extracted to src/cos/cycle-problems.ts on 2026-08-27, after a third silent
+ *  failure got past it. A local copy of the rule under test is the copy that
+ *  drifts, and this file's own header used to admit as much. */
 function detect(lines: string[]): string[] {
   let parsed: Record<string, unknown> | null = null
   for (const line of lines) {
@@ -32,33 +35,7 @@ function detect(lines: string[]): string[] {
       parsed = { ...(parsed ?? {}), ...JSON.parse(line.slice(brace)) as Record<string, unknown> }
     } catch { /* not this line */ }
   }
-  const problems: string[] = []
-  const failedIn = (o: unknown): { failed?: boolean; error?: string } | null =>
-    (o && typeof o === 'object' && (o as { failed?: unknown }).failed === true)
-      ? (o as { failed?: boolean; error?: string }) : null
-  const failureList = (o: unknown): Array<{ caseId?: string; error?: string }> | null => {
-    if (!o || typeof o !== 'object') return null
-    const f = (o as { failures?: unknown }).failures
-    return Array.isArray(f) && f.length > 0 ? f as Array<{ caseId?: string; error?: string }> : null
-  }
-  const describe_ = (list: Array<{ caseId?: string; error?: string }>): string => {
-    const first = list[0]
-    const rest = list.length > 1 ? ` (+${list.length - 1} more)` : ''
-    return `${list.length} failed: ${first?.caseId ?? '?'}: ${first?.error ?? 'no error text'}${rest}`
-  }
-  if (parsed) {
-    const self = failedIn(parsed)
-    if (self) problems.push(`step: ${self.error ?? 'reported failed:true'}`)
-    const selfFailures = failureList(parsed)
-    if (selfFailures) problems.push(`step: ${describe_(selfFailures)}`)
-    for (const [k, v] of Object.entries(parsed)) {
-      const nested = failedIn(v)
-      if (nested) problems.push(`step/${k}: ${nested.error ?? 'reported failed:true'}`)
-      const nestedFailures = failureList(v)
-      if (nestedFailures) problems.push(`step/${k}: ${describe_(nestedFailures)}`)
-    }
-  }
-  return problems
+  return collectProblems('step', parsed)
 }
 
 describe('cycle report failure detection', () => {
@@ -139,10 +116,68 @@ describe('cycle report failure detection', () => {
     ])).toEqual([])
   })
 
-  it('STANDING CHECK: the script itself still inspects nested payloads and failure lists', () => {
+  it('STANDING CHECK: the runner still routes its payloads through the real detector', () => {
+    // A grep, and a weak one on its own -- so it checks the WIRING, which is the
+    // part a test cannot otherwise reach, and leaves the RULE to the tests above
+    // that call collectProblems directly.
     const src = readFileSync(resolve(process.cwd(), 'scripts/cos-cycle.ts'), 'utf8')
-    expect(src).toMatch(/Object\.entries\(p\)/)
-    expect(src).toMatch(/failedIn/)
-    expect(src).toMatch(/failureList/)
+    expect(src).toMatch(/collectProblems\(s\.name, parsed\)/)
+    expect(src).toMatch(/from '\.\.\/src\/cos\/cycle-problems\.js'/)
+  })
+})
+
+// ── The third door, found live on 2026-08-27 ────────────────────────────────
+//
+// During the P2 post-cutover acceptance, two cycles run concurrently produced
+// SQLite contention. The progression step reported it honestly. The runner did
+// not read it:
+//
+//   "progression": { "cycleErrors": 1, "errors": ["…: database is locked"] }
+//   "problems": []
+//
+// The contention was a test artefact. The blindness was not: `errors` and
+// `cycleErrors` are simply different words for what `failures` and `failed`
+// already meant, and the detector only knew the older two.
+describe('cycle report — a step that says it failed, in any of its words', () => {
+  it('HEADLINE: a non-empty `errors` array is a problem (live 2026-08-27)', () => {
+    const problems = detect([
+      'Heartbeat: {"personalProgressed":0,"cycleErrors":1,'
+        + '"errors":["personal/case-private-1a03ebafc5167240: database is locked"]}',
+    ])
+    expect(problems).toHaveLength(1)
+    expect(problems[0]).toMatch(/database is locked/)
+  })
+
+  it('a bare-string entry is described, not rendered as [object Object]', () => {
+    // `failures` carries objects, `errors` carries strings. A list nobody can
+    // read is a list nobody reads.
+    const problems = detect(['S: {"errors":["a: boom","b: bang"]}'])
+    expect(problems[0]).toBe('step: 2 failed: a: boom (+1 more)')
+  })
+
+  it('a COUNT with no detail is still a failure, and says so', () => {
+    // cycleErrors:3 with an empty errors array is not "no problem" -- it is a
+    // step that failed three times and cannot say how, which is the shape a
+    // truncated payload takes.
+    const problems = detect(['S: {"cycleErrors":3,"errors":[]}'])
+    expect(problems).toHaveLength(1)
+    expect(problems[0]).toMatch(/cycleErrors: 3, but the payload carries no detail/)
+  })
+
+  it('a count is NOT reported twice when the list already spoke', () => {
+    // The counter-case: duplicate reporting of every real failure teaches the
+    // reader to skim, which is how the one that matters gets missed.
+    const problems = detect(['S: {"cycleErrors":1,"errors":["x: boom"]}'])
+    expect(problems).toHaveLength(1)
+  })
+
+  it('cycleErrors: 0 alongside an empty errors array is clean', () => {
+    // Every healthy progression payload looks exactly like this.
+    expect(detect(['S: {"personalProgressed":0,"cycleErrors":0,"errors":[]}'])).toEqual([])
+  })
+
+  it('an `errors` array nested one level down is caught too', () => {
+    expect(detect(['S: {"reader":{"read":0,"errors":["model exploded"]}}'])[0])
+      .toMatch(/step\/reader: 1 failed: model exploded/)
   })
 })
