@@ -14,6 +14,7 @@
 import { describe, it, expect } from 'vitest'
 import { cppResult } from '../cos/cycle-cpp.js'
 import { deriveRunStatus } from '../cos/consumer-manifest.js'
+import { recoveryStepPayload } from '../cos/recovery-queue-report.js'
 
 /** What the cycle does with the result: the outcome only matters through this. */
 const status = (payload: Record<string, unknown> | null) =>
@@ -40,12 +41,27 @@ describe('CPP normaliser — UNKNOWN means the STEP cannot speak', () => {
     // measured.
     const after = {
       enqueued: 0, resolved: 0, needsHuman: 0, pendingRetry: 0,
-      examined: 0, inRecovery: 0, reChecked: 0, matched: 0, acted: 0, needsHumanRows: [],
+      examined: 0, inRecovery: 0, reChecked: 0, surfacesScanned: 3,
+      matched: 0, acted: 0, needsHumanRows: [],
     }
     const r = cppResult('recoveryQueue', after, null)
     expect(r.outcome).not.toBe('UNKNOWN')
     expect(r.examined).toBe(0)
     expect(status(after)).toBe('SUCCESS')
+  })
+
+  it('a reconcile that scanned NO surfaces is a failure, not a quiet zero', () => {
+    // The step reports failed:true itself, because examined:0 with
+    // surfacesScanned:0 means "never looked" -- and that must not be able to
+    // exit clean. Every row counter below is identical to the healthy case
+    // above; only the witness differs.
+    const p = {
+      enqueued: 0, resolved: 0, needsHuman: 0, pendingRetry: 0,
+      examined: 0, inRecovery: 0, reChecked: 0, surfacesScanned: 0,
+      failed: true, error: 'recovery reconcile scanned ZERO source surfaces -- it did not run.',
+    }
+    expect(cppResult('recoveryQueue', p, null).outcome).toBe('FAILED')
+    expect(status(p)).toBe('FAILED')
   })
 
   it('a busy recoveryQueue run reports the work it did', () => {
@@ -124,5 +140,43 @@ describe('CPP normaliser — the nested/aliased readings that UNKNOWN once hid',
     expect(r.examined).toBe(1)
     expect(r.acted).toBe(0)
     expect(r.outcome).not.toBe('UNKNOWN')
+  })
+})
+
+// ── The step's own reporting adapter, and the guard inside it ────────────────
+describe('recovery step payload — the scanned-nothing guard', () => {
+  const healthy = {
+    enqueued: 0, resolved: 0, needsHuman: 0, pendingRetry: 0,
+    examined: 0, inRecovery: 0, reChecked: 0, surfacesScanned: 3,
+  }
+
+  it('a healthy empty run is reported as clean, with CPP names attached', () => {
+    const p = recoveryStepPayload(healthy, [])
+    expect(p.failed).toBeUndefined()
+    expect(p.matched).toBe(0)
+    expect(p.acted).toBe(0)
+    expect(p.examined).toBe(0)
+    expect(status(p)).toBe('SUCCESS')
+  })
+
+  it('HEADLINE: identical row counters, zero surfaces scanned -- FAILED', () => {
+    // Every number below is the same as the healthy case except the witness.
+    // This is the whole point of the witness: on the live store the row
+    // counters cannot tell these two runs apart, and one of them is a step
+    // that did not run.
+    const p = recoveryStepPayload({ ...healthy, surfacesScanned: 0 }, [])
+    expect(p.failed).toBe(true)
+    expect(String(p.error)).toMatch(/scanned ZERO source surfaces/)
+    expect(status(p)).toBe('FAILED')
+  })
+
+  it('work is reported as acted; status counts are not', () => {
+    const p = recoveryStepPayload(
+      { enqueued: 2, resolved: 1, needsHuman: 4, pendingRetry: 9, examined: 7, inRecovery: 4, reChecked: 3, surfacesScanned: 3 },
+      [{ queueId: 'q1' }],
+    )
+    expect(p.acted).toBe(3)      // 2 enqueued + 1 resolved
+    expect(p.matched).toBe(4)    // rows in a recovery state
+    expect(p.needsHumanRows).toHaveLength(1)
   })
 })

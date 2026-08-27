@@ -430,6 +430,23 @@ export interface ReconcileResult {
    *  Separate from `inRecovery` because a run that enqueues nothing and closes
    *  three rows and a run that did not query at all both report `enqueued: 0`. */
   reChecked: number
+  /**
+   * HOW MANY SOURCE SURFACES THIS RUN ACTUALLY QUERIED. Always >= 1 on a live
+   * store (ingest is unconditional); 3 when both outbound ledgers exist.
+   *
+   * The counters above fix the wrong zero but would introduce a new one. On the
+   * live store nothing is in a recovery state, so `examined` is 0 on every
+   * healthy cycle -- and a 0 that means "looked, found nothing" is byte-identical
+   * to a 0 that means "never looked". That is the ambiguity UNKNOWN existed to
+   * refuse, arriving through the door marked "fixed".
+   *
+   * This is the witness that survives an empty input set. It counts the QUERIES,
+   * not the rows, so it is non-zero whenever the scan happens at all. Its
+   * consumer treats zero as a FAILURE rather than a quiet number: a reconcile
+   * that examined no surfaces did not run, and must not be reported as a clean
+   * cycle.
+   */
+  surfacesScanned: number
 }
 
 /**
@@ -453,6 +470,7 @@ export function reconcileRecoveryQueue(db: Database.Database, now: number): Reco
   let resolved = 0
   let inRecovery = 0
   let reChecked = 0
+  let surfacesScanned = 0
 
   const tx = db.transaction(() => {
     // ── INGEST ──────────────────────────────────────────────────────────
@@ -460,6 +478,7 @@ export function reconcileRecoveryQueue(db: Database.Database, now: number): Reco
       `SELECT gmail_account_id, message_id, batch_id, case_id, attempt, last_error
          FROM email_processing WHERE status='RECOVERY_REQUIRED'`
     ).all() as Array<{ gmail_account_id: string; message_id: string; batch_id: string; case_id: string | null; attempt: number; last_error: string | null }>
+    surfacesScanned++
     inRecovery += ingest.length
     for (const r of ingest) {
       const ref = `${r.gmail_account_id}/${r.message_id}`
@@ -486,6 +505,7 @@ export function reconcileRecoveryQueue(db: Database.Database, now: number): Reco
         `SELECT ledger_id, case_id, action_type, status, internal_idempotency_key, external_ref, last_error
            FROM ${table} WHERE status IN ('RECOVERY_REQUIRED','OUTCOME_UNKNOWN')`
       ).all() as Array<{ ledger_id: string; case_id: string | null; action_type: string; status: string; internal_idempotency_key: string; external_ref: string | null; last_error: string | null }>
+      surfacesScanned++
       inRecovery += rows.length
       for (const r of rows) {
         const before = getRecovery(db, surface, r.ledger_id)
@@ -543,7 +563,7 @@ export function reconcileRecoveryQueue(db: Database.Database, now: number): Reco
   const by = (s: RecoveryQueueStatus) => counts.find(c => c.status === s)?.n ?? 0
   return {
     enqueued, resolved, needsHuman: by('NEEDS_HUMAN'), pendingRetry: by('PENDING_RETRY'),
-    examined: inRecovery + reChecked, inRecovery, reChecked,
+    examined: inRecovery + reChecked, inRecovery, reChecked, surfacesScanned,
   }
 }
 

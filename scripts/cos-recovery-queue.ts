@@ -23,6 +23,7 @@
  */
 import { getDb, initDatabase } from '../src/db.js'
 import { reconcileRecoveryQueue, listNeedsHuman } from '../src/cos/recovery-queue.js'
+import { recoveryStepPayload } from '../src/cos/recovery-queue-report.js'
 
 initDatabase()
 const now = Math.floor(Date.now() / 1000)
@@ -34,28 +35,11 @@ try {
     attempts: `${r.attemptCount}/${r.maxAttempts}`, since: r.escalatedAt,
     pendingAction: r.pendingAction, lastError: r.lastError,
   }))
-  // CPP TRANSLATION, AT THE BOUNDARY ON PURPOSE (2026-08-27).
-  //
-  // The domain function speaks domain (`enqueued`, `resolved`, `inRecovery`);
-  // the cycle's normaliser speaks CPP (`examined`, `matched`, `acted`). Doing
-  // the mapping here keeps CPP vocabulary out of src/cos/ and keeps the
-  // normaliser free of a per-step table -- the thing its own comment warns
-  // against, because the step nobody remembered to add to that table reports
-  // UNKNOWN while looking exactly like a step that genuinely cannot say what it
-  // did. This step WAS that step: it reported UNKNOWN on every cycle from the
-  // pinned cutover (2026-08-24) until now, not because it could not speak but
-  // because nothing asked it in a language the reader knew.
-  //
-  // `acted` is enqueued + resolved: both are WRITES this reconcile made. A
-  // status count (needsHuman, pendingRetry) is state, not action, and putting
-  // state in `acted` would report work on every quiet cycle that has a single
-  // parked row.
-  console.log(JSON.stringify({
-    ...res,
-    matched: res.inRecovery,
-    acted: res.enqueued + res.resolved,
-    needsHumanRows: needsHuman,
-  }))
+  // The payload -- CPP mapping and the scanned-nothing failure -- is built in
+  // src/cos/recovery-queue-report.ts so both are reachable from a test. Exit
+  // stays 0 even on that failure: the runner's `exit != 0` branch discards the
+  // payload and reports only the exit code, and the payload is the message.
+  console.log(JSON.stringify(recoveryStepPayload(res, needsHuman)))
   process.exit(0)
 } catch (err) {
   console.log(JSON.stringify({ failed: true, error: err instanceof Error ? err.message : String(err) }))

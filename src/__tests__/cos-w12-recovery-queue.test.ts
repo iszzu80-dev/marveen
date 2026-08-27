@@ -217,15 +217,23 @@ describe('W12 §6.7 recovery queue — reconcile reports what it examined', () =
     createCase(getDb(), { caseId: 'c1', title: 'T', caseType: 'X' }, NOW - 100)
   })
 
-  it('an empty store is examined:0 -- and that zero is MEASURED, not assumed', () => {
+  it('an empty store is examined:0 -- and the WITNESS says it still looked', () => {
     const res = reconcileRecoveryQueue(getDb(), NOW)
     expect(res.examined).toBe(0)
     expect(res.inRecovery).toBe(0)
     expect(res.reChecked).toBe(0)
-    // The point of the counter is that this zero and the ones below come from
-    // the same code path, so a reconcile that stopped querying would show 0
-    // here and 0 there -- which is exactly what the next tests forbid.
     expect(res.enqueued).toBe(0)
+    // This is the live store's shape: nothing parked, so every row counter is
+    // 0 on every healthy cycle -- which is byte-identical to a reconcile that
+    // never queried. Fixing UNKNOWN by producing THAT zero would have moved the
+    // ambiguity rather than removed it. surfacesScanned counts the QUERIES, so
+    // it is the one number that separates the two cases when there is no input.
+    expect(res.surfacesScanned).toBeGreaterThan(0)
+  })
+
+  it('every source surface present is scanned, and the count says how many', () => {
+    // ingest + outbound_ledger + zst_outbound_ledger on a full store.
+    expect(reconcileRecoveryQueue(getDb(), NOW).surfacesScanned).toBe(3)
   })
 
   it('source rows in a recovery state are counted, in BOTH passes of one run', () => {
@@ -267,6 +275,7 @@ describe('W12 §6.7 recovery queue — reconcile reports what it examined', () =
     expect(res.reChecked).toBe(1)           // but the open row WAS re-checked
     expect(res.examined).toBe(1)
     expect(res.resolved).toBe(1)
+    expect(res.surfacesScanned).toBe(3)
     // Without these counters this run and a run that never queried both
     // reported enqueued:0 -- and the closure would have been invisible work.
   })
