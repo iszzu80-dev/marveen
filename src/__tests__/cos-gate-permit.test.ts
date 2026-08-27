@@ -44,6 +44,64 @@ function productionSources(roots: string[] = ['src', 'scripts']): string[] {
   return out.sort()
 }
 
+/** Strip line comments, block comments and string/template literals, so a
+ *  MENTION of a symbol cannot be mistaken for a call to it. Deliberately crude
+ *  and deliberately not a parser: it only has to be right about which
+ *  parentheses and commas are code. */
+function stripNonCode(src: string): string {
+  let out = ''
+  let i = 0
+  while (i < src.length) {
+    const two = src.slice(i, i + 2)
+    if (two === '//') { while (i < src.length && src[i] !== '\n') i++; continue }
+    if (two === '/*') { i += 2; while (i < src.length && src.slice(i, i + 2) !== '*/') i++; i += 2; continue }
+    const ch = src[i]!
+    if (ch === '\'' || ch === '"' || ch === '`') {
+      const quote = ch
+      i++
+      while (i < src.length && src[i] !== quote) { if (src[i] === '\\') i++; i++ }
+      i++
+      out += '""'
+      continue
+    }
+    out += ch
+    i++
+  }
+  return out
+}
+
+/** Every real `issueAuthorization(...)` call in a file, with how many top-level
+ *  arguments it passes. Counting by walking the parentheses is what lets a call
+ *  wrapped over four lines be told apart from a four-argument one. */
+export function issueAuthorizationCalls(src: string): Array<{ args: number }> {
+  const code = stripNonCode(src)
+  const calls: Array<{ args: number }> = []
+  const re = /\bissueAuthorization\s*\(/g
+  let m: RegExpExecArray | null
+  while ((m = re.exec(code)) !== null) {
+    let depth = 1
+    let i = m.index + m[0].length
+    // SEGMENTS, not comma count. A trailing comma before the closing paren is
+    // house style here, and counting commas made every correctly-formatted call
+    // look like it passed one argument too many.
+    const segments: string[] = ['']
+    for (; i < code.length && depth > 0; i++) {
+      const c = code[i]!
+      if ('([{'.includes(c)) { depth++; segments[segments.length - 1] += c; continue }
+      if (')]}'.includes(c)) {
+        depth--
+        if (depth === 0) break
+        segments[segments.length - 1] += c
+        continue
+      }
+      if (c === ',' && depth === 1) { segments.push(''); continue }
+      segments[segments.length - 1] += c
+    }
+    calls.push({ args: segments.filter(x => x.trim() !== '').length })
+  }
+  return calls
+}
+
 const ctx: AuthorizationContext = {
   domain: 'personal', caseId: 'c1', caseVersion: 1, goalVersion: null,
   actionId: 'led-1', actionType: 'EMAIL_SEND', intent: 'SEND_APPROVED_EMAIL',
@@ -97,28 +155,76 @@ describe('§22.2 gate permit', () => {
     expect(gatePermitRefusal(mintGatePermit({ allowed: true, reasons: [] }))).toBeNull()
   })
 
-  it('STANDING CHECK: exactly the two gates mint permits', () => {
-    // The half a WeakSet cannot enforce. If a third module starts minting, this
+  it('STANDING CHECK: exactly the three gates mint permits', () => {
+    // The half a WeakSet cannot enforce. If a fourth module starts minting, this
     // fails and somebody has to defend the addition — the same shape as the
     // caller check that caught the Reader island.
+    //
+    // THE THIRD ONE IS DEFENDED HERE, because this test is the place the check
+    // sends the next person. `progression-approval-gate.ts` was added by the P4
+    // closure (ACTION_APPROVAL_PRODUCER_WIRING) and it authorises a different
+    // KIND of thing: not an outbound message, but a progression step Invariant E
+    // refused to run autonomously. The two send gates cannot evaluate it —
+    // `evaluateDispatch` asks about a connector, a campaign approval and a
+    // rendered payload, and a plan step has none of the three. Reusing it would
+    // have meant fabricating a campaign so its checks pass, which is a lie told
+    // to a safety gate to get a yes out of it.
+    //
+    // The alternative to a third gate was no gate: let the answer path call
+    // `issueAuthorization` directly because "the owner said yes". Everything the
+    // new gate checks is a way for that yes to be true and the ticket still
+    // wrong — the case moved on, the step was already completed, the kill switch
+    // came down, the request went stale, or the risk class is one the owner's
+    // own rule forbids an approval to waive.
     const minters = productionSources()
       .filter(f => f !== 'src/cos/gate-permit.ts')
       .filter(f => /\bmintGatePermit\s*\(/.test(readFileSync(join(REPO, f), 'utf8')))
       .sort()
-    expect(minters).toEqual(['src/cos/dispatch-gate.ts', 'src/cos/zst-send.ts'])
+    expect(minters).toEqual([
+      'src/cos/dispatch-gate.ts',
+      'src/cos/progression-approval-gate.ts',
+      'src/cos/zst-send.ts',
+    ])
   })
 
   it('STANDING CHECK: every issueAuthorization call site passes a permit', () => {
+    // THE INSTRUMENT WAS WRONG BEFORE IT WAS RIGHT, and the fix is worth the
+    // paragraph because the old one was green for two reasons that had nothing
+    // to do with the property.
+    //
+    // It read the file LINE BY LINE and required five comma-separated arguments
+    // on ONE line. So a legitimate call formatted across four lines — the house
+    // style for a call with a context object — was reported as an offender, and
+    // a MENTION of the symbol inside a comment was reported as one too. Both are
+    // false positives, and a standing check that cries wolf gets its expectation
+    // edited rather than its finding investigated.
+    //
+    // The failure it could not see is the one that matters: a call written
+    // across several lines with only four arguments is a real permit-less call,
+    // and the line scanner could not tell it from the four-line legitimate one.
+    // So the scan now strips comments and strings, then counts arguments by
+    // walking the parentheses.
     const offenders: string[] = []
     for (const f of productionSources().filter(x => x !== 'src/cos/action-authorization.ts')) {
-      const src = readFileSync(join(REPO, f), 'utf8')
-      for (const line of src.split('\n')) {
-        if (!/\bissueAuthorization\s*\(/.test(line)) continue
-        // A call with fewer than five arguments cannot be carrying a permit.
-        if (!/issueAuthorization\([^)]*,[^)]*,[^)]*,[^)]*,[^)]*\)/.test(line)) offenders.push(`${f}: ${line.trim()}`)
+      for (const call of issueAuthorizationCalls(readFileSync(join(REPO, f), 'utf8'))) {
+        if (call.args < 5) offenders.push(`${f}: ${call.args} args`)
       }
     }
     expect(offenders).toEqual([])
+  })
+
+  it('the call-site scanner can actually tell a bad call from a wrapped good one', () => {
+    // A scan that never goes red proves nothing about the code it scans. These
+    // are the four shapes the old line-based version got wrong or could not see.
+    const wrappedGood = `issueAuthorization(\n  db, ctx, now,\n  { ttlSeconds: 60 },\n  permit,\n)`
+    const wrappedBad = `issueAuthorization(\n  db, ctx, now,\n  { ttlSeconds: 60 },\n)`
+    expect(issueAuthorizationCalls(wrappedGood).map(c => c.args)).toEqual([5])
+    expect(issueAuthorizationCalls(wrappedBad).map(c => c.args)).toEqual([4])
+    // Commas nested inside an argument are not argument separators.
+    expect(issueAuthorizationCalls('issueAuthorization(db, ctx, now, { a: 1, b: 2 })').map(c => c.args)).toEqual([4])
+    // A mention in prose is not a call.
+    expect(issueAuthorizationCalls('// calls issueAuthorization(...) eventually')).toEqual([])
+    expect(issueAuthorizationCalls('/* issueAuthorization(a,b,c,d,e) */')).toEqual([])
   })
 
   it('STANDING CHECK: the scan itself reaches outside src/cos', () => {

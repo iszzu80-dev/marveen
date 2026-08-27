@@ -72,7 +72,8 @@ import { resolveExecutionDependency, withResolvedDependency } from './capability
 import {
   assessDecision, invariantE, gatherRequiredInputs, type DecisionSignals,
 } from './decision-confidence.js'
-import { resolveHumanAnswer } from './human-answer-class.js'
+import { resolveHumanAnswer, approvalReferenceOf } from './human-answer-class.js'
+import { requestActionApproval } from './action-approval-request.js'
 import {
   armWaitCondition, evaluateWaitCondition, resolveWaitCondition, type ArmResult,
 } from './wait-condition.js'
@@ -553,12 +554,13 @@ function consumeOwnerAnswer(
   if (!answerEvent.source_reference) return null
 
   const referencedRun = db.prepare(
-    `SELECT decision, progress_delta_json
+    `SELECT decision, progress_delta_json, safety_assertions_json
      FROM case_progression_runs
      WHERE progression_run_id = ? AND domain = ? AND case_id = ?`,
   ).get(answerEvent.source_reference, domain, caseId) as {
     decision: string | null
     progress_delta_json: string | null
+    safety_assertions_json: string | null
   } | undefined
 
   if (!referencedRun) return null
@@ -577,7 +579,38 @@ function consumeOwnerAnswer(
   //    Same decision + same nbaStep → same question → answer is valid.
   //    Different → question has genuinely changed → answer is stale.
   if (referencedDecision !== currentDecision || referencedNbaStep !== currentNbaStep) {
-    return null
+    // AN ACTION APPROVAL ANSWERS THE REFUSAL, NOT THE DECISION UNDERNEATH IT.
+    //
+    // The equality above asks "is this still the same question", and for an
+    // ordinary question it is the right test. For the P4 approval path it is
+    // wrong in a way that would have silently disabled the whole producer, so it
+    // is worth spelling out.
+    //
+    // The refusing run is FINALISED with decision = MANUAL_ACTION_REQUIRED (that
+    // is the Invariant E override, persisted at step 13c). The next run computes
+    // its tentative decision BEFORE Invariant E runs, so it holds
+    // CONTINUE_AUTONOMOUSLY at this point. Same case, same step, same question
+    // on Istvan's screen -- and two different strings, so the answer would be
+    // dropped as stale, the question would close, nothing would move, and the
+    // next sweep would ask him again. That is the H-2 loop, arriving through a
+    // door nobody had opened yet.
+    //
+    // The exception is deliberately NARROW, because widening the staleness rule
+    // is the kind of change that buys one path and loses three. All four must
+    // hold: the answer names a ticket, the step is the same step, the referenced
+    // run really was refused, and its refusal really was Invariant E. Anything
+    // less and the ordinary rule stands.
+    //
+    // It is also not a weakening. The ticket binds case, version, goal version,
+    // step, action type and the step's own text in one hash, re-derived at
+    // consumption -- strictly more than the two fields being relaxed here. What
+    // this branch does is hand the staleness question to the stronger instrument.
+    const isApprovalForRefusedStep =
+      referencedNbaStep === currentNbaStep
+      && referencedDecision === 'MANUAL_ACTION_REQUIRED'
+      && approvalReferenceOf(answerEvent.payload) !== null
+      && (referencedRun.safety_assertions_json ?? '').includes('INVARIANT_E_REFUSAL')
+    if (!isApprovalForRefusedStep) return null
   }
 
   // 6. Parse the payload for a choice. A payload that will not parse leaves
@@ -1340,6 +1373,9 @@ function runProgressionCycleInner(
       reason = redone.reason
     }
 
+    /** Does this answer carry a scoped action approval for the step in hand? */
+    const approvalRef = approvalReferenceOf(ownerAnswer.payload)
+
     if (ownerAnswer.intent === 'REFUSE') {
       // Explicit no → BLOCKED for replanning.
       moveTo('BLOCKED', 'Owner rejected the proposed action')
@@ -1351,6 +1387,26 @@ function runProgressionCycleInner(
       // the owner to finish. What it must NOT do is what it used to: advance the
       // plan as if the answer had been go-ahead.
       moveTo('BLOCKED', `Owner dropped this path (${answerLabel}); needs owner closure or a new plan`)
+    } else if (approvalRef !== null && ownerAnswer.answeredNbaStep === nba.planStep) {
+      // AN APPROVAL UNLOCKS THE STEP. IT DOES NOT ANSWER IT.
+      //
+      // Every other yes in this chain means "the question is settled, move to
+      // the next step", and `PROCEED` therefore sets completedPlanStep to the
+      // answered step and advances the NBA past it. An action approval means the
+      // opposite: Istvan was shown step N and said run STEP N. Advancing here
+      // would skip the very step he authorised, and -- because the ticket binds
+      // the step and the step's text -- it would also move the NBA to N+1, whose
+      // policy hash does not match the ticket. The approval would then be
+      // refused at consumption for a mismatch this branch itself created, and
+      // the run would report "the referenced approval is not valid for this
+      // action" about the action it was granted for.
+      //
+      // Nothing advances, nothing transitions. The one thing that changes is
+      // that Invariant E's exemption is now reachable further down, where the
+      // ticket is actually consumed. If the ticket turns out not to match, the
+      // exemption is refused and the step stays gated -- so this branch cannot
+      // let anything through on its own.
+      reason = `${reason} — a tulajdonos EZT a lépést hagyta jóvá; a lépés nem lett átugorva`
     } else if (ownerAnswer.intent === 'HOLD') {
       // "Várjunk még rá" / "Elhalasztjuk" / "Később". The step is NOT settled,
       // so nothing advances; the answer is recorded (this run names its event
@@ -2098,6 +2154,75 @@ function runProgressionCycleInner(
       detail: `${eGate.code}: confidence=${assessment.confidence} risk=${assessment.risk} `
         + `(${assessment.reasons.join(', ')})`,
     })
+
+    // THE PLAN CURSOR MUST NOT MOVE PAST A STEP THE INVARIANT REFUSED.
+    //
+    // FOUND WHILE WIRING THE PRODUCER, and it is the more serious half of this
+    // blocker. `completed_plan_step` is advanced a few hundred lines above,
+    // gated on `nba.canProceedAutonomously && runStatus === 'COMPLETED'` -- and
+    // Invariant E runs AFTER that write. So the engine said "this step cannot be
+    // executed automatically, a person must do it", and in the same run recorded
+    // the step as completed. The next run therefore picked the FOLLOWING step:
+    // the refused one was silently skipped, its refusal preserved only as a
+    // sentence in the run record while the plan behaved as though it had run.
+    //
+    // The symptom that exposed it was the approval gate refusing every genuine
+    // approval with "a lépés időközben elkészült" -- the gate was right, the
+    // state was wrong, and without the gate this would have stayed invisible
+    // because a skipped step and a completed step look identical afterwards.
+    //
+    // The stagnation counter is rolled back for the same reason: a run that was
+    // refused made no progress, and leaving `no_progress_run_count` at 0 would
+    // tell the stall detector that a permanently blocked case is moving.
+    try {
+      db.prepare(
+        `UPDATE case_progression_state
+            SET completed_plan_step = ?, no_progress_run_count = ?, updated_at = ?
+          WHERE domain = ? AND case_id = ?`,
+      ).run(completedPlanStep, prevNoProgressCount + 1, now, domain, caseId)
+    } catch {
+      // Same posture as the judgement write below: a bookkeeping failure must
+      // not take the cycle down. The refusal itself is already durable.
+    }
+
+    // THE DOOR OUT OF THE REFUSAL (P4 closure, ACTION_APPROVAL_PRODUCER_WIRING).
+    //
+    // Until this call existed, MANUAL_ACTION_REQUIRED was a terminus. The
+    // consumer side -- a scoped, single-use §22.2 ticket that lets exactly this
+    // step run once -- was built and tested, and NOTHING PRODUCED ONE, which
+    // `human-answer-class.ts` said about itself in its own header. A gate whose
+    // allow-branch cannot be reached by any real sequence of events is not a
+    // safe system; it is an untested one that happens to look safe.
+    //
+    // ONLY FOR HIGH RISK, which is the class the owner's blocker names, and the
+    // class whose refusal has no other exit: a LOW-confidence read-only step
+    // recovers by gathering more evidence, and a contradiction recovers by
+    // resolving the contradiction. Asking him to approve those would be asking
+    // him to do the engine's work.
+    //
+    // NOT SWALLOWED. A producer fault must not take the cycle down, so it is
+    // caught -- but a caught fault here means the owner is never asked and the
+    // case stalls in silence, which is the exact failure this packet exists to
+    // end. It is therefore recorded as a safety assertion, on the run, where the
+    // cycle's problem collector and the acceptance can both see it.
+    if (assessment.risk === 'HIGH') {
+      try {
+        requestActionApproval(db, {
+          domain, caseId, caseVersion: caseRow.version, goalVersion,
+          planStep: nba.planStep, description: nba.description,
+          actionType: nba.kind, recipient: null,
+          riskClasses: assessment.riskClasses,
+          progressionRunId: runId, title: caseRow.title,
+        }, now)
+      } catch (err) {
+        safetyViolations.push({
+          assertion: 'APPROVAL_REQUEST_NOT_CREATED',
+          case_id: caseId, domain,
+          detail: `a jóváhagyás-kérés nem jött létre, az ügy némán elakadhat: `
+            + `${String((err as Error)?.message ?? err).slice(0, 200)}`,
+        })
+      }
+    }
   }
   // Written whatever the verdict, including the allowed ones: a fill rate that
   // matched only the refusals would make the field a refusal log, and the

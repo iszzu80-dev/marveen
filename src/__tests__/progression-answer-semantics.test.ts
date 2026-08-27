@@ -303,7 +303,11 @@ describe('the buttons Mission Control renders mean what they say', () => {
     // regression in answer consumption would produce REQUEST_DECISION, not this.
     expect(r.decision).toBe('MANUAL_ACTION_REQUIRED')
     expect(r.safetyViolations.map(v => v.assertion)).toContain('INVARIANT_E_REFUSAL')
-    expect(completedStep(db, 'c-go')).toBeGreaterThan(2)
+    // The ANSWERED step is settled; the refused one is not. This used to assert
+    // `> 2`, which was true only because the cursor walked past a step Invariant
+    // E had just refused -- see the blocker closure note in
+    // progression-owner-answer.test.ts.
+    expect(completedStep(db, 'c-go')).toBe(2)
   })
 })
 

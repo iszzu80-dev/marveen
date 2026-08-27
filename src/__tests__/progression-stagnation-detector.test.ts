@@ -15,6 +15,7 @@ import { runProgressionCycle, type PipelineOptions } from '../cos/progression-pi
 import { seedProgressionState } from '../cos/progression-migrate.js'
 import { releaseProgressionClaim } from '../cos/progression-scheduler.js'
 import { satisfyDoDCriterion } from '../cos/progression-completion.js'
+import { recordOwnerAnswer } from '../cos/owner-question.js'
 
 function freshDb(): Database.Database {
   const db = new Database(':memory:')
@@ -30,6 +31,36 @@ const MANUAL_OPTS: PipelineOptions = { triggerType: 'MANUAL', triggerReference: 
 /** Seed a case with progression state, WITHOUT running initial progression.
  *  Pre-satisfies the DoD so completion is never what these tests are measuring
  *  — they are about the stagnation counter and plan-step advancement. */
+/** Grant the approval the engine is now waiting on, through the real path.
+ *
+ *  BLOCKER CLOSURE, 2026-08-27. Both tests below used to walk the plan to
+ *  exhaustion in four uninterrupted cycles. They could, because
+ *  `completed_plan_step` was advanced BEFORE Invariant E ran: the engine refused
+ *  the HIGH-risk EXECUTE step and recorded it as completed in the same run, so
+ *  the next cycle picked the step after it. One of these tests then asserted
+ *  COMPLETE -- a case reaching completion by walking straight through a refusal.
+ *
+ *  The cursor now stops at the refusal, which is the correct behaviour and also
+ *  the reason the refusal needed a door. So the plan reaches exhaustion the way
+ *  it will in production: Istvan approves the step, the approval becomes a
+ *  single-use §22.2 ticket, and the engine proceeds. */
+function approveTheOpenRequest(db: Database.Database, caseId: string, at: number): void {
+  const req = db.prepare(
+    `SELECT question_hash AS h FROM cos_action_approval_requests
+      WHERE case_id = ? AND decided_at IS NULL`,
+  ).get(caseId) as { h: string } | undefined
+  if (!req) throw new Error(`no approval request open for ${caseId}`)
+  db.prepare(
+    `UPDATE cos_owner_questions SET channel='telegram:cos', channel_target='chat:1'
+      WHERE case_id = ? AND question_hash = ?`,
+  ).run(caseId, req.h)
+  const rec = recordOwnerAnswer(db, {
+    caseId, domain: 'personal', text: 'igen', now: at,
+    channel: { channel: 'telegram:cos', target: 'chat' },
+  })
+  if (!rec) throw new Error(`the approval answer was not recorded for ${caseId}`)
+}
+
 function seedCaseWithoutInitialRun(db: Database.Database, caseId: string, status: 'NEW' | 'WAITING_EXTERNAL', t: number) {
   createCase(db, {
     caseId, title: caseId, caseType: 'ADMIN',
@@ -146,14 +177,24 @@ describe('plan step advancement (completed_plan_step)', () => {
     // variable this test moves.
     seedCaseWithoutInitialRun(db, 'c-complete', 'NEW', t)
 
-    // Run through all 4 plan steps. The 4th run should trigger COMPLETE.
-    for (let i = 0; i < 4; i++) {
+    // Steps 1 and 2 run autonomously; step 3 is the HIGH-risk EXECUTE and
+    // Invariant E refuses it. The cursor STOPS there -- it no longer walks past.
+    for (let i = 0; i < 3; i++) {
       releaseProgressionClaim(db, 'personal', 'c-complete', 'runner', t + 60)
       const r = runProgressionCycle(db, 'personal', 'c-complete', t + i + 1, MANUAL_OPTS)
-      if (i === 3) {
-        expect(r.decision).toBe('COMPLETE')
-      }
+      if (i === 2) expect(r.decision).toBe('MANUAL_ACTION_REQUIRED')
     }
+    expect(getState(db, 'c-complete').completed_plan_step).toBe(2)
+
+    // The door: Istvan approves that exact step, and the engine proceeds.
+    approveTheOpenRequest(db, 'c-complete', t + 10)
+    let completedRun = false
+    for (let i = 0; i < 2; i++) {
+      releaseProgressionClaim(db, 'personal', 'c-complete', 'runner', t + 60)
+      const r = runProgressionCycle(db, 'personal', 'c-complete', t + 20 + i, MANUAL_OPTS)
+      if (r.decision === 'COMPLETE') completedRun = true
+    }
+    expect(completedRun).toBe(true)
 
     // completed_plan_step stays at maxStep (4) — case IS done, not reset
     const final = getState(db, 'c-complete')
@@ -187,9 +228,17 @@ describe('plan step advancement (completed_plan_step)', () => {
       evaluated_at: t,
     }), 'personal', 'c-wrap')
 
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 3; i++) {
       releaseProgressionClaim(db, 'personal', 'c-wrap', 'runner', t + 60)
       runProgressionCycle(db, 'personal', 'c-wrap', t + i + 1, MANUAL_OPTS)
+    }
+    // Same gate as above: the plan cannot be exhausted until the refused step is
+    // approved, so the wrap-around cannot be reached by walking past it.
+    expect(getState(db, 'c-wrap').completed_plan_step).toBe(2)
+    approveTheOpenRequest(db, 'c-wrap', t + 10)
+    for (let i = 0; i < 2; i++) {
+      releaseProgressionClaim(db, 'personal', 'c-wrap', 'runner', t + 60)
+      runProgressionCycle(db, 'personal', 'c-wrap', t + 20 + i, MANUAL_OPTS)
     }
 
     // DoD unmet → plan wraps around, completed_plan_step resets to 0

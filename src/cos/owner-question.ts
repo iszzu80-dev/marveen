@@ -25,6 +25,7 @@ import { foldName, type ReaderEvidencePacket } from './reader.js'
 import type { EvidencePlan } from './evidence-planner.js'
 import { collectDecisionPackage, formatDeadline, type DecisionPackage } from './decision-package.js'
 import { internalPlanLabels } from './progression-pipeline.js'
+import { openApprovalRequestForQuestion, decideActionApproval } from './action-approval-request.js'
 
 export interface OwnerQuestion {
   caseId: string
@@ -868,6 +869,38 @@ export function recordOwnerAnswer(
   const choice: 'YES' | 'NO' | null = YES.test(input.text) ? 'YES' : (NO.test(input.text) ? 'NO' : null)
   const eventType = choice ? 'OWNER_DECISION' : 'OWNER_INFORMATION'
 
+  // ── The scoped action approval (P4 closure) ─────────────────────────────
+  //
+  // WHERE THE TICKET IS BORN. If the question being answered is an approval
+  // REQUEST -- one this case opened because Invariant E refused a high-risk step
+  // -- then an explicit yes runs the deterministic gate and issues a §22.2
+  // ticket bound to that exact action, and the id travels in the answer event so
+  // the next progression run can consume it.
+  //
+  // THREE OUTCOMES, and the two that grant nothing are the point:
+  //
+  //   plain YES on an approval question   → gate → ticket → id in the payload
+  //   plain NO                            → the request is spent as REJECTED
+  //   anything else (free text)           → OWNER_INFORMATION, request UNTOUCHED
+  //
+  // The third is the owner's first mandatory counter-example: information and a
+  // decision must not manufacture an authorization. It is enforced structurally
+  // rather than by a check -- the only branch that calls the issuer is the one
+  // that already established the message was a bare yes to an approval request.
+  //
+  // AND A YES TO SOMETHING ELSE GRANTS NOTHING EITHER. The lookup is by QUESTION
+  // HASH, so answering an ordinary reader question on a case that also has an
+  // open approval request cannot decide the approval: different question, no
+  // row, no ticket.
+  let authorizationId: string | null = null
+  let approvalNote: string | null = null
+  const pendingApproval = openApprovalRequestForQuestion(db, input.domain, input.caseId, open.question_hash)
+  if (pendingApproval && choice !== null) {
+    const decided = decideActionApproval(db, pendingApproval.request_id, choice === 'YES' ? 'APPROVE' : 'REJECT', now)
+    if (decided.ok) authorizationId = decided.authorizationId
+    else approvalNote = decided.reason
+  }
+
   db.prepare(
     `UPDATE cos_owner_questions SET answered_at = ?, answer_text = ?
      WHERE case_id = ? AND domain = ? AND question_hash = ?`,
@@ -893,7 +926,14 @@ export function recordOwnerAnswer(
     ).run(
       input.caseId, row.version, eventType,
       input.text.slice(0, 500),
-      JSON.stringify({ choice, answer: input.text, question_hash: open.question_hash }),
+      JSON.stringify({
+        choice, answer: input.text, question_hash: open.question_hash,
+        // Present ONLY when a gate issued one. `approvalReferenceOf` reads this
+        // field and nothing else, so an answer that did not earn a ticket cannot
+        // carry a claim to one.
+        ...(authorizationId ? { authorizationId } : {}),
+        ...(approvalNote ? { approvalRefused: approvalNote } : {}),
+      }),
       open.progression_run_id ?? null,
       now,
     )

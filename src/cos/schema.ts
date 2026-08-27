@@ -2280,6 +2280,79 @@ export function initProgressionSchema(db: Database.Database): void {
     END
   `)
 
+  // ── cos_action_approval_requests (P4 closure, ACTION_APPROVAL_PRODUCER_WIRING)
+  //
+  // THE GAP THIS FILLS, stated as it was found. `human-answer-class.ts` shipped
+  // with an honest confession in its own header: HUMAN_ACTION_APPROVAL is "a
+  // built and tested path with no live producer today". Nothing in the system
+  // ever ISSUED a §22.2 ticket for a progression step, so the branch that can
+  // pass Invariant E's autonomous-execution gate could not be reached by any
+  // sequence of real events. A gate with an unreachable allow-branch is not a
+  // safe system; it is an untested one wearing a safe answer.
+  //
+  // THIS IS NOT A SECOND APPROVAL SYSTEM, and the owner was explicit that there
+  // must not be one. Nothing here grants authority. The row records WHAT WAS PUT
+  // IN FRONT OF ISTVAN and what he said about it; the only object that
+  // authorises anything is still `action_authorizations`, issued at the moment
+  // of approval and consumed by the executor/pipeline exactly once. Delete every
+  // row in this table and no authority changes hands -- the tickets are the
+  // authority, this is the paper trail that says which question produced one.
+  //
+  // WHY A TABLE AND NOT A COLUMN ON cos_owner_questions. The question row is
+  // keyed by (case_id, question_hash), is UPSERTed when the same ask returns,
+  // and is SUPERSEDED whenever the case gets a better-worded question. All three
+  // are correct for a question and wrong for an approval request: a request must
+  // be decided at most once, must not be silently rewritten under the owner
+  // after he has read it, and must keep its binding after the question it went
+  // out as has been superseded. Different lifecycle, different row.
+  //
+  // The BINDING columns are the owner's required scope, one column each, so a
+  // mismatch is a comparison and not a parse: concrete action (action_id +
+  // action_type), target (target_reference) and recipient, the payload
+  // (payload_hash), the case and run (case_id + case_version + goal_version +
+  // progression_run_id), single use (decided_at, set by a conditional UPDATE),
+  // and freshness (expires_at).
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cos_action_approval_requests (
+      request_id         TEXT PRIMARY KEY,
+      domain             TEXT NOT NULL,
+      case_id            TEXT NOT NULL,
+      case_version       INTEGER,
+      goal_version       INTEGER,
+      plan_step          INTEGER NOT NULL,
+      /* WHAT was asked for, in the exact shape the ticket will bind. */
+      action_id          TEXT NOT NULL,
+      action_type        TEXT NOT NULL,
+      description        TEXT NOT NULL,
+      target_reference   TEXT,
+      recipient          TEXT,
+      payload_hash       TEXT NOT NULL,
+      risk_classes_json  TEXT NOT NULL,
+      /* WHERE it went out, so the answer can be matched back to it. */
+      question_hash      TEXT,
+      progression_run_id TEXT,
+      requested_at       INTEGER NOT NULL,
+      expires_at         INTEGER NOT NULL,
+      /* THE DECISION. decided_at is the single-use latch: every decision path
+         writes it under WHERE decided_at IS NULL, so two concurrent answers
+         cannot both be the one that decided. */
+      decided_at         INTEGER,
+      decision           TEXT,
+      authorization_id   TEXT,
+      refusal            TEXT,
+      CHECK (domain IN ('personal','zst')),
+      CHECK (decision IS NULL OR decision IN ('APPROVED','REJECTED'))
+    )
+  `)
+  // One OPEN request per (case, action). A second question about the same step
+  // would give the owner two buttons for one action and leave a stray ticket
+  // path behind whichever he answered second.
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_caar_one_open
+             ON cos_action_approval_requests(domain, case_id, action_id, payload_hash)
+             WHERE decided_at IS NULL`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_caar_open
+             ON cos_action_approval_requests(domain, case_id, decided_at)`)
+
   // LAST in this function: the projection seam needs both case tables AND
   // case_progression_state to exist, and this is the first point where all
   // three are guaranteed.

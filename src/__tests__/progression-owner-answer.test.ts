@@ -147,10 +147,18 @@ describe('OWNER_DECISION with YES', () => {
     expect(r3.decision).toBe('MANUAL_ACTION_REQUIRED')
     expect(r3.safetyViolations.map(v => v.assertion)).toContain('INVARIANT_E_REFUSAL')
 
-    // completed_plan_step should advance: step 2 (answered) + step 3 (EXECUTE
-    // completed in the same run) = 3
+    // BLOCKER CLOSURE, 2026-08-27. This used to expect 3, and the 3 was a
+    // defect the test had frozen: `completed_plan_step` is advanced a few
+    // hundred lines BEFORE Invariant E runs, so the engine refused step 3 and
+    // then recorded step 3 as completed in the same run. The next run picked
+    // step 4 -- the refused step was silently skipped, and a case could reach
+    // COMPLETE by walking straight through a refusal.
+    //
+    // The cursor is now rolled back when the invariant refuses. The ANSWERED
+    // step (2) is settled, which is what this test is about; the refused step is
+    // not, and the case parks on it until Istvan approves it.
     const state = getState(db, 'c-yes')
-    expect(state.completed_plan_step).toBe(3)
+    expect(state.completed_plan_step).toBe(2)
   })
 
   it('picks up a previously-recorded answer retroactively (answer written before next cycle)', () => {
@@ -178,8 +186,17 @@ describe('OWNER_DECISION with YES', () => {
     // regression in answer consumption would produce REQUEST_DECISION, not this.
     expect(r3.decision).toBe('MANUAL_ACTION_REQUIRED')
     expect(r3.safetyViolations.map(v => v.assertion)).toContain('INVARIANT_E_REFUSAL')
-    // Step 2 answered + step 3 auto-completed = completed_plan_step 3
-    expect(getState(db, 'c-retro').completed_plan_step).toBe(3)
+    // BLOCKER CLOSURE, 2026-08-27. This used to expect 3, and the 3 was a
+    // defect the test had frozen: `completed_plan_step` is advanced a few
+    // hundred lines BEFORE Invariant E runs, so the engine refused step 3 and
+    // then recorded step 3 as completed in the same run. The next run picked
+    // step 4 -- the refused step was silently skipped, and a case could reach
+    // COMPLETE by walking straight through a refusal.
+    //
+    // The cursor is now rolled back when the invariant refuses. The ANSWERED
+    // step (2) is settled, which is what this test is about; the refused step is
+    // not, and the case parks on it until Istvan approves it.
+    expect(getState(db, 'c-retro').completed_plan_step).toBe(2)
   })
 })
 
@@ -349,8 +366,17 @@ describe('OWNER_INFORMATION', () => {
     // regression in answer consumption would produce REQUEST_DECISION, not this.
     expect(r3.decision).toBe('MANUAL_ACTION_REQUIRED')
     expect(r3.safetyViolations.map(v => v.assertion)).toContain('INVARIANT_E_REFUSAL')
-    // Step 2 answered + step 3 auto-completed = completed_plan_step 3
-    expect(getState(db, 'c-info').completed_plan_step).toBe(3)
+    // BLOCKER CLOSURE, 2026-08-27. This used to expect 3, and the 3 was a
+    // defect the test had frozen: `completed_plan_step` is advanced a few
+    // hundred lines BEFORE Invariant E runs, so the engine refused step 3 and
+    // then recorded step 3 as completed in the same run. The next run picked
+    // step 4 -- the refused step was silently skipped, and a case could reach
+    // COMPLETE by walking straight through a refusal.
+    //
+    // The cursor is now rolled back when the invariant refuses. The ANSWERED
+    // step (2) is settled, which is what this test is about; the refused step is
+    // not, and the case parks on it until Istvan approves it.
+    expect(getState(db, 'c-info').completed_plan_step).toBe(2)
   })
 })
 
@@ -381,8 +407,17 @@ describe('OWNER_CONFIRMATION', () => {
     // regression in answer consumption would produce REQUEST_DECISION, not this.
     expect(r3.decision).toBe('MANUAL_ACTION_REQUIRED')
     expect(r3.safetyViolations.map(v => v.assertion)).toContain('INVARIANT_E_REFUSAL')
-    // Step 2 answered + step 3 auto-completed = completed_plan_step 3
-    expect(getState(db, 'c-confirm').completed_plan_step).toBe(3)
+    // BLOCKER CLOSURE, 2026-08-27. This used to expect 3, and the 3 was a
+    // defect the test had frozen: `completed_plan_step` is advanced a few
+    // hundred lines BEFORE Invariant E runs, so the engine refused step 3 and
+    // then recorded step 3 as completed in the same run. The next run picked
+    // step 4 -- the refused step was silently skipped, and a case could reach
+    // COMPLETE by walking straight through a refusal.
+    //
+    // The cursor is now rolled back when the invariant refuses. The ANSWERED
+    // step (2) is settled, which is what this test is about; the refused step is
+    // not, and the case parks on it until Istvan approves it.
+    expect(getState(db, 'c-confirm').completed_plan_step).toBe(2)
   })
 })
 
