@@ -69,6 +69,7 @@ import {
   undeclaredContract, type CapabilityContract, type PlanStepKind,
 } from './capability-contract.js'
 import { resolveExecutionDependency, withResolvedDependency } from './capability-resolution.js'
+import { assessDecision, invariantE, type DecisionSignals } from './decision-confidence.js'
 import {
   armWaitCondition, evaluateWaitCondition, resolveWaitCondition, type ArmResult,
 } from './wait-condition.js'
@@ -1921,6 +1922,90 @@ function runProgressionCycleInner(
     })
   }
 
+  // ── 13a-bis. P4 §Invariant E — confidence and risk, recorded and enforced ──
+  //
+  // The audit's finding was not that Invariant E was violated: it was that the
+  // personal side had no confidence and no risk at all, so the sentence could
+  // not be enforced by anything. It is enforced here, and -- just as importantly
+  // -- the two numbers are RECORDED on every decision, so "how often would a
+  // different threshold have fired" is answerable from data rather than argument.
+  //
+  // A THIRD GATE. The approval bind and the send ceilings are untouched and still
+  // run; this one refuses earlier, for a different reason, with its own code.
+  // The extra signals are read HERE rather than by widening the two hot-path
+  // SELECTs above. Both of those are read on every cycle for every case and are
+  // shaped by what the pipeline needs; adding columns to them for one gate would
+  // put this feature's cost on every other path. Guarded, because a store that
+  // predates the exposure columns must not crash the decision.
+  const extra = ((): {
+    interruptions: number; dod: string | null
+    financialExposure: number | null; legalExposure: string | null
+  } => {
+    const base = { interruptions: 0, dod: null as string | null,
+      financialExposure: null as number | null, legalExposure: null as string | null }
+    try {
+      const st = db.prepare(
+        `SELECT interruption_count AS ic, dod_verification_json AS dod
+           FROM case_progression_state WHERE domain = ? AND case_id = ?`,
+      ).get(domain, caseId) as { ic?: number; dod?: string | null } | undefined
+      base.interruptions = st?.ic ?? 0
+      base.dod = st?.dod ?? null
+    } catch { /* older store */ }
+    try {
+      const cr = db.prepare(
+        `SELECT financial_exposure AS fe, legal_exposure AS le
+           FROM ${domain === 'personal' ? 'personal_cases' : 'zst_cases'} WHERE case_id = ?`,
+      ).get(caseId) as { fe?: number | null; le?: string | null } | undefined
+      base.financialExposure = cr?.fe ?? null
+      base.legalExposure = cr?.le ?? null
+    } catch {
+      // personal_cases has no exposure columns at all -- that is the audit's
+      // §3.5 asymmetry, not a fault. Null means "this namespace does not record
+      // it", which the risk assessment reads as "no exposure evidence", NOT as
+      // "no exposure". The distinction is why they are nullable rather than 0.
+    }
+    return base
+  })()
+  const decisionSignals: DecisionSignals = {
+    sideEffect: capClass,
+    capabilityVerdict: capResult.verdict,
+    degradations: capResult.degradations.length,
+    noProgressRuns: existing?.no_progress_run_count ?? 0,
+    interruptions: extra.interruptions,
+    hasVerifiedDoD: hasVerifiedDoD(extra.dod),
+    financialExposure: extra.financialExposure,
+    legalExposure: extra.legalExposure,
+  }
+  const assessment = assessDecision(decisionSignals)
+  const eGate = invariantE(assessment)
+  if (!eGate.allowed) {
+    // Refused BY THE INVARIANT, and the refusal names both numbers -- the
+    // acceptance criterion's requirement that a test can tell WHICH gate fired.
+    decision = 'MANUAL_ACTION_REQUIRED'
+    reason = `${eGate.reason} — "${nba.description}"`
+    safetyViolations.push({
+      assertion: 'INVARIANT_E_REFUSAL',
+      case_id: caseId, domain,
+      detail: `${eGate.code}: confidence=${assessment.confidence} risk=${assessment.risk} `
+        + `(${assessment.reasons.join(', ')})`,
+    })
+  }
+  // Written whatever the verdict, including the allowed ones: a fill rate that
+  // matched only the refusals would make the field a refusal log, and the
+  // acceptance asks for fill rate to match the DECISION count.
+  try {
+    db.prepare(
+      `UPDATE case_progression_state
+          SET decision_confidence = ?, decision_risk = ?, decision_assessment_json = ?,
+              updated_at = ?
+        WHERE domain = ? AND case_id = ?`,
+    ).run(assessment.confidence, assessment.risk,
+      JSON.stringify({ ...assessment, signals: decisionSignals }), now, domain, caseId)
+  } catch {
+    // Same posture as the capability trail: a judgement write that can take the
+    // cycle down would be a monitoring surface causing the outage it records.
+  }
+
   // ── 13b. P2 §10.4 — the typed wait condition ───────────────────────────────
   //
   // TWO ACTS, in this order, and the order is the point.
@@ -2034,6 +2119,27 @@ function armWaitFor(
     domain, caseId, kind: 'EXTERNAL_RESPONSE',
     subject, expectedBy, wakePolicy: 'EITHER', runId,
   }, now)
+}
+
+/** Does the case carry a Definition of Done that has actually been VERIFIED,
+ *  rather than merely written down? Deciding without one is deciding against an
+ *  unstated target, which is a reason for the engine to trust itself less.
+ *
+ *  Shape-checked rather than parsed into a type: this reads a column another
+ *  packet owns, and a strict parse here would turn a schema change over there
+ *  into a crash in the decision path. */
+function hasVerifiedDoD(json: string | null): boolean {
+  if (!json) return false
+  try {
+    const v = JSON.parse(json) as unknown
+    if (Array.isArray(v)) return v.length > 0
+    if (v && typeof v === 'object') {
+      const o = v as Record<string, unknown>
+      if (Array.isArray(o.criteria)) return o.criteria.length > 0
+      return Object.keys(o).length > 0
+    }
+    return false
+  } catch { return false }
 }
 
 /** How long an external wait runs before its own deadline, when the case

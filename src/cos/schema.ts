@@ -1819,6 +1819,29 @@ export function initProgressionSchema(db: Database.Database): void {
       CHECK (semantic_completion_status IN ('NOT_STARTED','IN_PROGRESS','PROPOSED','VERIFIED'))
     )
   `)
+
+  // P4: the engine's judgement about its OWN decision, so Invariant E has inputs.
+  //
+  // ADDED BY ALTER, not by the CREATE above, for the reason this file has now
+  // learned three times: `IF NOT EXISTS` is a no-op on an existing table, so
+  // every store older than today would run WITHOUT these columns while a fresh
+  // store and the whole suite agreed they were there.
+  //
+  // Named `decision_*` because two other `confidence` fields already exist and
+  // neither means this -- see decision-confidence.ts.
+  {
+    const cols = (db.prepare(`PRAGMA table_info(case_progression_state)`).all() as Array<{ name: string }>)
+      .map(c => c.name)
+    if (!cols.includes('decision_confidence')) {
+      db.exec(`ALTER TABLE case_progression_state ADD COLUMN decision_confidence TEXT`)
+    }
+    if (!cols.includes('decision_risk')) {
+      db.exec(`ALTER TABLE case_progression_state ADD COLUMN decision_risk TEXT`)
+    }
+    if (!cols.includes('decision_assessment_json')) {
+      db.exec(`ALTER TABLE case_progression_state ADD COLUMN decision_assessment_json TEXT`)
+    }
+  }
   // ── §10.8 trigger contract ───────────────────────────────────────────
   // HERE, not in initCosSchema. I put it there first and it threw
   // "no such table: case_progression_state" on every fresh database, because
