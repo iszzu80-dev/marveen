@@ -509,7 +509,14 @@ export function canCompleteCase(
       allowed: false,
       reason: 'DoD is a generic status template, not this case\'s outcome contract. '
         + 'The engine may not close on it; the owner can.',
-      unmet: verification?.criteria.map(c => c.label) ?? [],
+      // NOT the criteria list. This branch used to return every label here, and
+      // a reader of `unmet` would conclude the criteria were unmet -- which can
+      // be flatly false: a generic template with ALL THREE criteria met with
+      // evidence still refuses, and still reported three "unmet". The blocker is
+      // the provenance, not a criterion, and the two sibling refusals above
+      // already say so by returning nothing. Found by P6 driving the real
+      // lifecycle rather than by reading.
+      unmet: [],
     }
   }
 
