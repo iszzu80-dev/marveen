@@ -225,6 +225,18 @@ describe('through the pipeline: an answer does not open the gate', () => {
       caseId, title: caseId, caseType: 'SELECTION', status: 'AWAITING_SELECTION',
       sensitivity: 'PERSONAL', priority: 'P2', sourceSystem: 'test',
     }, NOW - 100)
+    // A QUEUED SEND, so the EXECUTE step this suite walks to is an action that
+    // genuinely reaches outside. Without it the step is INTERNAL under the
+    // 2026-08-28 classifier and Invariant E has nothing to refuse -- which
+    // would leave these counter-examples asserting that an answer does not open
+    // a gate that was never shut. The counter-examples only mean something
+    // against a real high-risk action.
+    db.prepare(
+      `INSERT INTO outbound_ledger
+         (ledger_id, case_id, action_type, sequence_number, internal_idempotency_key,
+          status, created_at, updated_at)
+       VALUES (?, ?, 'EMAIL_SEND', 1, ?, 'PLANNED', ?, ?)`,
+    ).run(`led-${caseId}`, caseId, `idem-${caseId}`, NOW - 100, NOW - 100)
     db.prepare(
       `INSERT INTO case_progression_state
         (domain, case_id, progression_enabled, progression_mode, goal, summary,

@@ -295,19 +295,22 @@ describe('the buttons Mission Control renders mean what they say', () => {
     answer(db, 'c-go', runId, 'OWNER_DECISION', { choice: 'GO' }, T + 10)
 
     const r = cycle(db, 'c-go', T + 11)
-    // P4 CLOSURE, owner 2026-08-27: an answer is not an approval. The step still
-    // ADVANCES on the answer -- which is what this test is about -- but the
-    // EXECUTE step it advances to is HIGH_RISK, and Invariant E gates it while
-    // the engine's own confidence is below HIGH. Asserting the gate's code here
-    // rather than only the decision keeps the test measuring answer handling: a
-    // regression in answer consumption would produce REQUEST_DECISION, not this.
-    expect(r.decision).toBe('MANUAL_ACTION_REQUIRED')
-    expect(r.safetyViolations.map(v => v.assertion)).toContain('INVARIANT_E_REFUSAL')
-    // The ANSWERED step is settled; the refused one is not. This used to assert
-    // `> 2`, which was true only because the cursor walked past a step Invariant
-    // E had just refused -- see the blocker closure note in
-    // progression-owner-answer.test.ts.
-    expect(completedStep(db, 'c-go')).toBe(2)
+    // WHAT THIS TEST IS ABOUT: the answer is consumed and the step advances. A
+    // regression in answer handling produces REQUEST_DECISION, which is what
+    // the assertion below discriminates against.
+    //
+    // WHAT IT USED TO ALSO ASSERT, and why that is gone. It expected
+    // MANUAL_ACTION_REQUIRED with an INVARIANT_E_REFUSAL, because the EXECUTE
+    // step this advances to -- "Act on the received decision" -- was classified
+    // HIGH_RISK by its KIND. That step declares `needsExternal: false` and this
+    // case has nothing queued to send, so under the 2026-08-28 classifier it is
+    // INTERNAL and there is nothing for Invariant E to refuse. The gate did not
+    // get weaker; it stopped firing on an action that reaches nothing. The
+    // counter-example lives in cos-human-answer-approval.test.ts, where the same
+    // shape WITH a queued send is still refused.
+    expect(r.decision).not.toBe('REQUEST_DECISION')
+    expect(r.safetyViolations.map(v => v.assertion)).not.toContain('INVARIANT_E_REFUSAL')
+    expect(completedStep(db, 'c-go')).toBeGreaterThanOrEqual(2)
   })
 })
 
@@ -354,7 +357,7 @@ describe('the external-wait escalation measures the wait, not the case', () => {
       ageDays: 400, statusAgeDays: 1, nextWakeAt: null, sensitivity: 'PERSONAL',
     }
     const nba = {
-      planStep: 2, description: 'x', kind: 'AWAIT_EXTERNAL' as const,
+      planStep: 2, description: 'x', kind: 'AWAIT_EXTERNAL' as const, needsExternal: false,
       canProceedAutonomously: false, estimatedEffortMinutes: 5,
     }
     expect(decide(nba, ctx, 'WAITING_EXTERNAL').decision).toBe('WAIT_EXTERNAL')

@@ -39,7 +39,8 @@ const proven = (over: Partial<Record<string, RequiredInputFact['status']>> = {})
   }))
 
 const signals = (over: Partial<DecisionSignals> = {}): DecisionSignals => ({
-  sideEffect: 'READ_ONLY', capabilityVerdict: 'PROCEED', degradations: 0,
+  sideEffect: 'READ_ONLY', actionSideEffect: 'INTERNAL',
+  capabilityVerdict: 'PROCEED', degradations: 0,
   noProgressRuns: 0, interruptions: 0, hasVerifiedDoD: true,
   financialExposure: null, legalExposure: null,
   pendingActionTypes: [], sensitivity: null,
@@ -167,7 +168,12 @@ describe('Invariant E — risk coverage is the Phase 0 policy surface, not just 
 
   it('EVERY risk class, one at a time, reaches HIGH and says which class it was', () => {
     const cases: Array<[RiskClass, Partial<DecisionSignals>]> = [
-      ['IRREVERSIBLE_EXTERNAL', { sideEffect: 'HIGH_RISK' }],
+      // NOT `sideEffect: 'HIGH_RISK'` any more. That was the kind-derived class,
+      // and the class it produced was the invention: an EXECUTE step became
+      // IRREVERSIBLE_EXTERNAL because of its kind, not because anything went
+      // out. The class now comes from the classifier's verdict, which is what
+      // this row asserts.
+      ['IRREVERSIBLE_EXTERNAL', { sideEffect: 'HIGH_RISK', actionSideEffect: 'IRREVERSIBLE_EXTERNAL' }],
       ['FINANCIAL_CONTRACTUAL', { financialExposure: 250_000 }],
       ['FINANCIAL_CONTRACTUAL', { legalExposure: 'CONTRACT' }],
       ['CREDENTIAL_SECURITY', { sensitivity: 'CREDENTIAL' }],
@@ -183,7 +189,7 @@ describe('Invariant E — risk coverage is the Phase 0 policy surface, not just 
   })
 
   it('MUTATING alone is MEDIUM -- a floor, not a class', () => {
-    const r = assessRisk(signals({ sideEffect: 'MUTATING' }))
+    const r = assessRisk(signals({ sideEffect: 'MUTATING', actionSideEffect: 'INTERNAL' }))
     expect(r.risk).toBe('MEDIUM')
     expect(r.riskClasses).toEqual([])
   })
@@ -213,14 +219,25 @@ describe('Invariant E — risk coverage is the Phase 0 policy surface, not just 
     expect(riskClassOfActionType(kinds[1])).toBe('ACCESS_CONTROL')
   })
 
-  it('an ordinary send is in no class by action type -- its risk comes from the step kind', () => {
-    // The honest state: the executor only ever writes EMAIL_SEND today, so the
-    // action-type table matches nothing in production. It is READY, not
-    // exercised, and this test says so rather than letting a green suite imply
-    // coverage that does not exist yet.
+  it('an ordinary send is HIGH because the CLASSIFIER says it goes out, not because of its kind', () => {
+    // THIS TEST'S OLD NAME WAS THE DEFECT: "its risk comes from the step kind".
+    // It did, and that is what was wrong. `riskClassOfActionType` still returns
+    // null for EMAIL_SEND -- the four §24 vocabularies genuinely do not contain
+    // it -- so the whole weight of "a send is dangerous" rested on the kind
+    // lookup, and the same lookup called an internal analysis step dangerous
+    // too. The severity now comes from the operation type, through the
+    // classifier, and the two statements can be told apart:
     expect(riskClassOfActionType('EMAIL_SEND')).toBe(null)
-    expect(assessRisk(signals({ sideEffect: 'HIGH_RISK', pendingActionTypes: ['EMAIL_SEND'] })).risk)
-      .toBe('HIGH')
+    // Classified as an irreversible outward act -> HIGH, and named.
+    const out = assessRisk(signals({ sideEffect: 'HIGH_RISK', actionSideEffect: 'IRREVERSIBLE_EXTERNAL' }))
+    expect(out.risk).toBe('HIGH')
+    expect(out.riskClasses).toContain('IRREVERSIBLE_EXTERNAL')
+    // THE DISCRIMINATING HALF. The same mutating step, classified INTERNAL, is
+    // NOT high risk and carries no class. Before this change both rows read
+    // HIGH, and the second one is the live defect of 2026-08-28.
+    const inside = assessRisk(signals({ sideEffect: 'MUTATING', actionSideEffect: 'INTERNAL' }))
+    expect(inside.risk).toBe('MEDIUM')
+    expect(inside.riskClasses).toEqual([])
   })
 })
 
@@ -279,11 +296,23 @@ describe('Invariant E — the refusal reaches the durable record', () => {
   function driveToExecute(caseId: string): void {
     const db = getDb()
     createCase(db, { caseId, title: 'T', caseType: 'X' }, NOW - 100)
-    db.prepare(`UPDATE personal_cases SET status='READY' WHERE case_id=?`).run(caseId)
+    // RECOVERY_REQUIRED, whose plan step 3 is the one EXECUTE in the template
+    // that declares `needsExternal: true`, plus a queued send that names what
+    // goes out. Before 2026-08-28 this fixture used READY and relied on the
+    // kind alone to make step 2 high-risk -- so this file proved that a REFUSAL
+    // reaches the durable record using an action that should never have been
+    // refused. The assertion was right; the premise was not.
+    db.prepare(`UPDATE personal_cases SET status='RECOVERY_REQUIRED' WHERE case_id=?`).run(caseId)
+    db.prepare(
+      `INSERT INTO outbound_ledger
+         (ledger_id, case_id, action_type, sequence_number, internal_idempotency_key,
+          status, created_at, updated_at)
+       VALUES (?, ?, 'EMAIL_SEND', 1, ?, 'PLANNED', ?, ?)`,
+    ).run(`led-${caseId}`, caseId, `idem-${caseId}`, NOW - 100, NOW - 100)
     seedCaseProgressionState(db, 'personal', caseId, NOW - 100)
     runProgressionCycle(db, 'personal', caseId, NOW, { triggerType: 'MANUAL', triggerReference: 't0' })
     db.prepare(
-      `UPDATE case_progression_state SET completed_plan_step = 1
+      `UPDATE case_progression_state SET completed_plan_step = 2
         WHERE domain='personal' AND case_id=?`,
     ).run(caseId)
     runProgressionCycle(db, 'personal', caseId, NOW + 60, { triggerType: 'MANUAL', triggerReference: 't1' })
@@ -437,7 +466,9 @@ describe('Invariant E — a THIRD gate, not a replacement', () => {
   })
 
   it('a full assessment refuses end to end, with both numbers on it', () => {
-    const a = assessDecision(signals({ sideEffect: 'HIGH_RISK', requiredInputs: [] }))
+    const a = assessDecision(signals({
+      sideEffect: 'HIGH_RISK', actionSideEffect: 'IRREVERSIBLE_EXTERNAL', requiredInputs: [],
+    }))
     expect(a.risk).toBe('HIGH')
     expect(a.confidence).toBe('MEDIUM')
     expect(a.riskClasses).toContain('IRREVERSIBLE_EXTERNAL')

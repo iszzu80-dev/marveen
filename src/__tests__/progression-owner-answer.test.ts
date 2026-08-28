@@ -138,14 +138,16 @@ describe('OWNER_DECISION with YES', () => {
     releaseProgressionClaim(db, 'personal', 'c-yes', 'runner', t + 60)
     const r3 = runProgressionCycle(db, 'personal', 'c-yes', t + 11, MANUAL_OPTS)
     expect(r3.decision).not.toBe('REQUEST_DECISION')
-    // P4 CLOSURE, owner 2026-08-27: an answer is not an approval. The step still
-    // ADVANCES on the answer -- which is what this test is about -- but the
-    // EXECUTE step it advances to is HIGH_RISK, and Invariant E gates it while
-    // the engine's own confidence is below HIGH. Asserting the gate's code here
-    // rather than only the decision keeps the test measuring answer handling: a
-    // regression in answer consumption would produce REQUEST_DECISION, not this.
-    expect(r3.decision).toBe('MANUAL_ACTION_REQUIRED')
-    expect(r3.safetyViolations.map(v => v.assertion)).toContain('INVARIANT_E_REFUSAL')
+    // WHAT THIS ASSERTED UNTIL 2026-08-28, and why it changed. It expected
+    // MANUAL_ACTION_REQUIRED with an INVARIANT_E_REFUSAL, because the EXECUTE
+    // step reached after the answer was classified HIGH_RISK by its KIND. That
+    // step declares `needsExternal: false` and this case queues nothing, so it
+    // is INTERNAL under the side-effect classifier and there is nothing to
+    // refuse. What this test is about -- the answer is consumed and the cursor
+    // advances -- is unchanged and still asserted. The refusal path is proven
+    // in cos-invariant-e and cos-action-approval-producer against a case with a
+    // queued send, which is an action that actually reaches outside.
+    expect(r3.safetyViolations.map(v => v.assertion)).not.toContain('INVARIANT_E_REFUSAL')
 
     // BLOCKER CLOSURE, 2026-08-27. This used to expect 3, and the 3 was a
     // defect the test had frozen: `completed_plan_step` is advanced a few
@@ -158,7 +160,7 @@ describe('OWNER_DECISION with YES', () => {
     // step (2) is settled, which is what this test is about; the refused step is
     // not, and the case parks on it until Istvan approves it.
     const state = getState(db, 'c-yes')
-    expect(state.completed_plan_step).toBe(2)
+    expect(state.completed_plan_step).toBeGreaterThanOrEqual(2)
   })
 
   it('picks up a previously-recorded answer retroactively (answer written before next cycle)', () => {
@@ -178,14 +180,16 @@ describe('OWNER_DECISION with YES', () => {
     // Run 3: should pick up the already-existing answer
     releaseProgressionClaim(db, 'personal', 'c-retro', 'runner', t + 60)
     const r3 = runProgressionCycle(db, 'personal', 'c-retro', t + 11, MANUAL_OPTS)
-    // P4 CLOSURE, owner 2026-08-27: an answer is not an approval. The step still
-    // ADVANCES on the answer -- which is what this test is about -- but the
-    // EXECUTE step it advances to is HIGH_RISK, and Invariant E gates it while
-    // the engine's own confidence is below HIGH. Asserting the gate's code here
-    // rather than only the decision keeps the test measuring answer handling: a
-    // regression in answer consumption would produce REQUEST_DECISION, not this.
-    expect(r3.decision).toBe('MANUAL_ACTION_REQUIRED')
-    expect(r3.safetyViolations.map(v => v.assertion)).toContain('INVARIANT_E_REFUSAL')
+    // WHAT THIS ASSERTED UNTIL 2026-08-28, and why it changed. It expected
+    // MANUAL_ACTION_REQUIRED with an INVARIANT_E_REFUSAL, because the EXECUTE
+    // step reached after the answer was classified HIGH_RISK by its KIND. That
+    // step declares `needsExternal: false` and this case queues nothing, so it
+    // is INTERNAL under the side-effect classifier and there is nothing to
+    // refuse. What this test is about -- the answer is consumed and the cursor
+    // advances -- is unchanged and still asserted. The refusal path is proven
+    // in cos-invariant-e and cos-action-approval-producer against a case with a
+    // queued send, which is an action that actually reaches outside.
+    expect(r3.safetyViolations.map(v => v.assertion)).not.toContain('INVARIANT_E_REFUSAL')
     // BLOCKER CLOSURE, 2026-08-27. This used to expect 3, and the 3 was a
     // defect the test had frozen: `completed_plan_step` is advanced a few
     // hundred lines BEFORE Invariant E runs, so the engine refused step 3 and
@@ -196,7 +200,9 @@ describe('OWNER_DECISION with YES', () => {
     // The cursor is now rolled back when the invariant refuses. The ANSWERED
     // step (2) is settled, which is what this test is about; the refused step is
     // not, and the case parks on it until Istvan approves it.
-    expect(getState(db, 'c-retro').completed_plan_step).toBe(2)
+    // The answered step is settled; the INTERNAL step after it is no longer
+    // parked by Invariant E, so the cursor may legitimately be past it.
+    expect(getState(db, 'c-retro').completed_plan_step).toBeGreaterThanOrEqual(2)
   })
 })
 
@@ -333,8 +339,8 @@ describe('stale answer (question changed)', () => {
     // the engine's own confidence is below HIGH. Asserting the gate's code here
     // rather than only the decision keeps the test measuring answer handling: a
     // regression in answer consumption would produce REQUEST_DECISION, not this.
-    expect(r4.decision).toBe('MANUAL_ACTION_REQUIRED')
-    expect(r4.safetyViolations.map(v => v.assertion)).toContain('INVARIANT_E_REFUSAL')
+    // See the 2026-08-28 note above: the step reached here is INTERNAL.
+    expect(r4.safetyViolations.map(v => v.assertion)).not.toContain('INVARIANT_E_REFUSAL')
   })
 })
 
@@ -358,14 +364,16 @@ describe('OWNER_INFORMATION', () => {
     releaseProgressionClaim(db, 'personal', 'c-info', 'runner', t + 60)
     const r3 = runProgressionCycle(db, 'personal', 'c-info', t + 11, MANUAL_OPTS)
     expect(r3.decision).not.toBe('REQUEST_DECISION')
-    // P4 CLOSURE, owner 2026-08-27: an answer is not an approval. The step still
-    // ADVANCES on the answer -- which is what this test is about -- but the
-    // EXECUTE step it advances to is HIGH_RISK, and Invariant E gates it while
-    // the engine's own confidence is below HIGH. Asserting the gate's code here
-    // rather than only the decision keeps the test measuring answer handling: a
-    // regression in answer consumption would produce REQUEST_DECISION, not this.
-    expect(r3.decision).toBe('MANUAL_ACTION_REQUIRED')
-    expect(r3.safetyViolations.map(v => v.assertion)).toContain('INVARIANT_E_REFUSAL')
+    // WHAT THIS ASSERTED UNTIL 2026-08-28, and why it changed. It expected
+    // MANUAL_ACTION_REQUIRED with an INVARIANT_E_REFUSAL, because the EXECUTE
+    // step reached after the answer was classified HIGH_RISK by its KIND. That
+    // step declares `needsExternal: false` and this case queues nothing, so it
+    // is INTERNAL under the side-effect classifier and there is nothing to
+    // refuse. What this test is about -- the answer is consumed and the cursor
+    // advances -- is unchanged and still asserted. The refusal path is proven
+    // in cos-invariant-e and cos-action-approval-producer against a case with a
+    // queued send, which is an action that actually reaches outside.
+    expect(r3.safetyViolations.map(v => v.assertion)).not.toContain('INVARIANT_E_REFUSAL')
     // BLOCKER CLOSURE, 2026-08-27. This used to expect 3, and the 3 was a
     // defect the test had frozen: `completed_plan_step` is advanced a few
     // hundred lines BEFORE Invariant E runs, so the engine refused step 3 and
@@ -376,7 +384,9 @@ describe('OWNER_INFORMATION', () => {
     // The cursor is now rolled back when the invariant refuses. The ANSWERED
     // step (2) is settled, which is what this test is about; the refused step is
     // not, and the case parks on it until Istvan approves it.
-    expect(getState(db, 'c-info').completed_plan_step).toBe(2)
+    // The answered step is settled; the INTERNAL step after it is no longer
+    // parked by Invariant E, so the cursor may legitimately be past it.
+    expect(getState(db, 'c-info').completed_plan_step).toBeGreaterThanOrEqual(2)
   })
 })
 
@@ -399,14 +409,16 @@ describe('OWNER_CONFIRMATION', () => {
     releaseProgressionClaim(db, 'personal', 'c-confirm', 'runner', t + 60)
     const r3 = runProgressionCycle(db, 'personal', 'c-confirm', t + 11, MANUAL_OPTS)
     expect(r3.decision).not.toBe('REQUEST_DECISION')
-    // P4 CLOSURE, owner 2026-08-27: an answer is not an approval. The step still
-    // ADVANCES on the answer -- which is what this test is about -- but the
-    // EXECUTE step it advances to is HIGH_RISK, and Invariant E gates it while
-    // the engine's own confidence is below HIGH. Asserting the gate's code here
-    // rather than only the decision keeps the test measuring answer handling: a
-    // regression in answer consumption would produce REQUEST_DECISION, not this.
-    expect(r3.decision).toBe('MANUAL_ACTION_REQUIRED')
-    expect(r3.safetyViolations.map(v => v.assertion)).toContain('INVARIANT_E_REFUSAL')
+    // WHAT THIS ASSERTED UNTIL 2026-08-28, and why it changed. It expected
+    // MANUAL_ACTION_REQUIRED with an INVARIANT_E_REFUSAL, because the EXECUTE
+    // step reached after the answer was classified HIGH_RISK by its KIND. That
+    // step declares `needsExternal: false` and this case queues nothing, so it
+    // is INTERNAL under the side-effect classifier and there is nothing to
+    // refuse. What this test is about -- the answer is consumed and the cursor
+    // advances -- is unchanged and still asserted. The refusal path is proven
+    // in cos-invariant-e and cos-action-approval-producer against a case with a
+    // queued send, which is an action that actually reaches outside.
+    expect(r3.safetyViolations.map(v => v.assertion)).not.toContain('INVARIANT_E_REFUSAL')
     // BLOCKER CLOSURE, 2026-08-27. This used to expect 3, and the 3 was a
     // defect the test had frozen: `completed_plan_step` is advanced a few
     // hundred lines BEFORE Invariant E runs, so the engine refused step 3 and
@@ -417,7 +429,9 @@ describe('OWNER_CONFIRMATION', () => {
     // The cursor is now rolled back when the invariant refuses. The ANSWERED
     // step (2) is settled, which is what this test is about; the refused step is
     // not, and the case parks on it until Istvan approves it.
-    expect(getState(db, 'c-confirm').completed_plan_step).toBe(2)
+    // The answered step is settled; the INTERNAL step after it is no longer
+    // parked by Invariant E, so the cursor may legitimately be past it.
+    expect(getState(db, 'c-confirm').completed_plan_step).toBeGreaterThanOrEqual(2)
   })
 })
 

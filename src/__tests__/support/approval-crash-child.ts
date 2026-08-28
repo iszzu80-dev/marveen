@@ -47,7 +47,9 @@ if (seam === 'consume') {
 }
 
 createCase(db, {
-  caseId, title: `Ügy ${caseId}`, caseType: 'SELECTION', status: 'AWAITING_SELECTION',
+  // RECOVERY_REQUIRED + a queued send: the one coherently external action in
+  // the plan template. Mirrors the in-process fixture; see the note there.
+  caseId, title: `Ügy ${caseId}`, caseType: 'SELECTION', status: 'RECOVERY_REQUIRED',
   sensitivity: 'PERSONAL', priority: 'P2', sourceSystem: 'test',
 }, now - 100)
 db.prepare(
@@ -59,19 +61,18 @@ db.prepare(
   criteria: [{ label: '_seed_guard', met: true, met_at: now - 100, met_by_run: '_seed' }],
   all_met: true, evaluated_at: now - 100,
 }), now - 100, now - 100)
+db.prepare(
+  `INSERT INTO outbound_ledger
+     (ledger_id, case_id, action_type, sequence_number, internal_idempotency_key,
+      status, created_at, updated_at)
+   VALUES (?, ?, 'EMAIL_SEND', 1, ?, 'PLANNED', ?, ?)`,
+).run(`led-${caseId}`, caseId, `idem-${caseId}`, now - 100, now - 100)
 
+// Walk the plan to the external EXECUTE step: Invariant E has nothing to refuse
+// until the case is standing on it. Same fixture shape as the in-process tests.
 runProgressionCycle(db, 'personal', caseId, now, { triggerType: 'MANUAL', triggerReference: 'c0' })
 runProgressionCycle(db, 'personal', caseId, now + 10, { triggerType: 'MANUAL', triggerReference: 'c1' })
-// Walk the plan to the HIGH-risk EXECUTE step: Invariant E has nothing to refuse
-// until the case is standing on it. Same fixture shape as the in-process tests.
-const priorRun = (db.prepare(
-  `SELECT progression_run_id AS id FROM case_progression_runs
-    WHERE case_id=? ORDER BY started_at DESC, rowid DESC LIMIT 1`,
-).get(caseId) as { id: string }).id
-appendCaseEvent(db, {
-  caseId, caseVersion: 1, actor: 'istvan', eventType: 'OWNER_DECISION',
-  payload: { choice: 'YES' }, sourceSystem: 'mission_control', sourceReference: priorRun,
-}, now + 20)
+runProgressionCycle(db, 'personal', caseId, now + 20, { triggerType: 'MANUAL', triggerReference: 'c1b' })
 runProgressionCycle(db, 'personal', caseId, now + 30, { triggerType: 'MANUAL', triggerReference: 'c2' })
 
 const req = db.prepare(

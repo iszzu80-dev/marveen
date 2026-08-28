@@ -45,6 +45,8 @@ import {
 } from './progression-approval-gate.js'
 import { progressionActionIdentity, progressionPayloadHash } from './human-answer-class.js'
 import type { RiskClass } from './decision-confidence.js'
+import type { ActionSideEffectClass } from './action-side-effect.js'
+import { buildNarration, renderApprovalQuestion } from './approval-narration.js'
 
 export interface ApprovalRequestInput {
   domain: 'personal' | 'zst'
@@ -63,6 +65,14 @@ export interface ApprovalRequestInput {
   progressionRunId: string | null
   /** For the question text. Falls back to the case id. */
   title?: string | null
+  /** THE CLASSIFICATION THIS REQUEST RESTS ON, passed rather than re-derived so
+   *  the gate's verdict and the owner's sentence come from one reading. A class
+   *  that does not reach outside is refused here, not narrated. */
+  sideEffectClass: ActionSideEffectClass
+  sideEffectReasons: readonly string[]
+  /** Concrete operation types the action would perform. Empty when nothing
+   *  names one, which is a defect for an outward action and is treated as one. */
+  operationTypes: readonly string[]
 }
 
 export interface ApprovalRequestRow {
@@ -109,28 +119,94 @@ export function approvalQuestionHash(r: { domain: string; caseId: string; action
  *
  * No em dash, per the channel's own writing rules.
  */
-export function buildApprovalQuestion(r: ApprovalRequestRow, title: string): string {
-  const risk = (JSON.parse(r.risk_classes_json) as string[]).join(', ') || 'nincs osztályozva'
-  return [
-    `JÓVÁHAGYÁS KÉRÉSE: ${title}`,
-    '',
-    'Ez a lépés magas kockázatú, és a motor bizonyítottan magas bizalom nélkül',
-    'nem hajthatja végre magától (Invariáns E).',
-    '',
-    `Művelet: ${r.description}`,
-    `Típus: ${r.action_type} (terv-lépés #${r.plan_step})`,
-    `Ügy: ${r.case_id}${r.case_version !== null ? ` (v${r.case_version})` : ''}`,
-    `Címzett: ${r.recipient ?? 'nincs, ez belső lépés'}`,
-    `Payload-ujjlenyomat: ${r.payload_hash.slice(0, 12)}`,
-    `Kockázat: ${risk}`,
-    '',
-    '"igen" = EZT a konkrét műveletet hagyod jóvá, egyszer.',
-    '"nem" = nem hajtjuk végre.',
-    'Bármi más szöveg információ marad, és nem jóváhagyás.',
-    '',
-    'Ha a leírás, az ügy verziója vagy a lépés időközben változik,',
-    'a jóváhagyás magától érvénytelen lesz.',
-  ].join('\n')
+export function buildApprovalQuestion(
+  r: ApprovalRequestRow, title: string, i: {
+    sideEffectClass: ActionSideEffectClass
+    sideEffectReasons: readonly string[]
+    operationTypes: readonly string[]
+  },
+): string {
+  // WHAT THIS USED TO BE, kept as the reason it is not that any more. The first
+  // version's headline line was:
+  //
+  //     `Művelet: ${r.description}`
+  //
+  // and `r.description` is a plan-step label out of `buildRollingPlan`. On
+  // 2026-08-28 that put "Művelet: Identify required actions and dependencies" in
+  // front of Istvan, above "igen = jóváhagyod". The label is not wrong, it is
+  // internal: it names the step to the engine and says nothing to a person about
+  // what would happen. It is now on the audit line, where it belongs, and the
+  // reader gets the five things the owner asked for.
+  //
+  // THROWS on a narration it cannot build. See `renderApprovalQuestion`.
+  const narrationInput = {
+    machineLabel: r.description,
+    caseId: r.case_id, caseVersion: r.case_version, caseTitle: title,
+    planStep: r.plan_step, target: r.recipient,
+    operationTypes: i.operationTypes,
+    riskClasses: JSON.parse(r.risk_classes_json) as RiskClass[],
+    sideEffectClass: i.sideEffectClass,
+    sideEffectReasons: i.sideEffectReasons,
+    payloadFingerprint: r.payload_hash,
+  }
+  return renderApprovalQuestion(buildNarration(narrationInput), narrationInput)
+}
+
+/**
+ * Close every open request on this action whose payload no longer matches.
+ *
+ * WHY THIS IS NOT LEFT TO DRIFT. Changing what a request binds already makes an
+ * old row unmatchable: the consumer recomputes the hash and the ticket dies. But
+ * "unmatchable" is a property nobody can see. The row still says `decided_at IS
+ * NULL`, the board still counts it as an open question, and the question text it
+ * put on the channel is still on the channel, still answerable in words. The
+ * owner asked for the opposite of that:
+ *
+ *   "A már létrejött NVIDIA approval requestet ne lehessen a hibás szöveg
+ *    alapján jóváhagyni. Invalidáld/revoke-old a régi requestet."
+ *
+ * So it is settled REJECTED with a refusal that names why, and its question is
+ * superseded. A revoked request and a request that was never asked are different
+ * facts and the store keeps both.
+ *
+ * AT THE PRODUCER, which every path to a new request goes through, rather than
+ * in a migration that runs once and covers only what existed on the day.
+ */
+export function revokeOpenApprovalRequests(
+  db: Database.Database,
+  r: {
+    domain: string; caseId: string; actionId: string
+    /** Leave this one alone. Omitted or null revokes every open request on the
+     *  action, which is what a step that stopped being approval-eligible needs. */
+    exceptPayloadHash?: string | null
+  },
+  now: number,
+  reason: string,
+): string[] {
+  const keep = r.exceptPayloadHash ?? null
+  const stale = db.prepare(
+    `SELECT request_id, question_hash FROM cos_action_approval_requests
+      WHERE domain = ? AND case_id = ? AND action_id = ?
+        AND decided_at IS NULL
+        AND (? IS NULL OR payload_hash != ?)`,
+  ).all(r.domain, r.caseId, r.actionId, keep, keep) as
+    Array<{ request_id: string; question_hash: string | null }>
+
+  for (const row of stale) {
+    db.prepare(
+      `UPDATE cos_action_approval_requests
+          SET decided_at = ?, decision = 'REJECTED', refusal = ?
+        WHERE request_id = ? AND decided_at IS NULL`,
+    ).run(now, reason, row.request_id)
+    if (row.question_hash) {
+      db.prepare(
+        `UPDATE cos_owner_questions SET superseded_at = ?
+          WHERE case_id = ? AND domain = ? AND question_hash = ?
+            AND answered_at IS NULL AND superseded_at IS NULL`,
+      ).run(now, r.caseId, r.domain, row.question_hash)
+    }
+  }
+  return stale.map(x => x.request_id)
 }
 
 /**
@@ -163,6 +239,16 @@ export function requestActionApproval(
         AND decided_at IS NULL`,
   ).get(input.domain, input.caseId, actionId, payloadHash) as ApprovalRequestRow | undefined
 
+  // AN OLD ASK ON THE SAME ACTION, bound to a payload this one no longer uses,
+  // is closed with a reason before anything new is written. Leaving it open
+  // would put two asks about one step on the board, one of them answerable and
+  // meaningless.
+  revokeOpenApprovalRequests(
+    db, { domain: input.domain, caseId: input.caseId, actionId, exceptPayloadHash: payloadHash },
+    now,
+    'SUPERSEDED_PAYLOAD: a lépéshez tartozó kötés megváltozott, a kérés újra lett nyitva',
+  )
+
   const row: ApprovalRequestRow = existing ?? {
     request_id: randomBytes(16).toString('hex'),
     domain: input.domain, case_id: input.caseId,
@@ -176,6 +262,19 @@ export function requestActionApproval(
     decided_at: null, decision: null, authorization_id: null, refusal: null,
   }
 
+
+  const title = input.title ?? input.caseId
+  const text = buildApprovalQuestion(row, title, {
+    sideEffectClass: input.sideEffectClass,
+    sideEffectReasons: input.sideEffectReasons,
+    operationTypes: input.operationTypes,
+  })
+
+  // THE ROW IS WRITTEN ONLY ONCE THE QUESTION EXISTS. `buildApprovalQuestion`
+  // throws on a narration it cannot honestly build, and if the insert came
+  // first that throw would leave an open request with no question anywhere: a
+  // door that exists and cannot be reached, which is the exact shape of the
+  // defect this module was created to close. Text first, row second.
   if (!existing) {
     db.prepare(
       `INSERT INTO cos_action_approval_requests
@@ -197,9 +296,6 @@ export function requestActionApproval(
       .run(input.progressionRunId, row.request_id)
     row.progression_run_id = input.progressionRunId
   }
-
-  const title = input.title ?? input.caseId
-  const text = buildApprovalQuestion(row, title)
 
   // The question row is the DELIVERY surface: cos-channel-send picks up every
   // open, undelivered question and sends it. Writing here rather than sending

@@ -70,10 +70,15 @@ import {
 } from './capability-contract.js'
 import { resolveExecutionDependency, withResolvedDependency } from './capability-resolution.js'
 import {
+  classifyActionSideEffect, MUTATES_BY_KIND, type ActionSideEffectVerdict,
+} from './action-side-effect.js'
+import {
   assessDecision, invariantE, gatherRequiredInputs, type DecisionSignals,
 } from './decision-confidence.js'
-import { resolveHumanAnswer, approvalReferenceOf } from './human-answer-class.js'
-import { requestActionApproval } from './action-approval-request.js'
+import {
+  resolveHumanAnswer, approvalReferenceOf, progressionActionIdentity,
+} from './human-answer-class.js'
+import { requestActionApproval, revokeOpenApprovalRequests } from './action-approval-request.js'
 import {
   armWaitCondition, evaluateWaitCondition, resolveWaitCondition, type ArmResult,
 } from './wait-condition.js'
@@ -377,6 +382,11 @@ export interface NextBestAction {
   canProceedAutonomously: boolean
   /** Estimated effort in minutes (for prioritization). */
   estimatedEffortMinutes: number
+  /** THE STEP'S OWN DECLARATION about reaching outside, carried here rather
+   *  than re-derived from the kind. It is source 1 of the side-effect
+   *  classification, and the whole reason that classification exists is that
+   *  the kind was standing in for it. */
+  needsExternal: boolean
 }
 
 /** Pick the Next Best Action from the rolling plan, skipping steps that
@@ -397,6 +407,7 @@ export function determineNextBestAction(
   return {
     planStep: chosen.step,
     description: chosen.label,
+    needsExternal: chosen.needsExternal,
     kind: chosen.kind,
     canProceedAutonomously: canProceed,
     estimatedEffortMinutes: chosen.kind === 'EXECUTE' ? 15 : 5,
@@ -1872,9 +1883,150 @@ function runProgressionCycleInner(
   // from the kind here: re-deriving would silently repair a plan that was built
   // before contracts existed, and a repaired-on-read contract is an inference
   // wearing a declaration's clothes. A step that carries none yields UNDECLARED.
+  const extra = ((): {
+    interruptions: number; dod: string | null
+    financialExposure: number | null; legalExposure: string | null
+    sensitivity: string | null; pendingActionTypes: string[]
+    unreadable: string[]
+  } => {
+    const base = { interruptions: 0, dod: null as string | null,
+      financialExposure: null as number | null, legalExposure: null as string | null,
+      sensitivity: null as string | null, pendingActionTypes: [] as string[],
+      // A SOURCE THAT DID NOT ANSWER IS NOT AN EMPTY SOURCE. The ledger read
+      // below used to swallow its own failure, so a namespace whose ledger
+      // could not be read reported "no pending outbound work" -- absence
+      // manufactured from ignorance. The side-effect classifier refuses to
+      // classify at all when this list is non-empty.
+      unreadable: [] as string[] }
+    try {
+      const st = db.prepare(
+        `SELECT interruption_count AS ic, dod_verification_json AS dod
+           FROM case_progression_state WHERE domain = ? AND case_id = ?`,
+      ).get(domain, caseId) as { ic?: number; dod?: string | null } | undefined
+      base.interruptions = st?.ic ?? 0
+      base.dod = st?.dod ?? null
+    } catch { /* older store */ }
+    try {
+      const cr = db.prepare(
+        `SELECT financial_exposure AS fe, legal_exposure AS le
+           FROM ${domain === 'personal' ? 'personal_cases' : 'zst_cases'} WHERE case_id = ?`,
+      ).get(caseId) as { fe?: number | null; le?: string | null } | undefined
+      base.financialExposure = cr?.fe ?? null
+      base.legalExposure = cr?.le ?? null
+    } catch {
+      // personal_cases has no exposure columns at all -- that is the audit's
+      // §3.5 asymmetry, not a fault. Null means "this namespace does not record
+      // it", which the risk assessment reads as "no exposure evidence", NOT as
+      // "no exposure". The distinction is why they are nullable rather than 0.
+    }
+    // The owner's closure widened HIGH risk past money and law, so the risk read
+    // has to see WHAT THE CASE WILL DO and WHAT IT HOLDS, not only which kind of
+    // plan step is next.
+    try {
+      const sr = db.prepare(
+        `SELECT sensitivity AS s FROM ${domain === 'personal' ? 'personal_cases' : 'zst_cases'}
+          WHERE case_id = ?`,
+      ).get(caseId) as { s?: string | null } | undefined
+      base.sensitivity = sr?.s ?? null
+    } catch { /* namespace without a sensitivity column */ }
+    try {
+      const rows = db.prepare(
+        `SELECT DISTINCT action_type AS t
+           FROM ${domain === 'personal' ? 'outbound_ledger' : 'zst_outbound_ledger'}
+          WHERE case_id = ? AND status NOT IN ('VERIFIED','CANCELLED','FAILED')`,
+      ).all(caseId) as Array<{ t?: string | null }>
+      base.pendingActionTypes = rows.map(r => r.t).filter((t): t is string => !!t)
+    } catch { base.unreadable.push('outbound_ledger') }
+    return base
+  })()
+
   const capStep = plan.find(st => st.step === nba.planStep)
   const capDeclared = capStep ? contractFor(capStep) : undeclaredContract()
-  const capClass = SIDE_EFFECT_CLASS[nba.kind as PlanStepKind]
+
+  // ── WHAT THIS ACTION ACTUALLY DOES TO THE WORLD ───────────────────────────
+  //
+  // WAS: `SIDE_EFFECT_CLASS[nba.kind]`, a lookup on the plan-step kind, which
+  // said EXECUTE and COMMUNICATE are HIGH_RISK because they CAN reach outside.
+  // On 2026-08-28 that reasoning produced a live approval request asking Istvan
+  // to approve an irreversible external act for a step whose own plan row says
+  // `needsExternal: false` and which sends nothing. The owner's ruling:
+  //
+  //   "Az EXECUTE önmagában nem side-effect class. [...] A side-effect/risk
+  //    classification ettől külön dimenzió."
+  //
+  // TWO AXES NOW. Mutation stays a property of the kind, where it belongs.
+  // Externality is classified from evidence: the step's own declaration, the
+  // resolved target when a queued outbound row bound one, the case's dispatch
+  // intents, the concrete operation type, and the policy taxonomy.
+  //
+  // THE RESOLUTION LAYER ALREADY KNEW. `resolveExecutionDependency` has said
+  // "WHAT MAKES AN EXECUTE EXTERNAL IS A PENDING OUTBOUND ROW, not the kind"
+  // since it was written. Two layers disagreed and the wrong one drove the gate;
+  // this makes the right one the source and the other one derived.
+  const capMutates = MUTATES_BY_KIND[nba.kind as PlanStepKind]
+  const capResolvedPre = resolveExecutionDependency(db, domain, caseId, nba.kind as PlanStepKind, capMutates)
+  // Case-scoped, and used only to decide HOW FAR an already-external step
+  // reaches. It cannot argue with the step's own declaration: the ledger records
+  // a case and no plan step, so a queued send is not attributable to this step.
+  // Unreadable is not empty -- a namespace whose ledger cannot be read forces
+  // UNKNOWN rather than a classification made with a source missing.
+  const sideEffectVerdict: ActionSideEffectVerdict = classifyActionSideEffect({
+    declaredExternal: capStep ? capStep.needsExternal : null,
+    // ONLY a resolution a queued outbound row drove counts as evidence. The
+    // KIND_DEFAULT mailbox every COMMUNICATE resolves is a capability floor, and
+    // reading a floor as evidence would raise a contradiction on every internal
+    // COMMUNICATE step in the store.
+    resolvedExternalTarget: capResolvedPre.evidence === 'PENDING_OUTBOUND' ? capResolvedPre.target : null,
+    dispatchIntents: extra.pendingActionTypes,
+    operationType: capResolvedPre.evidence === 'PENDING_OUTBOUND' ? capResolvedPre.operationType : null,
+    financialExposure: extra.financialExposure,
+    legalExposure: extra.legalExposure,
+    sensitivity: extra.sensitivity,
+    unreadableSources: extra.unreadable,
+    mutates: capMutates,
+  })
+  const capClass = sideEffectVerdict.legacy
+
+  // AN OPEN REQUEST THAT NO LONGER HAS A SUBJECT IS CLOSED, not left to age
+  // out. Three of them existed on 2026-08-28, all asking Istvan to approve an
+  // irreversible external act for internal steps, and the TTL would have kept
+  // them answerable for a week. His instruction was explicit: revoke, and do
+  // not open a replacement for the same step until the step's externality is
+  // consistently classified. This is that, at the one place that knows the
+  // current classification.
+  if (!sideEffectVerdict.executable || !sideEffectVerdict.reachesOutside) {
+    try {
+      const revoked = revokeOpenApprovalRequests(
+        db,
+        {
+          domain, caseId,
+          // The shared derivation, not a second spelling of it. Two spellings
+          // of one identity is how a revocation quietly stops matching the
+          // rows it is supposed to close.
+          actionId: progressionActionIdentity(domain, caseId, nba.planStep),
+        },
+        now,
+        `RECLASSIFIED_${sideEffectVerdict.klass}: a lépés nem bizonyítottan külső hatású művelet, `
+        + 'jóváhagyás nem kérhető rá',
+      )
+      if (revoked.length) {
+        safetyViolations.push({
+          assertion: 'APPROVAL_REQUEST_REVOKED',
+          case_id: caseId, domain,
+          detail: `${revoked.length} nyitott jóváhagyás-kérés visszavonva `
+            + `(${sideEffectVerdict.klass}): ${revoked.join(', ')}`,
+        })
+      }
+    } catch (err) {
+      safetyViolations.push({
+        assertion: 'APPROVAL_REQUEST_REVOKE_FAILED',
+        case_id: caseId, domain,
+        detail: `a visszavonás nem futott le, egy tárgytalan kérés nyitva maradhatott: `
+          + `${String((err as Error)?.message ?? err).slice(0, 200)}`,
+      })
+    }
+  }
+
 
   // CLOSURE B: the CONCRETE dependency, resolved before execution rather than
   // discovered inside the executor.
@@ -1890,7 +2042,10 @@ function runProgressionCycleInner(
   // still run. What changes is that the answer to "what will this need" exists
   // BEFORE the executor opens, and lands in the audit trail as a chain:
   // planned action -> resolved target -> required capability -> preflight verdict.
-  const capResolved = resolveExecutionDependency(db, domain, caseId, nba.kind as PlanStepKind, capClass)
+  // Already resolved above, as source 2 of the classification. Reused rather
+  // than re-run: two resolutions of the same action that could disagree is the
+  // shape of defect this whole change is undoing.
+  const capResolved = capResolvedPre
   const capContract = withResolvedDependency(capDeclared, capResolved)
   const capResult = enforceCapabilityContract(db, capContract, capClass, now)
   // The chain, recorded whatever the verdict -- including PROCEED. A trail that
@@ -2007,57 +2162,9 @@ function runProgressionCycleInner(
   // shaped by what the pipeline needs; adding columns to them for one gate would
   // put this feature's cost on every other path. Guarded, because a store that
   // predates the exposure columns must not crash the decision.
-  const extra = ((): {
-    interruptions: number; dod: string | null
-    financialExposure: number | null; legalExposure: string | null
-    sensitivity: string | null; pendingActionTypes: string[]
-  } => {
-    const base = { interruptions: 0, dod: null as string | null,
-      financialExposure: null as number | null, legalExposure: null as string | null,
-      sensitivity: null as string | null, pendingActionTypes: [] as string[] }
-    try {
-      const st = db.prepare(
-        `SELECT interruption_count AS ic, dod_verification_json AS dod
-           FROM case_progression_state WHERE domain = ? AND case_id = ?`,
-      ).get(domain, caseId) as { ic?: number; dod?: string | null } | undefined
-      base.interruptions = st?.ic ?? 0
-      base.dod = st?.dod ?? null
-    } catch { /* older store */ }
-    try {
-      const cr = db.prepare(
-        `SELECT financial_exposure AS fe, legal_exposure AS le
-           FROM ${domain === 'personal' ? 'personal_cases' : 'zst_cases'} WHERE case_id = ?`,
-      ).get(caseId) as { fe?: number | null; le?: string | null } | undefined
-      base.financialExposure = cr?.fe ?? null
-      base.legalExposure = cr?.le ?? null
-    } catch {
-      // personal_cases has no exposure columns at all -- that is the audit's
-      // §3.5 asymmetry, not a fault. Null means "this namespace does not record
-      // it", which the risk assessment reads as "no exposure evidence", NOT as
-      // "no exposure". The distinction is why they are nullable rather than 0.
-    }
-    // The owner's closure widened HIGH risk past money and law, so the risk read
-    // has to see WHAT THE CASE WILL DO and WHAT IT HOLDS, not only which kind of
-    // plan step is next.
-    try {
-      const sr = db.prepare(
-        `SELECT sensitivity AS s FROM ${domain === 'personal' ? 'personal_cases' : 'zst_cases'}
-          WHERE case_id = ?`,
-      ).get(caseId) as { s?: string | null } | undefined
-      base.sensitivity = sr?.s ?? null
-    } catch { /* namespace without a sensitivity column */ }
-    try {
-      const rows = db.prepare(
-        `SELECT DISTINCT action_type AS t
-           FROM ${domain === 'personal' ? 'outbound_ledger' : 'zst_outbound_ledger'}
-          WHERE case_id = ? AND status NOT IN ('VERIFIED','CANCELLED','FAILED')`,
-      ).all(caseId) as Array<{ t?: string | null }>
-      base.pendingActionTypes = rows.map(r => r.t).filter((t): t is string => !!t)
-    } catch { /* no ledger for this namespace */ }
-    return base
-  })()
   const decisionSignals: DecisionSignals = {
     sideEffect: capClass,
+    actionSideEffect: sideEffectVerdict.klass,
     capabilityVerdict: capResult.verdict,
     degradations: capResult.degradations.length,
     noProgressRuns: existing?.no_progress_run_count ?? 0,
@@ -2124,11 +2231,27 @@ function runProgressionCycleInner(
       }, {
         domain, caseId, caseVersion: caseRow.version, goalVersion,
         planStep: nba.planStep, description: nba.description,
-        actionType: nba.kind, recipient: null,
+        actionType: nba.kind,
+        // THE SAME EXPRESSION THE PRODUCER USED, not a hand-written null.
+        // `issueAuthorization` hashes the recipient into the policy evaluation,
+        // so a consumer that rebuilds the context with a different value kills
+        // the ticket with "the action changed after authorization" -- a refusal
+        // that looks like a safety win and is a bug. The module header warns
+        // about exactly this; the producer test caught it the first time the
+        // two sides drifted apart, which is why the expression is written once
+        // and read twice rather than typed twice.
+        recipient: capResolved.evidence === 'PENDING_OUTBOUND' ? capResolved.target : null,
         riskClasses: assessment.riskClasses,
       }, now)
     : null
+  // AND NOT WHEN THE CLASSIFICATION IS UNRESOLVED. A ticket cannot exist for an
+  // action whose externality the engine could not settle -- the producer refuses
+  // to open a request in that state -- but a ticket issued BEFORE the
+  // classification changed still could, and consuming it would let an
+  // approval from yesterday's picture authorise today's contradiction. The
+  // owner's rule 4 is a property of the action, not of the moment it was asked.
   const ownerAuthorised = humanVerdict?.executionExemption === true
+    && sideEffectVerdict.executable
   const eApplies = decision !== 'COMPLETE' && !ownerAuthorised
   if (humanVerdict) {
     // Recorded on EVERY answered run, exempt or not. The three classes are the
@@ -2205,14 +2328,50 @@ function runProgressionCycleInner(
     // case stalls in silence, which is the exact failure this packet exists to
     // end. It is therefore recorded as a safety assertion, on the run, where the
     // cycle's problem collector and the acceptance can both see it.
-    if (assessment.risk === 'HIGH') {
+    //
+    // TWO GATES BEFORE THE DOOR, both added 2026-08-28 on the owner's ruling
+    // after a live approval request asked him to authorise an irreversible
+    // external act for a step that sends nothing.
+    //
+    // FIRST, A CONTRADICTION IS NOT AN APPROVAL QUESTION. When the sources
+    // disagree about whether this action reaches outside at all, or when one of
+    // them could not be read, the engine does not know what it is asking about.
+    // His words: "Az approval nem való arra, hogy egy belső modell-kontradikciót
+    // emberrel felülírassunk." No request, no ticket, no execution -- and the
+    // contradiction is recorded, so the case sits in a state somebody can
+    // repair rather than in a silence.
+    //
+    // SECOND, ONLY A GENUINELY OUTWARD ACT. A HIGH-risk step that changes
+    // nothing outside has nothing for him to approve: one of the five things
+    // the question must state is what changes in the world, and for such a step
+    // the honest answer is "nothing", which turns the whole ask into theatre.
+    if (!sideEffectVerdict.executable) {
+      safetyViolations.push({
+        assertion: 'ACTION_SEMANTICS_CONTRADICTION',
+        case_id: caseId, domain,
+        detail: `${sideEffectVerdict.klass} — ${[...sideEffectVerdict.conflicts, ...sideEffectVerdict.reasons].join('; ')}`
+          + ' | nincs jóváhagyás-kérés, nincs jogosultság, nincs külső végrehajtás,'
+          + ' amíg a besorolás fel nem oldódik',
+      })
+    } else if (assessment.risk === 'HIGH' && sideEffectVerdict.reachesOutside) {
       try {
         requestActionApproval(db, {
           domain, caseId, caseVersion: caseRow.version, goalVersion,
           planStep: nba.planStep, description: nba.description,
-          actionType: nba.kind, recipient: null,
+          // The recipient is a real bound target or nothing. A KIND_DEFAULT
+          // mailbox is the channel this kind WOULD use, not who this action
+          // reaches, and putting it in front of Istvan as "Címzett" would name
+          // a party that is not being contacted.
+          actionType: nba.kind,
+          recipient: capResolved.evidence === 'PENDING_OUTBOUND' ? capResolved.target : null,
           riskClasses: assessment.riskClasses,
           progressionRunId: runId, title: caseRow.title,
+          // The narration's evidence. Passed rather than re-derived, so what he
+          // reads and what the gate decided come from one classification.
+          sideEffectClass: sideEffectVerdict.klass,
+          sideEffectReasons: sideEffectVerdict.reasons,
+          operationTypes: capResolved.evidence === 'PENDING_OUTBOUND' && capResolved.operationType
+            ? [capResolved.operationType] : [],
         }, now)
       } catch (err) {
         safetyViolations.push({

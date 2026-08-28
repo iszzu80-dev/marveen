@@ -50,7 +50,10 @@ beforeAll(() => {
 afterAll(() => { try { rmSync(root, { recursive: true, force: true }) } catch { /* best effort */ } })
 
 /** A case at the start of its life, on the real store. */
-function freshCase(caseId: string, status: 'NEW' | 'READY' | 'AWAITING_SELECTION' = 'NEW'): void {
+function freshCase(
+  caseId: string,
+  status: 'NEW' | 'READY' | 'AWAITING_SELECTION' | 'RECOVERY_REQUIRED' = 'NEW',
+): void {
   const db = getDb()
   createCase(db, {
     caseId, title: caseId, caseType: 'ADMIN', status,
@@ -175,20 +178,34 @@ describe('P6 — the ten §10.8 scenarios, one store, one arc', () => {
   it('6. a high-risk action at unproven confidence produces NO side effect', () => {
     // The scenario the audit called a GAP: it was enforced by the approval bind,
     // which is a different rule that happens to overlap. P4 made it an invariant.
-    freshCase('s6', 'READY')
+    // WHAT THIS FIXTURE USED TO BE, and why it had to change on 2026-08-28. It
+    // used a READY case and relied on the plan-step KIND to make step 2 "high
+    // risk": that step declares `needsExternal: false` and this case queued
+    // nothing, so the scenario's own premise -- A HIGH-RISK ACTION -- was not
+    // true. The action is now genuinely outward: a RECOVERY_REQUIRED case whose
+    // step 3 declares it reaches out, with a queued send that names what goes.
+    freshCase('s6', 'RECOVERY_REQUIRED')
+    getDb().prepare(
+      `INSERT INTO outbound_ledger
+         (ledger_id, case_id, action_type, sequence_number, internal_idempotency_key,
+          status, created_at, updated_at)
+       VALUES ('led-s6','s6','EMAIL_SEND',1,'idem-s6','PLANNED',?,?)`,
+    ).run(NOW - 1000, NOW - 1000)
     runCycle('s6', NOW)
     getDb().prepare(
-      `UPDATE case_progression_state SET completed_plan_step = 1
+      `UPDATE case_progression_state SET completed_plan_step = 2
         WHERE domain='personal' AND case_id='s6'`,
     ).run()
     const r = runCycle('s6', NOW + 60)
     expect(r.decision).toBe('MANUAL_ACTION_REQUIRED')
     expect(r.safetyViolations.map(v => v.assertion)).toContain('INVARIANT_E_REFUSAL')
-    // NO SIDE EFFECT: nothing was staged on the outbound ledger.
+    // NO SIDE EFFECT: the queued row is still only PLANNED. A stronger claim
+    // than the old "nothing was staged", which was satisfied by a case that had
+    // nothing to stage in the first place.
     const staged = getDb().prepare(
-      `SELECT COUNT(*) AS n FROM outbound_ledger WHERE case_id='s6'`,
-    ).get() as { n: number }
-    expect(staged.n).toBe(0)
+      `SELECT status FROM outbound_ledger WHERE case_id='s6'`,
+    ).all() as Array<{ status: string }>
+    expect(staged.map(x => x.status)).toEqual(['PLANNED'])
     // And the durable row agrees with the refusal.
     expect(runRows('s6').at(-1)?.decision).toBe('MANUAL_ACTION_REQUIRED')
   })

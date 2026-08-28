@@ -48,12 +48,43 @@ const CHAT = '8942301795'
 
 // ── The fixture: a case the engine will refuse to advance on its own ─────
 
-function seedHighRiskCase(caseId: string): void {
+function seedHighRiskCase(caseId: string, opts: { outbound?: boolean } = {}): void {
   const db = getDb()
   createCase(db, {
-    caseId, title: `Ügy ${caseId}`, caseType: 'SELECTION', status: 'AWAITING_SELECTION',
+    // RECOVERY_REQUIRED, because its plan step 3 is the one EXECUTE in the
+    // whole template that DECLARES `needsExternal: true`. Paired with the
+    // queued send below it is a coherently external action: the step says it
+    // reaches out, the ledger says what goes out, and the two agree. The old
+    // fixture used AWAITING_SELECTION, whose EXECUTE declares the opposite --
+    // which under the corrected classifier is a CONTRADICTION, not a high-risk
+    // action, and is refused rather than put in front of the owner.
+    caseId, title: `Ügy ${caseId}`, caseType: 'SELECTION', status: 'RECOVERY_REQUIRED',
     sensitivity: 'PERSONAL', priority: 'P2', sourceSystem: 'test',
   }, NOW - 100)
+  // A REAL OUTWARD ACT, not a kind that used to be assumed to be one.
+  //
+  // WHAT THIS FIXTURE USED TO BE, and why every proof below rested on a false
+  // premise. It seeded a case whose next EXECUTE step declares
+  // `needsExternal: false` and sends nothing, and the old classifier called it
+  // IRREVERSIBLE_EXTERNAL because EXECUTE was mapped to HIGH_RISK by kind. The
+  // seven proofs were therefore all proven THROUGH a mis-classified action:
+  // real assertions about the ticket, resting on an approval that should never
+  // have been asked for. With the classification corrected they went red, which
+  // is the correct outcome and the reason the fixture now has to state an
+  // outward act rather than inherit one.
+  //
+  // A queued EMAIL_SEND is what makes this action external: the resolution layer
+  // binds the row to the step, the operation type names what happens out there,
+  // and the classifier reads both. Nothing here is a flag that says "pretend
+  // this is risky".
+  if (opts.outbound !== false) {
+    db.prepare(
+      `INSERT INTO outbound_ledger
+         (ledger_id, case_id, action_type, sequence_number, internal_idempotency_key,
+          status, created_at, updated_at)
+       VALUES (?, ?, 'EMAIL_SEND', 1, ?, 'PLANNED', ?, ?)`,
+    ).run(`led-${caseId}`, caseId, `idem-${caseId}`, NOW - 100, NOW - 100)
+  }
   db.prepare(
     `INSERT INTO case_progression_state
       (domain, case_id, progression_enabled, progression_mode, goal, summary,
@@ -119,7 +150,7 @@ function driveToRefusal(caseId: string): ApprovalRequestRow {
   seedHighRiskCase(caseId)
   runProgressionCycle(getDb(), 'personal', caseId, NOW, { triggerType: 'MANUAL', triggerReference: 't0' })
   runProgressionCycle(getDb(), 'personal', caseId, NOW + 10, { triggerType: 'MANUAL', triggerReference: 't1' })
-  rawAnswer(caseId, { choice: 'YES' }, NOW + 20)
+  runProgressionCycle(getDb(), 'personal', caseId, NOW + 20, { triggerType: 'MANUAL', triggerReference: 't1b' })
   runProgressionCycle(getDb(), 'personal', caseId, NOW + 30, { triggerType: 'MANUAL', triggerReference: 't2' })
   const req = openRequest(caseId)
   if (!req) throw new Error(`no approval request was opened for ${caseId}: ${lastRun(caseId)?.sa}`)
@@ -158,15 +189,46 @@ describe('the refusal opens a door, and the door names the action', () => {
     expect(tickets()).toHaveLength(0)
   })
 
-  it('the QUESTION Istvan reads names the concrete action, the target and the payload', () => {
+  it('E1: the QUESTION carries the owner\'s five elements, and the machine label is NOT one of them', () => {
+    // THE DEFECT THIS REPLACES, in the text that actually went out on
+    // 2026-08-28 for the NVIDIA Inception case:
+    //
+    //     Művelet: Identify required actions and dependencies
+    //
+    // an internal English plan-step label as the headline of a yes/no approval.
+    // The owner's ruling: the machine label may stay as AUDIT, and he needs a
+    // deterministic human sentence saying what will be done, on what target,
+    // what changes outside, why approval is needed, and a short safe payload
+    // summary.
     const req = driveToRefusal('ap-2')
     const q = getDb().prepare(
       `SELECT question_text AS t FROM cos_owner_questions WHERE case_id='ap-2' AND question_hash=?`,
     ).get(req.question_hash) as { t: string }
-    expect(q.t).toContain(req.description)
-    expect(q.t).toContain(req.action_type)
+
+    for (const heading of [
+      'MIT FOGOK TENNI', 'MILYEN CÉLPONTON', 'MI VÁLTOZIK KINT A VILÁGBAN',
+      'MIÉRT KÉREM A JÓVÁHAGYÁSODAT', 'MIT TARTALMAZ',
+    ]) expect(q.t, `hiányzó elem: ${heading}`).toContain(heading)
+
+    // Element 3 says something concrete about the outside world, not a hedge.
+    expect(q.t).toMatch(/Elküldött levelet nem lehet visszavonni/)
     expect(q.t).toContain('ap-2')
     expect(q.t).toContain(req.payload_hash.slice(0, 12))
+
+    // THE DISCRIMINATING PART. The machine label is present exactly once, and
+    // on the audit line -- not as the thing he is asked to approve. A test that
+    // only checked "the label is absent" would pass on a question that dropped
+    // the audit trail, and one that only checked "the label is present" is the
+    // test that let the defect ship.
+    const lines = q.t.split('\n')
+    const labelLines = lines.filter(l => l.includes(req.description))
+    expect(labelLines).toHaveLength(1)
+    expect(labelLines[0].startsWith('Audit:')).toBe(true)
+    expect(lines.indexOf(labelLines[0])).toBeGreaterThan(lines.indexOf('MIT FOGOK TENNI'))
+
+    // The plan-step kind is a machine token too, and it is not shown as a field.
+    expect(q.t).not.toMatch(/^Típus: /m)
+
     // The owner's own writing rule for this channel.
     expect(q.t).not.toContain('—')
   })

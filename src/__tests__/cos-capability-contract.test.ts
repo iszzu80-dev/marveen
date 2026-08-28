@@ -458,14 +458,14 @@ describe('capability resolution — planned action to concrete dependency', () =
   const declared = (over: Partial<CapabilityContract> = {}) => contract(over)
 
   it('PROOF 1: COMMUNICATE resolves to the CHANNEL capability, per namespace', () => {
-    const p = resolveExecutionDependency(getDb(), 'personal', 'c1', 'COMMUNICATE', 'HIGH_RISK')
+    const p = resolveExecutionDependency(getDb(), 'personal', 'c1', 'COMMUNICATE', true)
     expect(p.status).toBe('RESOLVED')
     expect(p.target).toBe('gmail')
     expect(p.capability).toBe('CONNECTOR_WRITE:gmail')
 
     // The scope boundary, not a preference: ZST mail cannot resolve to the
     // private mailbox.
-    const z = resolveExecutionDependency(getDb(), 'zst', 'c1', 'COMMUNICATE', 'HIGH_RISK')
+    const z = resolveExecutionDependency(getDb(), 'zst', 'c1', 'COMMUNICATE', true)
     expect(z.capability).toBe('CONNECTOR_WRITE:gmail-zst')
   })
 
@@ -478,11 +478,11 @@ describe('capability resolution — planned action to concrete dependency', () =
     // What makes an EXECUTE external is a PENDING outbound row, and that is
     // evidence rather than a property of the kind.
     const db = getDb()
-    expect(resolveExecutionDependency(db, 'personal', 'c1', 'EXECUTE', 'HIGH_RISK').status)
+    expect(resolveExecutionDependency(db, 'personal', 'c1', 'EXECUTE', true).status)
       .toBe('NOT_REQUIRED')
 
     outboundRow('l-exec')                       // PLANNED EMAIL_SEND, waiting
-    const r = resolveExecutionDependency(db, 'personal', 'c1', 'EXECUTE', 'HIGH_RISK')
+    const r = resolveExecutionDependency(db, 'personal', 'c1', 'EXECUTE', true)
     expect(r.status).toBe('RESOLVED')
     expect(r.capability).toBe('CONNECTOR_WRITE:gmail')
     expect(r.reason).toMatch(/EMAIL_SEND/)
@@ -494,14 +494,14 @@ describe('capability resolution — planned action to concrete dependency', () =
     const db = getDb()
     outboundRow('l-done')
     db.prepare(`UPDATE outbound_ledger SET status='VERIFIED' WHERE ledger_id='l-done'`).run()
-    expect(resolveExecutionDependency(db, 'personal', 'c1', 'EXECUTE', 'HIGH_RISK').status)
+    expect(resolveExecutionDependency(db, 'personal', 'c1', 'EXECUTE', true).status)
       .toBe('NOT_REQUIRED')
   })
 
   it('PROOF 3: the resolved capability missing -> typed WAIT_CAPABILITY', () => {
     const db = getDb()
     connectorDown(db, 'gmail', NOW)
-    const resolved = resolveExecutionDependency(db, 'personal', 'c1', 'COMMUNICATE', 'HIGH_RISK')
+    const resolved = resolveExecutionDependency(db, 'personal', 'c1', 'COMMUNICATE', true)
     const folded = withResolvedDependency(declared({ requiredCapabilities: ['RUN_LEDGER'] }), resolved)
     // The floor SURVIVES the fold: recording the action and performing it are
     // different questions, and the answer to one must not erase the other.
@@ -532,7 +532,7 @@ describe('capability resolution — planned action to concrete dependency', () =
     // one shape that must deny: a real send behind a capability nobody checked.
     const db = getDb()
     outboundRow('l-weird', 'SMS_SEND')
-    const resolved = resolveExecutionDependency(db, 'personal', 'c1', 'EXECUTE', 'HIGH_RISK')
+    const resolved = resolveExecutionDependency(db, 'personal', 'c1', 'EXECUTE', true)
     expect(resolved.status).toBe('UNRESOLVED')
     expect(resolved.reason).toMatch(/SMS_SEND/)
     const folded = withResolvedDependency(declared({ requiredCapabilities: ['RUN_LEDGER'] }), resolved)
@@ -545,7 +545,7 @@ describe('capability resolution — planned action to concrete dependency', () =
   it('PROOF 5: a missing OPTIONAL enrichment degrades under control, and does not park', () => {
     const db = getDb()
     db.exec('DROP TABLE IF EXISTS case_evidence_packets')
-    const resolved = resolveExecutionDependency(db, 'personal', 'c1', 'GATHER_INFO', 'READ_ONLY')
+    const resolved = resolveExecutionDependency(db, 'personal', 'c1', 'GATHER_INFO', false)
     expect(resolved.status).toBe('NOT_REQUIRED')
     const folded = withResolvedDependency(declareForPlanStep('GATHER_INFO'), resolved)
     const v = enforceCapabilityContract(db, folded, 'READ_ONLY', NOW)
@@ -558,8 +558,8 @@ describe('capability resolution — planned action to concrete dependency', () =
     // resolution that varies between two runs cannot be replayed.
     const db = getDb()
     outboundRow('l-x')
-    const a = resolveExecutionDependency(db, 'personal', 'c1', 'EXECUTE', 'HIGH_RISK')
-    const b = resolveExecutionDependency(db, 'personal', 'c1', 'EXECUTE', 'HIGH_RISK')
+    const a = resolveExecutionDependency(db, 'personal', 'c1', 'EXECUTE', true)
+    const b = resolveExecutionDependency(db, 'personal', 'c1', 'EXECUTE', true)
     expect(a).toEqual(b)
   })
 

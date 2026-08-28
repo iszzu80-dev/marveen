@@ -173,28 +173,28 @@ describe('Checkpoint B — Thin shadow vertical slice (card 4a809934)', () => {
     })
 
     it('decide returns WAIT_EXTERNAL for a waiting case with external dependency', () => {
-      const nba = { planStep: 2, description: 'Check for external response', kind: 'AWAIT_EXTERNAL' as const, canProceedAutonomously: false, estimatedEffortMinutes: 5 }
+      const nba = { planStep: 2, description: 'Check for external response', kind: 'AWAIT_EXTERNAL' as const, needsExternal: false, canProceedAutonomously: false, estimatedEffortMinutes: 5 }
       const ctx = { eventCount: 2, lastEventType: null, lastEventReason: null, hasParent: false, hasChildren: false, ageDays: 3, statusAgeDays: 3, nextWakeAt: null, sensitivity: 'PERSONAL' }
       const { decision } = decide(nba, ctx, 'WAITING_EXTERNAL')
       expect(decision).toBe('WAIT_EXTERNAL')
     })
 
     it('decide returns RECOVERY_REQUIRED for overdue waiting (>7 days)', () => {
-      const nba = { planStep: 2, description: 'Check', kind: 'AWAIT_EXTERNAL' as const, canProceedAutonomously: false, estimatedEffortMinutes: 5 }
+      const nba = { planStep: 2, description: 'Check', kind: 'AWAIT_EXTERNAL' as const, needsExternal: false, canProceedAutonomously: false, estimatedEffortMinutes: 5 }
       const ctx = { eventCount: 2, lastEventType: null, lastEventReason: null, hasParent: false, hasChildren: false, ageDays: 10, statusAgeDays: 10, nextWakeAt: null, sensitivity: 'PERSONAL' }
       const { decision } = decide(nba, ctx, 'WAITING_EXTERNAL')
       expect(decision).toBe('RECOVERY_REQUIRED')
     })
 
     it('decide returns RECOVERY_REQUIRED for BLOCKED status', () => {
-      const nba = { planStep: 1, description: 'Identify', kind: 'GATHER_INFO' as const, canProceedAutonomously: true, estimatedEffortMinutes: 5 }
+      const nba = { planStep: 1, description: 'Identify', kind: 'GATHER_INFO' as const, needsExternal: false, canProceedAutonomously: true, estimatedEffortMinutes: 5 }
       const ctx = { eventCount: 2, lastEventType: null, lastEventReason: null, hasParent: false, hasChildren: false, ageDays: 1, statusAgeDays: 1, nextWakeAt: null, sensitivity: 'PERSONAL' }
       const { decision } = decide(nba, ctx, 'BLOCKED')
       expect(decision).toBe('RECOVERY_REQUIRED')
     })
 
     it('decide returns COMPLETE for COMPLETED status', () => {
-      const nba = { planStep: 1, description: 'Verify', kind: 'VERIFY' as const, canProceedAutonomously: true, estimatedEffortMinutes: 5 }
+      const nba = { planStep: 1, description: 'Verify', kind: 'VERIFY' as const, needsExternal: false, canProceedAutonomously: true, estimatedEffortMinutes: 5 }
       const ctx = { eventCount: 2, lastEventType: null, lastEventReason: null, hasParent: false, hasChildren: false, ageDays: 1, statusAgeDays: 1, nextWakeAt: null, sensitivity: 'PERSONAL' }
       const { decision } = decide(nba, ctx, 'COMPLETED')
       expect(decision).toBe('COMPLETE')

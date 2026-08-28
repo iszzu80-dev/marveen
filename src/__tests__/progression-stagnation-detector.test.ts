@@ -177,22 +177,19 @@ describe('plan step advancement (completed_plan_step)', () => {
     // variable this test moves.
     seedCaseWithoutInitialRun(db, 'c-complete', 'NEW', t)
 
-    // Steps 1 and 2 run autonomously; step 3 is the HIGH-risk EXECUTE and
-    // Invariant E refuses it. The cursor STOPS there -- it no longer walks past.
-    for (let i = 0; i < 3; i++) {
+    // THE APPROVAL DETOUR THIS USED TO NEED, and why it is gone. A NEW case's
+    // step 3 is "Identify required actions and dependencies", which declares
+    // `needsExternal: false` and sends nothing. Until 2026-08-28 it was
+    // classified HIGH_RISK by its KIND, so this test could not reach plan
+    // exhaustion without first collecting an owner approval for an internal
+    // analysis step -- the same false approval that reached Istvan live on the
+    // NVIDIA case. The step is INTERNAL now and the plan simply runs out, which
+    // is what this test is actually about.
+    let completedRun = false
+    for (let i = 0; i < 5; i++) {
       releaseProgressionClaim(db, 'personal', 'c-complete', 'runner', t + 60)
       const r = runProgressionCycle(db, 'personal', 'c-complete', t + i + 1, MANUAL_OPTS)
-      if (i === 2) expect(r.decision).toBe('MANUAL_ACTION_REQUIRED')
-    }
-    expect(getState(db, 'c-complete').completed_plan_step).toBe(2)
-
-    // The door: Istvan approves that exact step, and the engine proceeds.
-    approveTheOpenRequest(db, 'c-complete', t + 10)
-    let completedRun = false
-    for (let i = 0; i < 2; i++) {
-      releaseProgressionClaim(db, 'personal', 'c-complete', 'runner', t + 60)
-      const r = runProgressionCycle(db, 'personal', 'c-complete', t + 20 + i, MANUAL_OPTS)
-      if (r.decision === 'COMPLETE') completedRun = true
+      if (r.decision === 'COMPLETE') { completedRun = true; break }
     }
     expect(completedRun).toBe(true)
 
@@ -228,17 +225,15 @@ describe('plan step advancement (completed_plan_step)', () => {
       evaluated_at: t,
     }), 'personal', 'c-wrap')
 
-    for (let i = 0; i < 3; i++) {
+    // See the note in the previous test: the internal step no longer needs an
+    // owner approval to be walked through, so the plan reaches its end on its
+    // own and the wrap-around is what gets measured.
+    // Exactly one pass through the four-step plan: the wrap-around is what the
+    // FIFTH run does, and running past it would start the next lap and read a
+    // cursor that has already moved on.
+    for (let i = 0; i < 4; i++) {
       releaseProgressionClaim(db, 'personal', 'c-wrap', 'runner', t + 60)
       runProgressionCycle(db, 'personal', 'c-wrap', t + i + 1, MANUAL_OPTS)
-    }
-    // Same gate as above: the plan cannot be exhausted until the refused step is
-    // approved, so the wrap-around cannot be reached by walking past it.
-    expect(getState(db, 'c-wrap').completed_plan_step).toBe(2)
-    approveTheOpenRequest(db, 'c-wrap', t + 10)
-    for (let i = 0; i < 2; i++) {
-      releaseProgressionClaim(db, 'personal', 'c-wrap', 'runner', t + 60)
-      runProgressionCycle(db, 'personal', 'c-wrap', t + 20 + i, MANUAL_OPTS)
     }
 
     // DoD unmet → plan wraps around, completed_plan_step resets to 0

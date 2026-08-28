@@ -60,6 +60,10 @@
 
 import type Database from 'better-sqlite3'
 import type { EnforcementVerdict, SideEffectClass } from './capability-contract.js'
+// TYPE ONLY, deliberately. `action-side-effect.ts` imports the risk vocabularies
+// from here at run time; importing its values back would close a module cycle.
+// A type import is erased, so the dependency is one-directional where it counts.
+import type { ActionSideEffectClass } from './action-side-effect.js'
 import { PAYMENT_ACTION_TYPES, LEGAL_ACTION_TYPES } from './progression-eval.js'
 import {
   reconstructLatestPacketWatermark, evaluateEvidenceFreshness,
@@ -122,9 +126,17 @@ export const RISK_CLASS_ACTION_TYPES: Record<RiskClass, readonly string[]> = {
     'GRANT_ACCESS', 'REVOKE_ACCESS', 'PERMISSION_CHANGE', 'ROLE_ASSIGN',
     'SHARE_BEYOND_APPROVED',
   ],
-  // Not a list: this one is a property of the STEP KIND, and the side-effect
-  // class already carries it. EXECUTE and COMMUNICATE reach outside, and a sent
-  // message cannot be unsent.
+  // WAS EMPTY, AND THE COMMENT THAT KEPT IT EMPTY WAS THE DEFECT. It read:
+  // "Not a list: this one is a property of the STEP KIND [...] EXECUTE and
+  // COMMUNICATE reach outside". CAN reach outside. On 2026-08-28 an internal
+  // "Identify required actions and dependencies" step was classified
+  // IRREVERSIBLE_EXTERNAL on that reasoning alone and produced a live approval
+  // request for an act that does not exist.
+  //
+  // The vocabulary now lives in `action-side-effect.ts` with the other operation
+  // lists, because it is an operation vocabulary like they are. This row stays
+  // empty on purpose and is no longer the place the class comes from: the
+  // classifier supplies it, from evidence. A test asserts the two do not drift.
   IRREVERSIBLE_EXTERNAL: [],
 }
 
@@ -181,8 +193,15 @@ export interface RequiredInputFact {
 /** What the engine knows about the decision it just made. Every field is a fact
  *  it already has -- nothing here requires a new source. */
 export interface DecisionSignals {
-  /** The side-effect class of the chosen action (capability-contract's). */
+  /** The side-effect class of the chosen action (capability-contract's).
+   *  DERIVED from `actionSideEffect` by the pipeline, never chosen: it exists so
+   *  the gates written against the three-value vocabulary keep working. */
   sideEffect: SideEffectClass
+  /** The externality verdict from `classifyActionSideEffect`. REQUIRED, not
+   *  optional: an optional field here would let a caller that forgot it fall
+   *  back to the kind-derived class -- exactly the behaviour being retired --
+   *  and it would do so silently. */
+  actionSideEffect: ActionSideEffectClass
   /** The capability verdict for it. DENY and WAIT are not merely blockers: they
    *  are evidence the engine does not have what the action needs. */
   capabilityVerdict: EnforcementVerdict
@@ -233,9 +252,29 @@ export function assessRisk(s: DecisionSignals): {
   const classes = new Set<RiskClass>()
   let risk: DecisionLevel = 'LOW'
 
-  if (s.sideEffect === 'MUTATING') { risk = 'MEDIUM'; reasons.push('side-effect:MUTATING') }
-  if (s.sideEffect === 'HIGH_RISK') {
-    risk = 'HIGH'; classes.add('IRREVERSIBLE_EXTERNAL'); reasons.push('side-effect:HIGH_RISK')
+  // ── EXTERNALITY, from the classifier rather than from the step kind.
+  //
+  // The four outcomes are four different statements and none of them may be
+  // rendered as another:
+  //
+  //   INTERNAL + mutating      MEDIUM. It writes, and only in here.
+  //   *_EXTERNAL, recoverable  MEDIUM. It reaches out and can be put back.
+  //   IRREVERSIBLE_EXTERNAL    HIGH, and the class is named -- this is the only
+  //                            branch that may add IRREVERSIBLE_EXTERNAL.
+  //   CONTRADICTORY / UNKNOWN  HIGH, and the class is NOT named. The engine does
+  //                            not know what this action does; claiming it is an
+  //                            irreversible external act would be a second
+  //                            invention on top of the first, and it is that
+  //                            invented class that reached the owner as an
+  //                            approval question on 2026-08-28.
+  if (s.actionSideEffect === 'INTERNAL') {
+    if (s.sideEffect !== 'READ_ONLY') { risk = 'MEDIUM'; reasons.push('side-effect:INTERNAL_MUTATING') }
+  } else if (s.actionSideEffect === 'READ_ONLY_EXTERNAL' || s.actionSideEffect === 'REVERSIBLE_EXTERNAL') {
+    risk = 'MEDIUM'; reasons.push(`side-effect:${s.actionSideEffect}`)
+  } else if (s.actionSideEffect === 'IRREVERSIBLE_EXTERNAL') {
+    risk = 'HIGH'; classes.add('IRREVERSIBLE_EXTERNAL'); reasons.push('side-effect:IRREVERSIBLE_EXTERNAL')
+  } else {
+    risk = 'HIGH'; reasons.push(`side-effect:${s.actionSideEffect}`)
   }
   if (s.financialExposure !== null && s.financialExposure > 0) {
     risk = 'HIGH'; classes.add('FINANCIAL_CONTRACTUAL')

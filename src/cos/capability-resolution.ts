@@ -28,7 +28,7 @@
  */
 
 import type Database from 'better-sqlite3'
-import type { CapabilityContract, SideEffectClass, PlanStepKind } from './capability-contract.js'
+import type { CapabilityContract, PlanStepKind } from './capability-contract.js'
 
 export type ResolutionStatus =
   /** A concrete execution target was determined. */
@@ -46,6 +46,27 @@ export interface ResolvedExecution {
   capability: string | null
   /** How it was determined, in one line, for the audit trail. */
   reason: string
+  /** WHAT KIND OF ANSWER THIS IS, and the distinction is load-bearing for the
+   *  side-effect classifier one layer up.
+   *
+   *  PENDING_OUTBOUND  a real queued outbound row drove this. EVIDENCE that this
+   *                    action reaches outside.
+   *  KIND_DEFAULT      the target is the one this KIND would use if it sent
+   *                    anything. A capability floor, NOT evidence that this step
+   *                    sends: every COMMUNICATE resolves a mailbox, including
+   *                    the ones whose whole job is to write a local note.
+   *  NONE              nothing to resolve.
+   *
+   *  Collapsing the first two is how "this kind could reach outside" became
+   *  "this action does", which is the defect `action-side-effect.ts` exists to
+   *  undo. A floor read as evidence would raise a contradiction on every
+   *  internal COMMUNICATE step in the store. */
+  evidence: 'PENDING_OUTBOUND' | 'KIND_DEFAULT' | 'NONE'
+  /** The CONCRETE operation type this action would perform, when a queued
+   *  outbound row names one. Null when nothing names it -- which is a gap the
+   *  classifier must treat as a gap, never as "harmless". Never the plan-step
+   *  kind: EXECUTE is not an operation. */
+  operationType: string | null
 }
 
 /** The domain's outbound email connector.
@@ -73,12 +94,18 @@ export function resolveExecutionDependency(
   domain: 'personal' | 'zst',
   caseId: string,
   kind: PlanStepKind,
-  sideEffect: SideEffectClass,
+  mutates: boolean,
 ): ResolvedExecution {
-  if (sideEffect === 'READ_ONLY') {
+  // TAKES THE MUTATION AXIS, NOT THE OLD SIDE-EFFECT CLASS. Same set of steps
+  // short-circuits -- the old `READ_ONLY` row of `SIDE_EFFECT_CLASS` is exactly
+  // the `false` row of `MUTATES_BY_KIND` -- but the argument now says what it
+  // means. Passing the class would be circular: the class is derived from this
+  // resolution.
+  if (!mutates) {
     return {
       status: 'NOT_REQUIRED', target: null, capability: null,
       reason: `${kind}: olvasó lépés, nem ér el semmit kifelé`,
+      evidence: 'NONE', operationType: null,
     }
   }
 
@@ -91,6 +118,7 @@ export function resolveExecutionDependency(
       status: 'RESOLVED', target: connector,
       capability: `CONNECTOR_WRITE:${connector}`,
       reason: `COMMUNICATE -> ${connector} (a ${domain} névtér kimenő levélcsatornája), írás kell`,
+      evidence: 'KIND_DEFAULT', operationType: null,
     }
   }
 
@@ -113,6 +141,7 @@ export function resolveExecutionDependency(
       return {
         status: 'NOT_REQUIRED', target: null, capability: null,
         reason: 'EXECUTE: nincs végrehajtásra váró kimenő sor az ügyön — helyi lépés',
+        evidence: 'NONE', operationType: null,
       }
     }
     const tool = toolForActionType(pending.actionType, domain)
@@ -124,11 +153,13 @@ export function resolveExecutionDependency(
         status: 'UNRESOLVED', target: null, capability: null,
         reason: `EXECUTE: végrehajtásra váró "${pending.actionType}" művelet, `
           + 'amelynek a függősége ebben a rétegben nem nevezhető meg',
+        evidence: 'PENDING_OUTBOUND', operationType: pending.actionType,
       }
     }
     return {
       status: 'RESOLVED', target: tool.target, capability: tool.capability,
       reason: `EXECUTE -> ${tool.target} (${tool.why}, ledger ${pending.ledgerId})`,
+      evidence: 'PENDING_OUTBOUND', operationType: pending.actionType,
     }
   }
 
@@ -136,6 +167,7 @@ export function resolveExecutionDependency(
   return {
     status: 'NOT_REQUIRED', target: null, capability: null,
     reason: `${kind}: helyi állapotot ír, nem ér el külső rendszert`,
+    evidence: 'NONE', operationType: null,
   }
 }
 
