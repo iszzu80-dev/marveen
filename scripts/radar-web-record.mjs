@@ -27,7 +27,7 @@
 // store path, so anything implemented in it can only be tested against the real
 // database. A step that cannot be tested is how the previous version shipped.
 // This script is now argv parsing and nothing else.
-import Database from '../node_modules/better-sqlite3/lib/index.js'
+import { initDatabase, getDb } from '../dist/db.js'
 import { recordWebObservation } from '../dist/cos/radar-web.js'
 
 const [, , radarId, priceRaw, shop = 'web', url = '', shippableRaw] = process.argv
@@ -38,7 +38,24 @@ if (!radarId || priceRaw == null) {
 const price = Number(priceRaw)
 if (!Number.isFinite(price)) { console.error('priceMajor must be a number'); process.exit(2) }
 
-const db = new Database(new URL('../store/claudeclaw.db', import.meta.url).pathname)
+// THROUGH `initDatabase`, NOT A PRIVATE HANDLE, and this is the third act of the
+// same defect. The header above says delivery "is therefore no longer the
+// caller's to forget" -- and it still failed, one layer further in. This file
+// opened its own better-sqlite3 handle and passed it down, so
+// `recordWebObservation` wrote observations correctly while the alert it then
+// calls reached `createAgentMessage`, which reads the MODULE-LEVEL db singleton
+// in db.js. That singleton is set only by `initDatabase`, which nothing on this
+// path ever called. So every HIT recorded through this script died at
+// "Cannot read properties of undefined (reading 'prepare')", was caught, and
+// logged "NOT marked notified, will retry next tick" -- a retry that runs this
+// same script and fails identically. A permanent drop wearing a retry message.
+// Measured live 2026-08-28 on BUY-SHOE-005 at 34 120 HUF: notify.should=true,
+// delivered=false, and neither the bus post nor the daily-log line nor the
+// outbox row was written, because the first of the three threw.
+//
+// One handle now, shared by the write and by the delivery that follows it.
+initDatabase(new URL('../store/claudeclaw.db', import.meta.url).pathname)
+const db = getDb()
 const now = Math.floor(Date.now() / 1000)
 const item = db.prepare("SELECT radar_id, currency FROM radar_items WHERE radar_id=? AND kind='PRODUCT'").get(radarId)
 if (!item) { console.error(`no PRODUCT radar item ${radarId}`); process.exit(1) }
