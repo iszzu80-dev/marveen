@@ -18,7 +18,7 @@
  * the fix branch to verify GREEN.
  */
 
-import { writeFileSync, unlinkSync, existsSync, mkdirSync, readFileSync, mkdtempSync, symlinkSync } from "node:fs";
+import { writeFileSync, unlinkSync, existsSync, mkdirSync, readFileSync, mkdtempSync, symlinkSync, rmSync, realpathSync, lstatSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
@@ -238,36 +238,63 @@ async function run(): Promise<void> {
         const monitorExists = existsSync(monitorJs);
         ok("T4: monitor JS in release dir exists", monitorExists, monitorJs);
 
-        // Simulate a branch switch: rename the source file to break it
-        const srcMonitor = join(process.env.MARVEEN_HOME ?? process.cwd(), "src/web/memory-pressure-monitor.ts");
-        const srcBackup = srcMonitor + ".test-backup";
-
-        if (existsSync(srcMonitor)) {
+        // ── Branch-switch independence, WITHOUT mutating the live checkout ──
+        //
+        // 2026-08-31, run 20 of the twenty-run final-candidate sweep: this test
+        // used to `mv src/web/memory-pressure-monitor.ts` aside and back to
+        // simulate a branch switch. inotify caught the window:
+        //
+        //   16:25:28.930 MOVED_FROM memory-pressure-monitor.ts
+        //   16:25:28.932 MOVED_TO   memory-pressure-monitor.ts.test-backup
+        //   16:25:28.948 MOVED_FROM memory-pressure-monitor.ts.test-backup
+        //   16:25:28.948 MOVED_TO   memory-pressure-monitor.ts
+        //
+        // For those 18 ms the file did not exist, and any test in another worker
+        // reading that path got ENOENT. That is what failed run 20, in
+        // cos-eligibility-denominator.test.ts, a suite with no connection to
+        // this one. Same defect class as the run-10 vault race: a shared,
+        // mutable, repo-level fixture.
+        //
+        // The proof is split rather than dropped:
+        //   (a) the PROPERTY -- a copy under releases/ survives the deletion of
+        //       its source -- proven destructively, on a throwaway fixture;
+        //   (b) that the property APPLIES to the real install, proven by
+        //       structure: the release file is a regular file of its own whose
+        //       realpath is inside releases/. A file that is its own copy under
+        //       releases/ cannot be affected by anything done to src/, so
+        //       deleting the live source would add nothing this does not say.
+        {
+          const fixture = mkdtempSync(join(tmpdir(), "t4-branch-switch-"));
           try {
-            // "Branch switch" — the source file is gone/changed
-            execSync(`mv "${srcMonitor}" "${srcBackup}"`, { timeout: 5000 });
+            const fxSrc = join(fixture, "src", "web");
+            const fxRelease = join(fixture, "releases", "monitor-current");
+            mkdirSync(fxSrc, { recursive: true });
+            mkdirSync(fxRelease, { recursive: true });
+            const fxSrcFile = join(fxSrc, "memory-pressure-monitor.ts");
+            const fxReleaseFile = join(fxRelease, "memory-pressure-monitor.js");
+            writeFileSync(fxSrcFile, "export const x = 1;\n");
+            writeFileSync(fxReleaseFile, "export const x = 1;\n");   // the install COPY
 
-            // The installed release should still be intact — it's a separate copy
-            const stillExists = existsSync(monitorJs);
-            ok("T4: after source removal, release copy still intact (branch-switch-proof)",
-              stillExists, `release=${monitorJs}`);
+            unlinkSync(fxSrcFile);                                    // the "branch switch"
 
-            // The source is gone, proving the release is independent
-            const srcGone = !existsSync(srcMonitor);
-            ok("T4: source file successfully removed (simulated branch switch)",
-              srcGone, srcMonitor);
-
-            // Restore the source
-            execSync(`mv "${srcBackup}" "${srcMonitor}"`, { timeout: 5000 });
-          } catch (e: any) {
-            // Restore on failure
-            try { execSync(`mv "${srcBackup}" "${srcMonitor}" 2>/dev/null`, { timeout: 5000 }); } catch { /* ok */ }
-            ok("T4: branch switch isolation check failed", false, e.message);
+            ok("T4a: fixture source removed (simulated branch switch)",
+              !existsSync(fxSrcFile), fxSrcFile);
+            ok("T4a: release copy survives the source's removal (branch-switch-proof)",
+              existsSync(fxReleaseFile), fxReleaseFile);
+          } finally {
+            rmSync(fixture, { recursive: true, force: true });
           }
-        } else {
-          console.log("T4 note: source file not found — may be running from installed release already");
-          // If source doesn't exist, that also proves isolation!
-          ok("T4: source file absent, release present → already isolated", true);
+
+          // (b) the live install has that same shape -- asserted, not assumed.
+          const realRelease = realpathSync(monitorJs);
+          const releasesRoot = realpathSync(RELEASES_DIR);
+          const checkoutSrc = join(process.env.MARVEEN_HOME ?? process.cwd(), "src");
+          ok("T4b: the live release file is a REGULAR file, not a link into the checkout",
+            lstatSync(monitorJs).isFile(), monitorJs);
+          ok("T4b: the live release file resolves INSIDE releases/, so src/ cannot reach it",
+            realRelease.startsWith(releasesRoot + "/"), realRelease + " vs " + releasesRoot);
+          ok("T4b: the live release file does not resolve into the checkout's src/",
+            !realRelease.startsWith(checkoutSrc + "/"), realRelease);
         }
       }
     } else {

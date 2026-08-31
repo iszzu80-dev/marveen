@@ -70,9 +70,17 @@ describe('W13 §7.6 — UNKNOWN DOMAIN, as its own criterion', () => {
 describe('W13 §7.6 — CREDENTIAL REUSE on the wrong service', () => {
   let dir: string
   let mcpPath: string
+  let prevStoreDir: string | undefined
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'w13-bindings-'))
+    // PER-TEST credential store, on top of the per-worker one the suite setup
+    // installs. The worker-level directory already stops the cross-FILE race
+    // that failed run 10 of the 2026-08-31 sweep; this stops one test in THIS
+    // file from inheriting another's vault, which is the same defect one scope
+    // down and the one a reader of this file can actually check.
+    prevStoreDir = process.env.MARVEEN_CREDENTIAL_STORE_DIR
+    process.env.MARVEEN_CREDENTIAL_STORE_DIR = mkdtempSync(join(tmpdir(), 'w13-credstore-'))
     mcpPath = join(dir, '.mcp.json')
     writeFileSync(mcpPath, JSON.stringify({
       mcpServers: {
@@ -85,9 +93,13 @@ describe('W13 §7.6 — CREDENTIAL REUSE on the wrong service', () => {
   })
 
   afterEach(() => {
+    const testStoreDir = process.env.MARVEEN_CREDENTIAL_STORE_DIR
     removeBinding('W13_SERVICE_A_KEY', 'SERVICE_A_KEY')
     deleteSecret('W13_SERVICE_A_KEY')
     rmSync(dir, { recursive: true, force: true })
+    if (testStoreDir) rmSync(testStoreDir, { recursive: true, force: true })
+    if (prevStoreDir === undefined) delete process.env.MARVEEN_CREDENTIAL_STORE_DIR
+    else process.env.MARVEEN_CREDENTIAL_STORE_DIR = prevStoreDir
     clearKnownSecrets()
   })
 

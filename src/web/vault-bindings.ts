@@ -3,13 +3,19 @@ import { join, basename } from 'node:path'
 import { homedir } from 'node:os'
 import { PROJECT_ROOT } from '../config.js'
 import { atomicWriteFileSync } from './atomic-write.js'
+import {
+  credentialStorePath, readJsonStore,
+  type CredentialStoreFailureKind, isCredentialStoreUnreadable,
+} from './credential-store.js'
 import { readFileOr, AGENTS_BASE_DIR, listAgentNames } from './agent-config.js'
 import { getSecret, listSecrets } from './vault.js'
 import { getExternalProjectPaths } from './dashboard-settings.js'
 import { shellEscape } from './sanitize.js'
 import { logger } from '../logger.js'
 
-const BINDINGS_PATH = join(PROJECT_ROOT, 'store', 'vault-bindings.json')
+// Resolved per call — see credential-store.ts. The old module-level constant is
+// what made every vitest worker share one bindings file.
+const BINDINGS_PATH = () => credentialStorePath('vault-bindings.json')
 const VAULT_WRAPPER_PATH = join(PROJECT_ROOT, 'scripts', 'vault-env-wrapper.sh')
 const VAULT_HEADERS_HELPER_PATH = join(PROJECT_ROOT, 'scripts', 'vault-headers-helper.sh')
 
@@ -59,18 +65,59 @@ export interface ScanFinding {
   existingVaultId?: string
 }
 
-export interface SyncResult {
-  updated: number
-  errors: string[]
+export interface SyncStoreFailure {
+  kind: CredentialStoreFailureKind
+  path: string
+  message: string
 }
 
+export interface SyncResult {
+  /** COMPLETED means the bindings store was read and every target attempted.
+   *  STORE_UNREADABLE means nothing was attempted at all — `updated: 0` here is
+   *  "we do not know", never "there was nothing to do". */
+  outcome: 'COMPLETED' | 'STORE_UNREADABLE'
+  updated: number
+  errors: string[]
+  failure?: SyncStoreFailure
+}
+
+function isBindingsStore(parsed: unknown): parsed is BindingsStore {
+  return !!parsed && typeof parsed === 'object' && Array.isArray((parsed as BindingsStore).bindings)
+}
+
+/**
+ * A missing bindings file is the specified initial state: no binding has ever
+ * been made, and an empty list is the honest answer. Every OTHER failure --
+ * corrupt JSON, a wrong shape, EACCES, an unexpected IO error -- throws a typed
+ * CredentialStoreUnreadable.
+ *
+ * Before this, all four collapsed into `{ bindings: [] }`. Downstream that read
+ * as "this secret is bound to nothing", and syncSecret returned
+ * `{ updated: 0, errors: [] }` -- a shape no caller can tell apart from a
+ * successful no-op. On a credential path the operator would have been told the
+ * sync was fine while the .mcp.json still carried whatever it carried before.
+ */
 function readBindings(): BindingsStore {
-  try { return JSON.parse(readFileSync(BINDINGS_PATH, 'utf-8')) }
-  catch { return { bindings: [] } }
+  return readJsonStore<BindingsStore>(BINDINGS_PATH(), { bindings: [] }, isBindingsStore)
+}
+
+/** Turn a thrown store failure into the typed FAILED SyncResult. Rethrows
+ *  anything that is NOT a store-read failure: a bug in here must not be dressed
+ *  up as an IO problem. */
+function syncStoreFailure(err: unknown): SyncResult {
+  if (!isCredentialStoreUnreadable(err)) throw err
+  return {
+    outcome: 'STORE_UNREADABLE',
+    updated: 0,
+    // Non-empty on purpose: a caller that only ever looks at `errors` (every
+    // pre-existing one does) must still see this as a failure.
+    errors: [`Binding store unreadable (${err.kind}): ${err.message}`],
+    failure: { kind: err.kind, path: err.path, message: err.message },
+  }
 }
 
 function writeBindings(store: BindingsStore): void {
-  atomicWriteFileSync(BINDINGS_PATH, JSON.stringify(store, null, 2) + '\n')
+  atomicWriteFileSync(BINDINGS_PATH(), JSON.stringify(store, null, 2) + '\n')
 }
 
 export function getBindings(): VaultBinding[] {
@@ -269,11 +316,20 @@ function applyHeadersHelper(serverCfg: any, headerBindings: VaultBinding[]): voi
 }
 
 export function syncSecret(vaultSecretId: string): SyncResult {
-  const bindings = getBindings().filter(b => b.vaultSecretId === vaultSecretId)
-  if (bindings.length === 0) return { updated: 0, errors: [] }
+  let bindings: VaultBinding[]
+  try {
+    bindings = getBindings().filter(b => b.vaultSecretId === vaultSecretId)
+  } catch (err) {
+    // The store could not be read. We do NOT know whether this secret is bound
+    // to anything, so we must not report the "bound to nothing" no-op.
+    return syncStoreFailure(err)
+  }
+  if (bindings.length === 0) return { outcome: 'COMPLETED', updated: 0, errors: [] }
 
   const secret = getSecret(vaultSecretId)
-  if (secret === null) return { updated: 0, errors: [`Vault secret "${vaultSecretId}" not found`] }
+  if (secret === null) {
+    return { outcome: 'COMPLETED', updated: 0, errors: [`Vault secret "${vaultSecretId}" not found`] }
+  }
 
   let updated = 0
   const errors: string[] = []
@@ -308,9 +364,12 @@ export function syncSecret(vaultSecretId: string): SyncResult {
   }
 
   if (updated > 0) logger.info({ vaultSecretId, updated }, 'Vault secret synced to .mcp.json files')
-  return { updated, errors }
+  return { outcome: 'COMPLETED', updated, errors }
 }
 
+/** Throws CredentialStoreUnreadable if the bindings store cannot be read: an
+ *  unsync that quietly did nothing would leave the plaintext-free reference in
+ *  place while the caller believed the binding had been torn down. */
 export function unsyncBinding(vaultSecretId: string, envVar: string): void {
   const all = getBindings()
   const bindings = all.filter(
@@ -344,15 +403,30 @@ export function unsyncBinding(vaultSecretId: string, envVar: string): void {
 }
 
 export function syncAllBindings(): SyncResult {
-  const allBindings = getBindings()
+  let allBindings: VaultBinding[]
+  try {
+    allBindings = getBindings()
+  } catch (err) {
+    // Nothing was enumerated, so nothing was attempted. Reporting `updated: 0`
+    // as a COMPLETED sync here would tell an operator every binding is in sync.
+    return syncStoreFailure(err)
+  }
   const secretIds = new Set(allBindings.map(b => b.vaultSecretId))
   let totalUpdated = 0
   const allErrors: string[] = []
+  let outcome: SyncResult['outcome'] = 'COMPLETED'
+  let failure: SyncStoreFailure | undefined
 
   for (const id of secretIds) {
     const result = syncSecret(id)
     totalUpdated += result.updated
     allErrors.push(...result.errors)
+    // A store that became unreadable mid-loop degrades the WHOLE run: the
+    // remaining ids were read from a store we can no longer trust.
+    if (result.outcome === 'STORE_UNREADABLE') {
+      outcome = 'STORE_UNREADABLE'
+      failure ??= result.failure
+    }
   }
-  return { updated: totalUpdated, errors: allErrors }
+  return { outcome, updated: totalUpdated, errors: allErrors, failure }
 }

@@ -31,6 +31,27 @@ import { discloseAndRecord } from '../cos/disclosure.js'
 
 const REAL_LOOKING_SECRET = 'sk-live-9f2b7c41aa8e4d0fb3216e5c77d90142'
 
+// PER-TEST credential store. This file is the OTHER half of the run-10 race in
+// the 2026-08-31 twenty-run sweep: its twelve setSecret/deleteSecret calls each
+// rewrite the whole vault file, and until the store became per-worker they
+// rewrote the SAME file w13-egress-and-credential-criteria.test.ts was using in
+// a different worker. The suite setup makes that impossible across files; this
+// hook makes it impossible across the tests in this one.
+let prevCredStoreDir: string | undefined
+let testCredStoreDir: string
+
+beforeEach(() => {
+  prevCredStoreDir = process.env.MARVEEN_CREDENTIAL_STORE_DIR
+  testCredStoreDir = mkdtempSync(join(tmpdir(), 'w13-known-credstore-'))
+  process.env.MARVEEN_CREDENTIAL_STORE_DIR = testCredStoreDir
+})
+
+afterEach(() => {
+  rmSync(testCredStoreDir, { recursive: true, force: true })
+  if (prevCredStoreDir === undefined) delete process.env.MARVEEN_CREDENTIAL_STORE_DIR
+  else process.env.MARVEEN_CREDENTIAL_STORE_DIR = prevCredStoreDir
+})
+
 function loggerWith(sink: { write: (s: string) => void }) {
   return hardenChild(pino({
     level: 'info',

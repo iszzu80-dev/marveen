@@ -731,7 +731,13 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
     if (!id?.trim() || !value) { json(res, { error: 'id and value required' }, 400); return true }
     setSecret(id.trim(), label || id.trim(), value)
     const syncResult = syncSecret(id.trim())
-    json(res, { ok: true, synced: syncResult.updated })
+    // The secret IS stored; the binding sync is what may have failed. Saying
+    // ok:true with synced:0 here used to be the whole failure report.
+    if (syncResult.outcome === 'STORE_UNREADABLE') {
+      json(res, { ok: false, synced: 0, errors: syncResult.errors, failure: syncResult.failure }, 500)
+      return true
+    }
+    json(res, { ok: true, synced: syncResult.updated, errors: syncResult.errors })
     return true
   }
 
@@ -826,6 +832,10 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
     }
     addBinding(binding)
     const syncResult = syncSecret(data.vaultSecretId)
+    if (syncResult.outcome === 'STORE_UNREADABLE') {
+      json(res, { ok: false, synced: 0, errors: syncResult.errors, failure: syncResult.failure }, 500)
+      return true
+    }
     json(res, { ok: true, synced: syncResult.updated, errors: syncResult.errors })
     return true
   }
@@ -842,7 +852,8 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
 
   if (path === '/api/vault/sync' && method === 'POST') {
     const result = syncAllBindings()
-    json(res, { ok: true, ...result })
+    json(res, { ok: result.outcome === 'COMPLETED', ...result },
+      result.outcome === 'COMPLETED' ? 200 : 500)
     return true
   }
 
@@ -885,7 +896,9 @@ export async function tryHandleConnectors(ctx: RouteContext): Promise<boolean> {
       if (imp.createBinding && imp.targets.length > 0) {
         addBinding({ vaultSecretId: imp.vaultId, envVar: imp.envVar, targets: imp.targets })
         const sync = syncSecret(imp.vaultId)
-        bound++
+        // `bound` counts CONFIGS ACTUALLY WRITTEN. It used to increment once per
+        // attempt, so an import whose every sync failed still reported them bound.
+        if (sync.updated > 0) bound++
         errors.push(...sync.errors)
       }
     }

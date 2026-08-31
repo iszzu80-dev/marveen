@@ -1,15 +1,17 @@
 import { existsSync, readFileSync, renameSync } from 'node:fs'
-import { join } from 'node:path'
 import { randomBytes, createCipheriv, createDecipheriv, scryptSync } from 'node:crypto'
-import { PROJECT_ROOT } from '../config.js'
 import { atomicWriteFileSync } from './atomic-write.js'
+import { credentialStorePath, readJsonStore } from './credential-store.js'
 import { isKeychainAvailable, keychainStore, keychainRetrieve } from './keychain.js'
 import { logger } from '../logger.js'
 import { registerKnownSecret } from '../known-secrets.js'
 
-const VAULT_PATH = join(PROJECT_ROOT, 'store', 'vault.json')
-const VAULT_KEY_PATH = join(PROJECT_ROOT, 'store', '.vault-key')
-const VAULT_KEY_MIGRATED = join(PROJECT_ROOT, 'store', '.vault-key.migrated')
+// Resolved per call, never captured at module load: the test harness points
+// each vitest worker at its own store directory, and a constant would be fixed
+// before it could. See credential-store.ts for the race this closes.
+const VAULT_PATH = () => credentialStorePath('vault.json')
+const VAULT_KEY_PATH = () => credentialStorePath('.vault-key')
+const VAULT_KEY_MIGRATED = () => credentialStorePath('.vault-key.migrated')
 const ALGORITHM = 'aes-256-gcm'
 const KEY_LENGTH = 32
 const IV_LENGTH = 16
@@ -30,11 +32,11 @@ interface VaultStore {
 
 function getMasterKey(): Buffer {
   if (isKeychainAvailable()) {
-    if (existsSync(VAULT_KEY_PATH)) {
-      const fileKey = readFileSync(VAULT_KEY_PATH, 'utf-8').trim()
+    if (existsSync(VAULT_KEY_PATH())) {
+      const fileKey = readFileSync(VAULT_KEY_PATH(), 'utf-8').trim()
       try {
         keychainStore(fileKey)
-        renameSync(VAULT_KEY_PATH, VAULT_KEY_MIGRATED)
+        renameSync(VAULT_KEY_PATH(), VAULT_KEY_MIGRATED())
         logger.info('Vault master key migrated from file to macOS Keychain')
       } catch (err: any) {
         logger.warn({ err: err.message }, 'Keychain migration failed, keeping file-based key')
@@ -51,16 +53,16 @@ function getMasterKey(): Buffer {
       logger.info('New vault master key stored in macOS Keychain')
     } catch (err: any) {
       logger.warn({ err: err.message }, 'Keychain store failed, falling back to file')
-      atomicWriteFileSync(VAULT_KEY_PATH, newKey, { mode: 0o600 })
+      atomicWriteFileSync(VAULT_KEY_PATH(), newKey, { mode: 0o600 })
     }
     return Buffer.from(newKey, 'base64')
   }
 
-  if (!existsSync(VAULT_KEY_PATH)) {
+  if (!existsSync(VAULT_KEY_PATH())) {
     const key = randomBytes(64).toString('base64')
-    atomicWriteFileSync(VAULT_KEY_PATH, key, { mode: 0o600 })
+    atomicWriteFileSync(VAULT_KEY_PATH(), key, { mode: 0o600 })
   }
-  return Buffer.from(readFileSync(VAULT_KEY_PATH, 'utf-8').trim(), 'base64')
+  return Buffer.from(readFileSync(VAULT_KEY_PATH(), 'utf-8').trim(), 'base64')
 }
 
 function deriveKey(master: Buffer, salt: Buffer): Buffer {
@@ -91,13 +93,27 @@ function decrypt(packed: string): string {
   return decipher.update(ciphertext) + decipher.final('utf-8')
 }
 
+function isVaultStore(parsed: unknown): parsed is VaultStore {
+  return !!parsed && typeof parsed === 'object' && Array.isArray((parsed as VaultStore).entries)
+}
+
+/**
+ * A missing vault is the specified initial state and reads as empty. Anything
+ * else — corrupt bytes, a permission error, an unexpected IO failure — throws a
+ * typed CredentialStoreUnreadable rather than answering "no secrets".
+ *
+ * The direction matters: on a credential path, "the store is empty" is the
+ * answer that makes a caller proceed. Before this, an unreadable vault.json
+ * silently became a vault with nothing in it, and setSecret would then have
+ * written a NEW store over the unreadable one, destroying every secret it could
+ * not read.
+ */
 function readVault(): VaultStore {
-  try { return JSON.parse(readFileSync(VAULT_PATH, 'utf-8')) }
-  catch { return { entries: [] } }
+  return readJsonStore<VaultStore>(VAULT_PATH(), { entries: [] }, isVaultStore)
 }
 
 function writeVault(store: VaultStore): void {
-  atomicWriteFileSync(VAULT_PATH, JSON.stringify(store, null, 2) + '\n', { mode: 0o600 })
+  atomicWriteFileSync(VAULT_PATH(), JSON.stringify(store, null, 2) + '\n', { mode: 0o600 })
 }
 
 export function listSecrets(): Array<{ id: string, label: string, createdAt: string, updatedAt: string }> {
