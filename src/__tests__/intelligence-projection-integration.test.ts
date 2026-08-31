@@ -21,12 +21,19 @@ const ins = (over: Record<string, unknown>) => {
 describe('opportunities are conservative by construction', () => {
   const row = (over = {}) => ({
     case_id: 'c1', title: 't', status: 'READY', next_action: null,
-    blocked_reason: null, due_at: null, updated_at: NOW - DAY, ...over,
+    blocked_reason: null, due_at: null, follow_up_at: null, updated_at: NOW - DAY, ...over,
   })
 
-  it('OWED WORK IS NOT AN OPPORTUNITY -- a due date disqualifies it outright', () => {
+  it('OWED WORK IS NOT AN OPPORTUNITY -- a date disqualifies it outright', () => {
     // Otherwise the same work appears in two bands, one of which can interrupt.
     expect(opportunitiesForCase(row({ due_at: NOW + DAY }) as never, 'personal', NOW)).toEqual([])
+  })
+
+  it('and follow_up_at counts as a date, because commitments count it', () => {
+    // The live shadow run reported 43 personal cases derived as BOTH, and the
+    // cause was two definitions of "has a date" in two files: this rule read
+    // due_at, commitments read due_at ?? follow_up_at.
+    expect(opportunitiesForCase(row({ due_at: null, follow_up_at: NOW + DAY }) as never, 'personal', NOW)).toEqual([])
   })
 
   it('a stalled case with no next action and no block is one', () => {

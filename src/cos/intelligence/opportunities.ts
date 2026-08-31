@@ -31,7 +31,7 @@ export interface Opportunity extends IntelligenceElement {
 interface Row {
   case_id: string; title: string; status: string
   next_action: string | null; blocked_reason: string | null
-  due_at: number | null; updated_at: number
+  due_at: number | null; follow_up_at: number | null; updated_at: number
 }
 
 const IDLE_SEC = 21 * 86_400
@@ -58,10 +58,18 @@ export function opportunitiesForCase(row: Row, namespace: 'personal' | 'zst', no
     suggestion,
   })
 
-  // Owed work is NOT an opportunity. A case with a due date has a commitment on
-  // it, and duplicating it here would let the same work appear in two bands --
-  // one of which can interrupt and one of which must not.
-  if (row.due_at != null) return out
+  // Owed work is NOT an opportunity. A case with a date has a commitment on it,
+  // and duplicating it here would let the same work appear in two bands -- one
+  // of which can interrupt and one of which must not.
+  //
+  // THE SAME DATE EXPRESSION AS commitments.ts, and it has to be. The live
+  // shadow run on 2026-08-31 reported 43 personal "anomalies" -- cases derived
+  // as BOTH commitment and opportunity -- and the cause was not the data. This
+  // check read `due_at` while commitments read `due_at ?? follow_up_at`, so
+  // every case with a follow-up and no due date fell through both rules. Two
+  // definitions of "has a date" in two files, and the overlap detector faithfully
+  // reported the disagreement 43 times.
+  if ((row.due_at ?? row.follow_up_at) != null) return out
 
   if (ACTIVE_NOT_BLOCKED.has(row.status) && !row.next_action?.trim() && !row.blocked_reason) {
     out.push(make('STALLED_NO_ACTION',
@@ -83,7 +91,7 @@ export function projectOpportunities(
 ): Opportunity[] {
   const table = namespace === 'personal' ? 'personal_cases' : 'zst_cases'
   const rows = db.prepare(
-    `SELECT case_id, title, status, next_action, blocked_reason, due_at, updated_at
+    `SELECT case_id, title, status, next_action, blocked_reason, due_at, follow_up_at, updated_at
      FROM ${table} WHERE archived_at IS NULL ORDER BY updated_at DESC LIMIT ?`,
   ).all(limit) as Row[]
   return rows.flatMap((r) => opportunitiesForCase(r, namespace, now))
