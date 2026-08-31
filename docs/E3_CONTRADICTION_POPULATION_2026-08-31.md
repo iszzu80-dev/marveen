@@ -116,4 +116,61 @@ Recommendation: **1**, because 2 is a list nobody re-reads and 3 makes the
 Phase 2 gate a formality. But 1 changes a safety predicate, so it starts with
 Istvan saying which question the engine is supposed to be asking.
 
-Nothing in this document was implemented beyond §1's correction.
+---
+
+## 5. RESOLVED — the owner's ruling, and the measurement after it
+
+Istvan chose option 1 on 2026-08-31, and refined it: do not flatten to a single
+"does this need a human?" boolean. A contradiction exists only when two pieces of
+evidence make **incompatible claims about the same concrete next action, on the
+same decision dimension, over the same time horizon**. Case-level need and
+execution permission are different dimensions.
+
+Four axes, implemented in `contradiction-axes.ts`: HUMAN_DEPENDENCY,
+ENGINE_EXECUTION, EXTERNAL_SIDE_EFFECT, TERMINALITY. Each decision in the §7
+vocabulary declares its claims in a total table; a decision is **silent** on the
+rest, and silence is not disagreement.
+
+### The population, measured on the live store after the change
+
+| | count | share |
+|---|---|---|
+| active, progression-enabled | 181 | |
+| contradicted, old predicate | 152 | 0.84 |
+| removed: invalid evidence (never a contradiction) | 15 | |
+| removed: cross-axis, two different questions | 90 | |
+| **contradicted, axis model** | **47** | **0.26** |
+
+Kept, by branch: POLICY 43, CONFIDENCE 4.
+Kept, by axis: ENGINE_EXECUTION 29, TERMINALITY 14.
+Kept, by pair: WAIT_EXTERNAL vs CONTINUE_AUTONOMOUSLY 21, COMPLETE vs
+CONTINUE_AUTONOMOUSLY 13, WAIT_TIME vs CONTINUE_AUTONOMOUSLY 8,
+ASK_INFORMATION vs COMPLETE 1.
+
+The COMPLETE-versus-continue dispute stays blocking, as required — it is a real
+disagreement on the TERMINALITY axis, and the policy's own reason admits its DoD
+is a generic status template rather than this case's.
+
+### External-action candidates actually blocked
+
+**Zero, today.** All 183 enrolled cases are in `internal` progression mode and
+the ledger holds one PLANNED row and no proposed external actions, so the
+contradiction veto binds on nothing in practice right now. What the number means
+is forward-looking: when Checkpoint E proposes external actions, 47 cases carry a
+contradiction that would veto one, down from 152.
+
+### A veto the axis test would have erased, caught by measuring
+
+The first implementation applied the axis test to every branch. A CONFIDENCE
+refusal has reader and policy **agreeing** (rung 3 is only reached when they do),
+so the axis test found no conflicting claims and silently dropped the
+confidence-floor veto on four live cases. The re-judgement is now restricted to
+the POLICY branch. Reading the diff would not have found this; counting the
+population did.
+
+### And the sentence that governs all of it
+
+NO RELEVANT CONTRADICTION != ALLOW. Removing this veto is not permission. Action
+semantics, reachesOutside, capability, risk class, scoped approval, W12
+idempotency, disclosure and egress each still have to pass on their own, and a
+test asserts that the helper answers one question and never "may this go out".

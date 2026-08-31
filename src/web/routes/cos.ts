@@ -54,7 +54,8 @@ import { listNeedsHuman, listDueForRetry } from '../../cos/recovery-queue.js'
 import { operationalHealth } from '../../cos/operational-health.js'
 import { linkCases, suggestLinks, linkedCases } from '../../cos/case-link.js'
 import { classifyScope, describeScope } from '../../cos/scope-gate.js'
-import { contradictorySql } from '../../cos/reader-arbitration.js'
+import { packetIsContradictory } from '../../cos/reader-arbitration.js'
+import { isAxisContradiction } from '../../cos/contradiction-axes.js'
 import { deriveAnswerOptions } from '../../cos/answer-options.js'
 import { interpretOwnerAnswer, ballMoved } from '../../cos/answer-interpretation.js'
 import { resolveInterpreter } from '../../cos/interpreter-provider.js'
@@ -1255,7 +1256,8 @@ function contradictionHealth(
 ): { active: number; contradicted: number; clean: number; share: number } {
   try {
     const rows = db.prepare(
-      `SELECT ${contradictorySql('p')} AS c
+      `SELECT p.conflict_reason AS reason, p.decided_by AS decidedBy,
+              p.reader_candidate AS rc, p.policy_result AS pr
          FROM case_progression_state s
          JOIN case_evidence_packets p
            ON p.domain = s.domain AND p.case_id = s.case_id
@@ -1263,8 +1265,19 @@ function contradictionHealth(
                 SELECT MAX(created_at) FROM case_evidence_packets
                  WHERE domain = s.domain AND case_id = s.case_id)
         WHERE s.progression_enabled = 1`,
-    ).all() as Array<{ c: number }>
-    const contradicted = rows.filter(r => r.c === 1).length
+    ).all() as Array<{ reason: string | null; decidedBy: string | null; rc: string | null; pr: string | null }>
+    // Derived from the AXIS MODEL, not from the stored prose. History matters
+    // here: rows written before 2026-08-31 carry the old "any difference is a
+    // conflict" reason string, and a metric that trusted it would keep
+    // reporting the number the owner's ruling replaced. Falling back to the
+    // stored reason only when the two candidates are missing.
+    const contradicted = rows.filter(r => {
+      if (r.decidedBy === 'INVALID_PACKET') return false
+      // Only the POLICY branch is re-judged on axes -- a CONFIDENCE veto has the
+      // two sides agreeing, so an axis test would erase it. See decision-confidence.
+      if ((r.decidedBy === 'POLICY' || r.decidedBy === 'POLICY_CROSS_AXIS') && r.rc && r.pr) return isAxisContradiction(r.rc, r.pr)
+      return packetIsContradictory({ conflictReason: r.reason, decidedBy: r.decidedBy })
+    }).length
     const active = (db.prepare(
       `SELECT COUNT(*) AS n FROM case_progression_state WHERE progression_enabled = 1`,
     ).get() as { n: number }).n

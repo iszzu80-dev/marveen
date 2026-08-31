@@ -16,6 +16,7 @@
 // policy_result, conflict_reason, safe_fallback_decision — because a suggestion
 // that was silently overruled and a suggestion that was silently followed look
 // identical afterwards, and the difference is the whole safety argument.
+import { axisConflicts } from './contradiction-axes.js'
 import type { ProgressionDecision } from './reader.js'
 
 /** Decisions that can cause something to happen OUTSIDE this system. §13.1's
@@ -68,7 +69,7 @@ export interface ArbitrationResult {
    *  without re-deriving it. */
   safeFallbackDecision: string
   /** Which rung of §13.1's ladder decided this. */
-  decidedBy: 'HARD_GATE' | 'POLICY' | 'CONFIDENCE' | 'INVALID_PACKET' | 'READER_AGREES'
+  decidedBy: 'HARD_GATE' | 'POLICY' | 'POLICY_CROSS_AXIS' | 'CONFIDENCE' | 'INVALID_PACKET' | 'READER_AGREES'
 }
 
 /**
@@ -119,12 +120,34 @@ export function arbitrate(input: ArbitrationInput): ArbitrationResult {
   }
 
   // Rung 2 — deterministic policy. Any disagreement ends here: POLICY WINS.
+  //
+  // But "disagreement" is now the owner's definition (2026-08-31): two claims on
+  // the SAME decision axis. A reader asking for a person and a policy saying the
+  // engine can keep working internally are not opposites, and recording them as
+  // contradictory evidence refused every outward action on 106 of 133 cases for
+  // a reason that did not hold. Policy still wins the DECISION either way -- what
+  // changed is whether the difference is also called a contradiction.
   if (readerCandidate !== policyDecision) {
+    const axes = axisConflicts(readerCandidate, policyDecision)
+    if (axes.length === 0) {
+      return {
+        ...base,
+        finalDecision: policyDecision,
+        conflict: false,
+        conflictReason: null,
+        safeFallbackDecision: policyDecision,
+        // Recorded as its own outcome rather than as a note nobody can query:
+        // `decided_by` is persisted, and a later reader must be able to tell
+        // "these two spoke about different things" from "they never differed".
+        decidedBy: 'POLICY_CROSS_AXIS',
+      }
+    }
     return {
       ...base,
       finalDecision: policyDecision,
       conflict: true,
-      conflictReason: `reader proposed ${readerCandidate}, deterministic policy decided ${policyDecision}`,
+      conflictReason: `reader proposed ${readerCandidate}, deterministic policy decided ${policyDecision}`
+        + ` — ${axes.map(a => a.reason).join('; ')}`,
       safeFallbackDecision: policyDecision,
       decidedBy: 'POLICY',
     }

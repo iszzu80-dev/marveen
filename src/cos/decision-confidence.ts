@@ -60,6 +60,7 @@
 
 import type Database from 'better-sqlite3'
 import { NON_CONFLICT_DECIDED_BY } from './reader-arbitration.js'
+import { axisConflicts } from './contradiction-axes.js'
 import type { EnforcementVerdict, SideEffectClass } from './capability-contract.js'
 // TYPE ONLY, deliberately. `action-side-effect.ts` imports the risk vocabularies
 // from here at run time; importing its values back would close a module cycle.
@@ -580,9 +581,10 @@ export function gatherRequiredInputs(
   //    history, and history that never expires would cap every case for ever.
   try {
     const r = db.prepare(
-      `SELECT conflict_reason AS c, decided_by AS by FROM case_evidence_packets
+      `SELECT conflict_reason AS c, decided_by AS by,
+              reader_candidate AS rc, policy_result AS pr FROM case_evidence_packets
         WHERE domain = ? AND case_id = ? ORDER BY created_at DESC LIMIT 1`,
-    ).get(domain, caseId) as { c?: string | null; by?: string | null } | undefined
+    ).get(domain, caseId) as { c?: string | null; by?: string | null; rc?: string | null; pr?: string | null } | undefined
     if (!r) {
       add('evidence_non_conflicting', 'PASS', 'nincs bizonyíték-csomag ehhez az ügyhöz')
       add('reader_evidence_valid', 'PASS', 'nincs bizonyíték-csomag ehhez az ügyhöz')
@@ -600,7 +602,26 @@ export function gatherRequiredInputs(
       add('evidence_non_conflicting', 'PASS', 'nincs ellentmondás: nem volt ervenyes olvasat, amivel ütközhetne')
       add('reader_evidence_valid', 'FAIL', `érvénytelen bizonyíték-csomag: ${r.c}`)
     } else if (r.c) {
-      add('evidence_non_conflicting', 'FAIL', `ellentmondó olvasat: ${r.c}`)
+      // The stored reason may predate the owner's 2026-08-31 ruling, so the
+      // AXIS MODEL decides -- on the two candidates the row actually holds --
+      // and the prose is only used when they are missing. A gate that inherited
+      // the old sentence would keep refusing on cross-axis differences after
+      // they stopped being contradictions.
+      // ONLY the POLICY branch is re-judged on axes. A CONFIDENCE refusal has
+      // reader and policy AGREEING (rung 3 is only reached when they do), so an
+      // axis test would find no conflicting claims and silently drop a
+      // confidence-floor veto the owner never asked me to touch. Same for
+      // HARD_GATE. Caught by measuring: four live rows would have walked
+      // through this.
+      const axes = (r.by === 'POLICY' || r.by === 'POLICY_CROSS_AXIS') && r.rc && r.pr
+        ? axisConflicts(r.rc, r.pr) : null
+      if (axes && axes.length === 0) {
+        add('evidence_non_conflicting', 'PASS',
+          `eltérő olvasat, de MÁS tengelyen — nem ellentmondás: ${r.rc} kontra ${r.pr}`)
+      } else {
+        add('evidence_non_conflicting', 'FAIL',
+          axes && axes.length ? `ellentmondó olvasat — ${axes.map(a => a.reason).join('; ')}` : `ellentmondó olvasat: ${r.c}`)
+      }
       add('reader_evidence_valid', 'PASS', 'a csomag érvényes volt')
     } else {
       add('evidence_non_conflicting', 'PASS', 'az utolsó csomag konfliktusmentes')

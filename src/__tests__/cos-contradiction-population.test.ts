@@ -32,13 +32,34 @@ describe('E3: what counts as a contradiction', () => {
     expect(packetIsContradictory({ conflictReason: r.conflictReason, decidedBy: r.decidedBy })).toBe(false)
   })
 
-  it('a real disagreement IS one, and the predicate agrees with the flag', () => {
+  // UPDATED after the owner's ruling of 2026-08-31, and the update is the
+  // ruling. This test used to assert that ASK_INFORMATION against
+  // CONTINUE_AUTONOMOUSLY is a contradiction. It is not: one speaks about
+  // whether a person is needed, the other about whether the engine may take its
+  // next step, and the owner named exactly this pair as the compatible case.
+  it('a SAME-AXIS disagreement IS one, and the predicate agrees with the flag', () => {
+    // TERMINALITY, both speaking, opposite claims.
+    const r = arbitrate({
+      readerCandidate: 'COMPLETE', confidence: 0.9,
+      policyDecision: 'CONTINUE_AUTONOMOUSLY', packetValid: true,
+    })
+    expect(r.conflict).toBe(true)
+    expect(r.conflictReason).toContain('TERMINALITY')
+    expect(packetIsContradictory({ conflictReason: r.conflictReason, decidedBy: r.decidedBy })).toBe(true)
+  })
+
+  it('a CROSS-AXIS difference is not a contradiction, and says so in decided_by', () => {
     const r = arbitrate({
       readerCandidate: 'ASK_INFORMATION', confidence: 0.9,
       policyDecision: 'CONTINUE_AUTONOMOUSLY', packetValid: true,
     })
-    expect(r.conflict).toBe(true)
-    expect(packetIsContradictory({ conflictReason: r.conflictReason, decidedBy: r.decidedBy })).toBe(true)
+    expect(r.conflict).toBe(false)
+    expect(r.conflictReason).toBeNull()
+    // Not silence: a later reader must be able to tell "they spoke about
+    // different things" from "they never differed".
+    expect(r.decidedBy).toBe('POLICY_CROSS_AXIS')
+    // POLICY still wins the decision itself.
+    expect(r.finalDecision).toBe('CONTINUE_AUTONOMOUSLY')
   })
 
   it('the predicate and the flag never disagree, across every branch', () => {
