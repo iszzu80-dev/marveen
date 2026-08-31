@@ -31,7 +31,7 @@ function packet(caseId: string): ReaderEvidencePacket {
 }
 
 /** A candidate case with a fresh evidence packet, i.e. something to ask about. */
-function candidate(caseId: string, opts: { status?: string; packetAt?: number } = {}): void {
+function candidate(caseId: string, opts: { status?: 'AWAITING_SELECTION' | 'NEW'; packetAt?: number } = {}): void {
   const db = getDb()
   // The case and its packet share a timestamp: a packet older than the case it
   // describes is STALE and is skipped before any ordering happens, so an
@@ -138,5 +138,37 @@ describe('E2: the scarce slot goes to the class that cannot wait', () => {
     // question does not get answered faster, it gets the channel muted.
     expect(r.asked).toBe(0)
     expect(askedCases()).toEqual([])
+  })
+})
+
+describe('the wall says what is behind it', () => {
+  beforeEach(() => { initDatabase(':memory:'); initProgressionSchema(getDb()) })
+
+  it('the daily digest names the held classes, without giving any of them a slot', async () => {
+    const { buildPlannedDigest } = await import('../cos/outbound-alert.js')
+    fillChannel(0)
+    candidate('NORMAL-9')
+    candidate('BLOCK-9', { status: 'AWAITING_SELECTION' })
+    candidate('APPR-9')
+    openApproval('APPR-9')
+
+    const d = buildPlannedDigest(getDb(), T0 + 1)
+    expect(d.text).toContain('A KERDES-CSATORNA TELE VAN')
+    // The part that did not exist: a channel blocked by five shopping questions
+    // read exactly like one blocked while an authorization gate waited behind
+    // it, and those need opposite responses from him.
+    expect(d.text).toContain('A fal MOGOTT')
+    expect(d.text).toContain('SAFETY_APPROVAL')
+    expect(d.text).toContain('APPR-9')
+    // Reported, not promoted: nothing was asked.
+    expect(askedCases()).toEqual([])
+  })
+
+  it('says nothing extra when the channel has room -- the line is about a wall', async () => {
+    const { buildPlannedDigest } = await import('../cos/outbound-alert.js')
+    fillChannel(3)
+    candidate('NORMAL-10')
+    const d = buildPlannedDigest(getDb(), T0 + 1)
+    expect(d.text).not.toContain('A fal MOGOTT')
   })
 })

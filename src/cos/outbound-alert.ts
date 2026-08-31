@@ -10,7 +10,7 @@
 import type Database from 'better-sqlite3'
 import { createAgentMessage, appendDailyLog } from '../db.js'
 import { APP_TZ } from '../config.js'
-import { ownerQuestionCapacity } from './owner-question.js'
+import { ownerQuestionCapacity, heldOwnerQuestionBacklog } from './owner-question.js'
 
 interface RecRow { ledger_id: string; case_id: string | null; action_type: string; last_error: string | null }
 
@@ -146,11 +146,34 @@ export function buildPlannedDigest(db: Database.Database, now: number, limit = 2
   // card is about: a second daily surface is a second thing that can stop
   // firing unnoticed. This one already speaks every day, zero case included.
   const capacity = ownerQuestionCapacity(db)
+  // E2, 2026-08-31: WHAT IS WAITING BEHIND THE WALL, and of what kind.
+  //
+  // The ceiling line above has said "full, and here is who holds the slots"
+  // since 08-15. It never said what the wall was holding back, so a channel
+  // blocked by five shopping questions read exactly like one blocked while an
+  // authorization gate and a parked decision queued behind it. Those need
+  // opposite responses from him and the message could not tell them apart.
+  //
+  // Reported, NOT given a slot. The class ordering decides who is asked next
+  // when a slot frees; it deliberately does not preempt a question already on
+  // his board. Visibility is the part that does not need his permission.
+  const heldLine = (() => {
+    if (!capacity.full) return ''
+    let held: ReturnType<typeof heldOwnerQuestionBacklog>
+    try { held = heldOwnerQuestionBacklog(db, now) } catch { return '' }
+    if (!held.total) return ''
+    const byClass = held.byClass.map(c => `${c.count} ${c.cls}`).join(', ')
+    const worst = held.top[0]
+    return `\n\nA fal MOGOTT ${held.total} kerdes var (${byClass}).`
+      + (worst ? ` A legregebben varo: ${worst.caseId} (${worst.cls}, ${Math.floor(worst.ageSec / 86_400)} napja).` : '')
+      + ` Egy valasz barmelyik fenti kerdesre ezek kozul a legsurgosebbet engedi ki.`
+  })()
   const capacityLine = capacity.full
     ? `\n\n⛔ A KERDES-CSATORNA TELE VAN (${capacity.open}/${capacity.cap}).`
       + ` Amig egyet meg nem valaszolsz, UJ kerdes nem tud kimenni -- egyik ugyrol sem.`
       + ` A helyet ezek foglaljak:\n`
       + capacity.questions.map(q => `- ${q.caseId}: ${firstLine(q.text)}`).join('\n')
+      + heldLine
     : ''
 
   if (total === 0) {

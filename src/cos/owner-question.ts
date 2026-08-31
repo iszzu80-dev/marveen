@@ -1265,6 +1265,51 @@ export interface QuestionCapacity {
  * VISIBLE, with the names of what is blocking it, because answering any one of
  * them is what frees the next.
  */
+/**
+ * WHAT IS HELD BEHIND A FULL CHANNEL, and of what class.
+ *
+ * Derived from the store on every call, deliberately: a second table recording
+ * "held" would be a copy of a fact the candidate query already answers, and a
+ * copy is a thing that can disagree with the original. This one cannot go
+ * stale, and it survives a restart for the same reason.
+ *
+ * The class expression is the SAME one the ask loop orders by. If those two
+ * ever diverge, the report would describe a queue nobody is serving.
+ */
+export function heldOwnerQuestionBacklog(
+  db: Database.Database, now = Math.floor(Date.now() / 1000),
+): {
+  total: number
+  byClass: Array<{ cls: QuestionClass; count: number }>
+  top: Array<{ caseId: string; cls: QuestionClass; ageSec: number }>
+} {
+  const empty = { total: 0, byClass: [] as Array<{ cls: QuestionClass; count: number }>, top: [] }
+  let rows: Array<{ case_id: string; question_class: number; packet_at: number }> = []
+  try {
+    const cls = questionClassSql(approvalTablePresent(db))
+    rows = db.prepare(
+      `SELECT p.case_id, p.created_at AS packet_at, ${cls} AS question_class
+       ${QUESTION_CANDIDATES_SQL}
+       ORDER BY ${cls}, ${QUESTION_ORDER_TAIL}`,
+    ).all({ now }) as never
+  } catch { return empty }
+  if (!rows.length) return empty
+  const counts = new Map<QuestionClass, number>()
+  for (const r of rows) {
+    const k = QUESTION_CLASS_NAMES[r.question_class] ?? 'NORMAL'
+    counts.set(k, (counts.get(k) ?? 0) + 1)
+  }
+  return {
+    total: rows.length,
+    byClass: QUESTION_CLASS_NAMES.filter(c => counts.has(c)).map(c => ({ cls: c, count: counts.get(c)! })),
+    top: rows.slice(0, 3).map(r => ({
+      caseId: r.case_id,
+      cls: QUESTION_CLASS_NAMES[r.question_class] ?? 'NORMAL',
+      ageSec: Math.max(0, now - r.packet_at),
+    })),
+  }
+}
+
 export function ownerQuestionCapacity(db: Database.Database): QuestionCapacity {
   const questions = outstandingOwnerQuestions(db, MAX_OUTSTANDING_QUESTIONS * 4)
     .map(q => ({ caseId: q.caseId, text: q.text, askedAt: q.askedAt }))
