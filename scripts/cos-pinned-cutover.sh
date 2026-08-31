@@ -89,13 +89,6 @@ run "mkdir -p '$GUARD'"
 run "git -C '$REPO' show '$GATE:scripts/run-pinned-cos-cycle.sh' > '$GUARD/run-pinned-cos-cycle.sh'"
 run "chmod +x '$GUARD/run-pinned-cos-cycle.sh'"
 
-# 4. The three pointers move TOGETHER. A cycle release ahead of its feeder is
-#    exactly the split the guard's check 4 exists to catch.
-for pair in "cos-cycle-current:$CYCLE" "scheduled-scripts-current:$FEEDER" "guard-current:$GUARD"; do
-  run "rm -f '$REL/${pair%%:*}' && ln -s '${pair#*:}' '$REL/${pair%%:*}'"
-done
-say "pointers moved together"
-
 # 5. The runtime build, with a backup NAMED AFTER WHAT IT ACTUALLY IS -- read from
 #    the pin being replaced, never typed by hand. This is the step that went wrong
 #    on 2026-08-26.
@@ -104,7 +97,64 @@ if [ -d "$REPO/dist" ]; then
   run "cp -a '$REPO/dist' '$REPO/dist.pre-$PREV_SHA-$STAMP'"
   say "runtime backup: dist.pre-$PREV_SHA-$STAMP (named from the pin it replaces)"
 fi
-run "cd '$REPO' && npm run build >/dev/null 2>&1 || npx tsc -p tsconfig.json"
+# THE BUILD SOURCE IS THE ARTIFACT, NEVER THE SHARED CHECKOUT.
+#
+# This line used to be `cd $REPO && npm run build`. $REPO is the shared checkout,
+# which sits on develop -- so on 2026-08-31 a clean cutover of a8c22955 produced a
+# dist built from develop while this script's own pin declared a8c22955, and
+# nothing could see it: run-pinned-cos-cycle.sh reads runtimeSha OUT OF THE PIN,
+# so the readback compared the declaration to itself.
+#
+# build-release-dist.ts compiles inside releases/cos-cycle-<short>/ (extracted by
+# `git archive` above), MEASURES that source tree against a fresh `git archive` of
+# the same sha before compiling, and writes a provenance manifest into the dist
+# from the bytes it produced. It exits 93 rather than build something it cannot
+# vouch for.
+if [ $DRY = 1 ]; then
+  say "would: (cd '$CYCLE' && npx tsx scripts/build-release-dist.ts '$CYCLE' --expect-sha '$SHA')"
+  say "would: install that dist as $REPO/dist (after provenance verification)"
+else
+  # THE RELEASE TOOLING COMES FROM THE RELEASE, exactly like the guard does.
+  # Calling $REPO/scripts/build-release-dist.ts would have run the SHARED
+  # checkout's copy -- the same class of mistake as building from the shared
+  # checkout, one level up: a build script that moves with develop cannot vouch
+  # for a pinned artifact. $CYCLE/scripts came out of `git archive $SHA` above.
+  [ -f "$CYCLE/scripts/build-release-dist.ts" ] \
+    || die "candidate $SHORT ships no scripts/build-release-dist.ts -- it predates build provenance and cannot be deployed by this cutover"
+  ( cd "$CYCLE" && npx tsx scripts/build-release-dist.ts "$CYCLE" --expect-sha "$SHA" ) \
+    || die "the release artifact did not build, or could not prove itself -- nothing installed, pin unchanged"
+
+  # FAIL CLOSED BEFORE THE SWAP. The artifact must prove the exact candidate sha
+  # while it is still only a directory; an unproven artifact never becomes dist.
+  ( cd "$CYCLE" && npx tsx scripts/verify-runtime-provenance.ts --dist "$CYCLE/dist" --expect "$SHA" >/dev/null ) \
+    || die "the built artifact does not prove $SHORT -- nothing installed, pin unchanged"
+
+  run "rm -rf '$REPO/dist' && cp -a '$CYCLE/dist' '$REPO/dist'"
+  say "installed dist from $CYCLE/dist (provenance-verified)"
+
+  # And again on the DEPLOYED copy: cp is not proof that what landed is what was
+  # verified.
+  ( cd "$CYCLE" && npx tsx scripts/verify-runtime-provenance.ts --dist "$REPO/dist" --expect "$SHA" >/dev/null ) \
+    || die "the INSTALLED dist does not prove $SHORT -- the copy did not land intact"
+  say "deployed dist re-verified in place"
+fi
+
+# 5b. ONLY NOW do the pointers move.
+#
+# They used to move BEFORE the build, and a refusal after that point left
+# `cos-cycle-current` aimed at a candidate the pin does not name -- which makes
+# the guard's check 1 fail and stops the CoS cycle. That is the 2026-08-26
+# incident shape, reached by a script whose whole purpose is to avoid it. Found
+# on 2026-08-31 by running a candidate that ships no build tooling: the refusal
+# was correct and the state it left behind was not.
+#
+# FAIL CLOSED HAS TO MEAN "NOTHING CHANGED", not "we stopped halfway". Every step
+# that can refuse now runs while the pointers still aim at the outgoing release,
+# so a refused cutover leaves a system that is exactly as it was.
+for pair in "cos-cycle-current:$CYCLE" "scheduled-scripts-current:$FEEDER" "guard-current:$GUARD"; do
+  run "rm -f '$REL/${pair%%:*}' && ln -s '${pair#*:}' '$REL/${pair%%:*}'"
+done
+say "pointers moved together (after the artifact proved itself)"
 
 # 6. The pin: the single statement of what the gate IS. Both digests, computed
 #    from the files just written -- neither script can verify itself.
@@ -136,6 +186,10 @@ fi
 #    stop the thing it was meant to stop.
 if [ $DRY = 0 ]; then
   bash "$REPO/scripts/cos-cycle-preflight.sh" --verify-only || die "the gate REFUSES the state this script just wrote -- nothing restarted"
+  # The gate checks the pin against the release. This checks the RUNTIME against
+  # the pin, measured from the deployed artifact -- the half the gate cannot do.
+  ( cd "$CYCLE" && MARVEEN_REPO_ROOT="$REPO" npx tsx scripts/verify-runtime-provenance.ts --expect-from-pin ) \
+    || die "the DEPLOYED runtime does not prove the sha the pin declares" 
   echo "cutover staged and gate-verified. Restart the runtime, then read the pin back."
 else
   echo "dry run complete; nothing written."
