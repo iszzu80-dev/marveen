@@ -167,4 +167,23 @@ describe('recency and identity', () => {
   it('a case with neither next action nor title yields NOTHING rather than an empty promise', () => {
     expect(commitmentsForCase(caseRow({ next_action: null, title: '' }), [], 'personal', NOW)).toEqual([])
   })
+
+  it('A BARE TITLE IS NOT A PROMISE -- nothing owed, no commitment', () => {
+    // Found by mutation: with `next_action || title`, every titled case became a
+    // commitment, the overlap rule then dropped every opportunity as a
+    // duplicate, and two tests were passing over an empty set.
+    expect(commitmentsForCase(
+      caseRow({ next_action: null, due_at: null, follow_up_at: null, title: 'Just a case' }),
+      [], 'personal', NOW,
+    )).toEqual([])
+  })
+
+  it('but a DATE makes it owed, and then the title is the wording', () => {
+    const c = commitmentsForCase(
+      caseRow({ next_action: null, due_at: NOW + 3600, title: 'Renew the licence' }),
+      [], 'personal', NOW,
+    )[0]
+    expect(c.statement).toBe('Renew the licence')
+    expect(c.provenance[0].field).toBe('title')
+  })
 })

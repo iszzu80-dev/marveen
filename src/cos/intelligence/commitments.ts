@@ -88,7 +88,21 @@ function ownerOf(row: CaseRow): CommitmentOwner {
 export function commitmentsForCase(
   row: CaseRow, events: readonly EventRow[], namespace: 'personal' | 'zst', now: number,
 ): Commitment[] {
-  const what = row.next_action?.trim() || row.title?.trim()
+  // A COMMITMENT NEEDS SOMETHING OWED. A bare title is not a promise.
+  //
+  // Found by mutation on 2026-08-31: with `next_action || title` every case with
+  // a title became a commitment, so the overlap rule in project.ts dropped EVERY
+  // opportunity as a duplicate and the opportunity surface was structurally
+  // empty. Two tests were passing over nothing -- "an opportunity never
+  // interrupts" cannot fail when no opportunity exists -- and the mutant that
+  // fed opportunities in as obligations stayed green for the same reason.
+  //
+  // So: a next action (someone owes a step), or a date (someone owes it BY
+  // then). The title is only ever the WORDING when a date exists without a
+  // stated action; it is never the reason a commitment exists.
+  const dueForCheck = row.due_at ?? row.follow_up_at ?? null
+  const owed = row.next_action?.trim() || (dueForCheck != null ? row.title?.trim() : '')
+  const what = owed
   if (!what) return []
 
   const caseProv: Provenance = {
