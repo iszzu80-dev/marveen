@@ -291,7 +291,7 @@ describe('costops API (route smoke)', () => {
   // Phase 3 (GAP-11): budget CRUD + history routes.
   //
   // These write through the REAL config load/save path -- which is the point of
-  // the test -- but into a throwaway file (see COSTOPS_CONFIG_PATH above, C-5),
+  // the test -- but into a throwaway file (see COSTOPS_CONFIG_PATH() above, C-5),
   // so a skipped cleanup can no longer leak into another test file or into the
   // operator's own config.
   describe('budget CRUD + history routes (GAP-11)', () => {

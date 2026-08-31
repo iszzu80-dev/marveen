@@ -38,7 +38,7 @@ describe('optimization API (route smoke)', () => {
     // per-request path override, matching production behaviour: one shared
     // config file) -- reset it before every test so config-mutating tests
     // don't leak state into the next one via the actual filesystem.
-    for (const p of [OPTIMIZATION_CONFIG_PATH, `${OPTIMIZATION_CONFIG_PATH}.bak`]) {
+    for (const p of [OPTIMIZATION_CONFIG_PATH(), `${OPTIMIZATION_CONFIG_PATH()}.bak`]) {
       if (existsSync(p)) rmSync(p)
     }
   })

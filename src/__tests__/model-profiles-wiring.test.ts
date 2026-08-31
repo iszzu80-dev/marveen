@@ -10,6 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { storePath } from '../config.js';
 import {
   readAgentModel,
   resolveAgentModelDetailed,
@@ -19,7 +20,11 @@ import {
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PROJECT_ROOT = join(SRC, '..');
-const MAP_PATH = join(PROJECT_ROOT, 'store', 'model-profile-map.json');
+// T5 (owner, 2026-08-31): this wrote the PRODUCTION store/model-profile-map.json
+// -- the file that decides which model every fleet agent runs on -- and restored
+// it by deleting it, so a run in a live checkout left the fleet with no map at
+// all. It now resolves through the same isolated store the runtime reads.
+const MAP_PATH = () => storePath('model-profile-map.json');
 
 const MAP = {
   version: 'wiring-test-1',
@@ -45,7 +50,7 @@ let createdStore = false;
 beforeAll(() => {
   createdStore = !existsSync(join(PROJECT_ROOT, 'store'));
   mkdirSync(join(PROJECT_ROOT, 'store'), { recursive: true });
-  writeFileSync(MAP_PATH, JSON.stringify(MAP, null, 2));
+  writeFileSync(MAP_PATH(), JSON.stringify(MAP, null, 2));
   invalidateModelProfileMapCache();
   for (const [name, cfg] of Object.entries(FIXTURES)) {
     mkdirSync(join(AGENTS_BASE_DIR, name), { recursive: true });
@@ -55,7 +60,7 @@ beforeAll(() => {
 
 afterAll(() => {
   for (const name of Object.keys(FIXTURES)) rmSync(join(AGENTS_BASE_DIR, name), { recursive: true, force: true });
-  rmSync(MAP_PATH, { force: true });
+  rmSync(MAP_PATH(), { force: true });
   if (createdStore) rmSync(join(PROJECT_ROOT, 'store'), { recursive: true, force: true });
   invalidateModelProfileMapCache();
 });

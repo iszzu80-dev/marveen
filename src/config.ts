@@ -11,6 +11,32 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 
 export const PROJECT_ROOT = join(__dirname, '..')
 export const STORE_DIR = join(PROJECT_ROOT, 'store')
+
+/**
+ * The store directory, resolved on EVERY call.
+ *
+ * T5 TEST<->RUNTIME FILESYSTEM ISOLATION (owner, 2026-08-31): "a test must not
+ * mutate a repo/store path that the running production runtime can read as real
+ * persistent state." The PRODUCTION-AUTHORITATIVE files -- everything in
+ * backup.ts POLICY_FILES, plus the policy/override and checkpoint files that
+ * list has never classified -- resolve their path through here, so the suite can
+ * point every worker at its own directory.
+ *
+ * Per call, never captured at module load: a constant is fixed before any
+ * harness can move it. That is the exact defect that made store/vault.json a
+ * shared fixture and failed run 10 of the 2026-08-31 sweep.
+ *
+ * STORE_DIR above is deliberately left alone: it also carries the database, the
+ * pid file and the live-install markers, and redirecting those would change what
+ * the suite is testing rather than isolate it.
+ */
+export function storeDir(): string {
+  return process.env.MARVEEN_STORE_DIR || join(PROJECT_ROOT, 'store')
+}
+
+export function storePath(name: string): string {
+  return join(storeDir(), name)
+}
 export const DB_FILENAME = 'claudeclaw.db'
 export const PID_FILENAME = 'claudeclaw.pid'
 
@@ -27,7 +53,7 @@ const env = readEnvFile()
 // the saved override would never be read by the boot-time consumers.
 function readConfigOverrides(): Record<string, unknown> {
   try {
-    const p = join(STORE_DIR, 'config-overrides.json')
+    const p = storePath('config-overrides.json')
     return existsSync(p) ? (JSON.parse(readFileSync(p, 'utf8')) as Record<string, unknown>) : {}
   } catch {
     return {}

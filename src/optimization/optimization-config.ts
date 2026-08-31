@@ -1,7 +1,7 @@
 import { copyFileSync, existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { PROJECT_ROOT } from '../config.js'
+import { PROJECT_ROOT, storePath } from '../config.js'
 import { atomicWriteFileSync } from '../web/atomic-write.js'
 import { setCapacityRoutingEnabled, clearAllRuntimeOverlays } from '../web/capacity-routing-store.js'
 import { getDb } from '../db.js'
@@ -127,7 +127,7 @@ export const DEFAULT_OPTIMIZATION_CONFIG: OptimizationConfig = {
   lastEnabledConfiguration: null,
 }
 
-export const OPTIMIZATION_CONFIG_PATH = join(PROJECT_ROOT, 'store', 'optimization-config.json')
+export const OPTIMIZATION_CONFIG_PATH = () => storePath('optimization-config.json')
 
 const MODULE_KEYS = [
   'measurement',
@@ -265,7 +265,7 @@ export interface ReadOptimizationConfigResult {
   errors: string[]
 }
 
-export function readOptimizationConfig(path: string = OPTIMIZATION_CONFIG_PATH): ReadOptimizationConfigResult {
+export function readOptimizationConfig(path: string = OPTIMIZATION_CONFIG_PATH()): ReadOptimizationConfigResult {
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, 'utf-8'))
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -383,7 +383,7 @@ export function writeOptimizationConfig(
     clearOverlays?: () => number
   } = {},
 ): WriteOptimizationConfigResult {
-  const path = opts.path ?? OPTIMIZATION_CONFIG_PATH
+  const path = opts.path ?? OPTIMIZATION_CONFIG_PATH()
   const current = readOptimizationConfig(path).config
 
   if (opts.expectedVersion !== undefined && opts.expectedVersion !== current.version) {

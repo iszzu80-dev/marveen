@@ -27,7 +27,7 @@ import { join } from 'node:path'
 import {
   initDatabase, getDb, createApproval, getApproval, createKanbanCard, getKanbanCard,
 } from '../db.js'
-import { PROJECT_ROOT, MAIN_AGENT_ID } from '../config.js'
+import { PROJECT_ROOT, MAIN_AGENT_ID, storePath } from '../config.js'
 import { tryHandleApg } from '../web/routes/apg.js'
 import { tryHandleKanban } from '../web/routes/kanban.js'
 import { tryHandleApprovals } from '../web/routes/approvals.js'
@@ -71,20 +71,20 @@ const OPERATOR_SESSION: RouteContext['auth'] = { kind: 'session', user: 'istvan'
 /** An enrolled device: operator-class, but it names a device, not a person. */
 const OPERATOR_DEVICE: RouteContext['auth'] = { kind: 'device', device: 'bridge-phone' }
 
-const SCOPE_OVERRIDES_PATH = join(PROJECT_ROOT, 'store', 'apg-scope-overrides.json')
-const IDEMPOTENCY_PATH = join(PROJECT_ROOT, 'store', 'apg-decision-idempotency.json')
-const AUDIT_PATH = join(PROJECT_ROOT, 'store', 'apg-ui-audit.jsonl')
+const SCOPE_OVERRIDES_PATH = () => storePath('apg-scope-overrides.json')
+const IDEMPOTENCY_PATH = () => storePath('apg-decision-idempotency.json')
+const AUDIT_PATH = () => storePath('apg-ui-audit.jsonl')
 
 function resetApgFiles(): void {
-  for (const p of [SCOPE_OVERRIDES_PATH, IDEMPOTENCY_PATH, AUDIT_PATH, OVERRIDES_PATH]) {
+  for (const p of [SCOPE_OVERRIDES_PATH(), IDEMPOTENCY_PATH(), AUDIT_PATH(), OVERRIDES_PATH()]) {
     if (existsSync(p)) rmSync(p)
   }
   reloadOverridesForTest()
 }
 
 function auditEvents(): Array<{ type: string; detail: Record<string, unknown> }> {
-  if (!existsSync(AUDIT_PATH)) return []
-  return readFileSync(AUDIT_PATH, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+  if (!existsSync(AUDIT_PATH())) return []
+  return readFileSync(AUDIT_PATH(), 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
 }
 
 /** Deps that answer the producer question without a DB, for the policy tests. */

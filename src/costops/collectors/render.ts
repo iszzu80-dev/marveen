@@ -10,10 +10,10 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
-import { PROJECT_ROOT } from '../../config.js'
+import { PROJECT_ROOT, storePath } from '../../config.js'
 import type { ProviderCollector, CollectOpts, NormalizedCostLine } from './types.js'
 
-export const RENDER_PRICING_PATH = join(PROJECT_ROOT, 'store', 'costops-render-pricing.json')
+export const RENDER_PRICING_PATH = () => storePath('costops-render-pricing.json')
 export const RENDER_PRICING_EXAMPLE = join(PROJECT_ROOT, 'src', 'costops', 'collectors', 'render-pricing.example.json')
 
 const RENDER_SERVICES_URL = 'https://api.render.com/v1/services?limit=100'
@@ -47,7 +47,7 @@ function hashRef(salt: string, raw: string): string {
 /** Load the local (gitignored) Render plan->price map. Missing -> zero-rate, flagged. */
 export function loadRenderPricing(): { pricing: RenderPricing; exists: boolean } {
   const empty: RenderPricing = { version: 1, currency: 'HUF', fx_usd_huf: 0, fx_eur_huf: 0, plans: {} }
-  if (!existsSync(RENDER_PRICING_PATH)) {
+  if (!existsSync(RENDER_PRICING_PATH())) {
     // write a safe zero-rate example next to the config for guidance (once)
     try {
       if (!existsSync(RENDER_PRICING_EXAMPLE)) {
@@ -57,7 +57,7 @@ export function loadRenderPricing(): { pricing: RenderPricing; exists: boolean }
     return { pricing: empty, exists: false }
   }
   try {
-    const raw = JSON.parse(readFileSync(RENDER_PRICING_PATH, 'utf-8')) as Partial<RenderPricing>
+    const raw = JSON.parse(readFileSync(RENDER_PRICING_PATH(), 'utf-8')) as Partial<RenderPricing>
     return {
       pricing: {
         version: typeof raw.version === 'number' ? raw.version : 1,

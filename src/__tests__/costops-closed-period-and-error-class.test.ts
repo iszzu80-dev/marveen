@@ -260,8 +260,18 @@ describe('C-5: the config path is redirectable, so tests stop writing the real f
   })
 
   it('without the override the real path is used — production is unchanged', () => {
+    // The suite now points MARVEEN_STORE_DIR at a per-worker temp store (T5),
+    // so observing the PRODUCTION fallback means lifting that too. Only the path
+    // is computed here, nothing is written, so the isolation rule is intact:
+    // it forbids MUTATING a production-authoritative path, not naming one.
+    const savedStore = process.env.MARVEEN_STORE_DIR
     delete process.env.COSTOPS_CONFIG_PATH
-    expect(costopsConfigPath()).toContain(join('store', 'costops-config.json'))
+    delete process.env.MARVEEN_STORE_DIR
+    try {
+      expect(costopsConfigPath()).toContain(join('store', 'costops-config.json'))
+    } finally {
+      if (savedStore !== undefined) process.env.MARVEEN_STORE_DIR = savedStore
+    }
   })
 
   it('C-6: a BROKEN config is not reported as a missing one', () => {

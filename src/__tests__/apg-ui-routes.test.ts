@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { initDatabase, createApproval } from '../db.js'
-import { PROJECT_ROOT } from '../config.js'
+import { PROJECT_ROOT, storePath } from '../config.js'
 import { SETTINGS_REGISTRY } from '../config-registry.js'
 import { tryHandleApg } from '../web/routes/apg.js'
 import { reloadOverridesForTest, setOverride, OVERRIDES_PATH } from '../settings-store.js'
@@ -48,12 +48,12 @@ function fakeCtxWithBody(
   return { ctx, out }
 }
 
-const SCOPE_OVERRIDES_PATH = join(PROJECT_ROOT, 'store', 'apg-scope-overrides.json')
-const IDEMPOTENCY_PATH = join(PROJECT_ROOT, 'store', 'apg-decision-idempotency.json')
-const AUDIT_PATH = join(PROJECT_ROOT, 'store', 'apg-ui-audit.jsonl')
+const SCOPE_OVERRIDES_PATH = () => storePath('apg-scope-overrides.json')
+const IDEMPOTENCY_PATH = () => storePath('apg-decision-idempotency.json')
+const AUDIT_PATH = () => storePath('apg-ui-audit.jsonl')
 
 function resetApgFiles(): void {
-  for (const p of [SCOPE_OVERRIDES_PATH, IDEMPOTENCY_PATH, AUDIT_PATH, OVERRIDES_PATH]) {
+  for (const p of [SCOPE_OVERRIDES_PATH(), IDEMPOTENCY_PATH(), AUDIT_PATH(), OVERRIDES_PATH()]) {
     if (existsSync(p)) rmSync(p)
   }
   reloadOverridesForTest()
@@ -220,8 +220,8 @@ describe('APG UI API (route smoke)', () => {
   it('a corrupted scope-overrides.json degrades to empty instead of crashing the request', async () => {
     const { writeFileSync, mkdirSync } = await import('node:fs')
     const { dirname } = await import('node:path')
-    mkdirSync(dirname(SCOPE_OVERRIDES_PATH), { recursive: true })
-    writeFileSync(SCOPE_OVERRIDES_PATH, '{not valid json::')
+    mkdirSync(dirname(SCOPE_OVERRIDES_PATH()), { recursive: true })
+    writeFileSync(SCOPE_OVERRIDES_PATH(), '{not valid json::')
 
     const { ctx, out } = fakeCtx('/api/apg/scope-overrides')
     expect(await tryHandleApg(ctx)).toBe(true)

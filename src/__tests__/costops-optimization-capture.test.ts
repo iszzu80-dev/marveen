@@ -95,13 +95,13 @@ describe('gatherRecommendationCandidates -- the 5 honestly-unwired types', () =>
 })
 
 function writeSubscriptionsFixture(content: unknown): void {
-  mkdirSync(dirname(SUBSCRIPTIONS_PATH), { recursive: true })
-  writeFileSync(SUBSCRIPTIONS_PATH, JSON.stringify(content))
+  mkdirSync(dirname(SUBSCRIPTIONS_PATH()), { recursive: true })
+  writeFileSync(SUBSCRIPTIONS_PATH(), JSON.stringify(content))
 }
 
 describe('gatherRecommendationCandidates -- subscription-based (real file fixture)', () => {
   beforeEach(() => { initDatabase(':memory:') })
-  afterEach(() => { if (existsSync(SUBSCRIPTIONS_PATH)) rmSync(SUBSCRIPTIONS_PATH) })
+  afterEach(() => { if (existsSync(SUBSCRIPTIONS_PATH())) rmSync(SUBSCRIPTIONS_PATH()) })
 
   it('is empty (never fabricated) when no costops-subscriptions.json exists', () => {
     const db = getDb()

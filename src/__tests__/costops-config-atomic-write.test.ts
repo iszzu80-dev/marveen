@@ -12,10 +12,10 @@ import { mkdirSync, rmSync, readFileSync, readdirSync, writeFileSync } from 'nod
 import { join, dirname, basename } from 'node:path'
 import { saveCostopsConfig, loadCostopsConfig, COSTOPS_CONFIG_PATH, type CostOpsConfig } from '../costops/config.js'
 
-const STORE = dirname(COSTOPS_CONFIG_PATH)
+const STORE = dirname(COSTOPS_CONFIG_PATH())
 
 function cleanup(): void {
-  rmSync(COSTOPS_CONFIG_PATH, { force: true })
+  rmSync(COSTOPS_CONFIG_PATH(), { force: true })
   rmSync(join(STORE, 'costops-config.json.example'), { force: true })
 }
 
@@ -51,16 +51,16 @@ describe('saveCostopsConfig atomic write (COS-CORE-M7)', () => {
 
   it('leaves no orphan tmp file behind (the write is tmp + rename, fully consumed)', () => {
     saveCostopsConfig(cfg())
-    const leftovers = readdirSync(STORE).filter(f => f.startsWith(basename(COSTOPS_CONFIG_PATH)) && f.endsWith('.tmp'))
+    const leftovers = readdirSync(STORE).filter(f => f.startsWith(basename(COSTOPS_CONFIG_PATH())) && f.endsWith('.tmp'))
     expect(leftovers).toEqual([])
   })
 
   it('replaces an existing config in one rename -- the target is never observably truncated', () => {
     // Pre-existing config with a DIFFERENT amount; after the save, the file
     // must contain exactly the new content (valid JSON, never a partial mix).
-    writeFileSync(COSTOPS_CONFIG_PATH, JSON.stringify({ version: 1, currency: 'HUF', fixed_costs: [], budgets: [] }))
+    writeFileSync(COSTOPS_CONFIG_PATH(), JSON.stringify({ version: 1, currency: 'HUF', fixed_costs: [], budgets: [] }))
     saveCostopsConfig(cfg())
-    const onDisk = JSON.parse(readFileSync(COSTOPS_CONFIG_PATH, 'utf-8'))
+    const onDisk = JSON.parse(readFileSync(COSTOPS_CONFIG_PATH(), 'utf-8'))
     expect(onDisk.fixed_costs).toHaveLength(1)
     expect(onDisk.fixed_costs[0].source_id).toBe('anthropic-max')
   })

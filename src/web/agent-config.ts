@@ -1,7 +1,7 @@
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { PROJECT_ROOT, MAIN_AGENT_ID, DEFAULT_AGENT_MODEL } from '../config.js'
+import { PROJECT_ROOT, MAIN_AGENT_ID, DEFAULT_AGENT_MODEL, storePath } from '../config.js'
 import { atomicWriteFileSync } from './atomic-write.js'
 import { safeJoin } from './sanitize.js'
 import { isValidModelId, InvalidModelIdError } from '../model-id.js'
@@ -75,18 +75,18 @@ export function resolveModelId(raw: string): string {
 // the machine. config-examples/model-profile-map.example.json documents the
 // shape. A missing map is FINE: every agent that names a concrete `model`
 // keeps working untouched, which is every agent today.
-const MODEL_PROFILE_MAP_PATH = join(PROJECT_ROOT, 'store', 'model-profile-map.json')
+const MODEL_PROFILE_MAP_PATH = () => storePath('model-profile-map.json')
 
 let cachedProfileMap: { state: ModelProfileMapState; mtimeMs: number } | null = null
 
 export function readModelProfileMap(): ModelProfileMapState | null {
   try {
-    if (!existsSync(MODEL_PROFILE_MAP_PATH)) return null
-    const mtimeMs = statSync(MODEL_PROFILE_MAP_PATH).mtimeMs
+    if (!existsSync(MODEL_PROFILE_MAP_PATH())) return null
+    const mtimeMs = statSync(MODEL_PROFILE_MAP_PATH()).mtimeMs
     if (cachedProfileMap && cachedProfileMap.mtimeMs === mtimeMs) return cachedProfileMap.state
     let state: ModelProfileMapState
     try {
-      state = validateModelProfileMap(JSON.parse(readFileSync(MODEL_PROFILE_MAP_PATH, 'utf-8')))
+      state = validateModelProfileMap(JSON.parse(readFileSync(MODEL_PROFILE_MAP_PATH(), 'utf-8')))
     } catch {
       state = { ok: false, error: 'profile_map_unparseable' }
     }

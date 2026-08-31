@@ -10,11 +10,11 @@
 
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { PROJECT_ROOT } from '../config.js'
+import { PROJECT_ROOT, storePath } from '../config.js'
 import { logger } from '../logger.js'
 import { atomicWriteFileSync } from '../web/atomic-write.js'
 
-export const COSTOPS_CONFIG_PATH = join(PROJECT_ROOT, 'store', 'costops-config.json')
+export const COSTOPS_CONFIG_PATH = () => storePath('costops-config.json')
 export const COSTOPS_EXAMPLE_PATH = join(PROJECT_ROOT, 'store', 'costops-config.json.example')
 
 /**
@@ -34,7 +34,7 @@ export const COSTOPS_EXAMPLE_PATH = join(PROJECT_ROOT, 'store', 'costops-config.
  * the REAL read/write code rather than a mock of it.
  */
 export function costopsConfigPath(): string {
-  return process.env.COSTOPS_CONFIG_PATH ?? COSTOPS_CONFIG_PATH
+  return process.env.COSTOPS_CONFIG_PATH ?? COSTOPS_CONFIG_PATH()
 }
 
 /** The example lives beside whatever config path is in force, so a test that

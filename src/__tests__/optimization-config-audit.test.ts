@@ -8,7 +8,7 @@
 // optimization_decision_events.
 //
 // Same harness as optimization-routes.test.ts: a real RouteContext against a
-// real in-memory DB, with the real default OPTIMIZATION_CONFIG_PATH reset
+// real in-memory DB, with the real default OPTIMIZATION_CONFIG_PATH() reset
 // around every test.
 
 import { describe, it, expect, beforeEach } from 'vitest'
@@ -63,7 +63,7 @@ const VALID_ACTIVE_BODY = {
 describe('OPT-M3: optimization config writes are audited', () => {
   beforeEach(() => {
     initDatabase(':memory:')
-    for (const p of [OPTIMIZATION_CONFIG_PATH, `${OPTIMIZATION_CONFIG_PATH}.bak`]) {
+    for (const p of [OPTIMIZATION_CONFIG_PATH(), `${OPTIMIZATION_CONFIG_PATH()}.bak`]) {
       if (existsSync(p)) rmSync(p)
     }
   })

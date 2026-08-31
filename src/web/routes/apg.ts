@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { PROJECT_ROOT } from '../../config.js'
+import { PROJECT_ROOT, storePath } from '../../config.js'
 import {
   buildApgEvents,
   buildApgWorkItemDetail,
@@ -57,7 +57,7 @@ const APG_MODE_RANK: Record<ApgMode, number> = {
 // different key. This small file closes that gap: recognize the exact same
 // (approvalId, idempotency_key) pair and hand back the prior response
 // verbatim before ever touching resolveApproval again.
-const IDEMPOTENCY_PATH = join(PROJECT_ROOT, 'store', 'apg-decision-idempotency.json')
+const IDEMPOTENCY_PATH = () => storePath('apg-decision-idempotency.json')
 
 interface IdempotencyRecord {
   status: number
@@ -70,8 +70,8 @@ function idempotencyKey(approvalId: string, idempotencyKeyValue: string): string
 
 function readIdempotencyStore(): Record<string, IdempotencyRecord> {
   try {
-    if (!existsSync(IDEMPOTENCY_PATH)) return {}
-    const parsed = JSON.parse(readFileSync(IDEMPOTENCY_PATH, 'utf-8')) as unknown
+    if (!existsSync(IDEMPOTENCY_PATH())) return {}
+    const parsed = JSON.parse(readFileSync(IDEMPOTENCY_PATH(), 'utf-8')) as unknown
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
     return parsed as Record<string, IdempotencyRecord>
   } catch {
@@ -88,7 +88,7 @@ function recordIdempotentResponse(
   try {
     const store = readIdempotencyStore()
     store[idempotencyKey(approvalId, idempotencyKeyValue)] = { status, body }
-    atomicWriteFileSync(IDEMPOTENCY_PATH, JSON.stringify(store, null, 2) + '\n')
+    atomicWriteFileSync(IDEMPOTENCY_PATH(), JSON.stringify(store, null, 2) + '\n')
   } catch (err) {
     logger.warn({ err, approvalId }, 'apg idempotency write failed')
   }

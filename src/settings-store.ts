@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, watch, type FSWatcher } from 'node:fs'
 import { join } from 'node:path'
-import { STORE_DIR } from './config.js'
+import { STORE_DIR, storePath } from './config.js'
 import { readEnvFile } from './env.js'
 import { atomicWriteFileSync } from './web/atomic-write.js'
 import { getSettingDefinition, validateSettingValue, type SettingDefinition } from './config-registry.js'
@@ -12,15 +12,15 @@ import { getSettingDefinition, validateSettingValue, type SettingDefinition } fr
 // directory watch keeps the in-memory cache in sync if the file is edited
 // outside this process (e.g. by hand over SSH); our own writes update the
 // cache directly without waiting for the watch event.
-export const OVERRIDES_PATH = join(STORE_DIR, 'config-overrides.json')
+export const OVERRIDES_PATH = () => storePath('config-overrides.json')
 
 let cache: Record<string, string | number> = {}
 let watcher: FSWatcher | undefined
 
 function loadFromDisk(): Record<string, string | number> {
   try {
-    if (!existsSync(OVERRIDES_PATH)) return {}
-    const raw = readFileSync(OVERRIDES_PATH, 'utf-8')
+    if (!existsSync(OVERRIDES_PATH())) return {}
+    const raw = readFileSync(OVERRIDES_PATH(), 'utf-8')
     const parsed = JSON.parse(raw)
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
     return {}
@@ -91,7 +91,7 @@ export function setOverride(key: string, rawValue: unknown): SetOverrideResult {
   ensureWatching()
   mkdirSync(STORE_DIR, { recursive: true })
   const next = { ...loadFromDisk(), [key]: validation.value! }
-  atomicWriteFileSync(OVERRIDES_PATH, JSON.stringify(next, null, 2))
+  atomicWriteFileSync(OVERRIDES_PATH(), JSON.stringify(next, null, 2))
   cache = next
   return { ok: true }
 }

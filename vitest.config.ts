@@ -32,6 +32,9 @@ export default defineConfig({
       './src/__tests__/setup/assert-not-live-install.ts',
       // Per-worker credential store. See the file header for the run-10 race.
       './src/__tests__/setup/isolate-credential-store.ts',
+      // Per-worker production-authoritative store. See the file header for the
+      // owner's T5 rule and the measured write baseline it closes.
+      './src/__tests__/setup/isolate-production-store.ts',
     ],
   },
 })

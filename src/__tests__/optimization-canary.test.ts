@@ -47,7 +47,7 @@ const ACTIVE_BODY = {
 describe('canary scenarios (spec section 20)', () => {
   beforeEach(() => {
     initDatabase(':memory:')
-    for (const p of [OPTIMIZATION_CONFIG_PATH, `${OPTIMIZATION_CONFIG_PATH}.bak`]) {
+    for (const p of [OPTIMIZATION_CONFIG_PATH(), `${OPTIMIZATION_CONFIG_PATH()}.bak`]) {
       if (existsSync(p)) rmSync(p)
     }
   })

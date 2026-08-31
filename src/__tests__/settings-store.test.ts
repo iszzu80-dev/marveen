@@ -8,10 +8,18 @@ import { tmpdir } from 'node:os'
 // on a comment claiming the checkout lives under /tmp; run in a production
 // checkout it rmSync'd the LIVE store/config-overrides.json (2026-07-27
 // incident: the deletion dropped MAIN_AGENT_ISOLATED_CONFIG and 401'd the
-// main agent that evening). STORE_DIR is baked into OVERRIDES_PATH at import
+// main agent that evening). STORE_DIR is baked into OVERRIDES_PATH() at import
 // time, so the sandbox must be mocked in before the module loads.
 const SANDBOX = mkdtempSync(join(tmpdir(), 'settings-store-'))
 const STORE = join(SANDBOX, 'store')
+
+// The suite-wide isolation (setup/isolate-production-store.ts) already keeps
+// this out of the checkout; this file keeps its OWN sandbox because its
+// assertions name the directory. storePath() reads the env var per call, so the
+// override has to be the env var -- mocking STORE_DIR alone no longer reaches it,
+// and a mock that silently stops reaching its target is worse than none.
+mkdirSync(STORE, { recursive: true })
+process.env.MARVEEN_STORE_DIR = STORE
 
 vi.mock('../config.js', async (orig) => {
   const actual = await orig<typeof import('../config.js')>()
@@ -34,13 +42,13 @@ const {
 } = await import('../settings-store.js')
 
 describe('settings-store', () => {
-  it('resolves OVERRIDES_PATH inside the sandbox (the guard this suite relies on)', () => {
-    expect(OVERRIDES_PATH).toBe(join(STORE, 'config-overrides.json'))
+  it('resolves OVERRIDES_PATH() inside the sandbox (the guard this suite relies on)', () => {
+    expect(OVERRIDES_PATH()).toBe(join(STORE, 'config-overrides.json'))
   })
 
   beforeEach(() => {
     mkdirSync(STORE, { recursive: true })
-    if (existsSync(OVERRIDES_PATH)) rmSync(OVERRIDES_PATH)
+    if (existsSync(OVERRIDES_PATH())) rmSync(OVERRIDES_PATH())
     reloadOverridesForTest()
   })
 
@@ -65,8 +73,8 @@ describe('settings-store', () => {
 
   it('writes the overrides file atomically (content matches what was set)', () => {
     setOverride('KANBAN_WIP_OK_COLOR', '#112233')
-    expect(existsSync(OVERRIDES_PATH)).toBe(true)
-    const onDisk = JSON.parse(readFileSync(OVERRIDES_PATH, 'utf-8'))
+    expect(existsSync(OVERRIDES_PATH())).toBe(true)
+    const onDisk = JSON.parse(readFileSync(OVERRIDES_PATH(), 'utf-8'))
     expect(onDisk.KANBAN_WIP_OK_COLOR).toBe('#112233')
   })
 
@@ -80,10 +88,10 @@ describe('settings-store', () => {
   })
 
   it('rejects an unknown key without touching the file', () => {
-    const before = existsSync(OVERRIDES_PATH) ? readFileSync(OVERRIDES_PATH, 'utf-8') : null
+    const before = existsSync(OVERRIDES_PATH()) ? readFileSync(OVERRIDES_PATH(), 'utf-8') : null
     const result = setOverride('NOT_A_REAL_KEY', 'x')
     expect(result.ok).toBe(false)
-    const after = existsSync(OVERRIDES_PATH) ? readFileSync(OVERRIDES_PATH, 'utf-8') : null
+    const after = existsSync(OVERRIDES_PATH()) ? readFileSync(OVERRIDES_PATH(), 'utf-8') : null
     expect(after).toBe(before)
   })
 

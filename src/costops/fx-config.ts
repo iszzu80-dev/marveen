@@ -15,16 +15,16 @@
 
 import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { PROJECT_ROOT } from '../config.js'
+import { PROJECT_ROOT, storePath } from '../config.js'
 import { logger } from '../logger.js'
 import { atomicWriteFileSync } from '../web/atomic-write.js'
 import type { FxRateTable } from './fx.js'
 
-export const COSTOPS_FX_CONFIG_PATH = join(PROJECT_ROOT, 'store', 'costops-fx.json')
+export const COSTOPS_FX_CONFIG_PATH = () => storePath('costops-fx.json')
 // Legacy source, kept ONLY for the one-time migration below. Not imported from
 // render.ts to avoid a module cycle -- this is deliberately a plain fs read of
 // the same path render.ts uses.
-const LEGACY_RENDER_PRICING_PATH = join(PROJECT_ROOT, 'store', 'costops-render-pricing.json')
+const LEGACY_RENDER_PRICING_PATH = () => storePath('costops-render-pricing.json')
 
 interface FxRatesFile {
   version: number
@@ -68,8 +68,8 @@ function sanitizeRates(raw: unknown): FxRateTable {
  * (see loadRenderPricing) of no caching layer for these local config files.
  */
 function migrateFromLegacyRenderPricingOnce(): void {
-  if (existsSync(COSTOPS_FX_CONFIG_PATH)) return
-  const legacy = readJson(LEGACY_RENDER_PRICING_PATH) as { fx_usd_huf?: unknown; fx_eur_huf?: unknown } | null
+  if (existsSync(COSTOPS_FX_CONFIG_PATH())) return
+  const legacy = readJson(LEGACY_RENDER_PRICING_PATH()) as { fx_usd_huf?: unknown; fx_eur_huf?: unknown } | null
   if (!legacy) return
   const seeded = sanitizeRates({ USD: legacy.fx_usd_huf, EUR: legacy.fx_eur_huf })
   if (Object.keys(seeded).length === 0) return
@@ -87,7 +87,7 @@ function migrateFromLegacyRenderPricingOnce(): void {
     // COS-CORE-M7: atomic (tmp + rename) -- this is the single copy of the
     // fx table; a crash mid-write must not leave a truncated file that reads
     // back as "every rate unset".
-    atomicWriteFileSync(COSTOPS_FX_CONFIG_PATH, JSON.stringify(file, null, 2))
+    atomicWriteFileSync(COSTOPS_FX_CONFIG_PATH(), JSON.stringify(file, null, 2))
     logger.info({ rates: Object.keys(seeded) }, 'costops-fx: migrated rate(s) from legacy render-pricing config')
   } catch (err) {
     logger.warn({ err }, 'costops-fx: migration write failed (continuing with unset rates)')
@@ -108,7 +108,7 @@ function migrateFromLegacyRenderPricingOnce(): void {
  */
 export function loadFxRates(): { rates: FxRateTable; source: 'costops_fx_config' | 'unset' } {
   migrateFromLegacyRenderPricingOnce()
-  const raw = readJson(COSTOPS_FX_CONFIG_PATH) as FxRatesFile | null
+  const raw = readJson(COSTOPS_FX_CONFIG_PATH()) as FxRatesFile | null
   const rates = sanitizeRates(raw?.rates)
   return { rates, source: Object.keys(rates).length > 0 ? 'costops_fx_config' : 'unset' }
 }

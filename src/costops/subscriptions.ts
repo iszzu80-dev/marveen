@@ -8,10 +8,10 @@
 
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { PROJECT_ROOT } from '../config.js'
+import { PROJECT_ROOT, storePath } from '../config.js'
 import { logger } from '../logger.js'
 
-export const SUBSCRIPTIONS_PATH = join(PROJECT_ROOT, 'store', 'costops-subscriptions.json')
+export const SUBSCRIPTIONS_PATH = () => storePath('costops-subscriptions.json')
 export const SUBSCRIPTIONS_EXAMPLE_PATH = join(PROJECT_ROOT, 'store', 'costops-subscriptions.json.example')
 
 export type SubscriptionStatus = 'active' | 'canceled' | 'expired' | 'unknown'
@@ -93,13 +93,13 @@ export interface SubscriptionsLoadResult {
 }
 
 export function loadSubscriptionsConfig(): SubscriptionsLoadResult {
-  if (!existsSync(SUBSCRIPTIONS_PATH)) {
+  if (!existsSync(SUBSCRIPTIONS_PATH())) {
     ensureExampleSubscriptions()
     return { config: { ...EMPTY }, exists: false, errors: [] }
   }
   let raw: unknown
   try {
-    raw = JSON.parse(readFileSync(SUBSCRIPTIONS_PATH, 'utf-8'))
+    raw = JSON.parse(readFileSync(SUBSCRIPTIONS_PATH(), 'utf-8'))
   } catch (err) {
     logger.warn({ err }, 'costops-subscriptions.json is not valid JSON')
     return { config: { ...EMPTY }, exists: true, errors: ['config is not valid JSON'] }

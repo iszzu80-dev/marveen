@@ -128,7 +128,7 @@ describe('F-2: acceptance requires an accepter', () => {
 describe('F-7 + F-13: the mode is reported honestly and cannot be escalated', () => {
   beforeEach(() => {
     initDatabase(':memory:')
-    for (const p of [OVERRIDES_PATH, join(PROJECT_ROOT, 'store', 'apg-scope-overrides.json')]) {
+    for (const p of [OVERRIDES_PATH(), join(PROJECT_ROOT, 'store', 'apg-scope-overrides.json')]) {
       if (existsSync(p)) rmSync(p)
     }
     reloadOverridesForTest()

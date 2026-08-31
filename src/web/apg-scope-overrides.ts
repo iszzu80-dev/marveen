@@ -6,7 +6,7 @@
 
 import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { PROJECT_ROOT } from '../config.js'
+import { PROJECT_ROOT, storePath } from '../config.js'
 import { logger } from '../logger.js'
 import { getEffectiveSettingValue } from '../settings-store.js'
 import type {
@@ -23,8 +23,8 @@ import {
 import { getDb } from '../db.js'
 import { listCardProducerAgents, listProjectProducerAgents } from '../costops/dispatch.js'
 
-const OVERRIDES_PATH = join(PROJECT_ROOT, 'store', 'apg-scope-overrides.json')
-const AUDIT_PATH = join(PROJECT_ROOT, 'store', 'apg-ui-audit.jsonl')
+const OVERRIDES_PATH = () => storePath('apg-scope-overrides.json')
+const AUDIT_PATH = () => storePath('apg-ui-audit.jsonl')
 const APG_MODES: readonly ApgMode[] = ['off', 'observe', 'assisted', 'enforced']
 const STORED_MODES: ReadonlyArray<ApgScopeOverride['mode']> = ['inherit', ...APG_MODES]
 const KANBAN_CARD_ID_PATTERN = /^[0-9a-f]{8}$/
@@ -68,8 +68,8 @@ function isStoredScopeOverride(value: unknown): value is StoredScopeOverride {
 
 function readScopeOverrideFile(): ScopeOverrideFile {
   try {
-    if (!existsSync(OVERRIDES_PATH)) return { overrides: [] }
-    const parsed = JSON.parse(readFileSync(OVERRIDES_PATH, 'utf-8')) as unknown
+    if (!existsSync(OVERRIDES_PATH())) return { overrides: [] }
+    const parsed = JSON.parse(readFileSync(OVERRIDES_PATH(), 'utf-8')) as unknown
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
       return { overrides: [] }
     }
@@ -356,7 +356,7 @@ export function setScopeOverride(
   }
 
   try {
-    atomicWriteFileSync(OVERRIDES_PATH, JSON.stringify(file, null, 2) + '\n')
+    atomicWriteFileSync(OVERRIDES_PATH(), JSON.stringify(file, null, 2) + '\n')
   } catch {
     return { ok: false, error: 'Failed to write scope override' }
   }
@@ -439,7 +439,7 @@ export function deleteScopeOverride(
   const [deleted] = file.overrides.splice(existingIndex, 1)
 
   try {
-    atomicWriteFileSync(OVERRIDES_PATH, JSON.stringify(file, null, 2) + '\n')
+    atomicWriteFileSync(OVERRIDES_PATH(), JSON.stringify(file, null, 2) + '\n')
   } catch {
     return { ok: false, error: 'Failed to delete scope override' }
   }
@@ -502,7 +502,7 @@ export function writeApgAuditEvent(
 ): void {
   try {
     appendFileSync(
-      AUDIT_PATH,
+      AUDIT_PATH(),
       JSON.stringify({ type, detail, at: new Date().toISOString() }) + '\n',
     )
   } catch (err) {
