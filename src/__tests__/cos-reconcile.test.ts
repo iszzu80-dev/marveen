@@ -60,13 +60,36 @@ describe('COS daily reconcile', () => {
     expect(ids(runDailyReconcile(db, NOW).findings)).not.toContain('corporate_content_in_personal_store')
   })
 
-  it('names corporate content sitting in the personal store (AC-17)', () => {
+  // UPDATED 2026-08-31, and the update is the point of the change it follows.
+  //
+  // This test used to create a ZST case and assert the CRITICAL. Since the
+  // scope marking moved to the createCase choke point, that same call produces a
+  // CLASSIFIED case -- one the gate has seen -- and the CRITICAL deliberately no
+  // longer fires for those. Keeping the old assertion would have frozen the
+  // behaviour the fix exists to change: an alarm that cannot be cleared by doing
+  // the right thing.
+  //
+  // So the invariant is now stated in two halves, which is what it always was.
+  it('names UNCLASSIFIED corporate content in the personal store (AC-17)', () => {
     const db = getDb()
     createCase(db, { caseId: 'z1', title: 'ZST Radio üzletrész', caseType: 'ADMIN' }, NOW - 100)
+    // The second door: created without ever meeting the gate, which is exactly
+    // how CORP-SEC-2026-001 and CORP-CLOUD-2026-001 arrived.
+    db.prepare(`UPDATE personal_cases SET scope_review_reason = NULL WHERE case_id = 'z1'`).run()
     const r = runDailyReconcile(db, NOW)
     const f = r.findings.find((x) => x.id === 'corporate_content_in_personal_store')
     expect(f?.severity).toBe('CRITICAL')
     expect(f?.detail).toContain('z1')
+  })
+
+  it('a CLASSIFIED one is a WARNING waiting on a human, not contamination', () => {
+    const db = getDb()
+    createCase(db, { caseId: 'z2', title: 'ZST Radio üzletrész', caseType: 'ADMIN' }, NOW - 100)
+    const r = runDailyReconcile(db, NOW)
+    expect(r.findings.find((x) => x.id === 'corporate_content_in_personal_store')).toBeUndefined()
+    const f = r.findings.find((x) => x.id === 'scope_flagged_awaiting_human_bridge')
+    expect(f?.severity).toBe('WARNING')
+    expect(f?.detail).toContain('z2')
   })
 
   it('flags a send stuck in SENDING, and does not flag a fresh one', () => {
@@ -183,6 +206,8 @@ describe('COS daily reconcile', () => {
   it('the formatted report leads with the counts and names each finding', () => {
     const db = getDb()
     createCase(db, { caseId: 'z1', title: 'ZST Radio', caseType: 'ADMIN' }, NOW - 100)
+    // Unclassified, so the CRITICAL fires and the report has a finding to name.
+    db.prepare(`UPDATE personal_cases SET scope_review_reason = NULL WHERE case_id = 'z1'`).run()
     const text = formatReconcileReport(runDailyReconcile(db, NOW))
     expect(text).toMatch(/^COS napi egyeztetés: \d+ kritikus/)
     expect(text).toContain('Céges tartalom a személyes tárban')
