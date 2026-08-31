@@ -130,6 +130,48 @@ const missingCheckpoint: Check = (db) => {
   }
 }
 
+/**
+ * A checkpoint row that exists but carries no POSITION.
+ *
+ * `missingCheckpoint` above asks only whether a row exists. On 2026-08-31 both
+ * accounts had one and both held a `triage-<unix>` wall-clock stamp, written by
+ * the pre-2026-08-13 triage bridge before `checkpointHoldReason` learned to
+ * refuse it. So the check passed, every day, over a value no history poller
+ * could start from -- a control surface reporting success about something it was
+ * not actually looking at.
+ *
+ * This is NOT the same finding as a missing row and must not be folded into it:
+ * "no row" means the batch-close path never ran, "a row that is not a position"
+ * means it ran and wrote garbage. The actions differ, so the findings differ.
+ *
+ * WARNING, not CRITICAL, and the reason is worth stating: nothing reads this
+ * value for real work today. The triage path dedups on its own `--mark` file and
+ * on `email_processing`'s UNIQUE, and the history poller the value would seed
+ * does not exist yet. It is a trap laid for the day someone builds one, not a
+ * live failure -- and calling it CRITICAL would put a permanent red next to the
+ * two that mean the mail actually stopped.
+ */
+const checkpointNotAPosition: Check = (db) => {
+  let rows: Array<{ a: string; c: string | null }> = []
+  try {
+    rows = db.prepare(
+      `SELECT gmail_account_id AS a, history_cursor AS c FROM email_source_checkpoints`,
+    ).all() as Array<{ a: string; c: string | null }>
+  } catch { return unreadable('email_source_checkpoints', '§6.4') }
+  const bad = rows.filter((r) => r.c != null && !/^\d+$/.test(r.c))
+  if (!bad.length) return null
+  return {
+    id: 'checkpoint_not_a_position', severity: 'WARNING', ref: '§6.4, P0.2',
+    title: 'A fiók-pozíció nem pozíció',
+    detail: `${bad.length} fiók checkpointja nem historyId: ` +
+      bad.map((r) => `${r.a}="${r.c}"`).join(', ') +
+      '. A sor létezik, tehát a "van-e cursor" ellenőrzés átengedi, de egy history-poller nem tud belőle indulni.',
+    action: 'Ez a 2026-08-13 előtti triage-bridge maradéka. A jelenlegi kód már nem ír ilyet ' +
+      '(checkpointHoldReason: "triage batch carries no history position"). Amikor lesz history-poller, ' +
+      'az induló pozíciót MÉRNI kell a Gmailtől, nem ebből a mezőből venni.',
+  }
+}
+
 const outboundNeedsHuman: Check = (db) => {
   const n = count(db, `SELECT COUNT(*) AS n FROM outbound_ledger WHERE status IN ('RECOVERY_REQUIRED','FAILED_TERMINAL')`)
   if (n === null) return unreadable('outbound_ledger', '§7.3, §19')
@@ -304,12 +346,35 @@ const duplicateSendAttempt: Check = (db) => {
   // campaign+recipient+kind. A silent "the constraint held" is not the same as
   // "nothing tried" — the second means the idempotency key is being derived
   // wrongly somewhere upstream.
+  //
+  // FALSE POSITIVE FIXED 2026-08-31 (Recovery Gate). This grouped over EVERY
+  // ledger row, so a cancelled plan followed by a fresh one for the same
+  // recipient -- the ordinary "we cancelled that, here is the new one" flow --
+  // read as an idempotency defect and held a CRITICAL red. One such pair was
+  // live: a CANCELLED row from 08-11 and a PLANNED row from 08-31.
+  //
+  // The question the check is actually asking is "could TWO of these deliver?".
+  // So the two statuses that can neither have delivered nor ever deliver are
+  // excluded, and only those two:
+  //
+  //   CANCELLED       cancelAction() refuses any row that is not PLANNED or
+  //                   FAILED_RETRYABLE, in its own words because "provider may
+  //                   already have it". A CANCELLED row provably never sent.
+  //   FAILED_TERMINAL a provably rejected send; a terminal no-op.
+  //
+  // Everything else stays counted, and OUTCOME_UNKNOWN deliberately so: that is
+  // the state where we do NOT know whether it went out, and a duplicate check
+  // that quietly assumes the unknown one did not send is the same class of bug
+  // as the one it is looking for. PLANNED and FAILED_RETRYABLE stay counted too
+  // -- both can still deliver.
   let rows: Array<{ n: number }> = []
   try {
     rows = db.prepare(
       `SELECT COUNT(*) AS n FROM (
          SELECT campaign_id, recipient, action_type, COUNT(*) AS c
-         FROM outbound_ledger WHERE campaign_id IS NOT NULL AND recipient IS NOT NULL
+         FROM outbound_ledger
+         WHERE campaign_id IS NOT NULL AND recipient IS NOT NULL
+           AND status NOT IN ('CANCELLED','FAILED_TERMINAL')
          GROUP BY campaign_id, recipient, action_type HAVING c > 1)`
     ).all() as never
   } catch { return null }
@@ -690,7 +755,7 @@ const projectionDrift: Check = (db, now) => {
 }
 
 export const CHECKS: Check[] = [
-  stuckLocalApplied, openBatches, missingCheckpoint,
+  stuckLocalApplied, openBatches, missingCheckpoint, checkpointNotAPosition,
   outboundNeedsHuman, outcomeUnknown, stuckSending, failedRetryableStranded,
   connectorDown, staleClaims, corporateInPersonal, scopeFlaggedAwaitingBridge, outputFloorBreaches,
   // §19 further minimum + critical alerts

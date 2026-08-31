@@ -353,6 +353,24 @@ function checkpointHoldReason(batchId: string, cursorAfter: string, current: str
   return null
 }
 
+/**
+ * The account's checkpoint AS A HISTORY POSITION, or null when the stored value
+ * is not one.
+ *
+ * `getCheckpoint` below returns the raw string, which is right for diagnostics
+ * and wrong for anything that wants to resume from it. Both accounts currently
+ * hold a `triage-<unix>` stamp written by the pre-2026-08-13 bridge; a poller
+ * seeded from that would ask Gmail to resume from a string Gmail rejects.
+ *
+ * Two functions rather than one so the caller has to say which it wants. A
+ * single function returning the raw value made "the position" and "whatever is
+ * in the column" the same expression, and they are not the same thing.
+ */
+export function getHistoryPosition(db: Database.Database, accountId: string): string | null {
+  const raw = getCheckpoint(db, accountId)
+  return cursorRank(raw) == null ? null : raw
+}
+
 export function getCheckpoint(db: Database.Database, accountId: string): string | null {
   const r = db.prepare(`SELECT history_cursor FROM email_source_checkpoints WHERE gmail_account_id=?`).get(accountId) as { history_cursor: string | null } | undefined
   return r?.history_cursor ?? null

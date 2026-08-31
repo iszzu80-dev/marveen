@@ -28,7 +28,8 @@
 // watches for.
 
 import type Database from 'better-sqlite3'
-import { sourceCommit, sourceCommitSkipped, sourceCommitFailed, tryAdvanceCheckpoint, isCursorPositionClear } from './email-ingest.js'
+import { sourceCommit, sourceCommitSkipped, sourceCommitFailed, tryAdvanceCheckpoint, isCursorPositionClear, setMessageStatus } from './email-ingest.js'
+import { classifySourceId } from './source-id.js'
 import { POISON_ATTEMPT_THRESHOLD } from './poison-quarantine.js'
 import { quarantineBatchPoison, type QuarantineDeps } from './poison-quarantine.js'
 
@@ -92,6 +93,10 @@ export interface CloseResult {
   failed: number
   /** Poison messages parked under A.1 during this close. */
   quarantined: number
+  /** Messages terminalised as EXCLUDED because their id can never be a source
+   *  object. Reported rather than merely counted: a disposition nothing prints
+   *  is a disposition nobody can audit. */
+  excluded: number
   batchClosed: boolean
   cursor: string | null
   reason: string
@@ -115,13 +120,41 @@ export async function closeBatch(
   now: number,
   opts: CloseOptions = {},
 ): Promise<CloseResult> {
-  const rows = db.prepare(
+  let rows = db.prepare(
     `SELECT gmail_account_id, message_id, attempt FROM email_processing
      WHERE batch_id = ? AND status = 'LOCAL_APPLIED'`
   ).all(batchId) as Row[]
 
   let committed = 0, skipped = 0, failed = 0
+  let excluded = 0
   let skipReason = ''
+
+  // ROOT CAUSE FIX (2026-08-31, Recovery Gate). A message whose id could never
+  // be a source object must not reach the committer at all.
+  //
+  // Before this, `closeBatch` handed every LOCAL_APPLIED row to the committer.
+  // A synthetic id -- a go-live probe POSTed to /api/cos/intake -- came back as
+  // a Gmail 400 `Invalid id value`, which the loop below reads as an ordinary
+  // failure and retries. Two such rows retried for 402 h and 170 h, held their
+  // batches OPEN, and kept two CRITICAL alerts red. The chain could say "failed,
+  // retry" and "skipped by policy"; it could not say "this can never commit".
+  //
+  // EXCLUDED, not SOURCE_COMMITTED and not SOURCE_COMMIT_SKIPPED. The first
+  // would claim a source mark that never happened, which is the exact lie F-8
+  // was written to remove. The second means "we could have, and policy said do
+  // not" -- a decision with an owner. This is neither: there is nothing at the
+  // source to mark, and no policy is being exercised. EXCLUDED already means
+  // "this message leaves the chain without a source commit", and the reason goes
+  // on the row so the disposition is auditable rather than inferred.
+  const committable: Row[] = []
+  for (const r of rows) {
+    const verdict = classifySourceId(r.gmail_account_id, r.message_id)
+    if (verdict.committable) { committable.push(r); continue }
+    setMessageStatus(db, r.gmail_account_id, r.message_id, 'EXCLUDED',
+      { lastError: `not source-committable: ${verdict.reason}` }, now)
+    excluded += 1
+  }
+  rows = committable
   // Terminalise on an audited exception: the local work is done, the source was
   // NOT marked, the reason is on the row, and the two review surfaces are
   // raised. One helper because three different conditions end here and each one
@@ -201,7 +234,7 @@ export async function closeBatch(
   // deltas the two differ, and only the second one is the P0.2 invariant.
   if (!isCursorPositionClear(db, batchId)) {
     return {
-      attempted: rows.length, committed, skipped, failed, quarantined, batchClosed: false, cursor: null,
+      attempted: rows.length, committed, skipped, failed, quarantined, excluded, batchClosed: false, cursor: null,
       reason: quarantineBlocked.length
         ? `a köteg blokkolt: ${quarantineBlocked[0]}`
         : skipped && !opts.allowCursorAdvanceWithoutSourceWrite
@@ -211,7 +244,7 @@ export async function closeBatch(
   }
   const adv = tryAdvanceCheckpoint(db, batchId, now)
   return {
-    attempted: rows.length, committed, skipped, failed, quarantined,
+    attempted: rows.length, committed, skipped, failed, quarantined, excluded,
     // The batch closing and the account cursor moving are two different facts.
     // A triage batch closes and deliberately moves no cursor (it has no history
     // position), so reporting batchClosed from `advanced` would have shown every

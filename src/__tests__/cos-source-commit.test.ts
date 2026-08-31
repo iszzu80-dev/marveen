@@ -4,6 +4,13 @@ import { createCase } from '../cos/case-store.js'
 import { openBatch, localApply, getCheckpoint, excludeMessage } from '../cos/email-ingest.js'
 import { initCosSchema } from '../cos/schema.js'
 import {
+
+// FIXTURE IDS CHANGED 2026-08-31 (Recovery Gate), disclosed rather than quietly
+// fixed. These tests used 'm1'/'m2'/'m3'/'m-probe' as message ids. Gmail message
+// ids are lowercase hex, and closeBatch now refuses to hand a non-Gmail id to the
+// committer at all -- so with the old fixtures these tests stopped reaching the
+// branches they are about (the committer, the F-8 policy path) and asserted
+// EXCLUDED instead. The ids are now Gmail-shaped; every assertion is unchanged.
   closeBatch, closeOpenBatches, openBatchIds,
   NoSourceWriteCommitter, GmailLabelCommitter, type SourceCommitter,
 } from '../cos/source-commit.js'
@@ -19,7 +26,7 @@ import {
 const NOW = 1_800_000_000
 const ACC = 'private'
 
-function seed(batchId = 'b1', messages = ['m1']) {
+function seed(batchId = 'b1', messages = ['1a00000000000001']) {
   const db = getDb()
   createCase(db, { caseId: 'c1', title: 'T', caseType: 'ADMIN' }, NOW - 1000)
   openBatch(db, {
@@ -45,9 +52,9 @@ describe('COS source commit + batch closure', () => {
     expect(r.committed).toBe(1)
     expect(r.batchClosed).toBe(true)
     expect(r.cursor).toBe('200')
-    expect(statusOf('m1')).toBe('SOURCE_COMMITTED')
+    expect(statusOf('1a00000000000001')).toBe('SOURCE_COMMITTED')
     expect(getCheckpoint(db, ACC)).toBe('200')
-    expect(labeled).toEqual(['m1'])
+    expect(labeled).toEqual(['1a00000000000001'])
   })
 
   it('without source-write capability the chain stays OPEN — visibly, not silently', async () => {
@@ -56,7 +63,7 @@ describe('COS source commit + batch closure', () => {
     expect(r.skipped).toBe(1)
     expect(r.committed).toBe(0)
     expect(r.batchClosed).toBe(false)
-    expect(statusOf('m1')).toBe('LOCAL_APPLIED')
+    expect(statusOf('1a00000000000001')).toBe('LOCAL_APPLIED')
     expect(getCheckpoint(db, ACC)).toBeNull()
     // and the reason names the missing capability rather than shrugging
     expect(r.reason).toMatch(/modify scope/)
@@ -73,9 +80,9 @@ describe('COS source commit + batch closure', () => {
     const r = await closeBatch(db, 'b1', new NoSourceWriteCommitter(), NOW,
       { allowCursorAdvanceWithoutSourceWrite: true })
     expect(r.batchClosed).toBe(true)
-    expect(statusOf('m1')).toBe('SOURCE_COMMIT_SKIPPED')
-    expect(statusOf('m1')).not.toBe('SOURCE_COMMITTED')
-    const row = db.prepare(`SELECT last_error FROM email_processing WHERE message_id='m1'`)
+    expect(statusOf('1a00000000000001')).toBe('SOURCE_COMMIT_SKIPPED')
+    expect(statusOf('1a00000000000001')).not.toBe('SOURCE_COMMITTED')
+    const row = db.prepare(`SELECT last_error FROM email_processing WHERE message_id='1a00000000000001'`)
       .get() as { last_error: string }
     expect(row.last_error).toMatch(/source-commit kihagyva/)
     expect(row.last_error).toMatch(/modify scope/)
@@ -106,8 +113,8 @@ describe('COS source commit + batch closure', () => {
       },
     })
     expect(r.batchClosed).toBe(true)
-    expect(alerts.some(a => a.mid === 'm1' && a.kind === 'SOURCE_COMMIT_SKIPPED' && a.reason.length > 0)).toBe(true)
-    expect(tasks.some(a => a.mid === 'm1' && a.kind === 'SOURCE_COMMIT_SKIPPED' && a.reason.length > 0)).toBe(true)
+    expect(alerts.some(a => a.mid === '1a00000000000001' && a.kind === 'SOURCE_COMMIT_SKIPPED' && a.reason.length > 0)).toBe(true)
+    expect(tasks.some(a => a.mid === '1a00000000000001' && a.kind === 'SOURCE_COMMIT_SKIPPED' && a.reason.length > 0)).toBe(true)
   })
 
   it('a failing committer does NOT close the batch and does not move the cursor', async () => {
@@ -121,11 +128,11 @@ describe('COS source commit + batch closure', () => {
     expect(r.batchClosed).toBe(false)
     expect(getCheckpoint(db, ACC)).toBeNull()
     // the policy exception must not rescue a genuine failure
-    expect(statusOf('m1')).toBe('LOCAL_APPLIED')
+    expect(statusOf('1a00000000000001')).toBe('LOCAL_APPLIED')
   })
 
   it('one unfinished message holds the whole batch — the cursor never steps over it', async () => {
-    const db = seed('b1', ['m1', 'm2'])
+    const db = seed('b1', ['1a00000000000001', '1a00000000000002'])
     let calls = 0
     const flaky: SourceCommitter = {
       id: 'flaky',
@@ -141,8 +148,8 @@ describe('COS source commit + batch closure', () => {
   })
 
   it('EXCLUDED messages are already terminal and do not block closure', async () => {
-    const db = seed('b1', ['m1', 'm2'])
-    excludeMessage(db, ACC, 'm2', NOW - 800)
+    const db = seed('b1', ['1a00000000000001', '1a00000000000002'])
+    excludeMessage(db, ACC, '1a00000000000002', NOW - 800)
     const r = await closeBatch(db, 'b1', new GmailLabelCommitter(async () => {}), NOW)
     expect(r.attempted).toBe(1)          // only the LOCAL_APPLIED one needed work
     expect(r.batchClosed).toBe(true)
@@ -173,8 +180,8 @@ describe('COS source commit + batch closure', () => {
   })
 
   it('reproduces 2026-08-09 and fixes it: eighteen-style backlog, all stuck, then closed', async () => {
-    const db = seed('b1', ['m1', 'm2', 'm3'])
-    expect(['m1', 'm2', 'm3'].every((m) => statusOf(m) === 'LOCAL_APPLIED')).toBe(true)
+    const db = seed('b1', ['1a00000000000001', '1a00000000000002', '1a00000000000003'])
+    expect(['1a00000000000001', '1a00000000000002', '1a00000000000003'].every((m) => statusOf(m) === 'LOCAL_APPLIED')).toBe(true)
     expect(getCheckpoint(db, ACC)).toBeNull()
 
     const r = await closeBatch(db, 'b1', new NoSourceWriteCommitter(), NOW,
@@ -203,14 +210,14 @@ describe('schema init never rewrites a row (N-1)', () => {
     const db = getDb()
     openBatch(db, {
       batchId: 'b-probe', accountId: 'acc', cursorBefore: '1', cursorAfter: '2',
-      messages: [{ messageId: 'm-probe' }],
+      messages: [{ messageId: '1a000000000000fe' }],
     }, NOW)
     // Put the rows in states the probe values would visibly clobber.
-    db.prepare("UPDATE email_processing SET status='LOCAL_APPLIED' WHERE message_id='m-probe'").run()
+    db.prepare("UPDATE email_processing SET status='LOCAL_APPLIED' WHERE message_id='1a000000000000fe'").run()
     db.prepare("UPDATE email_processing_batches SET status='TERMINAL' WHERE batch_id='b-probe'").run()
 
     const snapshot = () => JSON.stringify({
-      msg: (db.prepare("SELECT status FROM email_processing WHERE message_id='m-probe'").get() as { status: string }).status,
+      msg: (db.prepare("SELECT status FROM email_processing WHERE message_id='1a000000000000fe'").get() as { status: string }).status,
       batch: (db.prepare("SELECT status FROM email_processing_batches WHERE batch_id='b-probe'").get() as { status: string }).status,
     })
     const before = snapshot()

@@ -5,6 +5,13 @@ import { openBatch, claimMessage, localApply } from '../cos/email-ingest.js'
 import { closeOpenBatches, NoSourceWriteCommitter } from '../cos/source-commit.js'
 import type { QuarantineDeps, CursorPassKind } from '../cos/poison-quarantine.js'
 
+// FIXTURE IDS CHANGED 2026-08-31 (Recovery Gate), disclosed rather than quietly
+// fixed. These tests used 'm1'/'m2'/'m3'/'m-probe' as message ids. Gmail message
+// ids are lowercase hex, and closeBatch now refuses to hand a non-Gmail id to the
+// committer at all -- so with the old fixtures these tests stopped reaching the
+// branches they are about (the committer, the F-8 policy path) and asserted
+// EXCLUDED instead. The ids are now Gmail-shaped; every assertion is unchanged.
+
 // A poison message and a source-commit skip are both "the cursor passed
 // something", and there the similarity ends. On 2026-08-11 they shared the
 // alert and card wording, so a GLS pickup notice that had been processed
@@ -50,7 +57,7 @@ describe('a source-commit skip is not a quarantine', () => {
 
   it('reports the skip under its OWN kind, never as a quarantine', async () => {
     const { deps, alerts, tasks } = spyDeps()
-    seedMessage('b1', 'm1', NOW)
+    seedMessage('b1', '1a00000000000001', NOW)
     await closeOpenBatches(getDb(), new NoSourceWriteCommitter('nincs modify scope'), NOW + 10, {
       quarantine: deps, allowCursorAdvanceWithoutSourceWrite: true,
     })
@@ -65,13 +72,13 @@ describe('a source-commit skip is not a quarantine', () => {
     // The point of the exception is that the chain closes. Getting the wording
     // right must not cost that.
     const { deps } = spyDeps()
-    seedMessage('b1', 'm1', NOW)
+    seedMessage('b1', '1a00000000000001', NOW)
     const r = await closeOpenBatches(getDb(), new NoSourceWriteCommitter('nincs modify scope'), NOW + 10, {
       quarantine: deps, allowCursorAdvanceWithoutSourceWrite: true,
     })
     expect(r.closed, 'the exception exists so the chain can close').toBe(1)
     const row = getDb().prepare(
-      `SELECT status, last_error FROM email_processing WHERE message_id='m1'`,
+      `SELECT status, last_error FROM email_processing WHERE message_id='1a00000000000001'`,
     ).get() as { status: string; last_error: string | null }
     expect(row.status).toBe('SOURCE_COMMIT_SKIPPED')
     expect(row.last_error, 'the durable record of WHY lives on the row').toContain('modify scope')
@@ -91,11 +98,11 @@ describe('a permanent condition is reported once, not once per message', () => {
     // alert surfaces; here we prove the domain layer really does fire per
     // message, so a non-deduping implementation would spam once per email.
     const { deps, alerts } = spyDeps()
-    for (const mid of ['m1', 'm2', 'm3']) seedMessage(`b-${mid}`, mid, NOW)
+    for (const mid of ['1a00000000000001', '1a00000000000002', '1a00000000000003']) seedMessage(`b-${mid}`, mid, NOW)
     await closeOpenBatches(getDb(), new NoSourceWriteCommitter('nincs modify scope'), NOW + 10, {
       quarantine: deps, allowCursorAdvanceWithoutSourceWrite: true,
     })
-    expect(alerts.map(a => a.mid).sort()).toEqual(['m1', 'm2', 'm3'])
+    expect(alerts.map(a => a.mid).sort()).toEqual(['1a00000000000001', '1a00000000000002', '1a00000000000003'])
     expect(alerts.every(a => a.kind === 'SOURCE_COMMIT_SKIPPED')).toBe(true)
   })
 })
