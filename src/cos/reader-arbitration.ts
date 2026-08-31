@@ -178,3 +178,41 @@ export function fallbackFor(candidate: ProgressionDecision): string {
 export function hasExternalEffect(decision: string): boolean {
   return EXTERNAL_EFFECT_DECISIONS.has(decision as ProgressionDecision)
 }
+
+/**
+ * IS THIS PACKET CONTRADICTORY? One definition, because there were three.
+ *
+ * `arbitrate` returns a `conflict` boolean and it is not persisted -- the packet
+ * table keeps `conflict_reason` and `decided_by` and drops the flag. So every
+ * consumer re-derived the answer as `conflict_reason IS NOT NULL`, and that
+ * predicate is wrong for exactly one branch: an invalid packet fills the reason
+ * with an explanatory note while explicitly setting `conflict: false`, because
+ * a reading that failed validation is not a disagreement -- there is no second
+ * opinion to disagree with.
+ *
+ * Measured on the live store, 2026-08-31: 152 of 181 active cases counted as
+ * contradicted (0.84), of which 15 were INVALID_PACKET. The real contradiction
+ * count is 137 (0.76). That number gates Phase 2, and it was inflated by a
+ * predicate that read the note instead of the verdict.
+ *
+ * `decided_by` survives into the table and separates the branches exactly, so
+ * this needs no migration and no backfill -- and it is exported so the metric,
+ * the invariant and any future reader share ONE answer rather than three copies
+ * that can drift.
+ *
+ * NOT A LOOSENING. An invalid packet must still stop a non-read-only action;
+ * it just must not be called a contradiction while doing so. See Invariant E,
+ * where the single check became two and both still FAIL.
+ */
+export const NON_CONFLICT_DECIDED_BY = 'INVALID_PACKET'
+
+export function packetIsContradictory(
+  p: { conflictReason: string | null | undefined; decidedBy: string | null | undefined },
+): boolean {
+  if (!p.conflictReason) return false
+  return p.decidedBy !== NON_CONFLICT_DECIDED_BY
+}
+
+/** The same predicate for SQL. `alias` is the packet table's alias. */
+export const contradictorySql = (alias: string): string =>
+  `(${alias}.conflict_reason IS NOT NULL AND COALESCE(${alias}.decided_by, '') <> '${NON_CONFLICT_DECIDED_BY}')`

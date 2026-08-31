@@ -54,6 +54,7 @@ import { listNeedsHuman, listDueForRetry } from '../../cos/recovery-queue.js'
 import { operationalHealth } from '../../cos/operational-health.js'
 import { linkCases, suggestLinks, linkedCases } from '../../cos/case-link.js'
 import { classifyScope, describeScope } from '../../cos/scope-gate.js'
+import { contradictorySql } from '../../cos/reader-arbitration.js'
 import { deriveAnswerOptions } from '../../cos/answer-options.js'
 import { interpretOwnerAnswer, ballMoved } from '../../cos/answer-interpretation.js'
 import { resolveInterpreter } from '../../cos/interpreter-provider.js'
@@ -1254,7 +1255,7 @@ function contradictionHealth(
 ): { active: number; contradicted: number; clean: number; share: number } {
   try {
     const rows = db.prepare(
-      `SELECT p.conflict_reason AS c
+      `SELECT ${contradictorySql('p')} AS c
          FROM case_progression_state s
          JOIN case_evidence_packets p
            ON p.domain = s.domain AND p.case_id = s.case_id
@@ -1262,8 +1263,8 @@ function contradictionHealth(
                 SELECT MAX(created_at) FROM case_evidence_packets
                  WHERE domain = s.domain AND case_id = s.case_id)
         WHERE s.progression_enabled = 1`,
-    ).all() as Array<{ c: string | null }>
-    const contradicted = rows.filter(r => r.c).length
+    ).all() as Array<{ c: number }>
+    const contradicted = rows.filter(r => r.c === 1).length
     const active = (db.prepare(
       `SELECT COUNT(*) AS n FROM case_progression_state WHERE progression_enabled = 1`,
     ).get() as { n: number }).n

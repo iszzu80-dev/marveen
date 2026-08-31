@@ -59,6 +59,7 @@
  */
 
 import type Database from 'better-sqlite3'
+import { NON_CONFLICT_DECIDED_BY } from './reader-arbitration.js'
 import type { EnforcementVerdict, SideEffectClass } from './capability-contract.js'
 // TYPE ONLY, deliberately. `action-side-effect.ts` imports the risk vocabularies
 // from here at run time; importing its values back would close a module cycle.
@@ -168,6 +169,11 @@ export const REQUIRED_INPUTS = [
   'canonical_state_fresh',
   'external_outcome_settled',
   'evidence_non_conflicting',
+  // Split out of evidence_non_conflicting on 2026-08-31. An invalid packet is
+  // the ABSENCE of a reading, not a disagreement between two, and arbitrate()
+  // has always recorded it as `conflict: false`. It must still stop a
+  // non-read-only action -- it does, below -- under a name that is true.
+  'reader_evidence_valid',
   'required_capabilities_known',
   'no_unknown_required_field',
 ] as const
@@ -431,8 +437,13 @@ export function invariantE(a: {
   // continues -- that is the owner's explicit carve-out, and it is what keeps
   // this from stopping the engine on the 141-of-168 population that carries a
   // contradiction today.
+  // BOTH gates, because the split must not open a door. A case whose reading
+  // failed validation used to fail `evidence_non_conflicting` and be refused
+  // here; it now fails `reader_evidence_valid` and is refused here just the
+  // same. The reason it prints is the only thing that changed.
   const contradiction = (a.requiredInputs ?? [])
-    .find(f => f.input === 'evidence_non_conflicting' && f.status === 'FAIL')
+    .find(f => (f.input === 'evidence_non_conflicting' || f.input === 'reader_evidence_valid')
+      && f.status === 'FAIL')
   if (contradiction && a.sideEffect !== 'READ_ONLY') {
     return {
       allowed: false,
@@ -569,14 +580,35 @@ export function gatherRequiredInputs(
   //    history, and history that never expires would cap every case for ever.
   try {
     const r = db.prepare(
-      `SELECT conflict_reason AS c FROM case_evidence_packets
+      `SELECT conflict_reason AS c, decided_by AS by FROM case_evidence_packets
         WHERE domain = ? AND case_id = ? ORDER BY created_at DESC LIMIT 1`,
-    ).get(domain, caseId) as { c?: string | null } | undefined
-    if (!r) add('evidence_non_conflicting', 'PASS', 'nincs bizonyíték-csomag ehhez az ügyhöz')
-    else if (r.c) add('evidence_non_conflicting', 'FAIL', `ellentmondó olvasat: ${r.c}`)
-    else add('evidence_non_conflicting', 'PASS', 'az utolsó csomag konfliktusmentes')
+    ).get(domain, caseId) as { c?: string | null; by?: string | null } | undefined
+    if (!r) {
+      add('evidence_non_conflicting', 'PASS', 'nincs bizonyíték-csomag ehhez az ügyhöz')
+      add('reader_evidence_valid', 'PASS', 'nincs bizonyíték-csomag ehhez az ügyhöz')
+    } else if (r.by === NON_CONFLICT_DECIDED_BY) {
+      // ONE CHECK BECAME TWO, AND BOTH STILL FAIL.
+      //
+      // An invalid packet used to be reported as "ellentmondó olvasat" -- a
+      // disagreement between two readings -- when arbitrate() had explicitly
+      // recorded `conflict: false` for it, because a reading that failed
+      // validation is not a second opinion, it is the absence of one. The
+      // action must still be refused; it must simply be refused for the reason
+      // that is true. 15 of the 181 active cases were in this state on
+      // 2026-08-31, and every one of them was inflating the contradiction share
+      // that gates Phase 2 while telling the reader the wrong thing about why.
+      add('evidence_non_conflicting', 'PASS', 'nincs ellentmondás: nem volt ervenyes olvasat, amivel ütközhetne')
+      add('reader_evidence_valid', 'FAIL', `érvénytelen bizonyíték-csomag: ${r.c}`)
+    } else if (r.c) {
+      add('evidence_non_conflicting', 'FAIL', `ellentmondó olvasat: ${r.c}`)
+      add('reader_evidence_valid', 'PASS', 'a csomag érvényes volt')
+    } else {
+      add('evidence_non_conflicting', 'PASS', 'az utolsó csomag konfliktusmentes')
+      add('reader_evidence_valid', 'PASS', 'a csomag érvényes volt')
+    }
   } catch (e) {
     add('evidence_non_conflicting', 'UNKNOWN', String((e as Error)?.message ?? e))
+    add('reader_evidence_valid', 'UNKNOWN', String((e as Error)?.message ?? e))
   }
 
   // 6. The capability verdict, already computed by this run.
