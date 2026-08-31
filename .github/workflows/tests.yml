@@ -93,8 +93,13 @@ jobs:
 
           code=true
           if [ "${{ steps.changed.outputs.files }}" = "LIST" ]; then
-            # Docs-only: markdown and docs/ and deliverables/ carry no runtime.
-            if ! grep -qvE '(^|/)(docs/|deliverables/)|\.md$|^LICENSE$|^ATTRIBUTIONS\.md$' /tmp/changed.txt; then
+            # Docs-only, and the pattern is ANCHORED on purpose. An earlier
+            # cut of this line matched `docs/` anywhere in a path, so
+            # `src/docs/foo.ts` classified as documentation and would have
+            # skipped the suite; and it exempted `.md` at any depth, so a
+            # markdown FIXTURE a test reads would have done the same. Only
+            # repo-root markdown, docs/ and deliverables/ are runtime-free.
+            if ! grep -qvE '^(docs|deliverables)/|^[^/]*\.md$|^LICENSE$' /tmp/changed.txt; then
               code=false
             fi
           fi
