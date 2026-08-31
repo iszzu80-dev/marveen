@@ -88,3 +88,31 @@ describe('progression claims carry a fence', () => {
     expect(() => runProgressionHeartbeat(db, NOW)).not.toThrow()
   })
 })
+
+describe('the mirrored claim is released on EVERY exit path', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('a no-trigger sweep leaves no abandoned case_claims row', () => {
+    const db = seed(3)
+
+    // First sweep: the cases run, record their state hash, and release normally.
+    const first = runProgressionHeartbeat(db, NOW)
+    expect(first.personal).toBeGreaterThan(0)
+    expect(claims(db)).toHaveLength(0)
+
+    // Second sweep, later: nothing about the cases changed, so the trigger
+    // contract says do not run. This is the MAJORITY path in production --
+    // 77 to 99 cases per sweep on the live install -- and it `continue`s past
+    // the block whose finally used to be the only place the mirror was
+    // released.
+    db.prepare(`UPDATE case_progression_state SET next_progression_at = ?`).run(NOW + 100)
+    const second = runProgressionHeartbeat(db, NOW + 200)
+    expect(second.skippedNoTrigger).toBeGreaterThan(0)
+
+    // Before the fix: one abandoned row per skipped case, each expiring five
+    // minutes later and never removed, which the health monitor then reported
+    // for weeks as "94 lejart foglalas" -- the sweep's own litter, read as the
+    // residue of crashed runs.
+    expect(claims(db)).toHaveLength(0)
+  })
+})

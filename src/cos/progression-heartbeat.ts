@@ -170,6 +170,30 @@ export function runProgressionHeartbeat(
     return result
   }
 
+  // Release the MIRRORED case_claims row (§6.6 / A.2).
+  //
+  // This used to live only in the finally of the work block, and the two most
+  // common ways out of the loop never reach that block: a case with no trigger,
+  // and a run whose trigger is unnamed. Both `continue` after the mirror has
+  // already been acquired. skippedNoTrigger is the majority outcome of every
+  // sweep -- 77 to 99 cases per run on this install -- so the table filled with
+  // one abandoned row per case and stayed full: 181 rows, every one of them
+  // expired, none of them held by anybody.
+  //
+  // The comment on the finally block named the exact cost: "egy ott felejtett
+  // sor a kovetkezo egyeztetesben lejart foglalaskent jelenne meg, ami zaj, es
+  // a zaj megtanitja az embert atugrani a jelentest." It was right. The monitor
+  // reported 94 expired claims as a WARNING for weeks, reading as the residue of
+  // crashed runs, and it was the sweep's own litter.
+  const releaseMirroredClaim = (domain: string, caseId: string, runId: string): void => {
+    try {
+      const key = `progression:${domain}:${caseId}`
+      const held = db.prepare(`SELECT claim_fence FROM case_claims WHERE claim_key=? AND owner_run_id=?`)
+        .get(key, runId) as { claim_fence: number } | undefined
+      if (held) releaseClaim(db, { claimKey: key, ownerRunId: runId, fence: held.claim_fence })
+    } catch { /* a lease lejarata amugy is felszabaditja */ }
+  }
+
   for (const domain of ['personal', 'zst'] as const) {
     const page = findDuePage(db, domain, now, maxPerDomain)
     // Recorded BEFORE the loop: this is what the bound left behind, which is a
@@ -212,6 +236,7 @@ export function runProgressionHeartbeat(
         result.skippedNoTrigger++
         deferAndProject(db, domain, dc.case_id, now + NO_TRIGGER_BACKOFF_SEC, now)
         releaseProgressionClaim(db, domain, dc.case_id, runId, now)
+        releaseMirroredClaim(domain, dc.case_id, runId)
         continue
       }
 
@@ -220,6 +245,7 @@ export function runProgressionHeartbeat(
         result.cycleErrors++
         result.errors.push(`${domain}/${dc.case_id}: shouldRun with no trigger named (§10.8 defect)`)
         releaseProgressionClaim(db, domain, dc.case_id, runId, now)
+        releaseMirroredClaim(domain, dc.case_id, runId)
         continue
       }
 
@@ -274,15 +300,7 @@ export function runProgressionHeartbeat(
         )
       } finally {
         releaseProgressionClaim(db, domain, dc.case_id, runId, now)
-        // A tukrozott claim elengedese: egy ott felejtett sor a kovetkezo
-        // egyeztetesben "lejart foglalas"-kent jelenne meg, ami zaj, es a zaj
-        // megtanitja az embert atugrani a jelentest.
-        try {
-          const key = `progression:${domain}:${dc.case_id}`
-          const held = db.prepare(`SELECT claim_fence FROM case_claims WHERE claim_key=? AND owner_run_id=?`)
-            .get(key, runId) as { claim_fence: number } | undefined
-          if (held) releaseClaim(db, { claimKey: key, ownerRunId: runId, fence: held.claim_fence })
-        } catch { /* a lease lejarata amugy is felszabaditja */ }
+        releaseMirroredClaim(domain, dc.case_id, runId)
       }
     }
   }
