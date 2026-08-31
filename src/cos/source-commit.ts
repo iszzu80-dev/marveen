@@ -28,7 +28,8 @@
 // watches for.
 
 import type Database from 'better-sqlite3'
-import { sourceCommit, sourceCommitSkipped, tryAdvanceCheckpoint, isCursorPositionClear } from './email-ingest.js'
+import { sourceCommit, sourceCommitSkipped, sourceCommitFailed, tryAdvanceCheckpoint, isCursorPositionClear } from './email-ingest.js'
+import { POISON_ATTEMPT_THRESHOLD } from './poison-quarantine.js'
 import { quarantineBatchPoison, type QuarantineDeps } from './poison-quarantine.js'
 
 export type CommitOutcome = 'COMMITTED' | 'SKIPPED_NO_CAPABILITY' | 'FAILED'
@@ -96,7 +97,7 @@ export interface CloseResult {
   reason: string
 }
 
-interface Row { gmail_account_id: string; message_id: string }
+interface Row { gmail_account_id: string; message_id: string; attempt: number }
 
 /**
  * Finish the chain for one batch: source-commit every LOCAL_APPLIED message,
@@ -115,12 +116,24 @@ export async function closeBatch(
   opts: CloseOptions = {},
 ): Promise<CloseResult> {
   const rows = db.prepare(
-    `SELECT gmail_account_id, message_id FROM email_processing
+    `SELECT gmail_account_id, message_id, attempt FROM email_processing
      WHERE batch_id = ? AND status = 'LOCAL_APPLIED'`
   ).all(batchId) as Row[]
 
   let committed = 0, skipped = 0, failed = 0
   let skipReason = ''
+  // Terminalise on an audited exception: the local work is done, the source was
+  // NOT marked, the reason is on the row, and the two review surfaces are
+  // raised. One helper because three different conditions end here and each one
+  // used to be a separate half-wired branch.
+  const letPast = (r: Row, reason: string): boolean => {
+    if (!opts.allowCursorAdvanceWithoutSourceWrite) return false
+    sourceCommitSkipped(db, r.gmail_account_id, r.message_id, `source-commit kihagyva: ${reason}`, now)
+    opts.quarantine?.raiseAlert(r.gmail_account_id, r.message_id, reason, 'SOURCE_COMMIT_SKIPPED')
+    opts.quarantine?.createReviewTask(r.gmail_account_id, r.message_id, reason, 'SOURCE_COMMIT_SKIPPED')
+    return true
+  }
+
   for (const r of rows) {
     const res = await committer.commit(r.gmail_account_id, r.message_id)
     if (res.outcome === 'COMMITTED') {
@@ -151,6 +164,24 @@ export async function closeBatch(
       }
     } else {
       failed += 1
+      // A failure that writes nothing is indistinguishable from a step that did
+      // not run. This branch used to do exactly that: no attempt, no error, no
+      // state. Fifteen rows carried `attempt = 0, last_error = NULL` through two
+      // weeks of daily retries, so neither the poison sweep (which selects on
+      // attempt) nor a human reading the row could see that anything had been
+      // tried at all.
+      sourceCommitFailed(db, r.gmail_account_id, r.message_id, res.reason, now)
+      // A.1 in spirit, for the chain's SECOND half. quarantineBatchPoison only
+      // looks at RECOVERY_REQUIRED/CLAIMED/DISCOVERED, so a message that jams
+      // AFTER the local write could pin its cursor forever with no sweep able to
+      // reach it. Bounded by the same attempt threshold: a transient failure
+      // retries, a persistent one is let past on the owner's policy with the
+      // measured reason, never on a guess about the first failure.
+      const attempts = r.attempt + 1
+      if (attempts >= POISON_ATTEMPT_THRESHOLD) {
+        const why = `${attempts} sikertelen forras-jeloles utan: ${res.reason}`
+        if (letPast(r, why)) { failed -= 1; skipped += 1; skipReason = why; committed += 1 }
+      }
     }
   }
 

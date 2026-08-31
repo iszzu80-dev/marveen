@@ -10,9 +10,9 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { getDb, initDatabase } from '../src/db.js'
-import { closeOpenBatches, NoSourceWriteCommitter, GmailLabelCommitter } from '../src/cos/source-commit.js'
+import { closeOpenBatches, openBatchIds, NoSourceWriteCommitter, GmailLabelCommitter } from '../src/cos/source-commit.js'
+import { probeSourceWriteCapability } from '../src/cos/source-commit-capability.js'
 import { GmailLabelApi } from '../src/cos/adapters/gmail-label-api.js'
-import { existsSync } from 'node:fs'
 import type { QuarantineDeps } from '../src/cos/poison-quarantine.js'
 
 const REPO = join(import.meta.dirname, '..')
@@ -137,9 +137,33 @@ const quarantine: QuarantineDeps = {
 // committer reports FAILED, and the batch stays open -- visibly, which is the
 // behaviour F-8 wanted all along.
 const credsPath = 'store/.google-private-creds.json'
-const committer = existsSync(credsPath)
+
+// WHICH COMMITTER -- decided by MEASURING the granted scope, not by the creds
+// file existing (incident 2026-08-31, see source-commit-capability.ts). The file
+// was present the whole time the scope was gone, so the writer was chosen, every
+// call 403'd, and the jam looked like an ordinary open batch for two weeks.
+const capability = await probeSourceWriteCapability(credsPath)
+console.log('SourceWriteCapability:', JSON.stringify({ verdict: capability.verdict, reason: capability.reason }))
+
+if (capability.verdict === 'UNKNOWN') {
+  // Close nothing. We do not know whether the mark is possible, and an unknown
+  // must not be spent as a "cannot": the skip is what lets the cursor pass, and
+  // a cursor moved on a guess cannot be un-moved.
+  console.log(JSON.stringify({
+    batches: openBatchIds(getDb()).length, closed: 0, quarantined: 0,
+    policyApplied: policy.allowCursorAdvanceWithoutSourceWrite === true,
+    failed: true,
+    reasons: [`a forras-jelolesi kepesseg NEM MERHETO, ezert egyetlen koteget sem zarok: ${capability.reason}`],
+  }))
+  process.exit(0)
+}
+
+const committer = capability.verdict === 'CAPABLE'
   ? new GmailLabelCommitter(new GmailLabelApi({ credsPath }).apply)
-  : new NoSourceWriteCommitter(policy.reason)
+  // The MEASURED reason, not the sentence someone typed into the policy file in
+  // August. The policy grants the permission; it does not get to describe the
+  // world.
+  : new NoSourceWriteCommitter(capability.reason)
 console.log('SourceCommitter:', JSON.stringify({ id: committer.id }))
 const r = await closeOpenBatches(getDb(), committer, now, {
   allowCursorAdvanceWithoutSourceWrite: policy.allowCursorAdvanceWithoutSourceWrite === true,

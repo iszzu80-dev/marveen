@@ -182,6 +182,18 @@ export const sourceCommit = (db: Database.Database, a: string, m: string, now: n
  *  then inherits. */
 export const sourceCommitSkipped = (db: Database.Database, a: string, m: string, reason: string, now: number) =>
   setMessageStatus(db, a, m, 'SOURCE_COMMIT_SKIPPED', { lastError: reason }, now)
+/** The source mark was ATTEMPTED and failed. The message stays LOCAL_APPLIED --
+ *  the local work is done and must not be redone -- but the attempt is counted
+ *  and the error kept, so a jam explains itself and can eventually be swept.
+ *
+ *  INCIDENT 2026-08-31. closeBatch's FAILED branch wrote NOTHING: no attempt, no
+ *  error, no state. Fifteen messages sat at LOCAL_APPLIED with `attempt = 0` and
+ *  `last_error = NULL` for two weeks while the cursor stood still, and the only
+ *  thing any surface could say was "a koteg nem minden eleme terminalis" -- true
+ *  of every open batch, and therefore evidence of nothing. A failure that leaves
+ *  no trace is indistinguishable from a step that never ran. */
+export const sourceCommitFailed = (db: Database.Database, a: string, m: string, err: string, now: number) =>
+  setMessageStatus(db, a, m, 'LOCAL_APPLIED', { lastError: err, attemptDelta: 1 }, now)
 export const excludeMessage = (db: Database.Database, a: string, m: string, now: number) => setMessageStatus(db, a, m, 'EXCLUDED', {}, now)
 export const markDuplicate = (db: Database.Database, a: string, m: string, now: number) => setMessageStatus(db, a, m, 'DUPLICATE', {}, now)
 export const markRecoveryRequired = (db: Database.Database, a: string, m: string, err: string, now: number) => setMessageStatus(db, a, m, 'RECOVERY_REQUIRED', { lastError: err, attemptDelta: 1 }, now)
