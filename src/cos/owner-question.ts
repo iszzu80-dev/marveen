@@ -295,6 +295,15 @@ export interface AskResult {
    *  Reported rather than silent: a channel that went quiet because of a cap
    *  must not look like a system with nothing to ask. */
   heldBacklogFull: number
+  /** E2: WHAT is being held, by class. A number alone cannot tell an
+   *  authorization gate from a shopping question. */
+  heldByClass: Partial<Record<QuestionClass, number>>
+  /** The oldest few held asks, so a starving class is visible without a query. */
+  heldTop: Array<{ caseId: string; cls: QuestionClass; ageSec: number }>
+  /** False when the approval table is absent and the ordering degraded to two
+   *  classes. Never silent: an order that quietly stopped ordering is worse
+   *  than one that never did. */
+  priorityOrdered: boolean
   /** Questions suppressed because the same ask is already outstanding. */
   alreadyAsked: number
   /** Cases read this pass with nothing to ask the owner. */
@@ -487,7 +496,75 @@ const PRIORITY_RANK_SQL = `CASE COALESCE(pc.priority, zc.priority)
  * not — an exclusion that matches across domains can only suppress a question,
  * never invent one, and that is the safe direction to be loose in.
  */
-const QUESTION_ORDER_SQL = `
+/**
+ * E2 — WHICH QUESTION GETS ONE OF THE FIVE SLOTS.
+ *
+ * The ceiling was always there and the ORDER never was. Whoever the sweep
+ * reached first took a slot, so on 2026-08-31 the five open questions were a
+ * Cloudflare plan choice, a magnetic mount forward, a NAV notice from 07-10, a
+ * missing run log and a LinkedIn trial -- while the Teraszszigetelés decision
+ * had gone 48+ engine wake-ups without ever being asked, and every approval
+ * request the Phase 2 gate depends on queued behind the same wall.
+ *
+ * An approval-driven phase whose approvals compete with "which Waterpik" is not
+ * an approval-driven phase. Three classes, and each one is read from STRUCTURE,
+ * never from the wording of the question:
+ *
+ *   0 SAFETY_APPROVAL    the case has an UNDECIDED action-approval request.
+ *                        This is the authorization gate itself; if it cannot
+ *                        ask, the engine cannot act, and Checkpoint E is a
+ *                        queue rather than a capability.
+ *   1 BLOCKING_DECISION  the case is parked in AWAITING_SELECTION /
+ *                        AWAITING_APPROVAL: the engine has done everything it
+ *                        can and is stopped until a person answers.
+ *   2 NORMAL             everything else -- the reader enriching a case that
+ *                        is otherwise progressing perfectly well.
+ *
+ * Ordering only. Nothing here raises the ceiling, supersedes anybody's open
+ * question, or decides on his behalf which one he sees; it decides which one is
+ * ASKED when there is room for one. Preemption would change what is already on
+ * his board, and that is his call, not a sort order's.
+ *
+ * STARVATION: the existing keys stay, unchanged, below the class -- deadline
+ * bucket, priority, due date, and finally packet age ASCENDING. A NORMAL that
+ * loses a slot keeps ageing and therefore keeps climbing against its own class.
+ * Nothing is dropped: what does not fit is HELD, and held is recomputed from
+ * the store every sweep rather than written into a second table that can drift
+ * from it.
+ */
+export const QUESTION_CLASS_NAMES = ['SAFETY_APPROVAL', 'BLOCKING_DECISION', 'NORMAL'] as const
+export type QuestionClass = typeof QUESTION_CLASS_NAMES[number]
+
+const APPROVAL_TABLE = 'cos_action_approval_requests'
+
+function approvalTablePresent(db: Database.Database): boolean {
+  try {
+    return db.prepare(
+      `SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?`,
+    ).get(APPROVAL_TABLE) !== undefined
+  } catch { return false }
+}
+
+/** The class expression, or a constant when the approval table is absent.
+ *
+ *  A store without the table is an older one, not a broken one, and the whole
+ *  ask loop is wrapped in a try that would turn a missing-table error into
+ *  "no candidates" -- silence where questions should be. So the absence
+ *  degrades the ORDER, explicitly, and never the asking. */
+function questionClassSql(hasApprovals: boolean): string {
+  const approvalArm = hasApprovals
+    ? `WHEN EXISTS (SELECT 1 FROM ${APPROVAL_TABLE} ar
+                     WHERE ar.case_id = p.case_id AND ar.domain = p.domain
+                       AND ar.decided_at IS NULL) THEN 0`
+    : ''
+  return `CASE
+    ${approvalArm}
+    WHEN COALESCE(pc.status, zc.status) IN ('AWAITING_SELECTION','AWAITING_APPROVAL') THEN 1
+    ELSE 2
+  END`
+}
+
+const QUESTION_ORDER_TAIL = `
   CASE
     WHEN COALESCE(pc.due_at, zc.due_at) IS NULL THEN 3
     WHEN COALESCE(pc.due_at, zc.due_at) <= @now THEN 0
@@ -570,7 +647,7 @@ export function askPendingOwnerQuestions(
   const now = opts.now ?? Math.floor(Date.now() / 1000)
   const result: AskResult = {
     asked: 0, alreadyAsked: 0, nothingToAsk: 0, heldBacklogFull: 0, staleReading: 0, cooldown: 0,
-    windowExhausted: 0,
+    windowExhausted: 0, heldByClass: {}, heldTop: [], priorityOrdered: false,
   }
 
   // Questions that GREW the open pile this sweep. A superseding rewrite does
@@ -583,13 +660,19 @@ export function askPendingOwnerQuestions(
     ).get() as { n: number }).n
   } catch { outstanding = 0 }
 
-  let rows: Array<{ case_id: string; domain: string; packet_json: string; plan_json: string; packet_at: number; progression_run_id: string | null }> = []
+  let rows: Array<{ case_id: string; domain: string; packet_json: string; plan_json: string; packet_at: number; progression_run_id: string | null; question_class?: number }> = []
   try {
+    // E2: class first, then everything the order already weighed. The class is
+    // computed in SQL rather than after the fetch on purpose -- the scan window
+    // is a LIMIT on this ORDER BY, so classifying afterwards would let a safety
+    // approval fall off the end of the window and never be seen at all.
+    const cls = questionClassSql(approvalTablePresent(db))
+    result.priorityOrdered = true
     rows = db.prepare(
       `SELECT p.case_id, p.domain, p.packet_json, p.plan_json, p.created_at AS packet_at,
-              p.progression_run_id
+              p.progression_run_id, ${cls} AS question_class
        ${QUESTION_CANDIDATES_SQL}
-       ORDER BY ${QUESTION_ORDER_SQL} LIMIT ${QUESTION_SCAN_WINDOW}`,
+       ORDER BY ${cls}, ${QUESTION_ORDER_TAIL} LIMIT ${QUESTION_SCAN_WINDOW}`,
     ).all({ now }) as never
     // The window's overflow, counted rather than probed. A `LIMIT window + 1`
     // trick would only ever answer "at least one more", and the number is the
@@ -699,7 +782,20 @@ export function askPendingOwnerQuestions(
     //     that back would leave him with the worse wording and call it quiet.
     if (!replacesOwn && askedRecently(db, row.case_id, now)) { result.cooldown++; continue }
 
-    if (!replacesOwn && outstanding + netAdded >= maxOutstanding) { result.heldBacklogFull++; continue }
+    if (!replacesOwn && outstanding + netAdded >= maxOutstanding) {
+      result.heldBacklogFull++
+      // BACKPRESSURE, NAMED. A bare counter cannot tell "five trivia questions
+      // are holding the channel" from "an authorization gate is waiting behind
+      // them", and those need opposite responses. Held is derived from the
+      // store on every sweep, so it survives a restart without a second table
+      // that can disagree with the first.
+      const k = QUESTION_CLASS_NAMES[row.question_class ?? 2] ?? 'NORMAL'
+      result.heldByClass[k] = (result.heldByClass[k] ?? 0) + 1
+      if (result.heldTop.length < 5) {
+        result.heldTop.push({ caseId: row.case_id, cls: k, ageSec: Math.max(0, now - row.packet_at) })
+      }
+      continue
+    }
 
     // Record BEFORE sending. A crash between the two costs an unasked question,
     // which a later sweep re-derives; the other order costs a duplicate every
