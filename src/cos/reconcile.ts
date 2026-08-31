@@ -232,10 +232,19 @@ const corporateInPersonal: Check = (db) => {
     // to is a tombstone, not live contamination. Counting it would keep the
     // alarm ringing after the thing it warned about was fixed, and an alarm
     // that outlives its cause is how people learn to ignore alarms.
+    // AND NOT CLASSIFIED. A case the gate has marked is a KNOWN state waiting on
+    // an audited human bridge, not undetected contamination -- and the two must
+    // not share an alarm. Before this, doing the right thing (classifying it,
+    // and leaving it where the connector identity says it belongs) could not
+    // clear the CRITICAL, so the only way to silence it was to move a case that
+    // must not be moved automatically. An alarm that cannot be cleared by the
+    // correct action teaches people to ignore the alarm. Same reasoning as the
+    // tombstone exclusion above, one step further on.
     rows = db.prepare(
       `SELECT case_id, title FROM personal_cases
        WHERE archived_at IS NULL
          AND status NOT IN ('COMPLETED','CANCELLED','ARCHIVED')
+         AND scope_review_reason IS NULL
          AND (title LIKE '%ZST%' OR description LIKE '%ZST%'
               OR title LIKE '%ONE Magyarorsz%' OR title LIKE '%Product Lab%')`
     ).all() as never
@@ -243,9 +252,35 @@ const corporateInPersonal: Check = (db) => {
   if (!rows.length) return null
   return {
     id: 'corporate_content_in_personal_store', severity: 'CRITICAL', ref: '§19 kritikus, AC-17',
-    title: 'Céges tartalom a személyes tárban',
+    title: 'Céges tartalom a személyes tárban, OSZTÁLYOZATLANUL',
     detail: `${rows.length} ügy: ${rows.slice(0, 4).map(r => r.case_id).join(', ')}`,
-    action: 'A spec szerint ez kritikus riasztás. Vagy a Scope Gate hiányzik, vagy a postafiók-szabály engedte át.',
+    action: 'Ezeken nincs scope-verdikt, tehát egy beviteli út megkerülte a kaput. '
+      + 'Nem az a kérdés, hogy áthelyezzük-e -- az emberi döntés --, hanem hogy MELYIK ajtón jöttek be jelöletlenül.',
+  }
+}
+
+/** Classified, and waiting for the human bridge. Deliberately separate from the
+ *  check above and deliberately not CRITICAL: the gate did its job, the case is
+ *  where its connector identity says it belongs, and the only thing outstanding
+ *  is a decision that is Istvan's by design. Counting these as contamination
+ *  would make the critical alarm permanent and therefore worthless. */
+const scopeFlaggedAwaitingBridge: Check = (db) => {
+  let rows: Array<{ case_id: string; title: string }> = []
+  try {
+    rows = db.prepare(
+      `SELECT case_id, title FROM personal_cases
+       WHERE archived_at IS NULL
+         AND status NOT IN ('COMPLETED','CANCELLED','ARCHIVED')
+         AND scope_review_reason IS NOT NULL`
+    ).all() as never
+  } catch { return null }
+  if (!rows.length) return null
+  return {
+    id: 'scope_flagged_awaiting_human_bridge', severity: 'WARNING', ref: '§19, scope-gate',
+    title: 'Céges tartalmú ügy a személyes tárban, jelölve, emberi döntésre vár',
+    detail: `${rows.length} ügy: ${rows.slice(0, 4).map(r => r.case_id).join(', ')}`,
+    action: 'A kapu megjelölte, a namespace-t a connector identity tartja. '
+      + 'Az áthidalás a ZST tárba explicit emberi jóváhagyás -- amíg nincs, ez helyes állapot, nem hiba.',
   }
 }
 
@@ -657,7 +692,7 @@ const projectionDrift: Check = (db, now) => {
 export const CHECKS: Check[] = [
   stuckLocalApplied, openBatches, missingCheckpoint,
   outboundNeedsHuman, outcomeUnknown, stuckSending, failedRetryableStranded,
-  connectorDown, staleClaims, corporateInPersonal, outputFloorBreaches,
+  connectorDown, staleClaims, corporateInPersonal, scopeFlaggedAwaitingBridge, outputFloorBreaches,
   // §19 further minimum + critical alerts
   duplicateSendAttempt, failedReadback, stalledCampaign, expiredApproval,
   repeatedFollowUp, radarCheckFailing, cursorBatchMismatch, sourceWritePolicyActive,

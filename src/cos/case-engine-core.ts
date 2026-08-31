@@ -15,6 +15,7 @@
 //     a live claim cannot be stolen, an expired one can, and the fence proves it.
 
 import type Database from 'better-sqlite3'
+import { ZST_MARKERS, CORPORATE_MARKERS } from './scope-gate.js'
 
 /** The three tables a case namespace owns. */
 export interface CaseTables {
@@ -78,6 +79,10 @@ export interface NewCaseInput {
   actor?: string
   sourceSystem?: string
   sourceReference?: string
+  /** Set by a caller that has ALREADY classified the scope (the Gmail intake
+   *  route does). Its presence suppresses the createCase fallback marking, so
+   *  the gate's own verdict is never overwritten by the coarser one here. */
+  scopeReviewReason?: string
 }
 
 export interface CaseRow {
@@ -260,6 +265,50 @@ export function makeCaseEngine(
         // which is why the judgement had to be reconstructed from its effect.
         payload: input.triageReceiptId ? { triageReceiptId: input.triageReceiptId } : undefined,
       }, now)
+
+      // THE GATE BELONGS AT THE CHOKE POINT, NOT ON ONE CALLER.
+      //
+      // classifyScope runs in the Gmail intake route, and it works: the Deepgram
+      // DPA that arrived on the private connector on 2026-08-31 was marked
+      // "ZST bridge csak explicit emberi jovahagyassal" within the minute. But
+      // CORP-SEC-2026-001 and CORP-CLOUD-2026-001 -- both unmistakably ZST --
+      // sit in personal_cases with scope_review_reason NULL, because they came
+      // in through `scripts/chatgpt-cos-baseline-import.mjs`, a SECOND inbound
+      // door that never calls the gate. The health monitor has reported them as
+      // a CRITICAL "ceges tartalom a szemelyes tarban" ever since, with no way
+      // for anyone to tell a gated case from an ungated one.
+      //
+      // Every door goes through createCase. So the marking goes here.
+      //
+      // It MARKS, it does not route. Routing corporate content out of the
+      // connector it arrived on would break the boundary the whole namespace
+      // split rests on -- connector identity IS the scope, and a private mailbox
+      // may not write into the company's store on the strength of some words in
+      // a subject line. The bridge stays what it was designed to be: explicit,
+      // audited, and a human's decision.
+      // A caller that already classified the scope owns the wording; persist it.
+      // Without this the field was silently dropped, and a case the intake route
+      // HAD gated looked exactly like one nothing had ever looked at.
+      if (input.scopeReviewReason !== undefined) {
+        db.prepare(`UPDATE ${T.cases} SET scope_review_reason = ? WHERE case_id = ?`)
+          .run(input.scopeReviewReason, input.caseId)
+      }
+
+      if (T.cases === 'personal_cases' && input.scopeReviewReason === undefined) {
+        const text = `${input.title} ${input.description ?? ''}`.toLowerCase()
+        const hit = [...ZST_MARKERS, ...CORPORATE_MARKERS].find(m => text.includes(m.toLowerCase()))
+        if (hit) {
+          const reason = `SCOPE REVIEW — ${ZST_MARKERS.some(m => text.includes(m.toLowerCase())) ? 'ZST_EXCLUDED' : 'CORPORATE_EXCLUDED'}`
+            + ` (emberi ellenorzes kell): ceges/ZST tartalom a szemelyes tarban: ${hit};`
+            + ' a namespace-et a connector identity donti el, a ZST bridge csak explicit emberi jovahagyassal'
+          db.prepare(`UPDATE ${T.cases} SET scope_review_reason = ? WHERE case_id = ?`).run(reason, input.caseId)
+          appendCaseEvent(db, {
+            caseId: input.caseId, caseVersion: 1, actor,
+            eventType: 'SCOPE_REVIEW_FLAGGED', reason,
+            payload: { marker: hit, gate: 'createCase' },
+          }, now)
+        }
+      }
     })
     tx()
     return getCase(db, input.caseId)!

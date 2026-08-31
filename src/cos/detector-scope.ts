@@ -51,6 +51,13 @@ export const DETECTOR_BEHAVIOUR_SCOPE: readonly string[] = [
   // helyes: a beviteli út viselkedése tényleg megváltozott.
   'src/cos/triage-provenance.ts',
   'src/cos/email-ingest.ts',
+  // Hatókör-osztályozás (2026-08-31): a kapu dönti el, hogy egy céges tartalmú
+  // ügy MEGJELÖLVE jön-e létre a személyes tárban. Ez DÖNTÉS -- pontosan az a
+  // fajta, amit a fejléc szerint a hash lefed ("MELYIK üzenetből lesz ügy") --
+  // ezért a hatókörbe kerül, nem a deklarált kivételek közé, és a viselkedési
+  // ujjlenyomat mozdul vele. A `case-engine-core -> scope-gate` élet ez a sor
+  // teszi zárttá; a zártsági teszt hozta elő, olvasásból nem látszott volna.
+  'src/cos/scope-gate.ts',
   // Ügy-életciklus: ez dönti el, mi van nyitva, és mikor záródik.
   'src/cos/case-store.ts',
   'src/cos/case-engine-core.ts',
