@@ -5,15 +5,139 @@
 # Every "6811 green" in every audit came from one laptop, and the APG kernel
 # repo showed what that costs -- its default branch had been unrunnable for
 # days without anyone being wrong about it.
+#
+# COST STRUCTURE, 2026-08-31 (card d3dff901, owner ruling with the Checkpoint E
+# candidate). The budget hit 90% of $35 the night before, and the shape of the
+# spend was never measured. Four things were paying for nothing:
+#
+#   1. `push: ['**']` + `pull_request` ran the SAME sha twice on every PR
+#      branch. The second run proved nothing the first did not.
+#   2. No `concurrency`, so a rapid series of pushes ran a full suite for every
+#      intermediate commit, including the ones already superseded.
+#   3. A markdown-only commit ran 8000 tests.
+#   4. Every dev push to a scratch branch ran the whole heavy suite.
+#
+# WHAT THE OPTIMISATION MAY NOT TOUCH, and does not: the release proof. The
+# exact-SHA final gate (`release-gate`) is never cancelled, never deduped away,
+# and on a TAG runs unconditionally -- a release artefact does not get to skip
+# its own proof because the diff looked like documentation. On develop/main it
+# does honour the docs-only signal, and that is a deliberate, stated limit
+# rather than an oversight: a markdown-only commit produces a release-line sha
+# whose runtime is byte-identical to its parent. The kernel contract keeps its
+# separate job and its fail-on-missing-secret. Everything cheapened here is a
+# DEVELOPMENT signal, never a release one.
+
 name: tests
 
 on:
   push:
     branches: ['**']
+    tags: ['**']
   pull_request:
+  workflow_dispatch:
+    inputs:
+      full:
+        description: 'Force the full suite regardless of paths'
+        type: boolean
+        default: true
+
+# One run per ref. A newer push supersedes an older one -- EXCEPT on the
+# release line, where a cancelled run would destroy the proof somebody is
+# waiting on. develop, main and tags always finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !contains(fromJSON('["refs/heads/develop","refs/heads/main"]'), github.ref) && !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
+  # Always runs, always reports. A `paths-ignore` at the workflow level would
+  # have left required checks permanently pending on a docs-only PR -- a gate
+  # that never reports is indistinguishable from one that never passes.
+  triage:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.decide.outputs.code }}
+      heavy: ${{ steps.decide.outputs.heavy }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - id: changed
+        name: What changed
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          else
+            base="${{ github.event.before }}"
+          fi
+          # A first push to a branch, or a force-push, has no usable base.
+          # Unknown provenance is treated as CODE, never as docs: guessing wrong
+          # in the cheap direction is how a suite stops running.
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "files=UNKNOWN" >> "$GITHUB_OUTPUT"
+          else
+            git diff --name-only "$base" "${{ github.sha }}" > /tmp/changed.txt
+            echo "files=LIST" >> "$GITHUB_OUTPUT"
+            echo "--- changed files ---"; cat /tmp/changed.txt
+          fi
+
+      - id: decide
+        name: Decide what this run owes
+        run: |
+          release=false
+          case "${{ github.ref }}" in
+            refs/heads/develop|refs/heads/main|refs/tags/*) release=true ;;
+          esac
+          [ "${{ github.event_name }}" = "pull_request" ] && release=true
+          [ "${{ github.event_name }}" = "workflow_dispatch" ] && release=true
+
+          code=true
+          if [ "${{ steps.changed.outputs.files }}" = "LIST" ]; then
+            # Docs-only: markdown and docs/ and deliverables/ carry no runtime.
+            if ! grep -qvE '(^|/)(docs/|deliverables/)|\.md$|^LICENSE$|^ATTRIBUTIONS\.md$' /tmp/changed.txt; then
+              code=false
+            fi
+          fi
+
+          # THE DEDUP, and it is the whole saving. ONE heavy run per sha:
+          #   - a PR (or a manual dispatch) owes the reviewing suite -> `suite`
+          #   - the release line owes the exact-SHA proof     -> `release-gate`
+          #   - a plain branch push owes neither; the PR covers it
+          # `suite` therefore never fires on develop/main, and release-gate
+          # never fires on a PR, so the sha that used to run twice runs once.
+          heavy=false
+          case "${{ github.event_name }}" in
+            pull_request|workflow_dispatch) [ "$code" = "true" ] && heavy=true ;;
+          esac
+
+          echo "code=$code"   >> "$GITHUB_OUTPUT"
+          echo "heavy=$heavy" >> "$GITHUB_OUTPUT"
+          echo "::notice::code=$code heavy=$heavy release=$release event=${{ github.event_name }} ref=${{ github.ref }}"
+
+  # The cheap signal a plain branch push gets: types only, ~30s, no suite.
+  # A branch nobody has opened a PR for is not unguarded, it is cheaply guarded.
+  #
+  # Skipped when a heavy job will run anyway -- `suite` and `release-gate` both
+  # typecheck before their suite, and paying for a third identical tsc was the
+  # kind of small, permanent waste this pass exists to remove.
+  typecheck:
+    needs: triage
+    if: >-
+      needs.triage.outputs.code == 'true' &&
+      needs.triage.outputs.heavy != 'true' &&
+      !startsWith(github.ref, 'refs/tags/') &&
+      github.ref != 'refs/heads/develop' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm }
+      - run: npm ci
+      - run: npx tsc --noEmit
+
   suite:
+    needs: triage
+    if: needs.triage.outputs.heavy == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +155,37 @@ jobs:
       - name: Suite
         run: npx vitest run
 
+  # THE RELEASE PROOF. The job a production repin cites, and the one the cost
+  # work is forbidden to weaken. Never cancelled (see `concurrency`), never
+  # deduped away, and on a TAG it runs unconditionally -- a tag is a release
+  # artefact and a release artefact does not get to skip its own proof because
+  # the diff looked like documentation.
+  #
+  # On develop/main it does honour the docs-only signal: a commit that touches
+  # only markdown produces a release-line sha whose runtime is byte-identical to
+  # its parent, and running 8000 tests to discover that was one of the four ways
+  # this workflow was paying for nothing.
+  release-gate:
+    needs: triage
+    if: >-
+      startsWith(github.ref, 'refs/tags/') ||
+      ((github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') &&
+       needs.triage.outputs.code == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22', cache: npm }
+      - run: npm ci
+      - name: The exact SHA under test
+        run: |
+          echo "::notice::release gate on ${{ github.sha }}"
+          git rev-parse HEAD
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Full suite, exact SHA
+        run: npx vitest run
+
   # The two-repo vocabulary contract (APG_CHECKPOINT_RESULTS vs the kernel's
   # RESULT_VALUES) lives half in each repo, and its only guard is a test that
   # SKIPS when the kernel is not checked out. `APG_REQUIRE_KERNEL_CONTRACT=1`
@@ -42,7 +197,13 @@ jobs:
   # which is a visible gap. Folding it into `suite` would have made a missing
   # secret look like a passing contract -- the exact shape of bug this job
   # exists to catch.
+  #
+  # Gated on `code` only, never on `heavy`: the contract is cheap (one test
+  # file) and it is the one guard whose absence is invisible, so it does not
+  # get to be skipped for being on a side branch.
   kernel-contract:
+    needs: triage
+    if: needs.triage.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
