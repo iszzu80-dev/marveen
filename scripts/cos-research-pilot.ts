@@ -32,7 +32,20 @@ const INTENT_FOR_SCOPE: Record<string, ResearchIntent> = {
   PUBLIC_COMPANY_SUPPORT: 'OFFICIAL_SUPPORT_DOCUMENTATION',
   GENERAL_ADMIN: 'OFFICIAL_CONTACT',
 }
+// The corporate side asks a different question of the same vendors: whether the
+// service is up, rather than where to write. The owner asked for more than one
+// intent type in the round, and this is where the variety honestly comes from.
+const ZST_INTENT_FOR_SCOPE: Record<string, ResearchIntent> = {
+  PRODUCT_PRICE_COMMERCIAL: 'SERVICE_STATUS',
+  PUBLIC_COMPANY_SUPPORT: 'SERVICE_STATUS',
+  GENERAL_ADMIN: 'OFFICIAL_SUPPORT_DOCUMENTATION',
+}
 const MAX_SANCTIONED = 10
+// PER-NAMESPACE RESERVATION. The first B2 sanction pass filled all ten slots
+// from the personal side before reaching ZST, which the owner named explicitly
+// as something the round must include. A global cap with no reservation is a
+// cap that silently picks a namespace.
+const MAX_PER_NAMESPACE = 5
 
 const limitArg = process.argv.indexOf('--limit')
 const limit = limitArg > -1 ? Number(process.argv[limitArg + 1]) : 25
@@ -45,6 +58,8 @@ const out: Record<string, unknown> = {}
 const tickets: Array<Record<string, unknown>> = []
 let sanctionedTotal = 0
 let capped = 0
+let deduped = 0
+const seenQueries = new Set<string>()
 
 for (const ns of ['personal', 'zst'] as const) {
   const table = ns === 'personal' ? 'personal_cases' : 'zst_cases'
@@ -56,6 +71,7 @@ for (const ns of ['personal', 'zst'] as const) {
 
   const eligible: string[] = []
   const refusedAt: Record<string, number> = {}
+  let perNamespace = 0
   for (const r of rows) {
     const c: ResearchCase = {
       namespace: ns, caseId: String(r.case_id), title: r.title as string | null,
@@ -69,13 +85,19 @@ for (const ns of ['personal', 'zst'] as const) {
       continue
     }
     eligible.push(c.caseId)
-    if (sanctionedTotal >= MAX_SANCTIONED) { capped++; continue }
+    if (sanctionedTotal >= MAX_SANCTIONED || perNamespace >= MAX_PER_NAMESPACE) { capped++; continue }
     // A sanction attempt on an eligible case, so the gate's verdict is measured
     // and not assumed. Still nothing sent: this builds and records a query, and
     // the search is a separate, deliberate act.
-    const sanctioned = sanctionResearchQuery(db, c, INTENT_FOR_SCOPE[e.scope!] ?? 'OFFICIAL_SUPPORT_DOCUMENTATION', now)
+    const map = ns === 'zst' ? ZST_INTENT_FOR_SCOPE : INTENT_FOR_SCOPE
+    const sanctioned = sanctionResearchQuery(db, c, map[e.scope!] ?? 'OFFICIAL_SUPPORT_DOCUMENTATION', now)
     if (sanctioned.status === 'SANCTIONED') {
-      sanctionedTotal++
+      // ONE QUERY PER DISTINCT TARGET. Three cases about the same travel agent
+      // produce the same `atrapalo.com official contact information`, and paying
+      // for it three times measures nothing three times.
+      if (seenQueries.has(sanctioned.query!)) { deduped++; continue }
+      seenQueries.add(sanctioned.query!)
+      sanctionedTotal++; perNamespace++
       tickets.push({ ticketId: sanctioned.ticketId, caseId: c.caseId, namespace: ns, query: sanctioned.query })
     }
   }
@@ -84,6 +106,8 @@ for (const ns of ['personal', 'zst'] as const) {
 
 out.cappedAt = MAX_SANCTIONED
 out.notAttemptedBecauseCapped = capped
+out.dedupedIdenticalQueries = deduped
+out.maxPerNamespace = MAX_PER_NAMESPACE
 out.tickets = tickets
 out.metrics = pilotMetrics(db)
 console.log(JSON.stringify(out, null, 1))
