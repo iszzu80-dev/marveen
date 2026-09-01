@@ -99,6 +99,23 @@ describe('THE CARD SAYS WHAT IT IS, AND CARRIES EVERY FIELD THE OWNER ASKED FOR'
     const need = humanActionNeeds(getDb(), 'zst', NOW)[0]
     expect(priorityFor(need, NOW)).not.toBe('urgent')
   })
+
+  it('and an ordinary owner decision stays NORMAL -- the ladder has a bottom rung', () => {
+    // Without this the mutation run found the gap: a bridge that returned `high`
+    // for everything passed every assertion above, because they only ever
+    // checked the top of the range. A priority that is always high is a
+    // priority that says nothing, which is how the urgent label died here once.
+    initDatabase(':memory:')
+    getDb().prepare(
+      `INSERT INTO zst_cases (case_id,title,description,case_type,status,created_at,updated_at)
+       VALUES ('z-sel','Valassz csomagot','no sender','ADMIN','AWAITING_SELECTION',?,?)`,
+    ).run(NOW - DAY, NOW - DAY)
+    const need = humanActionNeeds(getDb(), 'zst', NOW)[0]
+    expect(need.reason).toBe('USER_ACTION_REQUIRED')
+    expect(priorityFor(need, NOW)).toBe('normal')
+    syncKanbanProjection(getDb(), 'zst', NOW)
+    expect(cards()[0].priority).toBe('normal')
+  })
 })
 
 describe('A DUE DATE ONLY WHEN THE RECORD STATES ONE', () => {
