@@ -16,7 +16,20 @@
 // Usage: npx tsx scripts/cos-research-pilot.ts [--limit N]
 
 import { getDb, initDatabase } from '../src/db.js'
-import { sanctionResearchQuery, pilotMetrics, researchEligibility, type ResearchCase } from '../src/cos/research/case-research.js'
+import {
+  sanctionResearchQuery, pilotMetrics, researchEligibility,
+  type ResearchCase, type ResearchIntent,
+} from '../src/cos/research/case-research.js'
+
+// Scope decides the question, and the map is fixed. The owner capped the first
+// round at ten cases, so the cap is here rather than in a comment: a pilot that
+// can quietly grow is not a pilot.
+const INTENT_FOR_SCOPE: Record<string, ResearchIntent> = {
+  PRODUCT_PRICE_COMMERCIAL: 'PUBLIC_PRICING',
+  PUBLIC_COMPANY_SUPPORT: 'PUBLIC_SUPPORT_DOCS',
+  GENERAL_ADMIN: 'PUBLIC_CONTACT_INFO',
+}
+const MAX_SANCTIONED = 10
 
 const limitArg = process.argv.indexOf('--limit')
 const limit = limitArg > -1 ? Number(process.argv[limitArg + 1]) : 25
@@ -26,6 +39,9 @@ const db = getDb()
 const now = Math.floor(Date.now() / 1000)
 
 const out: Record<string, unknown> = {}
+const tickets: Array<Record<string, unknown>> = []
+let sanctionedTotal = 0
+let capped = 0
 
 for (const ns of ['personal', 'zst'] as const) {
   const table = ns === 'personal' ? 'personal_cases' : 'zst_cases'
@@ -50,12 +66,21 @@ for (const ns of ['personal', 'zst'] as const) {
       continue
     }
     eligible.push(c.caseId)
+    if (sanctionedTotal >= MAX_SANCTIONED) { capped++; continue }
     // A sanction attempt on an eligible case, so the gate's verdict is measured
-    // and not assumed. Still nothing sent.
-    sanctionResearchQuery(db, c, `${e.scope} kerdes`, now)
+    // and not assumed. Still nothing sent: this builds and records a query, and
+    // the search is a separate, deliberate act.
+    const sanctioned = sanctionResearchQuery(db, c, INTENT_FOR_SCOPE[e.scope!] ?? 'PUBLIC_SUPPORT_DOCS', now)
+    if (sanctioned.status === 'SANCTIONED') {
+      sanctionedTotal++
+      tickets.push({ ticketId: sanctioned.ticketId, caseId: c.caseId, namespace: ns, query: sanctioned.query })
+    }
   }
   out[ns] = { examined: rows.length, eligibleByTier: eligible.length, refusedBeforeGate: refusedAt }
 }
 
+out.cappedAt = MAX_SANCTIONED
+out.notAttemptedBecauseCapped = capped
+out.tickets = tickets
 out.metrics = pilotMetrics(db)
 console.log(JSON.stringify(out, null, 1))

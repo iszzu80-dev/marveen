@@ -2673,6 +2673,9 @@ export function initCaseResearchSchema(db: Database.Database): void {
       /* Did the answer actually move an attention/decision/recommendation?
          The owner asked for this proportion by name. */
       changed_surface      INTEGER NOT NULL DEFAULT 0,
+      /* The search answered the WRONG question. Counted apart from "no result":
+         an empty answer costs a query, a confident wrong one can mislead. */
+      false_positive       INTEGER NOT NULL DEFAULT 0,
       outcome_note         TEXT,
       CHECK (namespace IN ('personal','zst')),
       CHECK (status IN ('REFUSED','SANCTIONED','EXECUTED','FAILED'))

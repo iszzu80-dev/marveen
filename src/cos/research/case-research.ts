@@ -37,8 +37,10 @@
 // fact -- there is no UPDATE against a case table anywhere in it.
 import { createHash } from 'node:crypto'
 import type Database from 'better-sqlite3'
-import { effectiveSensitivity } from '../sensitivity.js'
+import { egressTierFor } from '../provider-data-policy.js'
 import type { CaseSensitivity } from '../schema.js'
+import { publicVendorIdentifier } from './public-identifier.js'
+import { excludedTopicOf, type TopicExclusion } from './topic-exclusion.js'
 import {
   decideDisclosure, recordDisclosure, ensureDisclosureSchema,
   type DisclosureField, type DisclosureRequest, type FieldKind,
@@ -94,49 +96,94 @@ export interface ResearchCase {
 
 export interface Eligibility {
   eligible: boolean
+  /** The NORMALISED tier, in the one canonical vocabulary. */
   sensitivity: CaseSensitivity
+  /** What the record itself declared, kept as provenance. The owner asked for
+   *  normalisation, not for the original to disappear: `ZST_INTERNAL` becoming
+   *  `PERSONAL` is a translation, and a translation that discards the source
+   *  cannot be checked. */
+  declaredRaw: string
   scope: string | null
-  /** Always present, including when eligible: the reason a decision went the way
-   *  it did is as worth recording as the decision. */
+  /** The topic class that lifted this case out of the pilot, when one did. */
+  excludedTopic: TopicExclusion | null
+  /** Always present, including when eligible. */
   reason: string
 }
 
 /**
- * GUARD 1. Decides whether this case may be researched at all, before a single
- * field is assembled.
+ * GUARD 1. May this case be researched at all, before a single field is
+ * assembled.
  *
- * The tier is the EFFECTIVE one -- declared, then escalated by what the content
- * actually contains. Reading the declared column alone would let a case marked
- * PUBLIC whose body carries a health detail through, which is the whole failure
- * this gate exists to stop.
+ * THE TIER IS NORMALISED, NOT COERCED. Owner ruling 2026-09-01: "A ZST_INTERNAL
+ * ne essen UNKNOWN/max sensitivity agra csak azert, mert mas vocabularybol jon."
+ * Until that ruling every ZST case declared `ZST_INTERNAL`, which is not a
+ * `CaseSensitivity` value, so it failed closed to HIGHLY_SENSITIVE and the whole
+ * corporate namespace was out of the pilot for a VOCABULARY reason wearing the
+ * clothes of a policy one. `egressTierFor` is the existing canonical map -- no
+ * second sensitivity system was created for this -- and it runs the corporate
+ * content classifier, so the translation can only tighten.
+ *
+ * AND THE TIER IS NOT PERMISSION. A normalised internal tier says how sensitive
+ * the case is; it does not say the subject belongs in a web-research pilot. The
+ * owner named the classes that do not, and `excludedTopicOf` is a one-way valve
+ * that can lift a case out and can never let one in.
  */
 export function researchEligibility(c: ResearchCase): Eligibility {
   const content = [c.title ?? '', c.description ?? ''].join('\n')
-  const sensitivity = effectiveSensitivity(c.declaredSensitivity, content)
+  const sensitivity = egressTierFor(c.namespace, c.declaredSensitivity, content)
+  const declaredRaw = typeof c.declaredSensitivity === 'string' ? c.declaredSensitivity : 'ABSENT'
   const scope = scopeOf(c.caseType)
+  const excludedTopic = excludedTopicOf(content)
+  const base = { sensitivity, declaredRaw, scope, excludedTopic }
 
   if (!RESEARCHABLE_TIERS.has(sensitivity)) {
     return {
-      eligible: false, sensitivity, scope,
-      reason: `sensitivity ${sensitivity} is outside the pilot: only PUBLIC and PERSONAL may be researched, `
-        + `and an unrecognised or missing tier arrives here as HIGHLY_SENSITIVE by design`,
+      ...base, eligible: false,
+      reason: `sensitivity ${sensitivity} (declared ${declaredRaw}) is outside the pilot: only PUBLIC and `
+        + `PERSONAL may be researched, and an unrecognised tier normalises to HIGHLY_SENSITIVE by design`,
+    }
+  }
+  if (excludedTopic) {
+    return {
+      ...base, eligible: false,
+      reason: `topic ${excludedTopic.topic} is excluded from the pilot by the owner's list `
+        + `(matched "${excludedTopic.evidence}"); the tier permits it and the subject does not`,
     }
   }
   if (!scope) {
     return {
-      eligible: false, sensitivity, scope: null,
+      ...base, eligible: false,
       reason: `case type ${c.caseType} is not in the pilot allowlist; `
         + `the pilot enumerates what may be researched rather than what may not`,
     }
   }
-  return { eligible: true, sensitivity, scope, reason: `${scope} case at ${sensitivity}` }
+  return { ...base, eligible: true, reason: `${scope} case at ${sensitivity} (declared ${declaredRaw})` }
 }
+
+/**
+ * THE RESEARCH INTENT IS A CLOSED SET, and that is the point.
+ *
+ * Owner policy: "Preferalt payload: public root/domain; public product/service
+ * name; generic research intent." Free text authored per case would have been
+ * the obvious design and it is the leak: an intent written from the case is the
+ * case, paraphrased. These five phrasings are fixed, carry no case content, and
+ * a caller can only choose between them.
+ */
+export const RESEARCH_INTENTS = Object.freeze({
+  PUBLIC_PRICING: 'current public pricing',
+  PUBLIC_SUPPORT_DOCS: 'public support documentation',
+  PUBLIC_SERVICE_STATUS: 'public service status page',
+  PUBLIC_CONTACT_INFO: 'public contact information',
+  PUBLIC_PRODUCT_DOCS: 'public product documentation',
+} as const)
+
+export type ResearchIntent = keyof typeof RESEARCH_INTENTS
 
 /** The ONLY field kinds this pilot ever asks for. Minimum necessary, declared
  *  up front rather than trimmed afterwards. Note what is absent: no body, no
  *  amount, no account identifier, no exact sender. */
 export const PILOT_REQUIRED_FIELDS: readonly FieldKind[] = Object.freeze([
-  'SUBJECT', 'LANGUAGE', 'SENDER_ROLE_OR_DOMAIN',
+  'SENDER_ROLE_OR_DOMAIN', 'LANGUAGE',
 ])
 
 /**
@@ -183,15 +230,14 @@ export function ticketIdFor(namespace: string, caseId: string, intent: string, n
 /**
  * Build the query, or refuse, and write a ledger row EITHER WAY.
  *
- * `intent` is the researcher's own words for what is missing (for example "what
- * is the published support address"). It is written by the engine, not taken
- * from the case, so it carries no case content -- and because it is the only
- * free text in the query, it is swept by guard 3 along with everything else.
+ * `intent` is one of five fixed phrasings, not free text. An intent written per
+ * case would have been the obvious design and it is the leak: an intent written
+ * from the case is the case, paraphrased.
  */
 export function sanctionResearchQuery(
   db: Database.Database,
   c: ResearchCase,
-  intent: string,
+  intent: ResearchIntent,
   now = Math.floor(Date.now() / 1000),
   provider = 'websearch',
   opts: { skipEligibility?: boolean; skipGate?: boolean } = {},
@@ -218,12 +264,35 @@ export function sanctionResearchQuery(
   // to work on its own.
   if (!opts.skipEligibility && !elig.eligible) return refuse(elig.reason, elig.sensitivity, elig.scope)
 
+  // THE ONLY CASE-DERIVED THING THAT MAY TRAVEL, and it has to earn it.
+  //
+  // Owner policy: a vendor's public web domain may go out, and "customer-specific
+  // subdomain / portal URL NEM public identifier automatikusan". So the sender
+  // host is put through `publicVendorIdentifier`, which returns the registrable
+  // root or refuses -- it never sanitises a portal URL down into a root, because
+  // reducing would quietly turn a host we were handed into "the vendor's public
+  // site" and lose exactly the distinction the policy draws.
+  const rawHost = /From:\s*([^\s<>"]+)/i.exec(c.description ?? '')?.[1] ?? null
+  const ident = publicVendorIdentifier(rawHost)
+  if (!opts.skipGate && !ident.ok) {
+    return refuse(
+      `no public vendor identifier: ${ident.reason}. The pilot sends a public root domain and a generic `
+      + `intent, and it has neither if the sender is not one`,
+      elig.sensitivity, elig.scope,
+    )
+  }
+  const domain = ident.ok ? ident.value! : (rawHost ?? '')
+
   const fields: DisclosureField[] = [
-    { kind: 'SUBJECT', value: c.title ?? '' },
+    // TAGGED PUBLIC AS AN EXPLICIT ACT, which the disclosure interface permits
+    // for a field the caller knows is genuinely impersonal -- and only AFTER
+    // `publicVendorIdentifier` has said so. Without the tag the field inherits
+    // the case tier and an untrusted destination gets nothing; with the tag and
+    // without the check, the tag would be a way around the gate. The check is
+    // what makes the tag honest.
+    { kind: 'SENDER_ROLE_OR_DOMAIN', value: domain, sensitivity: 'PUBLIC' },
     { kind: 'LANGUAGE', value: 'hu', sensitivity: 'PUBLIC' },
   ]
-  const domain = /From:\s*[^\s<>"]+@([^\s<>"]+)/i.exec(c.description ?? '')?.[1]
-  if (domain) fields.push({ kind: 'SENDER_ROLE_OR_DOMAIN', value: domain })
 
   const req: DisclosureRequest = {
     actor: 'cos-case-research', onBehalfOf: 'istvan', runId: null,
@@ -231,7 +300,7 @@ export function sanctionResearchQuery(
     // A public search engine is the least trusted destination there is: the
     // query is not merely read by a company, it may be logged and retained.
     trustClass: 'UNKNOWN_UNTRUSTED',
-    taskTier: 'CLASSIFICATION_TRIAGE',
+    taskTier: 'ROUTING_METADATA',
     caseSensitivity: elig.sensitivity,
     fields,
     requiredFields: [...PILOT_REQUIRED_FIELDS],
@@ -239,40 +308,20 @@ export function sanctionResearchQuery(
   const decision = decideDisclosure(req)
   const recordId = recordDisclosure(db, req, decision, now)
 
-  // ONLY what the gate released. Not "the fields minus the denied ones" -- the
-  // released VALUES, in the treatment the gate chose, so a REDACTED subject
-  // travels redacted and a DENIED one does not travel at all.
-  const released = opts.skipGate
-    ? fields.map((f) => f.value)
-    : decision.outcomes.filter((o) => o.disclosed != null).map((o) => o.disclosed!)
-  const query = [intent, ...released].map((s) => s.trim()).filter(Boolean).join(' ')
-
-  // THE GATE'S ANSWER, TAKEN SERIOUSLY RATHER THAN WORKED AROUND.
-  //
-  // `decideDisclosure` denies EVERY field carrying the case's tier when the
-  // destination is UNKNOWN_UNTRUSTED, and a public search engine is exactly
-  // that -- it does not merely read the query, it may log and retain it. So on
-  // a PERSONAL case nothing case-derived survives, and what is left is the
-  // language code the caller tagged PUBLIC plus the engine's own words.
-  //
-  // Sending that would be theatre: a query with no case-derived term is not a
-  // search for this case, and shipping it would let the pilot report activity
-  // it did not have. The honest outcome is a refusal that names the reason, so
-  // the tension is visible as a POLICY question -- may a vendor's public domain
-  // be declared genuinely public? -- rather than being settled quietly by
-  // whoever tags a field next.
-  const CASE_DERIVED: readonly FieldKind[] = ['SUBJECT', 'SENDER_ROLE_OR_DOMAIN', 'SUMMARY', 'BODY_EXCERPT']
-  const releasedCaseDerived = opts.skipGate
-    ? CASE_DERIVED.slice(0, 1)
-    : decision.disclosedKinds.filter((k) => CASE_DERIVED.includes(k))
-  if (!releasedCaseDerived.length) {
+  const domainReleased = opts.skipGate
+    || decision.outcomes.some((o) => o.kind === 'SENDER_ROLE_OR_DOMAIN' && o.disclosed != null)
+  if (!domainReleased) {
     return refuse(
-      `the disclosure gate released no case-derived field to ${req.destination}: an `
-      + `UNKNOWN_UNTRUSTED destination may receive nothing at ${elig.sensitivity}, so the only `
-      + `query that could be sent carries no term from this case and would search for nothing`,
+      `the disclosure gate did not release the public identifier to ${req.destination}; without it the `
+      + `query carries no term from this case and would search for nothing`,
       elig.sensitivity, elig.scope,
     )
   }
+
+  // The query: a public root domain and one of five fixed phrasings. Nothing
+  // else is ever appended, so there is no path by which a case sentence, a
+  // person, an amount or a ticket id reaches it.
+  const query = [domain, RESEARCH_INTENTS[intent]].join(' ').trim()
 
   const shaped = looksSecretShaped(query)
   if (shaped) {
@@ -310,11 +359,17 @@ export interface ResearchResult {
   /** Where the answer came from: URLs and when they were retrieved. An answer
    *  with no provenance is recorded as NO_RESULT rather than as knowledge. */
   provenance: string[]
-  latencyMs: number
+  /** NULL when it was not timed cleanly. A sentinel like -1 would sit in the
+   *  median pretending to be a measurement; absence is the honest value. */
+  latencyMs: number | null
   costUsd?: number | null
   /** Did it actually move an attention, decision or recommendation? The owner
    *  asked for this proportion, so it is a field and not a guess made later. */
   changedSurface: boolean
+  /** The search answered, and answered the WRONG question. Recorded apart from
+   *  "no result": an empty answer costs a query, a confident wrong one costs a
+   *  query and can mislead a reader. */
+  falsePositive?: boolean
   note?: string
 }
 
@@ -345,12 +400,12 @@ export function recordResearchResult(
   db.prepare(
     `UPDATE case_research_queries
         SET status = 'EXECUTED', executed_at = ?, latency_ms = ?, cost_usd = ?,
-            result_kind = ?, result_provenance = ?, changed_surface = ?, outcome_note = ?
+            result_kind = ?, result_provenance = ?, changed_surface = ?, false_positive = ?, outcome_note = ?
       WHERE ticket_id = ?`,
   ).run(
-    now, result.latencyMs, result.costUsd ?? null, kind,
+    now, result.latencyMs ?? null, result.costUsd ?? null, kind,
     JSON.stringify(result.provenance), result.changedSurface ? 1 : 0,
-    result.note ?? null, ticketId,
+    result.falsePositive ? 1 : 0, result.note ?? null, ticketId,
   )
 }
 
@@ -362,6 +417,7 @@ export interface PilotMetrics {
   refusedByReason: Record<string, number>
   withResult: number
   noResult: number
+  falsePositive: number
   changedSurface: number
   medianLatencyMs: number | null
   totalCostUsd: number
@@ -371,7 +427,7 @@ export interface PilotMetrics {
 export function pilotMetrics(db: Database.Database): PilotMetrics {
   const rows = db.prepare(`SELECT * FROM case_research_queries`).all() as Array<Record<string, unknown>>
   const refusedByReason: Record<string, number> = {}
-  let sanctioned = 0, refused = 0, executed = 0, withResult = 0, noResult = 0, changed = 0, cost = 0
+  let sanctioned = 0, refused = 0, executed = 0, withResult = 0, noResult = 0, changed = 0, cost = 0, falsePos = 0
   const lat: number[] = []
   for (const r of rows) {
     const status = String(r.status)
@@ -385,7 +441,8 @@ export function pilotMetrics(db: Database.Database): PilotMetrics {
       executed++
       if (r.result_kind === 'NO_RESULT') noResult++; else withResult++
       if (r.changed_surface === 1) changed++
-      if (typeof r.latency_ms === 'number') lat.push(r.latency_ms)
+      if (r.false_positive === 1) falsePos++
+      if (typeof r.latency_ms === 'number' && r.latency_ms >= 0) lat.push(r.latency_ms)
       if (typeof r.cost_usd === 'number') cost += r.cost_usd
     }
   }
@@ -393,7 +450,7 @@ export function pilotMetrics(db: Database.Database): PilotMetrics {
   return {
     cases: new Set(rows.map((r) => `${r.namespace}:${r.case_id}`)).size,
     sanctioned, refused, executed, refusedByReason, withResult, noResult,
-    changedSurface: changed,
+    falsePositive: falsePos, changedSurface: changed,
     medianLatencyMs: lat.length ? lat[Math.floor(lat.length / 2)] : null,
     totalCostUsd: cost,
   }
