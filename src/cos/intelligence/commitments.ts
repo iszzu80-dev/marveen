@@ -57,6 +57,11 @@ export interface Commitment extends IntelligenceElement {
    *  could not be corroborated by an event. Null otherwise, so a reader cannot
    *  mistake "not applicable" for "no evidence". */
   closureEvidence: ClosureEvidence | null
+  /** When the ENGINE plans to look again (`follow_up_at`). Carried so the fact
+   *  is not lost, and kept in a separate field from `dueAt` so that no caller
+   *  can accidentally treat a wake-up as a deadline. Never makes a commitment
+   *  overdue. */
+  reviewWakeAt: number | null
   fulfillment: {
     /** True ONLY when `proof` is non-empty. The two cannot disagree because
      *  this is computed from `proof`, never passed in. */
@@ -119,18 +124,35 @@ export function commitmentsForCase(
   // interrupts" cannot fail when no opportunity exists -- and the mutant that
   // fed opportunities in as obligations stayed green for the same reason.
   //
-  // So: a next action (someone owes a step), or a date (someone owes it BY
-  // then). The title is only ever the WORDING when a date exists without a
+  // So: a next action (someone owes a step), or a DEADLINE (someone owes it BY
+  // then). The title is only ever the WORDING when a deadline exists without a
   // stated action; it is never the reason a commitment exists.
-  const dueForCheck = row.due_at ?? row.follow_up_at ?? null
-  const owed = row.next_action?.trim() || (dueForCheck != null ? row.title?.trim() : '')
-  const what = owed
-  if (!what) return []
+  //
+  // `follow_up_at` IS NOT A DEADLINE. Owner ruling 2026-09-01, and the measurement
+  // that produced it: of 81 expired commitments on the live store, only SEVEN had
+  // a real `due_at`. The other 74 were overdue against an engine review timer,
+  // and 48 of those had no stated action at all. `follow_up_at` answers "when
+  // should the engine look at this again" -- it is scheduler semantics, not a
+  // promise to anyone, and reading it as a deadline manufactured 66 false
+  // overdue obligations out of ordinary bookkeeping.
+  //
+  // The three cases, kept apart on purpose:
+  //   A  due_at                        a real obligation deadline
+  //   B  follow_up_at + next_action    something IS owed, with no deadline --
+  //                                    a review wake, never overdue
+  //   C  follow_up_at, no next_action  engine scheduling metadata. Not a
+  //                                    commitment at all, and never user-facing.
+  const hasAction = !!row.next_action?.trim()
+  const hasDeadline = row.due_at != null
+  const what = hasAction ? row.next_action!.trim() : (hasDeadline ? row.title?.trim() : '')
+  if (!what) return []   // case C, and a bare title with nothing owed
 
   const caseProv: Provenance = {
     source: 'CASE', ref: row.case_id, observedAt: row.updated_at, field: row.next_action ? 'next_action' : 'title',
   }
-  const dueAt = row.due_at ?? row.follow_up_at ?? null
+  // A COMMITMENT MAY HAVE NO DEADLINE. Only `due_at` can make one overdue.
+  const dueAt = row.due_at ?? null
+  const reviewWakeAt = row.follow_up_at ?? null
 
   // ── the evidence, oldest first, so "later contradicts earlier" is just order ──
   const ordered = [...events].sort((a, b) => a.created_at - b.created_at)
@@ -183,7 +205,12 @@ export function commitmentsForCase(
     confidenceParts = ['HIGH']
   } else {
     status = 'OPEN'
-    why = dueAt != null ? `owed, due at ${dueAt}` : 'owed, no date on the record'
+    why = dueAt != null
+      ? `owed, due at ${dueAt}`
+      : reviewWakeAt != null
+        ? `owed, no deadline on the record -- the engine plans to look again at ${reviewWakeAt}, ` +
+          `which is a wake-up and not a promise`
+        : 'owed, no date on the record'
     confidenceParts = dueAt != null ? ['HIGH'] : ['MEDIUM']
   }
 
@@ -213,6 +240,7 @@ export function commitmentsForCase(
     dueAt,
     status,
     closureEvidence,
+    reviewWakeAt,
     fulfillment: { proven: proof.length > 0 && status === 'FULFILLED', proof, why },
   }]
 }

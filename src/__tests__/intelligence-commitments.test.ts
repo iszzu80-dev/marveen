@@ -78,9 +78,16 @@ describe('the owner asked for six things', () => {
     expect(t.statement).toBe('Send the signed contract')
   })
 
-  it('3. DUE comes from due_at, then follow_up_at, and null is null', () => {
+  // SUPERSEDED 2026-09-01. It used to assert that `dueAt` falls back to
+  // `follow_up_at`. That fallback is exactly what manufactured 66 false overdue
+  // obligations on the live store, and the owner ruled it out: `follow_up_at` is
+  // "when should the engine look again", never a promise. Rewritten rather than
+  // deleted so the reversal stays legible.
+  it('3. DUE comes ONLY from due_at -- follow_up_at is a wake-up, not a deadline', () => {
     expect(one().dueAt).toBe(NOW + 24 * HOUR)
-    expect(one(caseRow({ due_at: null, follow_up_at: NOW + 5 * HOUR })).dueAt).toBe(NOW + 5 * HOUR)
+    const wake = one(caseRow({ due_at: null, follow_up_at: NOW + 5 * HOUR }))
+    expect(wake.dueAt).toBeNull()               // NOT NOW + 5h
+    expect(wake.reviewWakeAt).toBe(NOW + 5 * HOUR)   // the fact is kept, in its own field
     expect(one(caseRow({ due_at: null, follow_up_at: null })).dueAt).toBeNull()
   })
 
