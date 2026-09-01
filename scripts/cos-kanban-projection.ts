@@ -39,6 +39,17 @@ for (const ns of ['personal', 'zst'] as const) {
   }
 }
 
+// The cycle's counter vocabulary, top-level. See the note in
+// cos-attention-digest.ts: the normaliser is generic by design, so a new step
+// that stays silent about its counters is recorded as UNKNOWN, which is the
+// truth about the step and not about the reader.
+const sides = ['personal', 'zst'].map((k) => out[k] as Record<string, number> | undefined)
+const sum = (f: (s: Record<string, number>) => number) =>
+  sides.reduce((a, s) => a + (s && typeof s.needs === 'number' ? f(s) : 0), 0)
+out.examined = sum((s) => s.needs ?? 0)
+out.matched = sum((s) => s.needs ?? 0)
+out.acted = sum((s) => (s.created ?? 0) + (s.refreshed ?? 0) + (s.closed ?? 0))
+out.failed = problems.length
 out.problems = problems
 console.log(JSON.stringify(out))
 if (problems.length) process.exit(1)

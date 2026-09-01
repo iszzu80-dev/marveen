@@ -64,6 +64,21 @@ for (const ns of ['personal', 'zst'] as const) {
   }
 }
 
+// THE CYCLE'S COUNTER VOCABULARY, spoken at the TOP LEVEL on purpose.
+//
+// The pinned cycle normalises `examined / matched / acted / failed` and, absent
+// all three, records the step as UNKNOWN -- "ran, and we cannot say what it
+// did". On the first post-cutover run both new steps landed exactly there. The
+// normaliser was right and the fix belongs here: it is deliberately generic so
+// that adding a step never means editing a per-step table, and the price of
+// that design is that a new step has to speak the common vocabulary itself.
+const sides = ['personal', 'zst'].map((k) => out[k] as Record<string, number> | undefined)
+const sum = (f: (s: Record<string, number>) => number) =>
+  sides.reduce((a, s) => a + (s && typeof s.spoke === 'number' ? f(s) : 0), 0)
+out.examined = sum((s) => (s.spoke ?? 0) + (s.stillQuiet ?? 0) + (s.quiet ?? 0))
+out.matched = sum((s) => (s.spoke ?? 0) + (s.stillQuiet ?? 0))
+out.acted = sum((s) => s.spoke ?? 0)
+out.failed = problems.length
 out.problems = problems
 console.log(JSON.stringify(out))
 if (problems.length) process.exit(1)
