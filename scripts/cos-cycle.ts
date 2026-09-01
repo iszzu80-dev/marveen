@@ -103,6 +103,13 @@ const STEPS: Step[] = [
   // result is the receipt that it ran, so silence here cannot be mistaken for a
   // stopped job the way a missing daily digest could.
   { name: 'attentionDigest', args: ['scripts/cos-attention-digest.ts'], task: 'cos-attention-digest' },
+  // P3-C: the same needs, on the board Istvan actually works from. A DERIVED
+  // view and nothing else -- it creates, refreshes and archives its own cards,
+  // and there is no path from a board move back to a case. It runs AFTER the
+  // digest on purpose: the digest is the interrupt, the board is the backlog,
+  // and a backlog that appears before its own alert reads like something already
+  // handled.
+  { name: 'kanbanProjection', args: ['scripts/cos-kanban-projection.ts'], task: 'cos-kanban-projection' },
   // A kerdes megirasa es a KIKULDESE ket kulon lepes: ha egybe lennenek, egy
   // kezbesitesi hiba ugy nezne ki, mint "nincs mit kerdezni".
   // W12 / §6.7. A parked ingest row (RECOVERY_REQUIRED) is NON-TERMINAL, so it

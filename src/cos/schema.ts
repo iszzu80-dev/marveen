@@ -2402,6 +2402,7 @@ export function initProgressionSchema(db: Database.Database): void {
   // three are guaranteed.
   initCaseProjectionSchema(db)
   initIntelligenceReaderSchema(db)
+  initKanbanProjectionSchema(db)
 }
 
 /** PHASE 3 (P3-A) -- the DELIVERY LEDGER, and the reason it is not a second
@@ -2445,6 +2446,44 @@ export function initIntelligenceReaderSchema(db: Database.Database): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_intel_surfaced_ns
              ON intelligence_surfaced(namespace, last_surfaced_at)`)
+}
+
+/** PHASE 3 (P3-C) -- the HUMAN-ACTION KANBAN PROJECTION INDEX.
+ *
+ *  Owner ruling 2026-09-01: "a Kanban kizarolag DERIVED HUMAN-ACTION VIEW. Nem
+ *  lehet canonical case source of truth; completion authority; action
+ *  authorization; automatikus business-state valtozas forrasa. Egyiranyu
+ *  projectionkent induljon."
+ *
+ *  This table is the seam, and it holds only the seam: which case produced which
+ *  card, when it was first projected, when it was last refreshed, and -- if the
+ *  need went away -- when and why the card was closed. No case status, no
+ *  verdict, no completion. Two things follow that the owner asked for by name:
+ *
+ *  DEDUPE IS STRUCTURAL. The primary key is (namespace, case_id), so one
+ *  canonical human-action need cannot become two live cards. The card id is
+ *  additionally UNIQUE, so two cases cannot quietly share one card either.
+ *
+ *  THE DIRECTION IS ENFORCED BY WHAT IS ABSENT. There is no column here for a
+ *  board decision, because nothing reads the board back into a case. Moving the
+ *  card to done changes this table not at all, and the case not at all. */
+export function initKanbanProjectionSchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS kanban_human_action_projection (
+      namespace          TEXT NOT NULL,
+      case_id            TEXT NOT NULL,
+      card_id            TEXT NOT NULL UNIQUE,
+      /* WHY a human is needed, in the projection's vocabulary. Kept so a
+         refresh can tell "the same need, restated" from "a different need". */
+      reason             TEXT NOT NULL,
+      first_projected_at INTEGER NOT NULL,
+      last_refreshed_at  INTEGER NOT NULL,
+      closed_at          INTEGER,
+      close_reason       TEXT,
+      PRIMARY KEY (namespace, case_id),
+      CHECK (namespace IN ('personal','zst'))
+    )
+  `)
 }
 
 /** P1 §10.1/§10.2 — the projection seam between the canonical state machine and

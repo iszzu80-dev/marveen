@@ -97,6 +97,15 @@ export const SCHEDULED_TASK_GRANTS: readonly ScheduledTaskGrant[] = Object.freez
     rationale: 'Surfaces woken cases to Istvan; silent when nothing woke.',
   },
   {
+    task: 'cos-kanban-projection',
+    capabilities: Object.freeze(['READ', 'WRITE_LOCAL'] as Capability[]),
+    onBehalfOf: 'istvan',
+    rationale:
+      'P3-C: projects human-action needs onto the local Kanban board. WRITE_LOCAL only, '
+      + 'and deliberately NO EXTERNAL_EFFECT -- a board row reaches nobody by itself, '
+      + 'and the day this step tries to send something it should fail loudly.',
+  },
+  {
     task: 'cos-attention-digest',
     capabilities: Object.freeze(['READ', 'WRITE_LOCAL', 'EXTERNAL_EFFECT'] as Capability[]),
     onBehalfOf: 'istvan',
