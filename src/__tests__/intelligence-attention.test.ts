@@ -135,13 +135,25 @@ describe('the surfaces feed attention with the right band', () => {
     created_at: NOW - DAY, updated_at: NOW - HOUR,
   }
 
-  it('an UNPROVEN completion is a SAFETY item, not an ordinary obligation', () => {
+  // SUPERSEDED 2026-09-01 by the owner's noise ruling, and rewritten rather than
+  // deleted so the change of mind stays legible. It used to assert
+  // `band === 'SAFETY'`. The live baseline showed why that was wrong: every
+  // interruption on the personal namespace was a COMPLETED case with a thin
+  // closure record, holding a slot ahead of promises that were actually late.
+  // The RISK factor is unchanged for the no-evidence tier -- it still sorts
+  // first inside its band -- only the interrupting band is gone.
+  it('an UNPROVEN completion informs at its evidence tier; it is not a SAFETY alarm', () => {
     const c = commitmentsForCase(row as never, [], 'personal', NOW)[0]
     const a = commitmentToAttention(c, NOW)
     expect(c.status).toBe('UNKNOWN')
-    expect(a.band).toBe('SAFETY')
-    expect(a.factors.risk).toBeGreaterThan(0.5)
-    expect(a.why).toContain('nothing evidences it')
+    expect(a.band).toBe('INFORMATIONAL')
+    expect(a.band).not.toBe('SAFETY')
+    // The fixture closes with a bare completed_at, so it is the MIDDLE tier and
+    // its risk is exactly that tier's value -- asserted precisely, because a
+    // loose inequality here would pass for all three tiers and prove nothing.
+    expect(c.closureEvidence).toBe('COMPLETED_AT_ONLY')
+    expect(a.factors.risk).toBe(0.5)
+    expect(a.why).toContain('completion unverified')
   })
 
   it('an overdue commitment maxes urgency', () => {
@@ -157,10 +169,17 @@ describe('the surfaces feed attention with the right band', () => {
     expect(a.factors.blockedness).toBe(1)
   })
 
-  it('a SAFETY commitment outranks a BLOCKING decision', () => {
+  // SUPERSEDED 2026-09-01, same ruling. An unverified completion is now
+  // INFORMATIONAL, which ranks BELOW a blocking decision -- and that is the
+  // point: a blocked case is work that cannot move, a thin closure record is
+  // bookkeeping. The band order itself is untouched.
+  it('a BLOCKING decision now outranks an unverified completion', () => {
     const c = commitmentToAttention(commitmentsForCase(row as never, [], 'personal', NOW)[0], NOW)
     const d = decisionToAttention(
       decisionsForCase({ ...row, status: 'BLOCKED', blocked_reason: 'x' } as never, 'personal', NOW)[0], NOW)
-    expect(compareAttention(c, d)).toBeLessThan(0)
+    expect(c.band).toBe('INFORMATIONAL')
+    expect(d.band).toBe('BLOCKING')
+    expect(compareAttention(d, c)).toBeLessThan(0)
+    expect(explainOrder(d, c)).toBe('band: BLOCKING outranks INFORMATIONAL')
   })
 })

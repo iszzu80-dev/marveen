@@ -98,12 +98,26 @@ export function commitmentToAttention(c: Commitment, now: number): AttentionItem
   const urgency = c.dueAt == null ? 0
     : overdue ? 1
     : Math.max(0, Math.min(1, 1 - (c.dueAt - now) / (7 * DAY)))
-  // An UNKNOWN fulfilment is a risk: the board says done and the record cannot
-  // show it, which is precisely the state that hides real work.
-  const risk = c.status === 'UNKNOWN' ? 0.8 : c.status === 'REOPENED' ? 0.6 : 0
+  // An UNKNOWN fulfilment is a DATA-QUALITY finding, not a safety alarm.
+  //
+  // It used to be one. Measured on the live store 2026-09-01: every one of the
+  // three personal interruptions was a COMPLETED case whose only defect was a
+  // thin closure record, and all three held a SAFETY slot ahead of genuinely
+  // overdue obligations. A closed case cannot be an emergency because its
+  // paperwork is thin -- and treating it as one is exactly the generic
+  // "UNKNOWN therefore unsafe" alarm the owner ruled out.
+  //
+  // The risk factor still ORDERS these above ordinary items inside their band,
+  // graded by how much closure evidence exists, so the gap with no evidence at
+  // all still sorts first. What changed is that it no longer INTERRUPTS.
+  const risk = c.status === 'UNKNOWN'
+    ? (c.closureEvidence === 'CLOSURE_REASON' ? 0.3
+      : c.closureEvidence === 'COMPLETED_AT_ONLY' ? 0.5
+      : 0.8)
+    : c.status === 'REOPENED' ? 0.6 : 0
   return {
     element: c,
-    band: c.status === 'UNKNOWN' ? 'SAFETY' : 'OBLIGATION',
+    band: c.status === 'UNKNOWN' ? 'INFORMATIONAL' : 'OBLIGATION',
     factors: {
       risk,
       urgency,
@@ -112,7 +126,8 @@ export function commitmentToAttention(c: Commitment, now: number): AttentionItem
       unresolvedContradiction: c.contradiction.state === 'UNRESOLVED' ? 1 : 0,
     },
     why: c.status === 'UNKNOWN'
-      ? 'the record says done and nothing evidences it'
+      ? `completion unverified: the record says done and no event evidences it ` +
+        `(closure evidence: ${c.closureEvidence ?? 'NONE'})`
       : overdue ? 'past its date with nothing evidencing fulfilment' : c.fulfillment.why,
   }
 }

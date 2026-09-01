@@ -122,12 +122,17 @@ describe('the cross-surface invariants, asserted rather than trusted', () => {
     expect(p.anomalies.filter((a) => a.includes('INVARIANT BREACH'))).toEqual([])
   })
 
-  it('the unproven completion reaches the interrupt list as SAFETY', () => {
+  // SUPERSEDED 2026-09-01: it used to assert the unproven completion took the
+  // TOP interrupt slot. It still reaches attention, still names its tier, and
+  // is still findable -- it just no longer interrupts.
+  it('the unproven completion is surfaced and names its evidence tier, without interrupting', () => {
     const p = projectIntelligence(getDb(), 'personal', NOW)
-    const top = p.attention.interrupt[0]
-    expect(top.band).toBe('SAFETY')
-    expect(top.element.caseId).toBe('claimed')
-    expect(top.why).toContain('nothing evidences it')
+    const all = [...p.attention.interrupt, ...p.attention.quiet, ...p.attention.suppressed.map(s => s.item)]
+    const claimed = all.find(i => i.element.caseId === 'claimed')
+    expect(claimed).toBeDefined()
+    expect(claimed!.band).toBe('INFORMATIONAL')
+    expect(claimed!.why).toContain('closure evidence')
+    expect(p.attention.interrupt.every(i => i.band !== 'SAFETY')).toBe(true)
   })
 
   it('the whole projection writes NOTHING', () => {

@@ -31,10 +31,32 @@ export type CommitmentStatus =
   | 'EXPIRED'     // its moment passed with nothing evidencing it
   | 'UNKNOWN'     // the store cannot say -- reported, never rounded to OPEN
 
+/**
+ * How well the STORE evidences that a terminal case actually ended. Measured,
+ * not judged: three columns, three strengths, and the difference matters because
+ * it decides whether an UNKNOWN fulfilment is a data-quality gap or merely a
+ * thin record.
+ *
+ * `CLOSURE_REASON` a human or a rule wrote down WHY it ended -- weak evidence,
+ *                  but real evidence, and it names its own author.
+ * `COMPLETED_AT_ONLY` a timestamp and nothing else -- weaker: it says when,
+ *                  never what or by whom.
+ * `NONE`           the board says done and the record carries nothing at all.
+ *                  This is the genuine data-quality gap.
+ *
+ * Owner ruling 2026-09-01: none of these may be raised to a SAFETY alarm on its
+ * own. A generic "UNKNOWN therefore unsafe" is noise, not a finding.
+ */
+export type ClosureEvidence = 'CLOSURE_REASON' | 'COMPLETED_AT_ONLY' | 'NONE'
+
 export interface Commitment extends IntelligenceElement {
   owner: CommitmentOwner
   dueAt: number | null
   status: CommitmentStatus
+  /** Set ONLY when `status` is UNKNOWN -- the tier of the closure record that
+   *  could not be corroborated by an event. Null otherwise, so a reader cannot
+   *  mistake "not applicable" for "no evidence". */
+  closureEvidence: ClosureEvidence | null
   fulfillment: {
     /** True ONLY when `proof` is non-empty. The two cannot disagree because
      *  this is computed from `proof`, never passed in. */
@@ -126,6 +148,7 @@ export function commitmentsForCase(
   const proof: Provenance[] = []
   let status: CommitmentStatus
   let why: string
+  let closureEvidence: ClosureEvidence | null = null
   let confidenceParts: Confidence[] = ['HIGH']
 
   if (lastFulfil && contradicting.length) {
@@ -145,9 +168,15 @@ export function commitmentsForCase(
     // The case says done and NO event evidences it. This is the case the whole
     // surface exists for: reported as UNKNOWN, never rounded up to FULFILLED.
     status = 'UNKNOWN'
+    closureEvidence = row.closure_reason != null && String(row.closure_reason).trim() !== ''
+      ? 'CLOSURE_REASON'
+      : row.completed_at != null ? 'COMPLETED_AT_ONLY' : 'NONE'
     why = `case status is ${row.status} but no event evidences the completion -- ` +
-      `the board says done and the record cannot show when or by what`
-    confidenceParts = ['LOW']
+      `the board says done and the record cannot show when or by what ` +
+      `(closure evidence: ${closureEvidence})`
+    // The tier IS the confidence. A written reason is thin but real; a bare
+    // timestamp is thinner; nothing at all is the gap itself.
+    confidenceParts = closureEvidence === 'CLOSURE_REASON' ? ['MEDIUM'] : ['LOW']
   } else if (dueAt != null && dueAt < now) {
     status = 'EXPIRED'
     why = `due at ${dueAt}, now ${now}, and nothing evidences fulfilment`
@@ -183,6 +212,7 @@ export function commitmentsForCase(
     owner: ownerOf(row),
     dueAt,
     status,
+    closureEvidence,
     fulfillment: { proven: proof.length > 0 && status === 'FULFILLED', proof, why },
   }]
 }
