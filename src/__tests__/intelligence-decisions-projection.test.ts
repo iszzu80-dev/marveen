@@ -93,14 +93,44 @@ describe('PHASE 2 IS A PROJECTION -- it writes nothing and cannot be a second tr
     expect(snap()).toBe(before)
   })
 
+  // EDITED 2026-09-01 for P3-A, and deliberately made STRICTER rather than
+  // looser. The guard used to ban every table whose name began with an
+  // intelligence word. P3-A adds exactly one: `intelligence_surfaced`, the
+  // reader's delivery ledger -- what was said, in which band, when. It holds no
+  // case status and no verdict, so it cannot be the second truth this guard
+  // exists to prevent; deleting it makes the reader repeat itself once and
+  // cannot make it wrong.
+  //
+  // An exemption by name alone would rot: the next person to add a column could
+  // put `status` in it and this test would still pass. So the exemption is
+  // paired with a COLUMN check below, and the two together are a tighter fence
+  // than the single regex was.
+  const LEDGER = 'intelligence_surfaced'
+
   it('there is no intelligence TABLE -- nothing can hold a status that disagrees with the case', () => {
     const db = getDb()
     const tables = (db.prepare(
       `SELECT name FROM sqlite_master WHERE type='table'`,
     ).all() as Array<{ name: string }>).map((t) => t.name)
     for (const t of tables) {
+      if (t === LEDGER) continue
       expect(t).not.toMatch(/^(commitments|decisions|attention|opportunities|intelligence)/)
     }
+  })
+
+  it('and the ONE exempted table carries delivery bookkeeping, never case state', () => {
+    const db = getDb()
+    const cols = (db.prepare(`PRAGMA table_info("${LEDGER}")`).all() as Array<{ name: string }>)
+      .map((c) => c.name)
+    expect(cols.length).toBeGreaterThan(0)      // the exemption must name a real table
+    // Every column is an utterance fact. None of these words may ever appear,
+    // because each of them is a case fact that could disagree with the case.
+    const FORBIDDEN = /status|verdict|due|owner|statement|confidence|resolution|priority|state|completed/i
+    for (const c of cols) expect(c).not.toMatch(FORBIDDEN)
+    expect(cols.sort()).toEqual([
+      'band', 'element_id', 'fingerprint', 'first_surfaced_at',
+      'last_surfaced_at', 'namespace', 'times_surfaced',
+    ])
   })
 
   it('a change to the CANONICAL row changes the projection, with no refresh step', () => {

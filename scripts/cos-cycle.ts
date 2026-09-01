@@ -93,6 +93,16 @@ const STEPS: Step[] = [
   // beszel-e hataridorol UGY, hogy kozben EGYETLEN datum-mezoje sincs kitoltve.
   // Mindket nevterre fut, es a nullat is kimondja.
   { name: 'deadlineAudit', args: ['scripts/cos-deadline-audit.ts'], task: 'cos-deadline-audit' },
+  // P3-A: the Phase 2 projection finally gets a scheduled reader. It sits AFTER
+  // the steps that advance and reconcile case state, so it reads the freshest
+  // board rather than the one this cycle started with -- an attention digest
+  // built on pre-progression rows would announce yesterday's reasons.
+  //
+  // EVENT alert, not a summary: silent unless something is new, changed band,
+  // changed its sentence, or is a high-band item due to come back. Its own step
+  // result is the receipt that it ran, so silence here cannot be mistaken for a
+  // stopped job the way a missing daily digest could.
+  { name: 'attentionDigest', args: ['scripts/cos-attention-digest.ts'], task: 'cos-attention-digest' },
   // A kerdes megirasa es a KIKULDESE ket kulon lepes: ha egybe lennenek, egy
   // kezbesitesi hiba ugy nezne ki, mint "nincs mit kerdezni".
   // W12 / §6.7. A parked ingest row (RECOVERY_REQUIRED) is NON-TERMINAL, so it

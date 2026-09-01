@@ -97,6 +97,16 @@ export const SCHEDULED_TASK_GRANTS: readonly ScheduledTaskGrant[] = Object.freez
     rationale: 'Surfaces woken cases to Istvan; silent when nothing woke.',
   },
   {
+    task: 'cos-attention-digest',
+    capabilities: Object.freeze(['READ', 'WRITE_LOCAL', 'EXTERNAL_EFFECT'] as Capability[]),
+    onBehalfOf: 'istvan',
+    rationale:
+      'P3-A: reads the Phase 2 projection and speaks the interrupt list to Istvan. '
+      + 'WRITE_LOCAL is the delivery ledger only -- what was said, when -- never a case fact; '
+      + 'EXTERNAL_EFFECT because a message reaching Istvan is an effect outside this process, '
+      + 'the same grant cos-wake-alert carries for the same reason.',
+  },
+  {
     task: 'cos-close-batches',
     capabilities: Object.freeze(['READ', 'WRITE_LOCAL', 'EXTERNAL_EFFECT'] as Capability[]),
     onBehalfOf: 'istvan',

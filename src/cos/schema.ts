@@ -2401,6 +2401,50 @@ export function initProgressionSchema(db: Database.Database): void {
   // case_progression_state to exist, and this is the first point where all
   // three are guaranteed.
   initCaseProjectionSchema(db)
+  initIntelligenceReaderSchema(db)
+}
+
+/** PHASE 3 (P3-A) -- the DELIVERY LEDGER, and the reason it is not a second
+ *  intelligence state.
+ *
+ *  The owner's requirements pull in two directions: "ne termeljen notification
+ *  stormot" and "a NAV/Cegkapu tipusu P0/P1 attentionnek automatikusan ujra
+ *  felszinre kell kerulnie, amig valodi resolution evidence nincs". Both can
+ *  only be satisfied by a reader that REMEMBERS WHAT IT ALREADY SAID.
+ *
+ *  What it remembers is the fact of an utterance -- element id, band, a
+ *  fingerprint of the sentence, when -- and never the item's content or status.
+ *  Every number the reader speaks is still recomputed from the canonical store
+ *  on every run, so this table cannot drift from the cases it describes: there
+ *  is nothing in it to drift. Delete it and the reader repeats itself once; it
+ *  does not lose or corrupt a single case fact.
+ *
+ *  ONE ROW PER (namespace, element). Not a history: the selector only ever asks
+ *  "when did this last speak, and what did it say then", so keeping every
+ *  utterance would grow without bound to answer a question about the latest.
+ *  `times_surfaced` keeps the count that history would have been kept for. */
+export function initIntelligenceReaderSchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS intelligence_surfaced (
+      namespace        TEXT NOT NULL,
+      element_id       TEXT NOT NULL,
+      /* The band AT THE TIME IT SPOKE. A band change is news; this is what the
+         change is measured against. */
+      band             TEXT NOT NULL,
+      /* A digest of the sentence that was delivered. The element id is stable
+         across evidence changes (deliberately -- see elementId), so band alone
+         cannot notice that a case's REASON changed underneath a steady band.
+         This can. */
+      fingerprint      TEXT NOT NULL,
+      first_surfaced_at INTEGER NOT NULL,
+      last_surfaced_at  INTEGER NOT NULL,
+      times_surfaced    INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY (namespace, element_id),
+      CHECK (namespace IN ('personal','zst'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_intel_surfaced_ns
+             ON intelligence_surfaced(namespace, last_surfaced_at)`)
 }
 
 /** P1 §10.1/§10.2 — the projection seam between the canonical state machine and

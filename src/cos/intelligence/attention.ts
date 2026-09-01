@@ -172,6 +172,21 @@ export interface InterruptionPolicy {
   maxInterruptions: number
   /** An item in the same band may not speak again inside this window. */
   quietSeconds: number
+  /** PER-BAND override of the window above. Absent bands fall back to
+   *  `quietSeconds`, so every existing caller keeps the behaviour it had.
+   *
+   *  WHY A SINGLE WINDOW WAS NOT ENOUGH (owner ruling 2026-09-01, P3-A). One
+   *  number has to serve two opposite requirements: an unread authority notice
+   *  must come BACK on its own until the document is collected, and a stale
+   *  informational item must not come back at all. A window short enough for the
+   *  first is a storm for the second, and a window long enough for the second
+   *  loses the NAV document. They are different bands, so the window belongs to
+   *  the band.
+   *
+   *  `Infinity` is the honest way to say "only a real change speaks": the item
+   *  is suppressed for as long as its band is unchanged, with no timer behind
+   *  it at all. */
+  bandQuietSeconds?: Partial<Record<AttentionBand, number>>
 }
 
 export const DEFAULT_INTERRUPTION_POLICY: InterruptionPolicy = {
@@ -226,11 +241,13 @@ export function selectAttention(
 
   for (const item of ranked) {
     const prev = lastSeen.get(item.element.id)
-    if (prev && prev.band === item.band && now - prev.at < policy.quietSeconds) {
+    const quietWindow = policy.bandQuietSeconds?.[item.band] ?? policy.quietSeconds
+    if (prev && prev.band === item.band && now - prev.at < quietWindow) {
       suppressed.push({
         item,
-        reason: `same band (${item.band}) as when it was last surfaced ${now - prev.at}s ago; ` +
-          `a change that does not change the band is not an interruption`,
+        reason: `same band (${item.band}) as when it was last surfaced ${now - prev.at}s ago` +
+          (Number.isFinite(quietWindow) ? `, inside its ${quietWindow}s quiet window` : ' and this band has no timer') +
+          `; a change that does not change the band is not an interruption`,
       })
       continue
     }
