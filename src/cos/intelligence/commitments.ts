@@ -144,7 +144,26 @@ export function commitmentsForCase(
   //                                    commitment at all, and never user-facing.
   const hasAction = !!row.next_action?.trim()
   const hasDeadline = row.due_at != null
-  const what = hasAction ? row.next_action!.trim() : (hasDeadline ? row.title?.trim() : '')
+
+  // ONE EXCEPTION TO CASE C, and it is the reason this surface exists.
+  //
+  // A case the board calls finished, with no event evidencing it, is a
+  // data-quality finding whether or not anybody ever wrote down an action. Case
+  // C exists to keep ENGINE SCHEDULING METADATA out of the owner's view; a
+  // terminal case with nothing to show for it is not scheduling metadata.
+  //
+  // Found by running the C rule on the live store: it swallowed BOTH cases in
+  // the NO_CLOSURE_EVIDENCE tier -- the two car-rental deposit cases, the very
+  // rows the owner asked to be given STRONGER data-quality attention. They had
+  // no next_action, so the rule that removes 48 false obligations removed the
+  // two real findings with them. Silence about the worst-evidenced closures is
+  // the opposite of what the rule was for.
+  const unevidencedClosure = TERMINAL.has(row.status)
+    && !events.some((e) => FULFILLING_EVENT.has(e.event_type) && e.new_status != null && TERMINAL.has(e.new_status))
+
+  const what = hasAction
+    ? row.next_action!.trim()
+    : (hasDeadline || unevidencedClosure ? row.title?.trim() : '')
   if (!what) return []   // case C, and a bare title with nothing owed
 
   const caseProv: Provenance = {

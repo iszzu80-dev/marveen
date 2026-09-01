@@ -74,6 +74,27 @@ describe('C -- follow_up_at WITHOUT a next_action is engine metadata, not a comm
     expect(list({ title: 'Something', follow_up_at: NOW - 90 * DAY })).toEqual([])
   })
 
+  // The one exception, added after running the C rule on the live store: it
+  // swallowed both NO_CLOSURE_EVIDENCE cases -- the rows the owner asked to be
+  // given STRONGER data-quality attention. Case C is about keeping engine
+  // scheduling metadata out of view; a terminal case with nothing evidencing it
+  // is not scheduling metadata, it is the finding.
+  it('EXCEPT a terminal case whose completion nothing evidences -- that is the finding', () => {
+    const c = list({ title: 'Deposit released?', status: 'COMPLETED', completed_at: null,
+      follow_up_at: NOW - 40 * DAY })[0]
+    expect(c).toBeDefined()
+    expect(c.status).toBe('UNKNOWN')
+    expect(c.closureEvidence).toBe('NONE')
+    expect(c.statement).toBe('Deposit released?')
+  })
+
+  it('but a COMPLETED case WITH an evidencing event stays out -- nothing was owed', () => {
+    const ev = [{ event_id: 'e1', case_id: 'c1', event_type: 'STATUS_CHANGE',
+      new_status: 'COMPLETED', reason: null, created_at: NOW - DAY }] as never
+    expect(commitmentsForCase(row({ status: 'COMPLETED', follow_up_at: NOW - DAY }), ev, 'personal', NOW))
+      .toEqual([])
+  })
+
   it('but a title WITH a real deadline is still a dated obligation', () => {
     const c = list({ title: 'Pay the invoice', due_at: NOW - DAY })[0]
     expect(c).toBeDefined()
