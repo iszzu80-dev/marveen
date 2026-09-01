@@ -42,6 +42,7 @@ import type Database from 'better-sqlite3'
 import { createAgentMessage, appendDailyLog } from '../../db.js'
 import { APP_TZ } from '../../config.js'
 import { projectIntelligence } from './project.js'
+import { applyResearchEnrichment, markChangedSurface, type EnrichmentTrace } from '../research/result-reader.js'
 import type { AttentionBand, AttentionItem, InterruptionPolicy, SurfacedRecord } from './attention.js'
 
 export const ATTENTION_DIGEST_HEADER = '## COS figyelem'
@@ -170,6 +171,11 @@ export interface SpokenItem {
    *  owner reads them differently. */
   trigger: 'NEW' | 'BAND_CHANGED' | 'CHANGED_WHILE_QUIET' | 'RESURFACED'
   timesSurfacedBefore: number
+  /** P3-B2 enrichment, kept on its OWN line rather than folded into the
+   *  statement. The statement is what our records say; this is what somebody
+   *  else published. A reader must be able to see which is which without
+   *  knowing the feature exists. */
+  researchNote: string | null
 }
 
 export interface ReaderResult {
@@ -186,6 +192,10 @@ export interface ReaderResult {
   /** Held by the once-an-hour cadence floor: first-time, unchanged, non-SAFETY
    *  items that would otherwise have delivered the backlog in instalments. */
   heldByCadence: number
+  /** research result -> evidence -> projection item -> changed surface. Present
+   *  whether or not anything was spoken, because a finding that reached a QUIET
+   *  item still reached a surface. */
+  researchTraces: EnrichmentTrace[]
   /** MUST be 0. Kept as a number rather than an assumption so a test can read it. */
   opportunityInSpoken: number
   anomalies: number
@@ -217,7 +227,15 @@ export function runProjectionReader(
   dryRun = false,
 ): ReaderResult {
   const ledger = loadLedger(db, namespace)
-  const p = projectIntelligence(db, namespace, now, ledgerToSeen(ledger), policy)
+  const raw = projectIntelligence(db, namespace, now, ledgerToSeen(ledger), policy)
+
+  // P3-B2: the research ledger stops being a dead end. The enrichment is applied
+  // to the PROJECTION, never to a case, and it is applied here rather than inside
+  // `projectIntelligence` so the projection itself stays a pure function of the
+  // canonical store -- research is an overlay a reader chooses to put on.
+  const enriched = applyResearchEnrichment(db, namespace, raw)
+  const p = enriched.projection
+  const researchTraces = enriched.traces
 
   const decide = (item: AttentionItem, quietWhenSuppressed: boolean): SpokenItem => {
     const prev = ledger.get(item.element.id)
@@ -226,10 +244,12 @@ export function runProjectionReader(
       : quietWhenSuppressed ? 'CHANGED_WHILE_QUIET'
       : prev.band !== item.band ? 'BAND_CHANGED'
       : 'RESURFACED'
+    const research = researchTraces.find((t) => t.elementId === item.element.id)
     return {
       id: item.element.id, caseId: item.element.caseId, band: item.band,
       statement: item.element.statement, why: item.why, trigger,
       timesSurfacedBefore: prev?.times_surfaced ?? 0,
+      researchNote: research ? research.after.slice(research.before.length + 4) : null,
     }
   }
 
@@ -287,9 +307,15 @@ export function runProjectionReader(
     )
   }
 
+  // RECORDED FROM THE TRACES, not from a judgement: a research ticket is marked
+  // as having changed something only because an element in this projection now
+  // carries its provenance. That is what turns `changedSurface` from a claim
+  // into an acceptance metric. Skipped on a dry run like every other write.
+  if (!dryRun) markChangedSurface(db, researchTraces)
+
   const base: ReaderResult = {
     namespace, posted: false, spoke: spoken, stillQuiet, promotedByChange,
-    quiet: p.attention.quiet.length, heldByCadence, opportunityInSpoken: 0,
+    quiet: p.attention.quiet.length, heldByCadence, researchTraces, opportunityInSpoken: 0,
     anomalies: p.anomalies.length, text: null,
   }
   if (!speak.length) return base
@@ -329,7 +355,10 @@ export function buildDigestText(namespace: string, spoken: readonly SpokenItem[]
   const lines = spoken.map((s) => {
     const times = s.trigger === 'RESURFACED' && s.timesSurfacedBefore > 0
       ? ` (${s.timesSurfacedBefore + 1}. alkalom)` : ''
-    return `- [${BAND_LABEL[s.band]}] ${s.statement} -- ${TRIGGER_LABEL[s.trigger]}${times} [${s.caseId}]`
+    const line = `- [${BAND_LABEL[s.band]}] ${s.statement} -- ${TRIGGER_LABEL[s.trigger]}${times} [${s.caseId}]`
+    // The web-sourced sentence gets its own indented line, so nobody reads a
+    // published page as if it were one of our own records.
+    return s.researchNote ? `${line}\n    ${s.researchNote}` : line
   })
   return `${ATTENTION_DIGEST_HEADER} (${scope}): ${spoken.length} tetel\n${lines.join('\n')}`
 }

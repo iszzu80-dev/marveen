@@ -116,25 +116,24 @@ describe('THE TIER IS TRANSLATED, NOT COERCED -- and translation is not permissi
     expect(e.eligible).toBe(true)
   })
 
-  it('AND THE TIGHTENING IS REAL: the intake From: line alone lifts a ZST case out', () => {
-    // MEASURED, and it is the finding that decided the pilot's shape. The
-    // corporate content classifier reads an email address as ZST_PERSONAL_DATA,
-    // which maps to HIGHLY_SENSITIVE. Every case the intake creates carries a
-    // `From:` line, so on the corporate side that lifts ALL of them out.
-    //
-    // The two classifiers disagree about the same fact: the personal one calls
-    // an address PERSONAL (inside the pilot), the corporate one calls it
-    // PERSONAL_DATA (outside). That asymmetry is not worked around here --
-    // loosening it is the owner's call, not a convenience the pilot may take.
+  it('B2 SUPERSEDED THIS: the intake From: line no longer lifts a ZST case out', () => {
+    // B1 measured the defect: the corporate classifier read the intake's own
+    // `From:` line as personal data, so the one field EVERY case carries lifted
+    // the whole corporate namespace out. The owner ruled the sender is a FIELD --
+    // the address is protected harder than before, never travelling at all, and
+    // the header is removed before the case CONTENT is classified. Both
+    // namespaces now give the same answer to the same fact.
     const withHeader = researchEligibility(c({
       namespace: 'zst', declaredSensitivity: 'ZST_INTERNAL', caseType: 'VENDOR',
       title: 'AWS szolgaltatas allapot', description: 'From: support@aws.amazon.com',
     }))
-    expect(withHeader.sensitivity).toBe('HIGHLY_SENSITIVE')
-    expect(withHeader.eligible).toBe(false)
+    expect(withHeader.sensitivity).toBe('PERSONAL')
+    expect(withHeader.eligible).toBe(true)
 
+    // And on the personal side the same case is now PUBLIC rather than
+    // PERSONAL: the tier it used to carry came entirely from the intake header.
     const personal = researchEligibility(c({ description: 'From: info@bikeshop.hu' }))
-    expect(personal.sensitivity).toBe('PERSONAL')
+    expect(personal.sensitivity).toBe('PUBLIC')
     expect(personal.eligible).toBe(true)
   })
 
@@ -187,18 +186,18 @@ describe('WHAT MAY LEAVE -- a public root and one of five fixed phrasings', () =
   })
 
   it('the query is EXACTLY the root domain plus the fixed intent', () => {
-    const r = sanctionResearchQuery(getDb(), c({ title: 'Kerekpar szerviz Budapesten, 240 000 Ft' }), 'PUBLIC_PRICING', NOW)
+    const r = sanctionResearchQuery(getDb(), c({ title: 'Kerekpar szerviz Budapesten, 240 000 Ft' }), 'SERVICE_STATUS', NOW)
     expect(r.status).toBe('SANCTIONED')
-    expect(r.query).toBe('bikeshop.hu current public pricing')
+    expect(r.query).toBe('bikeshop.hu service status page')
   })
 
   it('so no case title, person, amount or ticket id can reach it', () => {
     const r = sanctionResearchQuery(getDb(), c({
       title: 'Kovacs Bela ajanlata, 240 000 Ft, ticket INV-88213',
       description: 'From: info@bikeshop.hu',
-    }), 'PUBLIC_SUPPORT_DOCS', NOW)
+    }), 'OFFICIAL_SUPPORT_DOCUMENTATION', NOW)
     expect(r.status).toBe('SANCTIONED')
-    expect(r.query).toBe('bikeshop.hu public support documentation')
+    expect(r.query).toBe('bikeshop.hu official support documentation')
     for (const leak of ['Kovacs', '240', 'INV-88213', 'p1']) {
       expect(r.query).not.toContain(leak)
     }
@@ -209,7 +208,7 @@ describe('WHAT MAY LEAVE -- a public root and one of five fixed phrasings', () =
     // the second, and it is the stronger one.
     const r = sanctionResearchQuery(getDb(), c({
       description: 'From: info@bikeshop.hu\nA lakcimem Kossuth utca 3.',
-    }), 'PUBLIC_SUPPORT_DOCS', NOW)
+    }), 'OFFICIAL_SUPPORT_DOCUMENTATION', NOW)
     expect(r.status).toBe('REFUSED')
     expect(r.query).toBeNull()
   })
@@ -219,14 +218,14 @@ describe('WHAT MAY LEAVE -- a public root and one of five fixed phrasings', () =
   })
 
   it('a case whose sender is not a public identifier is refused, not trimmed', () => {
-    const r = sanctionResearchQuery(getDb(), c({ description: 'From: sales@portal.acme.com' }), 'PUBLIC_PRICING', NOW)
+    const r = sanctionResearchQuery(getDb(), c({ description: 'From: sales@portal.acme.com' }), 'SERVICE_STATUS', NOW)
     expect(r.status).toBe('REFUSED')
     expect(r.reason).toContain('no public vendor identifier')
     expect(r.query).toBeNull()
   })
 
   it('the ledger records the query, the released kinds, the tier and the gate record', () => {
-    const r = sanctionResearchQuery(getDb(), c(), 'PUBLIC_PRICING', NOW)
+    const r = sanctionResearchQuery(getDb(), c(), 'SERVICE_STATUS', NOW)
     const row = getDb().prepare('SELECT * FROM case_research_queries WHERE ticket_id=?').get(r.ticketId) as Record<string, unknown>
     expect(row.status).toBe('SANCTIONED')
     expect(row.query).toBe(r.query)
@@ -244,12 +243,12 @@ describe('EACH GUARD ALONE -- fences that do not lean on each other', () => {
   beforeEach(() => { initDatabase(':memory:') })
 
   it('GUARD 1 refuses on its own, before anything is assembled', () => {
-    expect(sanctionResearchQuery(getDb(), c({ caseType: 'CONTRACT' }), 'PUBLIC_PRICING', NOW).status).toBe('REFUSED')
+    expect(sanctionResearchQuery(getDb(), c({ caseType: 'CONTRACT' }), 'SERVICE_STATUS', NOW).status).toBe('REFUSED')
   })
 
   it('GUARD 2 (the public-identifier check) refuses with eligibility switched off', () => {
     const r = sanctionResearchQuery(
-      getDb(), c({ caseType: 'CONTRACT', description: 'From: x@my.acme.com' }), 'PUBLIC_PRICING', NOW,
+      getDb(), c({ caseType: 'CONTRACT', description: 'From: x@my.acme.com' }), 'SERVICE_STATUS', NOW,
       'websearch', { skipEligibility: true },
     )
     expect(r.status).toBe('REFUSED')
@@ -260,8 +259,10 @@ describe('EACH GUARD ALONE -- fences that do not lean on each other', () => {
   it('GUARD 3 (the secret sweep) fires with the first two switched off', () => {
     const r = sanctionResearchQuery(
       getDb(),
-      c({ description: 'From: sk_live_abcdefghijklmnop@x', caseType: 'CONTRACT', declaredSensitivity: 'HIGHLY_SENSITIVE' }),
-      'PUBLIC_PRICING', NOW, 'websearch', { skipEligibility: true, skipGate: true },
+      // The secret shape has to be in the HOST, because the host is the only
+      // part that survives into the query once the sender is parsed as a field.
+      c({ description: 'From: a@sk-live-abcdefghijklmnop.com', caseType: 'CONTRACT', declaredSensitivity: 'HIGHLY_SENSITIVE' }),
+      'SERVICE_STATUS', NOW, 'websearch', { skipEligibility: true, skipGate: true },
     )
     expect(r.status).toBe('REFUSED')
     expect(r.reason).toContain('secret-shaped')
@@ -272,7 +273,7 @@ describe('EACH GUARD ALONE -- fences that do not lean on each other', () => {
     expect(looksSecretShaped('4111 1111 1111 1111')).toBeTruthy()
     expect(looksSecretShaped('HU42117730161111101800000000')).toBeTruthy()
     expect(looksSecretShaped('password: hunter2')).toBeTruthy()
-    expect(looksSecretShaped('bikeshop.hu current public pricing')).toBeNull()
+    expect(looksSecretShaped('bikeshop.hu service status page')).toBeNull()
   })
 })
 
@@ -280,7 +281,7 @@ describe('A REFUSAL IS RECORDED, BECAUSE AN UNMEASURED FAIL-CLOSED IS A CLAIM', 
   beforeEach(() => { initDatabase(':memory:') })
 
   it('a refused query gets a ledger row with its reason', () => {
-    const r = sanctionResearchQuery(getDb(), c({ caseType: 'CONTRACT' }), 'PUBLIC_PRICING', NOW)
+    const r = sanctionResearchQuery(getDb(), c({ caseType: 'CONTRACT' }), 'SERVICE_STATUS', NOW)
     const row = getDb().prepare('SELECT * FROM case_research_queries WHERE ticket_id=?').get(r.ticketId) as Record<string, unknown>
     expect(row.status).toBe('REFUSED')
     expect(String(row.refused_reason).length).toBeGreaterThan(0)
@@ -288,9 +289,9 @@ describe('A REFUSAL IS RECORDED, BECAUSE AN UNMEASURED FAIL-CLOSED IS A CLAIM', 
   })
 
   it('and the metrics count how often each reason fired', () => {
-    sanctionResearchQuery(getDb(), c({ caseId: 'a', caseType: 'CONTRACT' }), 'PUBLIC_PRICING', NOW)
-    sanctionResearchQuery(getDb(), c({ caseId: 'b', declaredSensitivity: 'HIGHLY_SENSITIVE' }), 'PUBLIC_PRICING', NOW + 1)
-    sanctionResearchQuery(getDb(), c({ caseId: 'd' }), 'PUBLIC_PRICING', NOW + 2)
+    sanctionResearchQuery(getDb(), c({ caseId: 'a', caseType: 'CONTRACT' }), 'SERVICE_STATUS', NOW)
+    sanctionResearchQuery(getDb(), c({ caseId: 'b', declaredSensitivity: 'HIGHLY_SENSITIVE' }), 'SERVICE_STATUS', NOW + 1)
+    sanctionResearchQuery(getDb(), c({ caseId: 'd' }), 'SERVICE_STATUS', NOW + 2)
     const m = pilotMetrics(getDb())
     expect(m.refused).toBe(2)
     expect(m.sanctioned).toBe(1)
@@ -302,14 +303,14 @@ describe('A RESULT IS EVIDENCE, NEVER PERMISSION', () => {
   beforeEach(() => { initDatabase(':memory:') })
 
   it('an answer with no provenance is recorded as NO_RESULT, not as knowledge', () => {
-    const r = sanctionResearchQuery(getDb(), c(), 'PUBLIC_PRICING', NOW)
+    const r = sanctionResearchQuery(getDb(), c(), 'SERVICE_STATUS', NOW)
     recordResearchResult(getDb(), r.ticketId, { kind: 'EVIDENCE', provenance: [], latencyMs: 900, changedSurface: false }, NOW + 5)
     const row = getDb().prepare('SELECT result_kind FROM case_research_queries WHERE ticket_id=?').get(r.ticketId) as { result_kind: string }
     expect(row.result_kind).toBe('NO_RESULT')
   })
 
   it('a result cannot be attached to a query that was never sanctioned', () => {
-    const r = sanctionResearchQuery(getDb(), c({ caseType: 'CONTRACT' }), 'PUBLIC_PRICING', NOW)
+    const r = sanctionResearchQuery(getDb(), c({ caseType: 'CONTRACT' }), 'SERVICE_STATUS', NOW)
     expect(() => recordResearchResult(getDb(), r.ticketId, {
       kind: 'EVIDENCE', provenance: ['https://example.com'], latencyMs: 10, changedSurface: true,
     })).toThrow(ResearchAuthorizationError)
@@ -322,7 +323,7 @@ describe('A RESULT IS EVIDENCE, NEVER PERMISSION', () => {
     ).run(NOW, NOW)
     const snap = () => JSON.stringify(getDb().prepare('SELECT * FROM personal_cases').all())
     const before = snap()
-    const r = sanctionResearchQuery(getDb(), c(), 'PUBLIC_PRICING', NOW)
+    const r = sanctionResearchQuery(getDb(), c(), 'SERVICE_STATUS', NOW)
     recordResearchResult(getDb(), r.ticketId, {
       kind: 'RECOMMENDATION', provenance: ['https://bikeshop.hu/arak'],
       latencyMs: 1200, costUsd: 0.002, changedSurface: true, note: 'published price list found',
@@ -335,8 +336,8 @@ describe('THE NUMBERS THE OWNER ASKED FOR BEFORE IT WIDENS', () => {
   beforeEach(() => { initDatabase(':memory:') })
 
   it('queries per case, usefulness, FALSE POSITIVES, latency, cost and what moved', () => {
-    const a = sanctionResearchQuery(getDb(), c({ caseId: 'a' }), 'PUBLIC_PRICING', NOW)
-    const b = sanctionResearchQuery(getDb(), c({ caseId: 'b' }), 'PUBLIC_SUPPORT_DOCS', NOW + 1)
+    const a = sanctionResearchQuery(getDb(), c({ caseId: 'a' }), 'SERVICE_STATUS', NOW)
+    const b = sanctionResearchQuery(getDb(), c({ caseId: 'b' }), 'OFFICIAL_SUPPORT_DOCUMENTATION', NOW + 1)
     recordResearchResult(getDb(), a.ticketId, { kind: 'EVIDENCE', provenance: ['https://x/1'], latencyMs: 800, costUsd: 0.001, changedSurface: true }, NOW + 10)
     recordResearchResult(getDb(), b.ticketId, {
       kind: 'EVIDENCE', provenance: ['https://x/2'], latencyMs: null, costUsd: 0.001,

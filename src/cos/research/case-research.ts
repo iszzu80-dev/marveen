@@ -41,6 +41,7 @@ import { egressTierFor } from '../provider-data-policy.js'
 import type { CaseSensitivity } from '../schema.js'
 import { publicVendorIdentifier } from './public-identifier.js'
 import { excludedTopicOf, type TopicExclusion } from './topic-exclusion.js'
+import { parseSenderField, contentWithoutSenderHeader } from './sender-field.js'
 import {
   decideDisclosure, recordDisclosure, ensureDisclosureSchema,
   type DisclosureField, type DisclosureRequest, type FieldKind,
@@ -129,7 +130,14 @@ export interface Eligibility {
  * that can lift a case out and can never let one in.
  */
 export function researchEligibility(c: ResearchCase): Eligibility {
-  const content = [c.title ?? '', c.description ?? ''].join('\n')
+  // FIELD-LEVEL, NOT CASE-LEVEL (owner ruling 2026-09-01). The intake's own
+  // `From:` header is removed before classification -- it is on every case, so
+  // it distinguishes none of them, and in B1 it lifted the entire corporate
+  // namespace out of the pilot. The address itself is not thereby permitted:
+  // `parseSenderField` keeps it as a sensitive field that never travels, and
+  // only the registrable root derived from it can be considered. An address in
+  // the BODY is still content and still escalates.
+  const content = contentWithoutSenderHeader(c.title, c.description)
   const sensitivity = egressTierFor(c.namespace, c.declaredSensitivity, content)
   const declaredRaw = typeof c.declaredSensitivity === 'string' ? c.declaredSensitivity : 'ABSENT'
   const scope = scopeOf(c.caseType)
@@ -170,14 +178,44 @@ export function researchEligibility(c: ResearchCase): Eligibility {
  * a caller can only choose between them.
  */
 export const RESEARCH_INTENTS = Object.freeze({
-  PUBLIC_PRICING: 'current public pricing',
-  PUBLIC_SUPPORT_DOCS: 'public support documentation',
-  PUBLIC_SERVICE_STATUS: 'public service status page',
-  PUBLIC_CONTACT_INFO: 'public contact information',
-  PUBLIC_PRODUCT_DOCS: 'public product documentation',
+  OFFICIAL_CONTACT: 'official contact information',
+  OFFICIAL_SUPPORT_DOCUMENTATION: 'official support documentation',
+  SERVICE_STATUS: 'service status page',
+  PRODUCT_DOCUMENTATION: 'product documentation',
+  /** Never sent on its own -- see `PRICING_NEEDS_TARGET`. */
+  PRICING: 'pricing',
 } as const)
 
 export type ResearchIntent = keyof typeof RESEARCH_INTENTS
+
+/**
+ * PRICING NEEDS A TARGET, and B1 is why.
+ *
+ * Owner ruling 2026-09-01: "A 'current public pricing' tul ketertelmunek
+ * bizonyult. Ne probaljuk altalanosabb NLP-vel megmenteni. Company domain +
+ * 'pricing' onmagaban REFUSE / INSUFFICIENT_TARGET."
+ *
+ * The measured failure: `fluidra.com current public pricing` returned the
+ * company's SHARE price, because Fluidra is listed. The query was safe, correctly
+ * formed and answered the wrong question with confidence -- which is worse than
+ * returning nothing. A domain names a company; a company has a share price and a
+ * catalogue, and only a product identifier picks between them.
+ *
+ * So PRICING requires an explicit public product or service identifier, supplied
+ * by the caller rather than mined out of the case. Absent one the pilot refuses
+ * with INSUFFICIENT_TARGET rather than guessing.
+ */
+export const PRICING_NEEDS_TARGET = 'INSUFFICIENT_TARGET'
+
+/** A product identifier the caller vouches for as public. Rejected if it looks
+ *  like case content rather than a catalogue name: no digits-heavy tokens, no
+ *  addresses, no long free text. */
+export function isPublicProductIdentifier(v: string | null | undefined): boolean {
+  const s = (v ?? '').trim()
+  if (!s || s.length > 60) return false
+  if (/@|https?:|\d{4,}/.test(s)) return false
+  return /^[\p{L}\p{N} .+&/-]{2,}$/u.test(s)
+}
 
 /** The ONLY field kinds this pilot ever asks for. Minimum necessary, declared
  *  up front rather than trimmed afterwards. Note what is absent: no body, no
@@ -240,8 +278,9 @@ export function sanctionResearchQuery(
   intent: ResearchIntent,
   now = Math.floor(Date.now() / 1000),
   provider = 'websearch',
-  opts: { skipEligibility?: boolean; skipGate?: boolean } = {},
+  opts: { skipEligibility?: boolean; skipGate?: boolean; productIdentifier?: string } = {},
 ): SanctionedQuery {
+  const productIdentifier = opts.productIdentifier ?? null
   ensureDisclosureSchema(db)
   const ticketId = ticketIdFor(c.namespace, c.caseId, intent, now)
   const elig = researchEligibility(c)
@@ -272,8 +311,11 @@ export function sanctionResearchQuery(
   // root or refuses -- it never sanitises a portal URL down into a root, because
   // reducing would quietly turn a host we were handed into "the vendor's public
   // site" and lose exactly the distinction the policy draws.
-  const rawHost = /From:\s*([^\s<>"]+)/i.exec(c.description ?? '')?.[1] ?? null
-  const ident = publicVendorIdentifier(rawHost)
+  // The sender is parsed as a FIELD. The address and the display name stay here
+  // and never travel; only `host` is offered to the public-identifier check, and
+  // only the registrable root it returns can reach the query.
+  const sender = parseSenderField(c.description)
+  const ident = publicVendorIdentifier(sender.host)
   if (!opts.skipGate && !ident.ok) {
     return refuse(
       `no public vendor identifier: ${ident.reason}. The pilot sends a public root domain and a generic `
@@ -281,7 +323,7 @@ export function sanctionResearchQuery(
       elig.sensitivity, elig.scope,
     )
   }
-  const domain = ident.ok ? ident.value! : (rawHost ?? '')
+  const domain = ident.ok ? ident.value! : (sender.host ?? '')
 
   const fields: DisclosureField[] = [
     // TAGGED PUBLIC AS AN EXPLICIT ACT, which the disclosure interface permits
@@ -318,10 +360,23 @@ export function sanctionResearchQuery(
     )
   }
 
-  // The query: a public root domain and one of five fixed phrasings. Nothing
-  // else is ever appended, so there is no path by which a case sentence, a
-  // person, an amount or a ticket id reaches it.
-  const query = [domain, RESEARCH_INTENTS[intent]].join(' ').trim()
+  // PRICING WITHOUT A TARGET IS REFUSED, never guessed. See PRICING_NEEDS_TARGET:
+  // a domain names a company, a company has both a share price and a catalogue,
+  // and B1 measured what happens when the query cannot tell them apart.
+  if (intent === 'PRICING' && !isPublicProductIdentifier(productIdentifier)) {
+    return refuse(
+      `${PRICING_NEEDS_TARGET}: a pricing query needs an explicit public product or service identifier. `
+      + `A company domain plus "pricing" returned the SHARE price in the B1 pilot, confidently and wrongly`,
+      elig.sensitivity, elig.scope,
+    )
+  }
+
+  // The query: a public root domain, one of five fixed phrasings, and for PRICING
+  // the caller's vouched-for public product name. Nothing else is ever appended,
+  // so there is no path by which a case sentence, a person, an amount or a ticket
+  // id reaches it.
+  const query = [domain, productIdentifier?.trim(), RESEARCH_INTENTS[intent]]
+    .filter(Boolean).join(' ').trim()
 
   const shaped = looksSecretShaped(query)
   if (shaped) {

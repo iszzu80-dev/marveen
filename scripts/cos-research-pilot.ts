@@ -24,10 +24,13 @@ import {
 // Scope decides the question, and the map is fixed. The owner capped the first
 // round at ten cases, so the cap is here rather than in a comment: a pilot that
 // can quietly grow is not a pilot.
+// B2 intents. PRICING is deliberately absent: it needs an explicit public
+// product identifier the pilot cannot mine out of a case, so a scope-driven run
+// would only ever produce INSUFFICIENT_TARGET refusals.
 const INTENT_FOR_SCOPE: Record<string, ResearchIntent> = {
-  PRODUCT_PRICE_COMMERCIAL: 'PUBLIC_PRICING',
-  PUBLIC_COMPANY_SUPPORT: 'PUBLIC_SUPPORT_DOCS',
-  GENERAL_ADMIN: 'PUBLIC_CONTACT_INFO',
+  PRODUCT_PRICE_COMMERCIAL: 'PRODUCT_DOCUMENTATION',
+  PUBLIC_COMPANY_SUPPORT: 'OFFICIAL_SUPPORT_DOCUMENTATION',
+  GENERAL_ADMIN: 'OFFICIAL_CONTACT',
 }
 const MAX_SANCTIONED = 10
 
@@ -70,7 +73,7 @@ for (const ns of ['personal', 'zst'] as const) {
     // A sanction attempt on an eligible case, so the gate's verdict is measured
     // and not assumed. Still nothing sent: this builds and records a query, and
     // the search is a separate, deliberate act.
-    const sanctioned = sanctionResearchQuery(db, c, INTENT_FOR_SCOPE[e.scope!] ?? 'PUBLIC_SUPPORT_DOCS', now)
+    const sanctioned = sanctionResearchQuery(db, c, INTENT_FOR_SCOPE[e.scope!] ?? 'OFFICIAL_SUPPORT_DOCUMENTATION', now)
     if (sanctioned.status === 'SANCTIONED') {
       sanctionedTotal++
       tickets.push({ ticketId: sanctioned.ticketId, caseId: c.caseId, namespace: ns, query: sanctioned.query })

@@ -38,6 +38,14 @@ export type Confidence = 'HIGH' | 'MEDIUM' | 'LOW' | 'UNKNOWN'
 
 export type ProvenanceSource =
   | 'CASE' | 'CASE_EVENT' | 'PROGRESSION' | 'OUTBOUND' | 'DOCUMENT' | 'TRIAGE_RECEIPT'
+  /** P3-B2: a public-web research result, named as its own class ON PURPOSE.
+   *  Every other source above is something this system observed or wrote; this
+   *  one is a page somebody else published, retrieved through the research
+   *  ledger. Keeping it distinguishable means a reader can always tell which
+   *  part of an element rests on our own records and which part rests on the
+   *  open web, and `ref` is the research ticket, so the exact query and its
+   *  source URLs are one lookup away. */
+  | 'WEB_RESEARCH'
 
 /** Where a claim came from. An element cannot be constructed without at least
  *  one, because an intelligence surface whose items cannot be traced back is a
