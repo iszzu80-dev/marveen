@@ -161,6 +161,24 @@ describe('THE DEAD END OPENS -- and changedSurface becomes a measurement', () =>
     expect(researchFindings(getDb(), 'zst').length).toBe(1)      // still one
   })
 
+  it('AND THE PROVENANCE CHECK STANDS ON ITS OWN, not behind the kind filter', () => {
+    // The mutation run found this: `recordResearchResult` downgrades a sourceless
+    // answer to NO_RESULT, and the kind filter then excludes it -- so the
+    // explicit "no provenance, not evidence" guard never fired in any test and
+    // could be deleted with nothing going red. Two guards, one proven.
+    //
+    // A row shaped like EVIDENCE with an empty provenance array can arrive from
+    // any other writer, so the guard is exercised on exactly that row.
+    executedTicket()
+    getDb().prepare(
+      `INSERT INTO case_research_queries
+         (ticket_id, namespace, case_id, sensitivity, scope, status, query, provider,
+          created_at, executed_at, result_kind, result_provenance, false_positive, changed_surface)
+       VALUES ('rq-handwritten','zst','z1','PERSONAL','GENERAL_ADMIN','EXECUTED','x','websearch',?,?,'EVIDENCE','[]',0,0)`,
+    ).run(NOW, NOW + 1)
+    expect(researchFindings(getDb(), 'zst').map((f) => f.ticketId)).not.toContain('rq-handwritten')
+  })
+
   it('a FALSE POSITIVE never enriches anything', () => {
     const r = sanctionResearchQuery(getDb(), c({ caseId: 'z3' }), 'SERVICE_STATUS', NOW)
     recordResearchResult(getDb(), r.ticketId, {
@@ -226,6 +244,15 @@ describe('THE DEAD END OPENS -- and changedSurface becomes a measurement', () =>
     })
     const { traces } = applyResearchEnrichment(getDb(), 'zst', projectIntelligence(getDb(), 'zst', NOW))
     expect(traces.map((t) => t.ticketId)).not.toContain(r.ticketId)
+
+    // AND THE LEDGER MUST NOT BE MARKED EITHER. The mutation run found that
+    // asserting only on `traces` left `markChangedSurface` free to stamp every
+    // executed ticket -- which would turn the acceptance metric back into a
+    // count of queries sent, exactly what it exists not to be.
+    markChangedSurface(getDb(), traces)
+    const row = getDb().prepare('SELECT changed_surface FROM case_research_queries WHERE ticket_id=?')
+      .get(r.ticketId) as { changed_surface: number }
+    expect(row.changed_surface).toBe(0)
   })
 
   it('the live reader carries the traces and marks them', () => {
