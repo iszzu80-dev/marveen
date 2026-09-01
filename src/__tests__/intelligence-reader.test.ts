@@ -319,3 +319,66 @@ describe('A REHEARSAL WRITES NOTHING', () => {
     expect(s.posts.length).toBe(1)
   })
 })
+
+describe('THE CADENCE FLOOR -- the backlog does not arrive in instalments', () => {
+  beforeEach(() => {
+    initDatabase(':memory:')
+    // Twelve competing items. Three speak; the other nine have never been
+    // surfaced, so under the per-item rules alone every one of them is "new"
+    // and would speak three at a time on the following cycles.
+    for (let i = 0; i < 12; i++) {
+      zst({
+        case_id: `z${i}`, title: `Valassz csomagot ${i}`, description: 'no sender',
+        status: 'AWAITING_SELECTION', updated_at: NOW - (i + 1) * 1000,
+      })
+    }
+  })
+
+  it('FOUND IN PRODUCTION: without a floor the next three speak ten minutes later', () => {
+    const first = runProjectionReader(getDb(), 'zst', NOW, sink().post)
+    expect(first.spoke.length).toBe(3)
+    const s = sink()
+    const second = runProjectionReader(getDb(), 'zst', NOW + 600, s.post)
+    expect(second.posted).toBe(false)
+    expect(second.heldByCadence).toBeGreaterThan(0)
+    expect(s.posts).toEqual([])
+  })
+
+  it('and the backlog is released an hour later, not silenced for ever', () => {
+    runProjectionReader(getDb(), 'zst', NOW, sink().post)
+    const s = sink()
+    const later = runProjectionReader(getDb(), 'zst', NOW + HOUR + 1, s.post)
+    expect(later.posted).toBe(true)
+    expect(later.spoke.length).toBe(3)
+  })
+
+  it('SAFETY is never held: an authority notice speaks inside the window', () => {
+    runProjectionReader(getDb(), 'zst', NOW, sink().post)
+    zst({ case_id: 'nav', title: 'NAV irat', description: 'From: ertesites@tarhely.gov.hu', updated_at: NOW })
+    const s = sink()
+    const r = runProjectionReader(getDb(), 'zst', NOW + 600, s.post)
+    expect(r.posted).toBe(true)
+    expect(r.spoke.every((x) => x.band === 'SAFETY')).toBe(true)
+    expect(s.posts[0]).toContain('BIZTONSAG')
+  })
+
+  it('a CHANGE is never held either -- that is the news the floor must not eat', () => {
+    const first = runProjectionReader(getDb(), 'zst', NOW, sink().post)
+    const moved = first.spoke[0].caseId
+    getDb().prepare(`UPDATE zst_cases SET status='AWAITING_APPROVAL' WHERE case_id=?`).run(moved)
+    const s = sink()
+    const r = runProjectionReader(getDb(), 'zst', NOW + 600, s.post)
+    expect(r.posted).toBe(true)
+    expect(r.spoke.some((x) => x.caseId === moved)).toBe(true)
+    expect(r.spoke.every((x) => x.trigger !== 'NEW')).toBe(true)
+  })
+
+  it('the two namespaces keep separate clocks', () => {
+    runProjectionReader(getDb(), 'zst', NOW, sink().post)
+    personal({ case_id: 'p-sel', status: 'AWAITING_SELECTION', title: 'valassz' })
+    const s = sink()
+    const r = runProjectionReader(getDb(), 'personal', NOW + 600, s.post)
+    expect(r.posted).toBe(true)          // a busy ZST day does not silence a personal one
+    expect(r.heldByCadence).toBe(0)
+  })
+})

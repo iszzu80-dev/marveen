@@ -28,6 +28,7 @@ const dry = process.argv.includes('--dry')
 initDatabase()
 const db = getDb()
 
+const startedAt = Math.floor(Date.now() / 1000)
 const out: Record<string, unknown> = { dry }
 const problems: string[] = []
 
@@ -47,6 +48,7 @@ for (const ns of ['personal', 'zst'] as const) {
       triggers: r.spoke.map((s) => `${s.band}:${s.trigger}`),
       promotedByChange: r.promotedByChange,
       stillQuiet: r.stillQuiet,
+      heldByCadence: r.heldByCadence,
       quiet: r.quiet,
       opportunityInSpoken: r.opportunityInSpoken,
       anomalies: r.anomalies,
@@ -75,6 +77,28 @@ for (const ns of ['personal', 'zst'] as const) {
 const sides = ['personal', 'zst'].map((k) => out[k] as Record<string, number> | undefined)
 const sum = (f: (s: Record<string, number>) => number) =>
   sides.reduce((a, s) => a + (s && typeof s.spoke === 'number' ? f(s) : 0), 0)
+// READBACK, because §8.7 does not accept "I posted it" as proof that anything
+// landed. A step with EXTERNAL_EFFECT that acted and cannot say it verified is
+// UNVERIFIED, and the run is PARTIAL -- correctly, on the first live cycle. The
+// check is a query, not a flag: the digest text must be findable on the bus.
+if (!dry) {
+  const posted = ['personal', 'zst']
+    .map((k) => out[k] as Record<string, unknown> | undefined)
+    .filter((s) => s && s.posted === true).length
+  if (posted > 0) {
+    const found = db.prepare(
+      `SELECT COUNT(*) n FROM agent_messages
+        WHERE from_agent = 'cos-attention' AND created_at >= ?`,
+    ).get(startedAt) as { n: number }
+    out.readback = found.n >= posted ? 'VERIFIED' : 'MISSING'
+    out.verified = found.n >= posted
+    if (found.n < posted) {
+      problems.push(`posted ${posted} digest(s) but only ${found.n} reached the bus`)
+    }
+  } else {
+    out.readback = 'NOTHING_POSTED'
+  }
+}
 out.examined = sum((s) => (s.spoke ?? 0) + (s.stillQuiet ?? 0) + (s.quiet ?? 0))
 out.matched = sum((s) => (s.spoke ?? 0) + (s.stillQuiet ?? 0))
 out.acted = sum((s) => s.spoke ?? 0)

@@ -72,6 +72,34 @@ export const READER_POLICY: InterruptionPolicy = {
   },
 }
 
+/**
+ * THE CADENCE FLOOR, and the storm it stops.
+ *
+ * FOUND IN PRODUCTION, on the second live cycle after the cutover, which is the
+ * only place it could have been found. The per-item rules were right and the
+ * aggregate was not: once the top three items had spoken they went quiet for
+ * twelve hours, so the NEXT three -- never surfaced, therefore "new" -- spoke on
+ * the following cycle. With 130 quiet items and a cycle every ten minutes, the
+ * reader would have worked through the entire backlog three items at a time.
+ * Every individual decision was correct and the sum of them was the notification
+ * storm the owner forbade by name.
+ *
+ * The rule: a namespace may open its mouth once an hour. Two exemptions, and
+ * both are the point of the feature rather than softenings of it --
+ *
+ *   SAFETY is never held back. An unread authority notice does not wait for a
+ *   cadence window; if it is the strongest thing in the namespace it speaks.
+ *
+ *   A CHANGE is never held back. "Csak valtozas vagy valoban releváns attention
+ *   eseten jelezzen" -- a case whose sentence or band moved is the change, and
+ *   silencing it to keep a rhythm would invert the requirement.
+ *
+ * What the floor actually suppresses is the third thing: a first-time item that
+ * is neither urgent nor changed, i.e. the backlog arriving in instalments. That
+ * belongs on the board (P3-C), which is exactly where it now is.
+ */
+export const MIN_DIGEST_INTERVAL_SECONDS = 3600
+
 export interface LedgerRow {
   element_id: string
   band: string
@@ -155,6 +183,9 @@ export interface ReaderResult {
   promotedByChange: number
   /** Ranked, available, not spoken. */
   quiet: number
+  /** Held by the once-an-hour cadence floor: first-time, unchanged, non-SAFETY
+   *  items that would otherwise have delivered the backlog in instalments. */
+  heldByCadence: number
   /** MUST be 0. Kept as a number rather than an assumption so a test can read it. */
   opportunityInSpoken: number
   anomalies: number
@@ -202,8 +233,25 @@ export function runProjectionReader(
     }
   }
 
-  const speak: AttentionItem[] = [...p.attention.interrupt]
-  const spoken: SpokenItem[] = p.attention.interrupt.map((i) => decide(i, false))
+  // The cadence floor. `lastSpokeAt` is the most recent utterance in THIS
+  // namespace; the two namespaces keep separate clocks, because a busy company
+  // day must not silence a personal deadline.
+  const lastSpokeAt = Math.max(0, ...[...ledger.values()].map((r) => r.last_surfaced_at))
+  const withinCadence = lastSpokeAt > 0 && now - lastSpokeAt < MIN_DIGEST_INTERVAL_SECONDS
+
+  const mayPassCadence = (item: AttentionItem): boolean => {
+    if (!withinCadence) return true
+    if (item.band === 'SAFETY') return true
+    const prev = ledger.get(item.element.id)
+    // A band change or a changed sentence IS the news; only a first-time,
+    // unchanged, non-urgent item is held for the next window.
+    return !!prev && (prev.band !== item.band || prev.fingerprint !== fingerprintOf(item))
+  }
+
+  const eligible = p.attention.interrupt.filter(mayPassCadence)
+  const heldByCadence = p.attention.interrupt.length - eligible.length
+  const speak: AttentionItem[] = [...eligible]
+  const spoken: SpokenItem[] = eligible.map((i) => decide(i, false))
 
   // THE PROMOTION, and the failure it exists to stop.
   //
@@ -216,7 +264,8 @@ export function runProjectionReader(
   let stillQuiet = 0
   for (const s of p.attention.suppressed) {
     const prev = ledger.get(s.item.element.id)
-    if (prev && prev.fingerprint !== fingerprintOf(s.item) && speak.length < policy.maxInterruptions) {
+    if (prev && prev.fingerprint !== fingerprintOf(s.item) && speak.length < policy.maxInterruptions
+        && mayPassCadence(s.item)) {
       speak.push(s.item)
       spoken.push(decide(s.item, true))
       promotedByChange++
@@ -240,7 +289,7 @@ export function runProjectionReader(
 
   const base: ReaderResult = {
     namespace, posted: false, spoke: spoken, stillQuiet, promotedByChange,
-    quiet: p.attention.quiet.length, opportunityInSpoken: 0,
+    quiet: p.attention.quiet.length, heldByCadence, opportunityInSpoken: 0,
     anomalies: p.anomalies.length, text: null,
   }
   if (!speak.length) return base
