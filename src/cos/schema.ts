@@ -2403,6 +2403,7 @@ export function initProgressionSchema(db: Database.Database): void {
   initCaseProjectionSchema(db)
   initIntelligenceReaderSchema(db)
   initKanbanProjectionSchema(db)
+  initCaseResearchSchema(db)
 }
 
 /** PHASE 3 (P3-A) -- the DELIVERY LEDGER, and the reason it is not a second
@@ -2626,4 +2627,59 @@ export function initCaseProjectionSchema(db: Database.Database): void {
        WHERE domain = NEW.domain AND case_id = NEW.case_id;
     END
   `)
+}
+
+
+/** PHASE 3 (P3-B) -- the CASE RESEARCH LEDGER.
+ *
+ *  Owner ruling 2026-09-01, limited pilot: "Minden queryhez tartos evidence:
+ *  case id; sensitivity classification; pontosan milyen mezo hagyta el a
+ *  rendszert; query; provider/tool; timestamp; result provenance; cost/usage, ha
+ *  merheto."
+ *
+ *  This is the only place in the system that records SOMETHING LEAVING. The
+ *  disclosure gate already records WHY a field was allowed to travel and
+ *  deliberately never stores its value; this table stores the sanctioned query
+ *  verbatim, because the owner asked to be able to read exactly what left. The
+ *  two are linked by `disclosure_record_id` and neither replaces the other.
+ *
+ *  REFUSALS GET A ROW TOO. A ledger that only holds the queries that went out
+ *  cannot answer "how often did the gate stop something", and an unmeasurable
+ *  fail-closed is indistinguishable from one that never fires. */
+export function initCaseResearchSchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS case_research_queries (
+      ticket_id            TEXT PRIMARY KEY,
+      namespace            TEXT NOT NULL,
+      case_id              TEXT NOT NULL,
+      /* The EFFECTIVE tier: declared, escalated by what the content actually
+         contains. Never the declared column on its own. */
+      sensitivity          TEXT NOT NULL,
+      scope                TEXT NOT NULL,
+      status               TEXT NOT NULL,
+      refused_reason       TEXT,
+      disclosure_record_id TEXT,
+      /* Exactly which field KINDS left, as decided by the disclosure gate. */
+      disclosed_fields     TEXT,
+      /* What was sent, verbatim. Built only from fields the gate released. */
+      query                TEXT,
+      provider             TEXT,
+      created_at           INTEGER NOT NULL,
+      executed_at          INTEGER,
+      latency_ms           INTEGER,
+      cost_usd             REAL,
+      result_kind          TEXT,
+      result_provenance    TEXT,
+      /* Did the answer actually move an attention/decision/recommendation?
+         The owner asked for this proportion by name. */
+      changed_surface      INTEGER NOT NULL DEFAULT 0,
+      outcome_note         TEXT,
+      CHECK (namespace IN ('personal','zst')),
+      CHECK (status IN ('REFUSED','SANCTIONED','EXECUTED','FAILED'))
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_research_case
+             ON case_research_queries(namespace, case_id, created_at)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_research_status
+             ON case_research_queries(status, created_at)`)
 }
