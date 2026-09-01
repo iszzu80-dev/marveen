@@ -238,6 +238,11 @@ describe('THE DEAD END OPENS -- and changedSurface becomes a measurement', () =>
   it('a finding for a case with no projection item marks nothing', () => {
     // The honest zero: research that answered something about a case the
     // projection does not surface has changed no surface, and must not claim to.
+    //
+    // A TRACED ticket exists alongside it ON PURPOSE. Without one the trace list
+    // is empty, `markChangedSurface` returns early, and a mutant that stamps
+    // every executed row never even runs -- the test would pass over it.
+    executedTicket()
     const r = sanctionResearchQuery(getDb(), c({ caseId: 'no-such-case' }), 'OFFICIAL_CONTACT', NOW)
     recordResearchResult(getDb(), r.ticketId, {
       kind: 'EVIDENCE', provenance: ['https://x/1'], latencyMs: 10, changedSurface: false,
@@ -249,6 +254,7 @@ describe('THE DEAD END OPENS -- and changedSurface becomes a measurement', () =>
     // asserting only on `traces` left `markChangedSurface` free to stamp every
     // executed ticket -- which would turn the acceptance metric back into a
     // count of queries sent, exactly what it exists not to be.
+    expect(traces.length).toBeGreaterThan(0)      // the mutant must get to run
     markChangedSurface(getDb(), traces)
     const row = getDb().prepare('SELECT changed_surface FROM case_research_queries WHERE ticket_id=?')
       .get(r.ticketId) as { changed_surface: number }
