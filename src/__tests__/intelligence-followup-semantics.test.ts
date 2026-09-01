@@ -103,6 +103,31 @@ describe('C -- follow_up_at WITHOUT a next_action is engine metadata, not a comm
   })
 })
 
+describe('the risk ladder, so the order has a stated reason and not a tuned number', () => {
+  it('a broken promise outranks an open question, and both yield to an unread authority notice', async () => {
+    const { caseAttentionFor, caseAttentionToAttention } = await import('../cos/intelligence/case-attention.js')
+    const expired = commitmentToAttention(
+      list({ next_action: 'do it', due_at: NOW - 26 * DAY })[0], NOW)
+    const mustChoose = caseAttentionToAttention(caseAttentionFor({
+      case_id: 'q', title: 'q', status: 'AWAITING_SELECTION', description: 'From: a@b.com',
+      due_at: null, waiting_on: null, related_document_ids: null,
+      created_at: NOW - DAY, updated_at: NOW - DAY,
+    }, 'personal', NOW)!, NOW)
+    const authority = caseAttentionToAttention(caseAttentionFor({
+      case_id: 'n', title: 'n', status: 'NEW', description: 'From: x@tarhely.gov.hu',
+      due_at: null, waiting_on: null, related_document_ids: null,
+      created_at: NOW - DAY, updated_at: NOW - DAY,
+    }, 'zst', NOW)!, NOW)
+
+    expect(expired.factors.risk).toBeGreaterThan(mustChoose.factors.risk)
+    expect(authority.factors.risk).toBeGreaterThan(expired.factors.risk)
+  })
+
+  it('an OPEN commitment carries no risk -- nothing is broken yet', () => {
+    expect(commitmentToAttention(list({ next_action: 'do it' })[0], NOW).factors.risk).toBe(0)
+  })
+})
+
 describe('the shape of the live baseline, in miniature', () => {
   it('the three cases together: one overdue, one owed-not-overdue, one not a commitment', () => {
     const a = list({ case_id: 'a', next_action: 'do it', due_at: NOW - DAY })

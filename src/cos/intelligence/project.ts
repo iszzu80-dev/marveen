@@ -15,11 +15,15 @@ import {
   commitmentToAttention, decisionToAttention, selectAttention,
   type AttentionItem, type SelectionResult, type SurfacedRecord, type InterruptionPolicy,
 } from './attention.js'
+import { projectCaseAttention, caseAttentionToAttention, type CaseAttention } from './case-attention.js'
 
 export interface IntelligenceProjection {
   commitments: Commitment[]
   decisions: Decision[]
   opportunities: Opportunity[]
+  /** Attention a case earns on its OWN evidence, with no commitment behind it.
+   *  A case can matter without anyone having promised anything. */
+  caseAttention: CaseAttention[]
   attention: SelectionResult
   /** Cross-surface problems found while assembling, reported rather than fixed
    *  silently. Empty is the normal case. */
@@ -36,6 +40,7 @@ export function projectIntelligence(
   const commitments = projectCommitments(db, namespace, now)
   const decisions = projectDecisions(db, namespace, now)
   const opportunities = projectOpportunities(db, namespace, now)
+  const caseAttention = projectCaseAttention(db, namespace, now)
 
   const anomalies: string[] = []
 
@@ -52,9 +57,16 @@ export function projectIntelligence(
   }
   const cleanOpportunities = opportunities.filter((o) => !owed.has(o.caseId))
 
+  // A case may raise attention on its own evidence AND carry a commitment. When
+  // both exist the commitment is the more specific statement, so the case-level
+  // item stands down rather than saying the same thing twice.
+  const spokenFor = new Set(commitments.map((c) => c.caseId))
+  const standaloneAttention = caseAttention.filter((a) => !spokenFor.has(a.caseId))
+
   const obligations: AttentionItem[] = [
     ...commitments.map((c) => commitmentToAttention(c, now)),
     ...decisions.map((d) => decisionToAttention(d, now)),
+    ...standaloneAttention.map((a) => caseAttentionToAttention(a, now)),
   ]
   const oppItems: AttentionItem[] = cleanOpportunities.map((o) => ({
     element: o,
@@ -73,5 +85,5 @@ export function projectIntelligence(
     anomalies.push(`INVARIANT BREACH: opportunity ${l.element.id} reached the interrupt list`)
   }
 
-  return { commitments, decisions, opportunities: cleanOpportunities, attention, anomalies }
+  return { commitments, decisions, opportunities: cleanOpportunities, caseAttention, attention, anomalies }
 }

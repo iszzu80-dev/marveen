@@ -49,6 +49,31 @@ export type CommitmentStatus =
  */
 export type ClosureEvidence = 'CLOSURE_REASON' | 'COMPLETED_AT_ONLY' | 'NONE'
 
+/**
+ * WHY this case carries an obligation at all. A commitment cannot exist without
+ * one of these, and each names a thing in the record rather than a thing the
+ * engine decided.
+ *
+ * Owner ruling 2026-09-01: "a motor sajat next_action / follow-up sablonja
+ * onmagaban SOHA ne legyen commitment evidence. A motor sajat terve csak
+ * execution metadata."
+ *
+ * The gate is written as a REQUIREMENT, not as a filter of known bad strings. A
+ * blocklist of the two templates seen today would pass the next one; requiring
+ * positive evidence fails closed for every template, including ones nobody has
+ * written yet.
+ */
+export type ObligationEvidence =
+  /** An explicit deadline stands on the case. The strongest, and self-evidencing. */
+  | 'EXPLICIT_DEADLINE'
+  /** A next action stated for THIS case and no other. Boilerplate repeated across
+   *  cases is the engine talking to itself; one case's promise is not, word for
+   *  word, seventeen other cases' promise. */
+  | 'CASE_SPECIFIC_ACTION'
+  /** The board says the case ended and no event evidences it. Not an obligation
+   *  anyone took on -- a data-quality finding that must not go silent. */
+  | 'UNEVIDENCED_CLOSURE'
+
 export interface Commitment extends IntelligenceElement {
   owner: CommitmentOwner
   dueAt: number | null
@@ -57,6 +82,9 @@ export interface Commitment extends IntelligenceElement {
    *  could not be corroborated by an event. Null otherwise, so a reader cannot
    *  mistake "not applicable" for "no evidence". */
   closureEvidence: ClosureEvidence | null
+  /** WHY this is a commitment. Never null: without one of these the element is
+   *  not constructed at all. */
+  obligationEvidence: ObligationEvidence
   /** When the ENGINE plans to look again (`follow_up_at`). Carried so the fact
    *  is not lost, and kept in a separate field from `dueAt` so that no caller
    *  can accidentally treat a wake-up as a deadline. Never makes a commitment
@@ -114,6 +142,11 @@ function ownerOf(row: CaseRow): CommitmentOwner {
  */
 export function commitmentsForCase(
   row: CaseRow, events: readonly EventRow[], namespace: 'personal' | 'zst', now: number,
+  /** How many OTHER cases in this namespace carry the exact same `next_action`.
+   *  0 means the text is this case's own. Passed in because the caller holds the
+   *  namespace; defaulted to 0 so a single-case caller keeps the old behaviour
+   *  for a genuinely unique action. */
+  sharedActionCount = 0,
 ): Commitment[] {
   // A COMMITMENT NEEDS SOMETHING OWED. A bare title is not a promise.
   //
@@ -161,10 +194,29 @@ export function commitmentsForCase(
   const unevidencedClosure = TERMINAL.has(row.status)
     && !events.some((e) => FULFILLING_EVENT.has(e.event_type) && e.new_status != null && TERMINAL.has(e.new_status))
 
-  const what = hasAction
+  // THE OBLIGATION GATE. Default: no commitment. One of three positive,
+  // provenanced reasons admits it.
+  //
+  // `CASE_SPECIFIC_ACTION` is the one that needed thought. Measured on the live
+  // store 2026-09-01: all 17 ZST commitments restated one of two engine
+  // templates, while all 50 personal ones carried 49 distinct authored texts.
+  // Excluding the two known template strings would have worked today and failed
+  // on the third template. Requiring the action to be THIS case's own catches
+  // every template, named or not: an obligation repeated verbatim across cases
+  // is the engine's execution metadata, because one case's promise is not, word
+  // for word, seventeen other cases' promise.
+  const caseSpecificAction = hasAction && sharedActionCount === 0
+  const obligationEvidence: ObligationEvidence | null =
+      hasDeadline ? 'EXPLICIT_DEADLINE'
+    : caseSpecificAction ? 'CASE_SPECIFIC_ACTION'
+    : unevidencedClosure ? 'UNEVIDENCED_CLOSURE'
+    : null
+  if (!obligationEvidence) return []
+
+  const what = caseSpecificAction
     ? row.next_action!.trim()
-    : (hasDeadline || unevidencedClosure ? row.title?.trim() : '')
-  if (!what) return []   // case C, and a bare title with nothing owed
+    : (hasAction && hasDeadline ? row.next_action!.trim() : row.title?.trim())
+  if (!what) return []
 
   const caseProv: Provenance = {
     source: 'CASE', ref: row.case_id, observedAt: row.updated_at, field: row.next_action ? 'next_action' : 'title',
@@ -259,6 +311,7 @@ export function commitmentsForCase(
     dueAt,
     status,
     closureEvidence,
+    obligationEvidence,
     reviewWakeAt,
     fulfillment: { proven: proof.length > 0 && status === 'FULFILLED', proof, why },
   }]
@@ -295,5 +348,18 @@ export function projectCommitments(
     list.push(e)
     byCase.set(e.case_id, list)
   }
-  return rows.flatMap((r) => commitmentsForCase(r, byCase.get(r.case_id) ?? [], namespace, now))
+  // How many cases share each `next_action`, verbatim. Computed over the whole
+  // namespace slice so the caller can tell a stated obligation from boilerplate
+  // without anyone maintaining a list of known templates.
+  const shared = new Map<string, number>()
+  for (const r of rows) {
+    const a = r.next_action?.trim()
+    if (a) shared.set(a, (shared.get(a) ?? 0) + 1)
+  }
+
+  return rows.flatMap((r) => {
+    const a = r.next_action?.trim()
+    const others = a ? (shared.get(a) ?? 1) - 1 : 0
+    return commitmentsForCase(r, byCase.get(r.case_id) ?? [], namespace, now, others)
+  })
 }

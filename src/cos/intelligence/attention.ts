@@ -110,11 +110,21 @@ export function commitmentToAttention(c: Commitment, now: number): AttentionItem
   // The risk factor still ORDERS these above ordinary items inside their band,
   // graded by how much closure evidence exists, so the gap with no evidence at
   // all still sorts first. What changed is that it no longer INTERRUPTS.
+  //
+  // AN EXPIRED COMMITMENT CARRIES RISK, and it used not to. That was harmless
+  // while commitments were the only route into attention; once case-level
+  // attention arrived carrying risk of its own, a risk of ZERO put every broken
+  // promise below every open question, because risk is the first factor. A
+  // stated promise whose date has passed with nothing showing it done is the
+  // clearest harm this surface can observe, so it ranks above "somebody must
+  // choose" and below "an authority sent something nobody has read".
   const risk = c.status === 'UNKNOWN'
     ? (c.closureEvidence === 'CLOSURE_REASON' ? 0.3
       : c.closureEvidence === 'COMPLETED_AT_ONLY' ? 0.5
       : 0.8)
-    : c.status === 'REOPENED' ? 0.6 : 0
+    : c.status === 'REOPENED' ? 0.6
+    : c.status === 'EXPIRED' ? 0.6
+    : 0
   return {
     element: c,
     band: c.status === 'UNKNOWN' ? 'INFORMATIONAL' : 'OBLIGATION',
