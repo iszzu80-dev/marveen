@@ -50,8 +50,17 @@ export interface ExtractionQuality {
  *  eighty characters. Deliberately generous: the failing sample was 0.014, and
  *  a real extraction of a table-heavy invoice still clears 0.45 comfortably. */
 export const MIN_LETTER_RATIO = 0.45
-/** Fewer words than this is not a document, it is a label. */
-export const MIN_WORDS = 20
+/** Reported, NOT enforced.
+ *
+ *  A word-count floor was tried and removed the same hour: it rejected 'rovid
+ *  szoveg' and 'A kinyert szoveg.' -- two-word extractions of two-word
+ *  documents, which are CORRECT extractions. Length is a question about the
+ *  document; this module's question is whether the bytes read as language, and
+ *  the letter ratio answers that independently of length. A floor here would
+ *  have made the engine ask the owner for a short document it already held --
+ *  the exact failure the gate above it exists to prevent, arriving through the
+ *  quality check instead of through the NULL. */
+export const MIN_WORDS = 0
 
 /**
  * Judge an extraction result. Pure, so the threshold is testable without a file.
@@ -79,8 +88,8 @@ export function classifyExtraction(text: string | null | undefined): ExtractionQ
   if (nulls > 0) {
     return { ...q, state: 'EXTRACTION_LOW_QUALITY', reason: `${nulls} NUL byte(s) — raw binary, not text` }
   }
-  if (words.length < MIN_WORDS) {
-    return { ...q, state: 'EXTRACTION_LOW_QUALITY', reason: `only ${words.length} words` }
+  if (words.length === 0) {
+    return { ...q, state: 'EXTRACTION_LOW_QUALITY', reason: 'no words at all' }
   }
   if (letterRatio < MIN_LETTER_RATIO) {
     return { ...q, state: 'EXTRACTION_LOW_QUALITY', reason: `letter ratio ${letterRatio.toFixed(3)} < ${MIN_LETTER_RATIO}` }
