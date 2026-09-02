@@ -53,12 +53,31 @@ function zstCase(caseId: string): void {
   }, NOW - 1000)
 }
 
-/** The minimum valid close. Every field the API demands, nothing more. */
-function goodClose(domain: 'personal' | 'zst', caseId: string, version: number) {
+/** The two checks with no instrument. Every close has to sign for them, so a
+ *  helper that omitted them would make every other test in this file a test of
+ *  the acknowledgement rule instead of the thing it is named after. */
+const UNMEASURABLE = [
+  'LEGAL_FINANCIAL_OBLIGATION_CHECK',
+  'CONTRADICTION_CHECK',
+  // The third one is not on Istvan's list and is here by the same rule he set:
+  // a case outside progression control has no DoD, so "the DoD evidence check
+  // passed" would be a claim about a check that never ran. It appears ONLY for
+  // such cases; on a progression-enabled case this ref is simply unused.
+  'DOD_EVIDENCE_CHECK',
+]
+
+/** A close with no acknowledgements at all -- the shape the gate tests use. */
+function bareClose(domain: 'personal' | 'zst', caseId: string, version: number) {
   return {
     domain, caseId, expectedVersion: version, intent: 'CLOSE_CASE' as const,
     reason: 'a tulajdonos lezarta', provenance: 'test:acceptance', actor: 'istvan',
   }
+}
+
+/** A well-formed close: every field the API demands, and the standing
+ *  NOT_EVALUATED gates signed for. */
+function goodClose(domain: 'personal' | 'zst', caseId: string, version: number) {
+  return { ...bareClose(domain, caseId, version), acknowledgedBlockers: [...UNMEASURABLE] }
 }
 
 describe('closeCase — the canonical exit', () => {
@@ -212,7 +231,7 @@ describe('closeCase — the canonical exit', () => {
     // not only in whatever dialog authorised it.
     const closed = closeCase(getDb(), {
       ...goodClose('personal', 'c-blocked', before.version),
-      acknowledgedBlockers: ['esc-1'],
+      acknowledgedBlockers: ['esc-1', ...UNMEASURABLE],
     }, NOW)
     expect(closed.outcome).toBe('CLOSED')
     if (closed.outcome !== 'CLOSED') throw new Error('unreachable')
@@ -328,5 +347,135 @@ describe('closeCase — durability across a reopen of the database', () => {
     const after = getCase(getDb(), 'c-restart') as never as { status: string; completed_at: number | null }
     expect(after.status).toBe('COMPLETED')
     expect(after.completed_at).toBe(NOW)
+  })
+})
+
+// ── NOT_EVALUATED gates (Istvan's conditional GO, 2026-09-02 17:45) ─────────
+//
+// "nem tudjuk mérni → nincs blocker" is the collapse this section exists to
+// prevent. The two dimensions with no instrument must stay visible, must be
+// acknowledged one by one, and must survive into the record still marked
+// unevaluated -- never rewritten as a pass.
+describe('closeCase — the checks that cannot run', () => {
+  beforeEach(() => { initDatabase(dbPath) })
+
+  it('names both unmeasurable gates as NOT_EVALUATED, with a stated reason', () => {
+    personalCase('g-visible')
+    const gate = canCompleteCase(getDb(), 'personal', 'g-visible', 'OWNER')
+    const byId = Object.fromEntries(gate.gates.map(g => [g.id, g]))
+
+    expect(byId['LEGAL_FINANCIAL_OBLIGATION_CHECK'].status).toBe('NOT_EVALUATED')
+    expect(byId['CONTRADICTION_CHECK'].status).toBe('NOT_EVALUATED')
+    // A reason is not decoration: an unexplained NOT_EVALUATED cannot be told
+    // apart from a gate someone forgot to implement.
+    expect(byId['LEGAL_FINANCIAL_OBLIGATION_CHECK'].reason.length).toBeGreaterThan(20)
+    expect(byId['CONTRADICTION_CHECK'].reason.length).toBeGreaterThan(20)
+
+    // And the measurable ones DID run on this case, so the list is not simply
+    // "everything is unknown" -- a gate set that never passes anything would
+    // satisfy every other assertion here while proving nothing.
+    expect(byId['OPEN_ESCALATION_CHECK'].status).toBe('PASS')
+    expect(byId['PENDING_OUTBOUND_CHECK'].status).toBe('PASS')
+  })
+
+  it('refuses a close that acknowledges nothing, naming the gates', () => {
+    personalCase('g-refuse')
+    const v = (getCase(getDb(), 'g-refuse') as never as { version: number }).version
+    const r = closeCase(getDb(), bareClose('personal', 'g-refuse', v), NOW)
+
+    expect(r.outcome).toBe('REFUSED')
+    if (r.outcome !== 'REFUSED') throw new Error('unreachable')
+    expect(r.code).toBe('BLOCKERS_NOT_ACKNOWLEDGED')
+    const ids = (r.unacknowledgedGates ?? []).map(g => g.id)
+    expect(ids).toContain('LEGAL_FINANCIAL_OBLIGATION_CHECK')
+    expect(ids).toContain('CONTRADICTION_CHECK')
+    // and the DoD gate, because this fixture is not under progression control
+    expect(ids).toContain('DOD_EVIDENCE_CHECK')
+    expect((getCase(getDb(), 'g-refuse') as never as { status: string }).status).toBe('NEW')
+  })
+
+  it('one gate acknowledgement does NOT release the other', () => {
+    // The single most important assertion in this file. If acknowledgement were
+    // a mood rather than a reference, one tick would clear the board -- and the
+    // owner would be signing for a question they never saw.
+    personalCase('g-partial')
+    const v = (getCase(getDb(), 'g-partial') as never as { version: number }).version
+    const r = closeCase(getDb(), {
+      ...bareClose('personal', 'g-partial', v),
+      acknowledgedBlockers: ['LEGAL_FINANCIAL_OBLIGATION_CHECK'],
+    }, NOW)
+
+    expect(r.outcome).toBe('REFUSED')
+    if (r.outcome !== 'REFUSED') throw new Error('unreachable')
+    const ids = (r.unacknowledgedGates ?? []).map(g => g.id).sort()
+    expect(ids).toEqual(['CONTRADICTION_CHECK', 'DOD_EVIDENCE_CHECK'])
+    expect((getCase(getDb(), 'g-partial') as never as { status: string }).status).toBe('NEW')
+  })
+
+  it('an unrelated ref does not satisfy a gate', () => {
+    // Acknowledging "something" must not count as acknowledging THIS.
+    personalCase('g-wrongref')
+    const v = (getCase(getDb(), 'g-wrongref') as never as { version: number }).version
+    const r = closeCase(getDb(), {
+      ...bareClose('personal', 'g-wrongref', v),
+      acknowledgedBlockers: ['SOME_OTHER_THING', 'esc-nonexistent'],
+    }, NOW)
+    expect(r.outcome).toBe('REFUSED')
+    if (r.outcome !== 'REFUSED') throw new Error('unreachable')
+    expect((r.unacknowledgedGates ?? []).length).toBe(3)
+  })
+
+  it('closes when every gate is acknowledged by its own id', () => {
+    personalCase('g-ok')
+    const v = (getCase(getDb(), 'g-ok') as never as { version: number }).version
+    const r = closeCase(getDb(), {
+      ...bareClose('personal', 'g-ok', v),
+      acknowledgedBlockers: [...UNMEASURABLE],
+    }, NOW)
+    expect(r.outcome).toBe('CLOSED')
+    expect((getCase(getDb(), 'g-ok') as never as { status: string }).status).toBe('COMPLETED')
+  })
+
+  it('the durable event keeps NOT_EVALUATED as NOT_EVALUATED, and names who signed', () => {
+    // The readback criterion. A record that quietly promoted an unchecked gate
+    // to PASS would be worse than no record: it would be evidence of something
+    // that never happened.
+    personalCase('g-durable')
+    const v = (getCase(getDb(), 'g-durable') as never as { version: number }).version
+    closeCase(getDb(), {
+      ...bareClose('personal', 'g-durable', v),
+      acknowledgedBlockers: [...UNMEASURABLE],
+    }, NOW)
+
+    const ev = getDb().prepare(
+      `SELECT actor, payload, reason, source_reference, created_at
+       FROM personal_case_events WHERE case_id = ? AND new_status = 'COMPLETED'
+       ORDER BY event_id DESC LIMIT 1`,
+    ).get('g-durable') as {
+      actor: string; payload: string | null; reason: string | null
+      source_reference: string | null; created_at: number
+    }
+    expect(ev.payload).not.toBeNull()
+    const p = JSON.parse(ev.payload as string).closure as {
+      gates: Array<{ id: string; status: string }>
+      acknowledgedRefs: string[]
+      notEvaluated: string[]
+      actor: string; acknowledgedAt: number; reason: string; provenance: string
+    }
+
+    const legal = p.gates.find(g => g.id === 'LEGAL_FINANCIAL_OBLIGATION_CHECK')
+    expect(legal?.status).toBe('NOT_EVALUATED')
+    expect(p.notEvaluated).toContain('CONTRADICTION_CHECK')
+    expect(p.acknowledgedRefs).toContain('CONTRADICTION_CHECK')
+    // who and when
+    expect(p.actor).toBe('istvan')
+    expect(p.acknowledgedAt).toBe(NOW)
+    // and the reason/provenance the closure was authorised on
+    expect(p.reason).toBe('a tulajdonos lezarta')
+    expect(p.provenance).toBe('test:acceptance')
+
+    // At least one gate genuinely passed, so the record is not uniformly
+    // "unknown" -- otherwise this assertion would hold for a broken assembler.
+    expect(p.gates.some(g => g.status === 'PASS')).toBe(true)
   })
 })

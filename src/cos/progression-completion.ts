@@ -157,6 +157,11 @@ export interface CompletionGateResult {
    *  two policies for one question drift -- which is the failure this whole
    *  module was written after. One gate, one answer, more of it. */
   blockers: CompletionBlocker[]
+  /** Every named check and its verdict, including the ones that could not run.
+   *  `blockers` stays as the measured-and-failing list; `gates` is the complete
+   *  picture, so a reader cannot mistake "nothing in blockers" for "everything
+   *  was checked". */
+  gates: CompletionGate[]
 }
 
 /** One outstanding commitment that a close would abandon.
@@ -178,6 +183,60 @@ export interface CompletionGateResult {
  *                 and no per-case conflict set is persisted to read back.
  *
  *  An absence claim has to name its instrument, or it just rewards not looking. */
+/** A named completion check and what it concluded.
+ *
+ *  THREE STATUSES, AND THE THIRD IS THE POINT (Istvan, 2026-09-02).
+ *
+ *  PASS and BLOCKED are the two a check can reach when it can actually look.
+ *  NOT_EVALUATED is what it must say when it CANNOT -- and the rule the owner
+ *  set is that "we cannot measure it" may never collapse into "there is
+ *  nothing there". Those are opposite claims and only one of them is knowledge.
+ *
+ *  A NOT_EVALUATED gate is never an implicit default-accept: closeCase demands
+ *  it be acknowledged by reference exactly like a real blocker. The
+ *  acknowledgement does NOT assert the risk is absent. It asserts something
+ *  narrower and true: the system could not check this, the owner knows that,
+ *  and is closing anyway. That distinction survives into the durable event,
+ *  where the gate stays NOT_EVALUATED and is never rewritten as PASS. */
+export type CompletionGateStatus = 'PASS' | 'BLOCKED' | 'NOT_EVALUATED'
+
+export interface CompletionGate {
+  /** Stable id. Also the acknowledgement reference for a NOT_EVALUATED gate,
+   *  which is what makes an acknowledgement gate-specific: acknowledging one
+   *  cannot release another, because the string differs. */
+  id: string
+  status: CompletionGateStatus
+  /** Why -- and for NOT_EVALUATED, why it could not be measured. Never empty:
+   *  an unexplained NOT_EVALUATED is indistinguishable from a forgotten one. */
+  reason: string
+}
+
+/** The checks that have no instrument in this store, named individually.
+ *
+ *  Deliberately NOT a generic "unknown risk" placeholder: the owner has to be
+ *  able to tell WHICH question went unanswered, because the two carry different
+ *  consequences and a merged one would be acknowledged with a single shrug.
+ *
+ *  Each reason states the missing instrument, not a vague inability. If either
+ *  ever gains a real check, the fix is to move it out of this list into a
+ *  computed gate -- and until then the preview keeps saying so out loud. */
+export const NOT_EVALUATED_GATES: readonly CompletionGate[] = [
+  {
+    id: 'LEGAL_FINANCIAL_OBLIGATION_CHECK',
+    status: 'NOT_EVALUATED',
+    reason: 'Nincs per-case jogi/penzugyi kotelezettseg-mezo a case store-ban '
+      + '(a zst_obligations szerzodes-figyelo tabla, nincs case-hivatkozasa), '
+      + 'ezert a rendszer NEM tudja megallapitani, marad-e nyitott kotelezettseg.',
+  },
+  {
+    id: 'CONTRADICTION_CHECK',
+    status: 'NOT_EVALUATED',
+    reason: 'Az ellentmondas-vizsgalat (contradictionBlocksAction) egy KIFELE IRANYULO '
+      + 'akciorol dont egy futasidoben eloallo konfliktus-halmazbol, amit nem tarolunk el; '
+      + 'lezarasrol nem nyilatkozik, es visszaolvasni sincs mibol.',
+  },
+]
+
 export interface CompletionBlocker {
   kind: 'OPEN_ESCALATION' | 'PENDING_OUTBOUND' | 'UNMET_DOD'
   /** Human-readable, shown to whoever is being asked to acknowledge it. */
@@ -557,6 +616,51 @@ export function completionBlockers(
   return out
 }
 
+/** Every named check for a case: the ones that ran, plus the ones that cannot.
+ *
+ *  One assembler, called from every gate return site, so the answer cannot
+ *  differ by which branch produced it -- a NOT_EVALUATED gate that appeared on
+ *  some verdicts and not others would be a gate nobody could rely on. */
+export function completionGates(
+  db: Database.Database,
+  domain: 'personal' | 'zst',
+  caseId: string,
+  blockers: readonly CompletionBlocker[],
+): CompletionGate[] {
+  const gates: CompletionGate[] = []
+
+  const escalations = blockers.filter(b => b.kind === 'OPEN_ESCALATION')
+  gates.push(escalations.length
+    ? { id: 'OPEN_ESCALATION_CHECK', status: 'BLOCKED', reason: `${escalations.length} nyitott eszkalacio` }
+    : { id: 'OPEN_ESCALATION_CHECK', status: 'PASS', reason: 'nincs nyitott eszkalacio az ugyon' })
+
+  const outbound = blockers.filter(b => b.kind === 'PENDING_OUTBOUND')
+  gates.push(outbound.length
+    ? { id: 'PENDING_OUTBOUND_CHECK', status: 'BLOCKED', reason: `${outbound.length} befejezetlen kimeno tetel` }
+    : { id: 'PENDING_OUTBOUND_CHECK', status: 'PASS', reason: 'nincs befejezetlen kimeno tetel' })
+
+  const dod = blockers.filter(b => b.kind === 'UNMET_DOD')
+  const hasState = db.prepare(
+    `SELECT 1 FROM case_progression_state WHERE domain = ? AND case_id = ?`,
+  ).get(domain, caseId)
+  if (!hasState) {
+    // No progression row means no DoD exists to evaluate. That is NOT a pass:
+    // "there was nothing to check" and "the checks passed" are different
+    // sentences, and only the second one is evidence.
+    gates.push({
+      id: 'DOD_EVIDENCE_CHECK', status: 'NOT_EVALUATED',
+      reason: 'Az ugy nincs progression-kontroll alatt, tehat nincs DoD, amit ertekelni lehetne.',
+    })
+  } else {
+    gates.push(dod.length
+      ? { id: 'DOD_EVIDENCE_CHECK', status: 'BLOCKED', reason: `${dod.length} bizonyitatlan kriterium` }
+      : { id: 'DOD_EVIDENCE_CHECK', status: 'PASS', reason: 'minden DoD-kriterium bizonyitott' })
+  }
+
+  for (const g of NOT_EVALUATED_GATES) gates.push({ ...g })
+  return gates
+}
+
 export function canCompleteCase(
   db: Database.Database,
   domain: 'personal' | 'zst',
@@ -569,9 +673,11 @@ export function canCompleteCase(
     // Still allowed, and deliberately so -- see the doc comment above. What
     // changed on 2026-09-02 is that the answer now carries what the closure
     // would abandon, so a caller can refuse to be silent about it.
+    const ownerBlockers = completionBlockers(db, domain, caseId)
     return {
       allowed: true, reason: 'Owner-authorized closure', unmet: [],
-      blockers: completionBlockers(db, domain, caseId),
+      blockers: ownerBlockers,
+      gates: completionGates(db, domain, caseId, ownerBlockers),
     }
   }
 
@@ -604,7 +710,7 @@ export function canCompleteCase(
     return {
       allowed: false,
       reason: 'Case is not under progression control; the engine may not close it (the owner can)',
-      unmet: [], blockers: [],
+      unmet: [], blockers: [], gates: completionGates(db, domain, caseId, []),
     }
   }
 
@@ -612,7 +718,7 @@ export function canCompleteCase(
     return {
       allowed: false,
       reason: 'Progression is disabled on this case; the engine may not close it (the owner can)',
-      unmet: [], blockers: [],
+      unmet: [], blockers: [], gates: completionGates(db, domain, caseId, []),
     }
   }
 
@@ -634,7 +740,7 @@ export function canCompleteCase(
       // the provenance, not a criterion, and the two sibling refusals above
       // already say so by returning nothing. Found by P6 driving the real
       // lifecycle rather than by reading.
-      unmet: [], blockers: [],
+      unmet: [], blockers: [], gates: completionGates(db, domain, caseId, []),
     }
   }
 
@@ -644,22 +750,26 @@ export function canCompleteCase(
     return {
       allowed: false,
       reason: 'No DoD criteria recorded — nothing was verified',
-      unmet: [], blockers: [],
+      unmet: [], blockers: [], gates: completionGates(db, domain, caseId, []),
     }
   }
 
   if (completeness.allMet) {
+    const metBlockers = completionBlockers(db, domain, caseId)
     return {
       allowed: true, reason: `All ${completeness.totalCriteria} DoD criteria met`, unmet: [],
-      blockers: completionBlockers(db, domain, caseId),
+      blockers: metBlockers,
+      gates: completionGates(db, domain, caseId, metBlockers),
     }
   }
 
+  const unmetBlockers = completionBlockers(db, domain, caseId)
   return {
     allowed: false,
     reason: `${completeness.metCriteria}/${completeness.totalCriteria} DoD criteria met with evidence. Unmet: ${completeness.unmetCriteria.join(', ')}`,
     unmet: completeness.unmetCriteria,
-    blockers: completionBlockers(db, domain, caseId),
+    blockers: unmetBlockers,
+    gates: completionGates(db, domain, caseId, unmetBlockers),
   }
 }
 

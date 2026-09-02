@@ -34,7 +34,7 @@ import { transitionCase, getCase } from './case-store.js'
 import { transitionZstCase, getZstCase } from './zst-case-store.js'
 import {
   canCompleteCase, completionActor, PrematureCompletionError,
-  type CompletionBlocker,
+  type CompletionBlocker, type CompletionGate,
 } from './progression-completion.js'
 
 export type CloseDomain = 'personal' | 'zst'
@@ -59,10 +59,17 @@ export interface CloseCaseInput {
   /** Explicit intent. Present so that a close cannot be reached by a caller
    *  that merely resembles one. */
   intent: 'CLOSE_CASE'
-  /** Blocker refs the caller has seen and accepts. Closing with outstanding
-   *  blockers is permitted -- the owner's authority is not in question -- but
-   *  only knowingly. An unacknowledged blocker is refused so the answer cannot
-   *  be given by someone who never saw the question. */
+  /** Refs the caller has seen and accepts. Two kinds live in one list on
+   *  purpose: a measured blocker's ref, and a NOT_EVALUATED gate's id.
+   *
+   *  Closing over either is permitted -- the owner's authority is not in
+   *  question -- but only knowingly, and only ITEM BY ITEM. Acknowledging one
+   *  never releases another, because the refs differ; a single "yes I accept
+   *  the risks" would be exactly the shrug this design is avoiding.
+   *
+   *  For a NOT_EVALUATED gate the acknowledgement asserts something narrower
+   *  than absence: the system could not check this, and the owner is closing in
+   *  the knowledge that it could not. */
   acknowledgedBlockers?: readonly string[]
   /** The terminal status. COMPLETED by default; CANCELLED for a case that ends
    *  without being done. Both are terminal and both are the owner's call. */
@@ -87,6 +94,9 @@ export type CloseCaseResult =
       /** What was outstanding at the moment of closing, recorded so the cost is
        *  visible afterwards and not only in the dialog that authorised it. */
       acknowledgedBlockers: CompletionBlocker[]
+      /** Every gate and its verdict at the moment of closing, NOT_EVALUATED
+       *  ones included and still marked NOT_EVALUATED. */
+      gates: CompletionGate[]
     }
   | {
       outcome: 'ALREADY_CLOSED'
@@ -105,6 +115,9 @@ export type CloseCaseResult =
       /** Present on BLOCKERS_NOT_ACKNOWLEDGED so the caller can show them and
        *  come back with the refs. Empty otherwise. */
       blockers: CompletionBlocker[]
+      /** Gate ids that were not acknowledged, when the refusal is about a
+       *  NOT_EVALUATED gate rather than a measured blocker. */
+      unacknowledgedGates?: CompletionGate[]
       /** Present on VERSION_CONFLICT: what the store actually holds, so the
        *  caller can re-read rather than guess. */
       currentVersion?: number
@@ -201,12 +214,24 @@ export function closeCase(
   // what the closure abandons; both halves are used.
   const gate = canCompleteCase(db, domain, caseId, completionActor(actor))
   const acked = new Set(input.acknowledgedBlockers ?? [])
+
+  // EVERYTHING THAT IS NOT A PASS NEEDS A SIGNATURE, and each one its own.
+  // A measured blocker and a check that could not run are different claims, but
+  // they share this: neither may be waived by silence, and neither may be
+  // waived by acknowledging the other. `acked` is a set of exact refs, so the
+  // only way through is to name each item.
   const unacknowledged = gate.blockers.filter(b => !acked.has(b.ref))
-  if (unacknowledged.length > 0) {
+  const unacknowledgedGates = gate.gates.filter(
+    g => g.status === 'NOT_EVALUATED' && !acked.has(g.id))
+  if (unacknowledged.length > 0 || unacknowledgedGates.length > 0) {
+    const parts: string[] = []
+    if (unacknowledged.length) parts.push(`${unacknowledged.length} nyitott tetel`)
+    if (unacknowledgedGates.length) parts.push(`${unacknowledgedGates.length} nem ertekelheto kapu`)
     return {
       ...base, outcome: 'REFUSED', code: 'BLOCKERS_NOT_ACKNOWLEDGED',
-      reason: `${unacknowledged.length} outstanding item(s) must be acknowledged before closing`,
+      reason: `${parts.join(' es ')} nyugtazasa hianyzik a lezarashoz`,
       blockers: unacknowledged,
+      unacknowledgedGates,
     }
   }
 
@@ -217,15 +242,28 @@ export function closeCase(
   let version: number
   try {
     const patch = { closure_reason: reason }
+    // THE ATTESTATION, written inside the same transaction as the status.
+    // It records what was true at the moment of closing and who accepted it --
+    // and it keeps a NOT_EVALUATED gate marked NOT_EVALUATED. Nothing here
+    // rewrites an unchecked gate into a passed one; a later reader must be able
+    // to see that a question went unanswered, not merely that a box was ticked.
+    const attestation = {
+      closure: {
+        reason, provenance, actor, newStatus,
+        acknowledgedAt: now,
+        gates: gate.gates,
+        acknowledgedRefs: [...acked],
+        acknowledgedBlockers: gate.blockers,
+        notEvaluated: gate.gates.filter(g => g.status === 'NOT_EVALUATED').map(g => g.id),
+      },
+    }
+    const args = {
+      caseId, seenVersion: input.expectedVersion, newStatus, actor,
+      reason, correlationId: provenance, patch, payload: attestation,
+    }
     version = domain === 'personal'
-      ? transitionCase(db, {
-          caseId, seenVersion: input.expectedVersion, newStatus, actor,
-          reason, correlationId: provenance, patch,
-        }, now)
-      : transitionZstCase(db, {
-          caseId, seenVersion: input.expectedVersion, newStatus, actor,
-          reason, correlationId: provenance, patch,
-        }, now)
+      ? transitionCase(db, args, now)
+      : transitionZstCase(db, args, now)
   } catch (err) {
     if (err instanceof PrematureCompletionError) {
       return {
@@ -241,5 +279,6 @@ export function closeCase(
     ...base, outcome: 'CLOSED', status: newStatus, version,
     completedAt: after?.completed_at ?? null,
     acknowledgedBlockers: gate.blockers,
+    gates: gate.gates,
   }
 }

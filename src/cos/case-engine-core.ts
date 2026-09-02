@@ -123,6 +123,16 @@ export interface TransitionInput {
   reason?: string
   correlationId?: string
   patch?: Partial<Record<TransitionPatchKey, string | number | null>>
+  /** Attestation to store on the STATUS_CHANGED event, inside the same
+   *  transaction as the status write.
+   *
+   *  Added 2026-09-02 for the close attestation: which gates passed, which were
+   *  NOT_EVALUATED, what the owner acknowledged and when. It rides on THIS
+   *  event on purpose -- a separate attestation event written next to the
+   *  transition can be lost while the status write stands, and a closure whose
+   *  record of what was waived went missing is worse than one that never
+   *  claimed to have a record. */
+  payload?: Record<string, unknown>
 }
 
 export interface CaseListItem {
@@ -493,6 +503,7 @@ export function makeCaseEngine(
         newStatus: input.newStatus,
         reason: input.reason ?? null,
         correlationId: input.correlationId ?? null,
+        payload: input.payload,
       }, now)
       return newVersion
     })

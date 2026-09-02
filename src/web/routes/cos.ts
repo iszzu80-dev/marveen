@@ -374,6 +374,10 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
       completedAt: r.completed_at ?? null,
       guard: { allowed: gate.allowed, reason: gate.reason, unmet: gate.unmet },
       blockers: gate.blockers,
+      // The complete verdict, NOT_EVALUATED gates included. Mission Control
+      // renders THIS -- it does not assemble its own opinion -- so the board and
+      // the API can never disagree about what was checked.
+      gates: gate.gates,
     })
     return true
   }

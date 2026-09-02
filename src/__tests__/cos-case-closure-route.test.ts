@@ -61,9 +61,18 @@ function seedZst(caseId: string): void {
   ).run(caseId, caseId, NOW - 100, NOW - 100)
 }
 
-const goodBody = (version: number) => ({
+/** Gates with no instrument. Every close signs for them; see the domain test
+ *  file for why the third one is here and not on Istvan's original list. */
+const UNMEASURABLE = [
+  'LEGAL_FINANCIAL_OBLIGATION_CHECK', 'CONTRADICTION_CHECK', 'DOD_EVIDENCE_CHECK',
+]
+
+const bareBody = (version: number) => ({
   expectedVersion: version, intent: 'CLOSE_CASE',
   reason: 'a tulajdonos lezarta', provenance: 'mission-control:test', actor: 'istvan',
+})
+const goodBody = (version: number) => ({
+  ...bareBody(version), acknowledgedBlockers: [...UNMEASURABLE],
 })
 
 describe('GET .../close-preview — look without committing', () => {
@@ -179,7 +188,7 @@ describe('POST .../close — the exit', () => {
     expect(first.out.body.blockers[0].ref).toBe('esc-r')
 
     const second = fakeCtxWithBody('/api/cos/cases/personal/P-BLOCK/close', 'POST',
-      { ...goodBody(1), acknowledgedBlockers: ['esc-r'] })
+      { ...goodBody(1), acknowledgedBlockers: ['esc-r', ...UNMEASURABLE] })
     expect(await tryHandleCos(second.ctx)).toBe(true)
     expect(second.out.body.outcome).toBe('CLOSED')
   })
@@ -211,6 +220,39 @@ describe('POST .../close — the exit', () => {
       `SELECT status FROM zst_cases WHERE case_id = 'Z-GUARDED'`,
     ).get() as { status: string }
     expect(after.status).toBe('NEW')
+  })
+
+  it('the preview exposes the NOT_EVALUATED gates, and the close refuses without them', async () => {
+    seedPersonal('P-GATES')
+    const prev = fakeCtx('/api/cos/cases/personal/P-GATES/close-preview')
+    await tryHandleCos(prev.ctx)
+    const ids = (prev.out.body.gates || [])
+      .filter((g: any) => g.status === 'NOT_EVALUATED').map((g: any) => g.id)
+    expect(ids).toContain('LEGAL_FINANCIAL_OBLIGATION_CHECK')
+    expect(ids).toContain('CONTRADICTION_CHECK')
+
+    // Mission Control renders THIS list. A close that ignored it is refused by
+    // the same server that produced it -- one verdict, two consumers.
+    const bare = fakeCtxWithBody('/api/cos/cases/personal/P-GATES/close', 'POST', bareBody(1))
+    await tryHandleCos(bare.ctx)
+    expect(bare.out.status).toBe(422)
+    expect(bare.out.body.unacknowledgedGates.map((g: any) => g.id)).toEqual(
+      expect.arrayContaining(['LEGAL_FINANCIAL_OBLIGATION_CHECK', 'CONTRADICTION_CHECK']))
+
+    const signed = fakeCtxWithBody('/api/cos/cases/personal/P-GATES/close', 'POST', goodBody(1))
+    await tryHandleCos(signed.ctx)
+    expect(signed.out.body.outcome).toBe('CLOSED')
+
+    // The record kept the gate unevaluated rather than promoting it.
+    const ev = getDb().prepare(
+      `SELECT payload FROM personal_case_events
+       WHERE case_id = 'P-GATES' AND new_status = 'COMPLETED' ORDER BY event_id DESC LIMIT 1`,
+    ).get() as { payload: string }
+    const closure = JSON.parse(ev.payload).closure
+    expect(closure.notEvaluated).toEqual(
+      expect.arrayContaining(['LEGAL_FINANCIAL_OBLIGATION_CHECK', 'CONTRADICTION_CHECK']))
+    expect(closure.gates.find((g: any) => g.id === 'CONTRADICTION_CHECK').status)
+      .toBe('NOT_EVALUATED')
   })
 
   it('a closed case reads back closed from the preview — one store, one answer', async () => {

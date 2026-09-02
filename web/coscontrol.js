@@ -335,6 +335,35 @@
       (g.allowed ? '<span style="color:#22c55e;">engedi</span>' : '<span style="color:#ef4444;">tiltja</span>') +
       ' &mdash; ' + esc(g.reason || '') + '</div>')
 
+    // Gates that could not be evaluated. These are NOT blockers -- nothing was
+    // found -- and they are NOT passes either. Rendered separately so the owner
+    // reads them as what they are: questions the system could not answer.
+    var ne = []
+    var gs = p.gates || []
+    for (var gi = 0; gi < gs.length; gi++) {
+      if (gs[gi].status === 'NOT_EVALUATED') ne.push(gs[gi])
+    }
+    if (ne.length) {
+      var neRows = ['<div class="cos-close-notevaluated">',
+        '<div><strong>' + ne.length + ' ellenőrzést a rendszer NEM tudott elvégezni.</strong> ' +
+        'A kipipálás nem azt jelenti, hogy nincs ott semmi, hanem hogy ennek tudatában zársz le.</div>']
+      for (var nj = 0; nj < ne.length; nj++) {
+        neRows.push('<label><input type="checkbox" data-blocker-ref="' + esc(ne[nj].id) + '"> ' +
+          '<code>' + esc(ne[nj].id) + '</code> &mdash; ' + esc(ne[nj].reason) + '</label>')
+      }
+      neRows.push('</div>')
+      out.push(neRows.join(''))
+    }
+
+    var passed = []
+    for (var pj = 0; pj < gs.length; pj++) {
+      if (gs[pj].status === 'PASS') passed.push(gs[pj].id)
+    }
+    if (passed.length) {
+      out.push('<div class="cos-close-row" style="color:var(--text-muted,#9ca3af);">' +
+        'Átment: ' + esc(passed.join(', ')) + '</div>')
+    }
+
     var bl = p.blockers || []
     if (bl.length) {
       var rows = ['<div class="cos-close-blockers">',
@@ -896,6 +925,9 @@
       '  border-radius:8px;font-size:12px;line-height:1.5; }',
       '.cos-close-row { margin-bottom:6px; }',
       '.cos-close-blockers { margin:8px 0;padding:8px;border-left:3px solid #f59e0b;background:rgba(245,158,11,0.08); }',
+      '.cos-close-notevaluated { margin:8px 0;padding:8px;border-left:3px solid #6366f1;background:rgba(99,102,241,0.08); }',
+      '.cos-close-notevaluated label { display:block;margin:4px 0;cursor:pointer; }',
+      '.cos-close-notevaluated code { font-size:11px;opacity:0.85; }',
       '.cos-close-blockers label { display:block;margin:4px 0;cursor:pointer; }',
       '.cos-close-reason { width:100%;box-sizing:border-box;margin-top:6px;padding:6px;',
       '  border-radius:6px;border:1px solid var(--border,#3a3a3a);background:transparent;color:inherit; }',
