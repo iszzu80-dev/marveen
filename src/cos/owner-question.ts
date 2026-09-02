@@ -26,6 +26,7 @@ import type { EvidencePlan } from './evidence-planner.js'
 import { collectDecisionPackage, formatDeadline, type DecisionPackage } from './decision-package.js'
 import { internalPlanLabels } from './progression-pipeline.js'
 import { openApprovalRequestForQuestion, decideActionApproval } from './action-approval-request.js'
+import { evaluatePreQuestionEvidence } from './pre-question-evidence.js'
 
 export interface OwnerQuestion {
   caseId: string
@@ -316,6 +317,17 @@ export interface AskResult {
    *  the same reason as everything else here: a channel that went quiet because
    *  of a rule must not look like a system with nothing to say. */
   cooldown: number
+  /** Questions NOT asked because the fact was already in the system, with
+   *  provenance (owner invariant 2026-09-02).
+   *
+   *  COUNTED AND NAMED, never silent. A suppression is the one outcome here
+   *  that LOOKS like health -- the channel is quiet and the backlog is short --
+   *  so if it were merely not-asked it would be indistinguishable from a reader
+   *  that found nothing, which is the exact confusion that let QADBD sit for
+   *  twenty-two days. */
+  answeredByEvidence: number
+  /** Which case, and which surface answered it. */
+  answeredByEvidenceDetail: Array<{ caseId: string; surfaces: string; reason: string }>
   /** §11 C-invariant: candidate cases the scan window (50) never looked at.
    *
    *  Every other count here explains a case the sweep SAW and declined. This one
@@ -648,6 +660,7 @@ export function askPendingOwnerQuestions(
   const result: AskResult = {
     asked: 0, alreadyAsked: 0, nothingToAsk: 0, heldBacklogFull: 0, staleReading: 0, cooldown: 0,
     windowExhausted: 0, heldByClass: {}, heldTop: [], priorityOrdered: false,
+    answeredByEvidence: 0, answeredByEvidenceDetail: [],
   }
 
   // Questions that GREW the open pile this sweep. A superseding rewrite does
@@ -732,6 +745,37 @@ export function askPendingOwnerQuestions(
       caseId: row.case_id, domain: row.domain, title, packet, plan, pkg, now,
     })
     if (!question) { result.nothingToAsk++; continue }
+
+    // THE PRE-QUESTION EVIDENCE GATE (owner invariant, 2026-09-02).
+    //
+    // Before interrupting him, look for the fact. The rule used to be "a column
+    // I selected is NULL, therefore ask", and that is how QADBD asked for a
+    // contract's text that had been extracted the same day and summarised into
+    // the case's own description -- then held a channel slot for twenty-two
+    // days.
+    //
+    // Suppression is all-or-nothing and it is COUNTED. A question that is not
+    // asked because we already know the answer looks, from every metric, exactly
+    // like a reader that found nothing to ask. Naming it is what keeps this gate
+    // from becoming the next silent failure.
+    const requirements = packet.missingRequirements
+      .filter(m => foldName(m.whoHasIt).includes('ISTVAN'))
+      .map(m => m.what)
+    if (requirements.length > 0) {
+      const gate = evaluatePreQuestionEvidence(db, {
+        namespace: row.domain === 'zst' ? 'zst' : 'personal',
+        caseId: row.case_id, requirements,
+      })
+      if (gate.suppress) {
+        const surfaces = [...new Set(gate.verdicts.flatMap(v => v.hits.map(h => h.surface)))].join(',')
+        result.answeredByEvidence++
+        result.answeredByEvidenceDetail.push({
+          caseId: row.case_id, surfaces, reason: gate.summary,
+        })
+        continue
+      }
+    }
+
     if (isHandled(db, row.case_id, row.domain, question.hash)) {
       // SUPPRESSED, BUT KEEP THE RUN CURRENT. The ask is unchanged, so it must
       // not go out twice -- but the case has been read again since, in a NEWER

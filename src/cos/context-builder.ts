@@ -29,6 +29,7 @@ import type Database from 'better-sqlite3'
 import { CASE_SENSITIVITIES, type CaseSensitivity } from './schema.js'
 import { escalateSensitivity, coerceSensitivity } from './sensitivity.js'
 import { readDocumentBytes } from './cos-documents.js'
+import { isTrustedExtraction, effectiveExtractionState } from './document-extraction.js'
 
 export type TrustClass =
   /** Written by this system or by Istvan. Instructions here are legitimate. */
@@ -131,7 +132,16 @@ function documentContent(db: Database.Database, d: Record<string, unknown>): str
   const kind = String(d.doc_kind ?? 'document')
   const name = String(d.filename ?? d.document_id)
   const extracted = typeof d.extracted_text === 'string' ? d.extracted_text.trim() : ''
-  if (extracted) return `${kind} (${name}):\n${extracted}`
+  // THE NEGATIVE CONTROL (owner decision 2026-09-02). Text alone is not enough
+  // to be evidence: a stdlib PDF read produced half a megabyte at a 0.014 letter
+  // ratio, and handed to a reader it would have been reported on as though it
+  // were the document. Only an extraction that reads as language passes; a
+  // low-quality one falls through to the label, exactly like no text at all.
+  if (extracted && isTrustedExtraction(effectiveExtractionState(
+    typeof d.extraction_state === 'string' ? d.extraction_state : null, extracted,
+  ))) {
+    return `${kind} (${name}):\n${extracted}`
+  }
 
   const mime = String(d.mime_type ?? '')
   // Only text-ish payloads are worth decoding here; a PDF or an image would
@@ -393,7 +403,7 @@ export function buildCaseContext(
   // the exclusion is demonstrable rather than merely intended.
   const docs = db.prepare(
     `SELECT document_id, doc_kind, filename, source, source_ref, sensitivity, content_purged_at,
-            mime_type, extracted_text
+            mime_type, extracted_text, extraction_state
      FROM cos_documents WHERE namespace = ? AND case_id = ? ORDER BY created_at DESC LIMIT 20`
   ).all(namespace, caseId) as Array<Record<string, unknown>>
   for (const d of docs) {

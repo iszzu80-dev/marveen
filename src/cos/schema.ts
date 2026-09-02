@@ -1153,6 +1153,19 @@ export function initCosDocumentsSchema(db: Database.Database): void {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cosdoc_case ON cos_documents(namespace, case_id)`)
   // Same bytes + same case + same namespace = one logical document (dedup anchor).
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_cosdoc_dedup ON cos_documents(namespace, sha256, IFNULL(case_id,''))`)
+  // EXTRACTION STATE (owner decision 2026-09-02). `extracted_text IS NULL`
+  // conflated "nobody tried" with "we tried and got nothing usable", and the
+  // reader resolved that ambiguity by interrupting the owner. See
+  // document-extraction.ts for the incident and the measure.
+  //
+  // Nullable, and legacy rows are classified on read rather than backfilled:
+  // stamping EXTRACTED_VALID on text written by a path that had no quality
+  // check would assert a verification that never happened.
+  ensureColumns(db, 'cos_documents', {
+    extraction_state: 'TEXT',
+    extraction_note: 'TEXT',
+    extraction_attempted_at: 'INTEGER',
+  })
 }
 
 // ── ZST Radio Kft. Chief of Staff — Slice 0 (arch option A) ──────────────────
