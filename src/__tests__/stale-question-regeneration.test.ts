@@ -286,3 +286,27 @@ describe('the bound must survive a rewording', () => {
     expect(exhaustedStaleQuestions(db).map(e => e.caseId)).toContain('C-1')
   })
 })
+
+describe('the exhausted report must be about a question that is actually blocked', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('a DELIVERED question is not an operational failure, whatever its history', () => {
+    // Live readback: PRI-HOME-2026-004 was delivered, its block lifted, and the
+    // cycle kept reporting REPEATED_STALE about it every ten minutes because the
+    // historical count was five. A failure report about something that succeeded
+    // is what teaches people to stop reading `problems`.
+    const db = getDb()
+    const h = seedQuestion('C-1')
+    for (let i = 0; i < 5; i++) {
+      markQuestionStaleBlocked(db, { caseId: 'C-1', questionHash: h, error: 'STALE_EVIDENCE: x' })
+    }
+    expect(exhaustedStaleQuestions(db).map(e => e.caseId)).toContain('C-1')
+
+    clearStaleBlock(db, 'C-1', h)              // delivered
+    expect(exhaustedStaleQuestions(db)).toHaveLength(0)
+
+    // And the history is NOT forgotten: blocked again, it reports at once.
+    markQuestionStaleBlocked(db, { caseId: 'C-1', questionHash: h, error: 'STALE_EVIDENCE: x' })
+    expect(exhaustedStaleQuestions(db).map(e => e.caseId)).toContain('C-1')
+  })
+})

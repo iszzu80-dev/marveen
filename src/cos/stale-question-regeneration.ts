@@ -123,7 +123,18 @@ export function staleBlockedCases(
 }
 
 /**
- * Questions that have gone stale too many times.
+ * Questions that have gone stale too many times AND are still blocked.
+ *
+ * `stale_blocked_at IS NOT NULL` is the whole difference, and it was added after
+ * the live readback: PRI-HOME-2026-004 was DELIVERED, its block lifted, and the
+ * cycle went on reporting REPEATED_STALE about it every ten minutes because its
+ * historical count was five. A failure report about something that succeeded is
+ * worse than no report -- it is what teaches everyone to stop reading
+ * `problems`, which is the failure this whole day has been about.
+ *
+ * The count itself still does not reset on success, deliberately: a case that
+ * alternates between fresh and stale must still reach the bound. What changed is
+ * only WHEN it is reported -- while it is actually blocked.
  *
  * These are the operational failure the owner asked to be VISIBLE. They are
  * returned rather than retried, so the cycle can put them in `problems` where a
@@ -140,6 +151,7 @@ export function exhaustedStaleQuestions(
               stale_last_error AS lastError
          FROM cos_owner_questions
         WHERE answered_at IS NULL AND superseded_at IS NULL
+          AND stale_blocked_at IS NOT NULL
           AND stale_retry_count >= ?
         ORDER BY stale_blocked_at ASC`,
     ).all(MAX_STALE_RETRIES) as never
