@@ -242,3 +242,47 @@ describe('regeneration defects found by live readback, 2026-09-02', () => {
     expect(retired.every(r => r.t === null)).toBe(true)
   })
 })
+
+describe('the bound must survive a rewording', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('the retry count is inherited across a regeneration, so the bound is reachable', () => {
+    // Measured live: PRI-HOME-2026-004 accumulated FOUR question rows with
+    // stale counts 2, 1, 2, 1 and never reached three, because every reworded
+    // regeneration opened a new row starting from zero. A bound that resets
+    // whenever the model picks different words is not a bound.
+    const db = getDb()
+    const h1 = seedQuestion('C-1', 'Melyik ajanlat?')
+    markQuestionStaleBlocked(db, { caseId: 'C-1', questionHash: h1, error: 'STALE_EVIDENCE: x' })
+    markQuestionStaleBlocked(db, { caseId: 'C-1', questionHash: h1, error: 'STALE_EVIDENCE: x' })
+
+    // Reworded regeneration -> new hash, new row.
+    const packet = {
+      ballHolder: 'ISTVAN', facts: [{ statement: 'f', source: 'e' }],
+      missingRequirements: [{ what: 'Melyik ajanlatot valasztod vegul?', whoHasIt: 'ISTVAN', why: null }],
+      uncertainty: [], confidence: 0.8,
+    }
+    db.prepare(
+      `INSERT INTO case_evidence_packets (case_id, domain, packet_json, plan_json, progression_run_id, created_at)
+       VALUES ('C-1','personal',?,?,'run-2',?)`,
+    ).run(JSON.stringify(packet),
+          JSON.stringify({ steps: [{ kind: 'ASK_OWNER', label: 'Melyik ajanlatot valasztod vegul?', blockedBy: 'ISTVAN' }] }),
+          NOW + 600)
+    db.prepare(
+      `INSERT INTO case_progression_runs
+         (progression_run_id, domain, case_id, status, trigger_type, started_at, case_version_after)
+       VALUES ('run-2','personal','C-1','COMPLETED','MANUAL',?,1)`).run(NOW + 600)
+    askPendingOwnerQuestions(db, { now: NOW + 700, channel: { channel: CHANNEL, target: CHAT } })
+
+    const open = db.prepare(
+      `SELECT question_hash h, stale_retry_count n FROM cos_owner_questions
+        WHERE case_id='C-1' AND answered_at IS NULL AND superseded_at IS NULL`).get() as
+      { h: string; n: number }
+    expect(open.h).not.toBe(h1)   // it really is a new row
+    expect(open.n).toBe(2)        // and it carries the history
+
+    // One more strike reaches the bound, which the old behaviour could never do.
+    markQuestionStaleBlocked(db, { caseId: 'C-1', questionHash: open.h, error: 'STALE_EVIDENCE: x' })
+    expect(exhaustedStaleQuestions(db).map(e => e.caseId)).toContain('C-1')
+  })
+})

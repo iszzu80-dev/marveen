@@ -884,11 +884,24 @@ export function askPendingOwnerQuestions(
     // on this case", which is exactly the thing he needs to point at, and
     // uniqueness is preserved because the old row is closed in the same
     // statement.
+    // THE RETRY COUNT IS INHERITED TOO (found by live readback, 2026-09-02).
+    //
+    // The bound lives on the question ROW, and a reworded regeneration opens a
+    // NEW row -- so the counter restarted every time and the bound could never
+    // be reached. Measured on the live store: PRI-HOME-2026-004 had four rows
+    // with counts 2, 1, 2, 1. A bound that resets whenever the model chooses
+    // different words is not a bound; it is a comment.
+    //
+    // Inherited for the same reason as the token, and it is the same object:
+    // "the open question on this case". The count therefore accumulates across
+    // rewordings, which is exactly the thing the owner asked to become a
+    // visible operational failure.
     const inherited = db.prepare(
-      `SELECT token FROM cos_owner_questions
+      `SELECT token, stale_retry_count AS retries FROM cos_owner_questions
         WHERE case_id = ? AND question_hash != ? AND answered_at IS NULL
-          AND superseded_at IS NULL AND token IS NOT NULL LIMIT 1`,
-    ).get(row.case_id, question.hash) as { token: string } | undefined
+          AND superseded_at IS NULL
+        ORDER BY stale_retry_count DESC LIMIT 1`,
+    ).get(row.case_id, question.hash) as { token: string | null; retries: number } | undefined
 
     db.prepare(
       `UPDATE cos_owner_questions SET superseded_at = ?, token = NULL
@@ -925,6 +938,12 @@ export function askPendingOwnerQuestions(
         `UPDATE cos_owner_questions SET token = ?
           WHERE case_id = ? AND question_hash = ? AND token IS NULL`,
       ).run(inherited.token, row.case_id, question.hash)
+    }
+    if (inherited && inherited.retries > 0) {
+      db.prepare(
+        `UPDATE cos_owner_questions SET stale_retry_count = ?
+          WHERE case_id = ? AND question_hash = ? AND stale_retry_count < ?`,
+      ).run(inherited.retries, row.case_id, question.hash, inherited.retries)
     }
     const token = ensureQuestionToken(db, row.case_id, question.hash)
     const outbound = question.text + replyContractLine(token)
