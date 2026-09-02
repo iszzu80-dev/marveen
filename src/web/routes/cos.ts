@@ -28,6 +28,10 @@ import { evaluateInvariantA, detectProjectionDrift } from '../../cos/case-projec
 import { stageGapReport, type StageGapReport } from '../../cos/progress-stage.js'
 import { listPolicyExceptions } from '../../cos/policy-exception.js'
 import { reopenCase } from '../../cos/case-reopen.js'
+import { closeCase, type CloseDomain } from '../../cos/case-closure.js'
+import { canCompleteCase } from '../../cos/progression-completion.js'
+import { getCase } from '../../cos/case-store.js'
+import { getZstCase } from '../../cos/zst-case-store.js'
 import { renderActionKind } from '../../cos/case-action-label.js'
 
 /** Attach the owner-readable rendering of the engine's next-action KIND.
@@ -333,6 +337,84 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
     } catch (e) {
       json(res, { error: String((e as Error).message) }, 400)
     }
+    return true
+  }
+
+  // ── CASE COMPLETION EXIT (Istvan GO, 2026-09-02) ──────────────────────────
+  //
+  // The close the store has always been able to do and nothing outside could
+  // reach. Two endpoints, and the split is the point:
+  //
+  //   GET  .../close-preview  what closing would mean, changes nothing
+  //   POST .../close          the close itself, explicit intent required
+  //
+  // A single POST that closed on first contact would make "show me what this
+  // costs" indistinguishable from "do it", and the whole reason the preview
+  // exists is that the owner must be able to look without committing.
+  //
+  // NEITHER writes a status. Both defer to `closeCase`, which defers to the
+  // engine's transition, which runs the completion guard. There is no second
+  // policy in this file and no UPDATE in this file.
+  const closePreviewMatch = path.match(/^\/api\/cos\/cases\/(personal|zst)\/(.+)\/close-preview$/)
+  if (closePreviewMatch && method === 'GET') {
+    const domain = closePreviewMatch[1] as CloseDomain
+    const caseId = decodeURIComponent(closePreviewMatch[2])
+    const row = domain === 'personal' ? getCase(getDb(), caseId) : getZstCase(getDb(), caseId)
+    if (!row) { json(res, { error: `no case ${caseId} in the ${domain} namespace` }, 404); return true }
+    const r = row as unknown as {
+      status: string; version: number; title: string; completed_at: number | null
+    }
+    // The gate is asked as the OWNER, because that is who is looking. Asking as
+    // the engine would show a refusal the owner is not subject to and teach the
+    // reader that the button is broken.
+    const gate = canCompleteCase(getDb(), domain, caseId, 'OWNER')
+    json(res, {
+      caseId, domain, title: r.title, status: r.status, version: r.version,
+      alreadyClosed: r.status === 'COMPLETED' || r.status === 'CANCELLED' || r.status === 'ARCHIVED',
+      completedAt: r.completed_at ?? null,
+      guard: { allowed: gate.allowed, reason: gate.reason, unmet: gate.unmet },
+      blockers: gate.blockers,
+    })
+    return true
+  }
+
+  const closeMatch = path.match(/^\/api\/cos\/cases\/(personal|zst)\/(.+)\/close$/)
+  if (closeMatch && method === 'POST') {
+    const domain = closeMatch[1] as CloseDomain
+    const caseId = decodeURIComponent(closeMatch[2])
+    let b: {
+      expectedVersion?: number; reason?: string; provenance?: string; actor?: string
+      intent?: string; acknowledgedBlockers?: string[]; newStatus?: string
+    }
+    try { b = JSON.parse((await readBody(req)).toString()) }
+    catch { json(res, { error: 'invalid JSON' }, 400); return true }
+
+    const result = closeCase(getDb(), {
+      domain, caseId,
+      // Deliberately NOT defaulted. A missing version must reach closeCase as
+      // something it refuses, not as a zero that happens to match a fresh case.
+      expectedVersion: b.expectedVersion as number,
+      reason: b.reason ?? '',
+      provenance: b.provenance ?? '',
+      actor: b.actor ?? 'istvan',
+      intent: b.intent as 'CLOSE_CASE',
+      acknowledgedBlockers: b.acknowledgedBlockers,
+      newStatus: b.newStatus === 'CANCELLED' ? 'CANCELLED' : 'COMPLETED',
+    })
+
+    if (result.outcome === 'REFUSED') {
+      // The status code carries the KIND of refusal, so a caller that only
+      // looks at the number still routes correctly: 409 for "the world moved",
+      // 422 for "you have not answered the question", 400 for a malformed ask.
+      const status =
+        result.code === 'NOT_FOUND' ? 404
+        : result.code === 'VERSION_CONFLICT' ? 409
+        : result.code === 'INVALID_INPUT' ? 400
+        : 422
+      json(res, result, status)
+      return true
+    }
+    json(res, result)
     return true
   }
 

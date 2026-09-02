@@ -318,11 +318,54 @@
   }
 
   // ---- Expanded detail panel (populated lazily on first expand) ----
+  /** What the owner sees BEFORE deciding: the store's status, the completion
+   *  guard's verdict verbatim, and every outstanding item as its own
+   *  acknowledgement. Nothing here is computed in the browser -- it is the
+   *  server's answer, rendered. A second opinion assembled client-side is how
+   *  two surfaces start disagreeing about one case. */
+  function renderClosePanel(p) {
+    var out = []
+    out.push('<div class="cos-close-row"><strong>Állapot:</strong> ' + esc(p.status) +
+             ' &middot; verzió ' + esc(String(p.version)) + '</div>')
+    if (p.alreadyClosed) {
+      return '<div class="cos-close-row">Ez az ügy már lezárt (' + esc(p.status) + ').</div>'
+    }
+    var g = p.guard || {}
+    out.push('<div class="cos-close-row"><strong>Lezárási kapu:</strong> ' +
+      (g.allowed ? '<span style="color:#22c55e;">engedi</span>' : '<span style="color:#ef4444;">tiltja</span>') +
+      ' &mdash; ' + esc(g.reason || '') + '</div>')
+
+    var bl = p.blockers || []
+    if (bl.length) {
+      var rows = ['<div class="cos-close-blockers">',
+        '<div><strong>' + bl.length + ' nyitott tétel marad utána.</strong> ' +
+        'Lezárhatod, de csak tudatosan: pipáld ki mindet.</div>']
+      for (var i = 0; i < bl.length; i++) {
+        rows.push('<label><input type="checkbox" data-blocker-ref="' + esc(bl[i].ref) + '"> ' +
+          esc(bl[i].detail) + '</label>')
+      }
+      rows.push('</div>')
+      out.push(rows.join(''))
+    } else {
+      out.push('<div class="cos-close-row" style="color:var(--text-muted,#9ca3af);">' +
+        'Nincs nyitott tétel az ügyön.</div>')
+    }
+
+    out.push('<label class="cos-close-row"><input type="checkbox" class="cos-close-cancel-mode"> ' +
+      'Nem teljesült, csak lezárom (CANCELLED)</label>')
+    out.push('<div class="cos-close-row"><strong>Indoklás</strong> (kötelező)' +
+      '<textarea class="cos-close-reason" rows="2" ' +
+      'placeholder="Miért zárható le?"></textarea></div>')
+    out.push('<button type="button" class="cos-close-confirm">Lezárás megerősítése</button>')
+    out.push('<div class="cos-close-msg"></div>')
+    return '<div data-version="' + esc(String(p.version)) + '">' + out.join('') + '</div>'
+  }
+
   function renderDetailLoading() {
     return '<div class="cos-detail-loading">Betöltés...</div>'
   }
 
-  function renderDetail(c, events, docs, nowSec, prog) {
+  function renderDetail(c, events, docs, nowSec, prog, namespace) {
     var parts = []
 
     // 1) Next action + owner (largest, top).
@@ -464,6 +507,24 @@
         '<span style="color:var(--text-muted,#888);font-size:12px;">Nincs csatolt dokumentum.</span></div>')
     }
 
+    // 4b) CLOSE. Deliberately NOT a one-click action: the button only opens the
+    // panel, and the panel is filled from /close-preview -- current status, the
+    // completion guard's verdict, and every outstanding item -- before any
+    // confirmation is offered. A silent close would make the board tidier and
+    // the record worse.
+    //
+    // Terminal cases get no control at all rather than a disabled one: there is
+    // nothing to decide about a case that has already ended.
+    var st = String(c.status || '')
+    if (st !== 'COMPLETED' && st !== 'CANCELLED' && st !== 'ARCHIVED') {
+      parts.push(
+        '<div class="cos-close-ctrl" data-close-case="' + esc(c.case_id) + '"' +
+        ' data-close-ns="' + esc(namespace || 'personal') + '">' +
+          '<button type="button" class="cos-close-open">Ügy lezárása…</button>' +
+          '<div class="cos-close-panel" hidden></div>' +
+        '</div>')
+    }
+
     // 5) Footer: case_id, source, category.
     var footerItems = []
     footerItems.push('<span class="cos-footer-id">' + esc(c.case_id) + '</span>')
@@ -493,7 +554,7 @@
     ]).then(function (res) {
       var events = (res[0] && res[0].events) || []
       var docs = (res[1] && res[1].documents) || []
-      detailEl.innerHTML = renderDetail(c, events, docs, nowSec, prog)
+      detailEl.innerHTML = renderDetail(c, events, docs, nowSec, prog, ns)
       detailEl.dataset.loaded = '1'
     }).catch(function () {
       detailEl.innerHTML = '<div class="cos-detail-loading" style="color:#ef4444;">Hiba a betöltéskor.</div>'
@@ -513,6 +574,7 @@
       // continue to the body handler while the tile stays in its current
       // open/closed state.
       if (e.target.closest('.cos-owner-ctrl')) return
+      if (e.target.closest('.cos-close-ctrl')) return
 
       var tile = e.target.closest('.cos-case-tile')
       if (!tile) return
@@ -826,6 +888,21 @@
       '  overflow:hidden;white-space:nowrap;text-overflow:ellipsis;',
       '}',
       // Owner-action controls (card 9193eedd) — placed on closed tile.
+      '.cos-close-ctrl { margin-top:12px; }',
+      '.cos-close-open { font-size:12px;padding:5px 10px;border-radius:6px;cursor:pointer;',
+      '  background:transparent;border:1px solid var(--border,#3a3a3a);color:var(--text-muted,#9ca3af); }',
+      '.cos-close-open:hover { color:var(--text,#e5e7eb);border-color:#6b7280; }',
+      '.cos-close-panel { margin-top:10px;padding:10px;border:1px solid var(--border,#3a3a3a);',
+      '  border-radius:8px;font-size:12px;line-height:1.5; }',
+      '.cos-close-row { margin-bottom:6px; }',
+      '.cos-close-blockers { margin:8px 0;padding:8px;border-left:3px solid #f59e0b;background:rgba(245,158,11,0.08); }',
+      '.cos-close-blockers label { display:block;margin:4px 0;cursor:pointer; }',
+      '.cos-close-reason { width:100%;box-sizing:border-box;margin-top:6px;padding:6px;',
+      '  border-radius:6px;border:1px solid var(--border,#3a3a3a);background:transparent;color:inherit; }',
+      '.cos-close-confirm { margin-top:8px;padding:6px 12px;border-radius:6px;cursor:pointer;',
+      '  background:#7f1d1d;border:1px solid #b91c1c;color:#fee2e2; }',
+      '.cos-close-confirm[disabled] { opacity:0.45;cursor:not-allowed; }',
+      '.cos-close-msg { margin-top:8px; }',
       '.cos-owner-ctrl {',
       '  display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:6px;',
       '}',
@@ -1070,6 +1147,103 @@
 
       // Owner-action click delegation (card 9193eedd).
       // Attached to body so it survives re-renders of the cosBody content.
+      // ---- CASE COMPLETION EXIT (Istvan GO 2026-09-02) ----
+      // Three clicks, on purpose: open, acknowledge, confirm. The middle step
+      // only exists when there is something to acknowledge, and it cannot be
+      // skipped -- the server refuses an unacknowledged blocker with 422, so a
+      // UI that hid them would only produce a button that mysteriously fails.
+      document.body.addEventListener('click', function (e) {
+        var openBtn = e.target.closest('.cos-close-open')
+        if (openBtn) {
+          e.stopPropagation(); e.preventDefault()
+          var ctrl = openBtn.closest('.cos-close-ctrl')
+          var panel = ctrl.querySelector('.cos-close-panel')
+          if (!panel.hidden) { panel.hidden = true; return }
+          panel.hidden = false
+          panel.innerHTML = '<div class="cos-close-row">Betöltés…</div>'
+          var caseId = ctrl.dataset.closeCase
+          var ns = ctrl.dataset.closeNs
+          fetch('/api/cos/cases/' + encodeURIComponent(ns) + '/' +
+                encodeURIComponent(caseId) + '/close-preview')
+            .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b } }) })
+            .then(function (res) {
+              if (!res.ok) {
+                panel.innerHTML = '<div class="cos-close-row" style="color:#ef4444;">' +
+                  esc(res.body && res.body.error ? res.body.error : 'Nem sikerült betölteni.') + '</div>'
+                return
+              }
+              panel.innerHTML = renderClosePanel(res.body)
+            })
+            .catch(function () {
+              panel.innerHTML = '<div class="cos-close-row" style="color:#ef4444;">Hálózati hiba.</div>'
+            })
+          return
+        }
+
+        var confirmBtn = e.target.closest('.cos-close-confirm')
+        if (confirmBtn) {
+          e.stopPropagation(); e.preventDefault()
+          var ctrl2 = confirmBtn.closest('.cos-close-ctrl')
+          var panel2 = ctrl2.querySelector('.cos-close-panel')
+          var caseId2 = ctrl2.dataset.closeCase
+          var ns2 = ctrl2.dataset.closeNs
+          var reasonEl = panel2.querySelector('.cos-close-reason')
+          var reason = reasonEl ? String(reasonEl.value || '').trim() : ''
+          if (!reason) { if (reasonEl) reasonEl.focus(); return }
+
+          var acked = []
+          var boxes = panel2.querySelectorAll('input[data-blocker-ref]')
+          for (var i = 0; i < boxes.length; i++) {
+            if (!boxes[i].checked) { boxes[i].focus(); return }
+            acked.push(boxes[i].dataset.blockerRef)
+          }
+
+          confirmBtn.disabled = true
+          fetch('/api/cos/cases/' + encodeURIComponent(ns2) + '/' +
+                encodeURIComponent(caseId2) + '/close', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              intent: 'CLOSE_CASE',
+              // The version the PANEL was rendered from -- not a fresh read. If the
+              // case moved since the owner looked, the server answers 409 and the
+              // decision is re-made against what is actually there. Re-reading here
+              // would quietly close a case the owner never saw.
+              expectedVersion: Number(
+                (panel2.querySelector('[data-version]') || {}).dataset
+                  ? panel2.querySelector('[data-version]').dataset.version : NaN),
+              reason: reason,
+              // Where this decision was taken. Not decorative: the server
+              // requires it, and a close with no origin is unauditable.
+              provenance: 'mission-control:' + (location.host || 'local') + ':' + Date.now(),
+              actor: 'istvan',
+              acknowledgedBlockers: acked,
+              newStatus: panel2.querySelector('.cos-close-cancel-mode') &&
+                panel2.querySelector('.cos-close-cancel-mode').checked ? 'CANCELLED' : 'COMPLETED',
+            }),
+          })
+            .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b } }) })
+            .then(function (res) {
+              var b = res.body || {}
+              if (b.outcome === 'CLOSED' || b.outcome === 'ALREADY_CLOSED') {
+                panel2.innerHTML = '<div class="cos-close-msg" style="color:#22c55e;">' +
+                  (b.outcome === 'CLOSED' ? 'Lezárva.' : 'Már le volt zárva.') +
+                  ' Frissítsd a nézetet.</div>'
+                return
+              }
+              confirmBtn.disabled = false
+              panel2.querySelector('.cos-close-msg').innerHTML =
+                '<span style="color:#ef4444;">' + esc(b.reason || 'Elutasítva.') + '</span>'
+            })
+            .catch(function () {
+              confirmBtn.disabled = false
+              panel2.querySelector('.cos-close-msg').innerHTML =
+                '<span style="color:#ef4444;">Hálózati hiba.</span>'
+            })
+          return
+        }
+      })
+
       document.body.addEventListener('click', function (e) {
         var btn = e.target.closest('.cos-owner-btn')
         if (!btn) return

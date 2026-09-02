@@ -143,6 +143,47 @@ export interface CompletionGateResult {
   allowed: boolean
   reason: string
   unmet: string[]
+  /** What closing this case would leave behind, computed for EVERY actor --
+   *  the owner included.
+   *
+   *  `allowed: true` with a non-empty `blockers` is a normal, intended shape:
+   *  "you may close this, and here is what it costs". The owner's authority to
+   *  close is not in question (see the OWNER branch below, and the reason it
+   *  exists); what was missing is that the owner could not SEE the cost. A
+   *  bypass that is also silent is the pair that hurts.
+   *
+   *  This stays inside canCompleteCase deliberately. A second function that
+   *  computed "real" blockers next to the gate would be a second policy, and
+   *  two policies for one question drift -- which is the failure this whole
+   *  module was written after. One gate, one answer, more of it. */
+  blockers: CompletionBlocker[]
+}
+
+/** One outstanding commitment that a close would abandon.
+ *
+ *  WHAT IS AND IS NOT COVERED, stated so a reader does not assume more.
+ *  Istvan's list on 2026-09-02 named five categories. Three of them have a real
+ *  instrument in this store and are computed below. Two do NOT, and are named
+ *  here rather than silently dropped:
+ *
+ *    covered   unresolved safety / open issue -> OPEN_ESCALATION
+ *    covered   pending external commitment    -> PENDING_OUTBOUND
+ *    covered   required evidence              -> UNMET_DOD
+ *    NOT COVERED  legal/financial obligation  -- `zst_obligations` is a ZST
+ *                 contract-watch table with no per-case link on the personal
+ *                 side; there is no field that marks a case as carrying a legal
+ *                 or financial obligation, so nothing here can measure it.
+ *    NOT COVERED  contradiction -- `contradictionBlocksAction` decides about an
+ *                 OUTWARD ACTION from a live conflict set, not about closure,
+ *                 and no per-case conflict set is persisted to read back.
+ *
+ *  An absence claim has to name its instrument, or it just rewards not looking. */
+export interface CompletionBlocker {
+  kind: 'OPEN_ESCALATION' | 'PENDING_OUTBOUND' | 'UNMET_DOD'
+  /** Human-readable, shown to whoever is being asked to acknowledge it. */
+  detail: string
+  /** The row this came from, so the claim is checkable. */
+  ref: string
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────
@@ -445,6 +486,77 @@ export function evaluateDoDCompleteness(
  *
  *  Read-only — no mutation.
  *  Domain-scoped. */
+/** Outstanding commitments on a case, from the surfaces that actually record
+ *  them. Read-only.
+ *
+ *  Domain-scoped on every query: the personal and corporate ledgers are
+ *  separate tables and a blocker from the wrong one would be worse than none,
+ *  because it would read as evidence about this case. */
+export function completionBlockers(
+  db: Database.Database,
+  domain: 'personal' | 'zst',
+  caseId: string,
+): CompletionBlocker[] {
+  const out: CompletionBlocker[] = []
+
+  // 1. Open escalations. `case_escalations` is domain-scoped in its own column.
+  const escalations = db.prepare(
+    `SELECT escalation_id, escalation_level, trigger_reason, summary
+     FROM case_escalations
+     WHERE domain = ? AND case_id = ? AND resolution_status = 'OPEN'
+     ORDER BY created_at ASC`,
+  ).all(domain, caseId) as Array<{
+    escalation_id: string; escalation_level: string | null
+    trigger_reason: string | null; summary: string | null
+  }>
+  for (const e of escalations) {
+    out.push({
+      kind: 'OPEN_ESCALATION',
+      detail: `nyitott eszkalacio (${e.escalation_level ?? 'szint ismeretlen'}): `
+        + (e.summary ?? e.trigger_reason ?? 'indoklas nelkul'),
+      ref: e.escalation_id,
+    })
+  }
+
+  // 2. Outbound the case has committed to but not finished. NOT the terminal
+  //    states: VERIFIED is done and CANCELLED was withdrawn on purpose. What
+  //    blocks is a letter that is drafted, approved or in flight -- closing the
+  //    case under it strands a promise the other side may already be waiting on.
+  const ledger = domain === 'personal' ? 'outbound_ledger' : 'zst_outbound_ledger'
+  const pending = db.prepare(
+    `SELECT ledger_id, status, recipient, outbound_kind
+     FROM ${ledger}
+     WHERE case_id = ? AND status NOT IN ('VERIFIED', 'CANCELLED', 'FAILED_TERMINAL')
+     ORDER BY created_at ASC`,
+  ).all(caseId) as Array<{
+    ledger_id: string; status: string; recipient: string | null; outbound_kind: string | null
+  }>
+  for (const p of pending) {
+    out.push({
+      kind: 'PENDING_OUTBOUND',
+      detail: `befejezetlen kimeno (${p.status})`
+        + (p.recipient ? ` -> ${p.recipient}` : '')
+        + (p.outbound_kind ? ` [${p.outbound_kind}]` : ''),
+      ref: p.ledger_id,
+    })
+  }
+
+  // 3. DoD criteria that are not proven. Reuses the same evaluator the engine
+  //    gate uses -- not a re-implementation of "met", which is exactly where a
+  //    second policy would start.
+  const state = db.prepare(
+    `SELECT 1 FROM case_progression_state WHERE domain = ? AND case_id = ?`,
+  ).get(domain, caseId)
+  if (state) {
+    const completeness = evaluateDoDCompleteness(db, domain, caseId)
+    for (const label of completeness.unmetCriteria) {
+      out.push({ kind: 'UNMET_DOD', detail: `bizonyitatlan DoD-kriterium: ${label}`, ref: caseId })
+    }
+  }
+
+  return out
+}
+
 export function canCompleteCase(
   db: Database.Database,
   domain: 'personal' | 'zst',
@@ -454,7 +566,13 @@ export function canCompleteCase(
   domainGuard(db, domain, caseId, 'canCompleteCase')
 
   if (by === 'OWNER') {
-    return { allowed: true, reason: 'Owner-authorized closure', unmet: [] }
+    // Still allowed, and deliberately so -- see the doc comment above. What
+    // changed on 2026-09-02 is that the answer now carries what the closure
+    // would abandon, so a caller can refuse to be silent about it.
+    return {
+      allowed: true, reason: 'Owner-authorized closure', unmet: [],
+      blockers: completionBlockers(db, domain, caseId),
+    }
   }
 
   // Check if progression state exists and is enabled
@@ -486,7 +604,7 @@ export function canCompleteCase(
     return {
       allowed: false,
       reason: 'Case is not under progression control; the engine may not close it (the owner can)',
-      unmet: [],
+      unmet: [], blockers: [],
     }
   }
 
@@ -494,7 +612,7 @@ export function canCompleteCase(
     return {
       allowed: false,
       reason: 'Progression is disabled on this case; the engine may not close it (the owner can)',
-      unmet: [],
+      unmet: [], blockers: [],
     }
   }
 
@@ -516,7 +634,7 @@ export function canCompleteCase(
       // the provenance, not a criterion, and the two sibling refusals above
       // already say so by returning nothing. Found by P6 driving the real
       // lifecycle rather than by reading.
-      unmet: [],
+      unmet: [], blockers: [],
     }
   }
 
@@ -526,18 +644,22 @@ export function canCompleteCase(
     return {
       allowed: false,
       reason: 'No DoD criteria recorded — nothing was verified',
-      unmet: [],
+      unmet: [], blockers: [],
     }
   }
 
   if (completeness.allMet) {
-    return { allowed: true, reason: `All ${completeness.totalCriteria} DoD criteria met`, unmet: [] }
+    return {
+      allowed: true, reason: `All ${completeness.totalCriteria} DoD criteria met`, unmet: [],
+      blockers: completionBlockers(db, domain, caseId),
+    }
   }
 
   return {
     allowed: false,
     reason: `${completeness.metCriteria}/${completeness.totalCriteria} DoD criteria met with evidence. Unmet: ${completeness.unmetCriteria.join(', ')}`,
     unmet: completeness.unmetCriteria,
+    blockers: completionBlockers(db, domain, caseId),
   }
 }
 
