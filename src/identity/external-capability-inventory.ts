@@ -24,18 +24,26 @@
 // checked, so the claim is falsifiable rather than asserted. A read-only claim
 // with no way to check it is worse than no claim, because it is believed.
 //
-// MEASURED, NOT ASSUMED (2026-08-25).
+// MEASURED, NOT ASSUMED (last re-measured 2026-09-02).
 //
 // Every `grantedScopes` list below was read from Google's own tokeninfo endpoint
-// on 2026-08-25 for the credential named in the entry, not copied from a comment
-// or a memory of a consent screen. `scripts/w10-verify-external-scopes.ts`
-// re-runs that measurement and exits non-zero on drift, so this file is a claim
-// that can be falsified on demand rather than a claim that ages quietly.
+// for the credential named in the entry, not copied from a comment or a memory
+// of a consent screen. `scripts/w10-verify-external-scopes.ts` re-runs that
+// measurement and exits non-zero on drift, so this file is a claim that can be
+// falsified on demand rather than a claim that ages quietly.
 //
 // The first run of that measurement immediately falsified two long-standing
 // comments in this repository -- see the `gmail.send` and `gmail.label` entries.
 // That is the value: an inventory nobody can check is a document, and documents
 // drift; an inventory a script checks is a control.
+//
+// AND THE CONTROL ONLY WORKS IF SOMETHING RUNS IT. Between 2026-08-11 and
+// 2026-09-02 the private account's scope list changed THREE times -- modify
+// granted, silently dropped by two re-auths, granted again -- and each entry
+// below went on stating the previous measurement as present tense in between.
+// A `measuredAt` is a timestamp, not a guarantee; the verifier on a schedule is
+// what turns this file from a dated snapshot into a control. Every entry's
+// prose must therefore say WHEN it was measured, never just what is true.
 //
 // WHY GMAIL APPEARS THREE TIMES.
 //
@@ -247,14 +255,20 @@ export const EXTERNAL_CAPABILITIES: readonly ExternalCapabilityEntry[] = Object.
   {
     id: 'gmail.label',
     description: 'Apply the COS/Processed label to a source message (source-commit).',
-    credential: 'google-private OAuth refresh token (gmail.modify, granted 2026-08-11)',
+    credential: 'google-private OAuth refresh token (gmail.modify)',
     readOnly: false,
-    scopeEvidence: 'oauth2.googleapis.com/tokeninfo, 2026-08-25: private account grants gmail.readonly ONLY',
-    grantedScopes: [],
+    scopeEvidence: 'oauth2.googleapis.com/tokeninfo, 2026-09-02: gmail.modify present on the private account',
+    grantedScopes: ['gmail.modify'],
     credentialFiles: ['store/.google-private-creds.json'],
-    measuredAt: '2026-08-25',
-    scopeGap:
-      'gmail.modify is NOT granted on the private account (measured 2026-08-25). gmail-label-api.ts states the scope was granted on 2026-08-11 and confirmed by the provider; that is not true of the credential the code actually loads. cos-close-batches.ts selects the label committer from the FILE EXISTING, so the committer is wired to a credential that cannot label -- every source-commit call will fail at the provider. The ZST account does hold gmail.modify.',
+    measuredAt: '2026-09-02',
+    // NO scopeGap: the 2026-08-25 gap is CLOSED, and closed is a measurement
+    // too. The 08-31 re-auth restored gmail.modify, and on 2026-09-02 the claim
+    // was checked at both ends -- tokeninfo says the scope is attached, and
+    // three messages this pipeline marked SOURCE_COMMITTED were read back from
+    // Gmail with the COS/Processed label actually on them. The second half is
+    // the one that matters: a SOURCE_COMMITTED row is this system's own claim
+    // about its own write, and a guard that reads back only its own rows can
+    // certify a mailbox it never touched.
     requiredCapability: 'EXTERNAL_EFFECT',
     // Labelling is reversible and touches no content, but gmail.modify is a
     // scope that CAN trash a message. The entry is honest about the scope it
@@ -289,12 +303,12 @@ export const EXTERNAL_CAPABILITIES: readonly ExternalCapabilityEntry[] = Object.
     description: 'Send mail as Istvan. The loudest thing this system can do.',
     credential: 'google-private OAuth refresh token (gmail.send)',
     readOnly: false,
-    scopeEvidence: 'oauth2.googleapis.com/tokeninfo, 2026-08-25: private account grants gmail.readonly ONLY',
+    scopeEvidence: 'oauth2.googleapis.com/tokeninfo, 2026-09-02: the private account grants gmail.modify + gmail.readonly + calendar.events + calendar.readonly + drive.readonly. gmail.send is NOT among them.',
     grantedScopes: [],
     credentialFiles: ['store/.google-private-creds.json'],
-    measuredAt: '2026-08-25',
+    measuredAt: '2026-09-02',
     scopeGap:
-      'gmail.send is NOT granted on the private account (measured 2026-08-25), and that is the credential GmailApiTransport loads by default and the personal COS send path uses. The personal send is therefore blocked at the provider today, whatever this codebase decides. The ZST account does hold gmail.send, which is why the corporate path works.',
+      'gmail.send is NOT granted on the private account (re-measured 2026-09-02, still absent). That is the credential GmailApiTransport loads by default and the personal COS send path uses, so the personal send is blocked AT THE PROVIDER, whatever this codebase decides -- and this gap is NOT the same shape as the label gap that sat next to it until 2026-09-02. That one was an accident of a re-auth and got fixed by one. This one needs a new browser consent from Istvan, and as of 2026-09-02 he has not been asked to give one, because a send right on the private mailbox is a capability we would not use and a mistake could use expensively. Draft is the terminus on this account by decision, not by oversight. The ZST account does hold gmail.send, which is why the corporate path works.',
     requiredCapability: 'EXTERNAL_EFFECT',
     // A sent mail cannot be recalled, and can create obligations. Everything
     // about this entry is deliberately the strictest in the file.

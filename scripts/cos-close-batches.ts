@@ -126,16 +126,6 @@ const quarantine: QuarantineDeps = {
   // place where the owner allows the cursor to move past something.
   policyAllowsCursorAdvance: () => policy.allowCursorAdvanceWithoutSourceWrite === true,
 }
-// WHICH COMMITTER. Istvan granted gmail.modify on 2026-08-11, so the real one
-// can finally be used -- GmailLabelCommitter has been written and unused since
-// F-8 precisely because wiring it without the scope produces a committer that
-// fails every call.
-//
-// The choice is made from the CREDS FILE's presence, not from a flag someone has
-// to remember to flip, and it falls back to the honest no-write committer when
-// the file is absent. If the scope is later revoked, the label call fails, the
-// committer reports FAILED, and the batch stays open -- visibly, which is the
-// behaviour F-8 wanted all along.
 const credsPath = 'store/.google-private-creds.json'
 
 // WHICH COMMITTER -- decided by MEASURING the granted scope, not by the creds
