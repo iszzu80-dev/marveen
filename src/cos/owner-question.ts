@@ -27,6 +27,7 @@ import { collectDecisionPackage, formatDeadline, type DecisionPackage } from './
 import { internalPlanLabels } from './progression-pipeline.js'
 import { openApprovalRequestForQuestion, decideActionApproval } from './action-approval-request.js'
 import { evaluatePreQuestionEvidence } from './pre-question-evidence.js'
+import { COUNTS_AGAINST_CAP_SQL, clearStaleBlock } from './stale-question-regeneration.js'
 
 export interface OwnerQuestion {
   caseId: string
@@ -789,6 +790,13 @@ export function askPendingOwnerQuestions(
           `UPDATE cos_owner_questions SET progression_run_id = ?
             WHERE case_id = ? AND question_hash = ? AND answered_at IS NULL AND superseded_at IS NULL`,
         ).run(row.progression_run_id, row.case_id, question.hash)
+        // THE REGENERATION COMPLETES HERE (owner directive 2026-09-02). The ask
+        // is unchanged, so this is the same question with the same hash and the
+        // same token -- semantic identity preserved by construction. What has
+        // changed is the run it points at, which is exactly what the delivery
+        // gate refused. Lifting the block lets the next channel pass try again
+        // against a current watermark.
+        clearStaleBlock(db, row.case_id, question.hash)
       }
       // AND REFRESH THE TEXT, WITHOUT RE-NOTIFYING (§20, 2026-08-12).
       //
@@ -1577,8 +1585,13 @@ export function outstandingOwnerQuestions(
 ): Array<{ caseId: string; domain: string; text: string; askedAt: number }> {
   try {
     return db.prepare(
+      // STALE-BLOCKED QUESTIONS DO NOT COUNT (owner directive 2026-09-02).
+      // One that delivery refuses cannot be answered, so a seat held for it
+      // starves the questions that CAN be -- the second freeze, measured on
+      // three blocking decisions that sat undeliverable while the cap read
+      // full. See stale-question-regeneration.ts.
       `SELECT case_id AS caseId, domain, question_text AS text, asked_at AS askedAt
-       FROM cos_owner_questions WHERE answered_at IS NULL AND superseded_at IS NULL
+       FROM cos_owner_questions WHERE ${COUNTS_AGAINST_CAP_SQL}
        ORDER BY asked_at DESC LIMIT ?`,
     ).all(limit) as never
   } catch { return [] }

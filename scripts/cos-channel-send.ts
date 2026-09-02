@@ -14,6 +14,9 @@ import {
   heldOwnerMessages, buildHeldFollowUp, markHeldResolved, outstandingOwnerQuestions,
 } from '../src/cos/owner-question.js'
 import { assertOwnerQuestionFreshForDelivery } from '../src/cos/owner-delivery-freshness.js'
+import {
+  markQuestionStaleBlocked, clearStaleBlock, exhaustedStaleQuestions, MAX_STALE_RETRIES,
+} from '../src/cos/stale-question-regeneration.js'
 
 async function main(): Promise<void> {
   initDatabase()
@@ -52,6 +55,7 @@ async function main(): Promise<void> {
 
   let sent = 0
   let staleBlocked = 0
+  let staleExhausted = 0
   const failures: Array<{ caseId: string; error: string }> = []
   for (const r of rows) {
     try {
@@ -66,6 +70,11 @@ async function main(): Promise<void> {
         `UPDATE cos_owner_questions SET channel = ?, channel_target = ?
           WHERE case_id = ? AND question_hash = ?`,
       ).run(cfg.channelId, `${res.chatId}:${res.messageId}`, r.case_id, r.question_hash)
+      // Delivered: the block is lifted. The RETRY COUNT is deliberately not
+      // reset -- a case that alternates between stale and fresh is showing the
+      // same problem repeatedly, and zeroing on success would let it do that
+      // for ever without reaching the bound.
+      clearStaleBlock(db, r.case_id, r.question_hash)
       sent++
     } catch (e) {
       // One undeliverable question must not stop the rest, and the row is left
@@ -74,7 +83,18 @@ async function main(): Promise<void> {
       // separately but remains a failure: silence caused by stale evidence must
       // not look like "nothing to ask".
       const msg = String((e as Error)?.message ?? e).slice(0, 160)
-      if (msg.includes('STALE_EVIDENCE') || msg.includes('EVIDENCE_UNKNOWN')) staleBlocked++
+      if (msg.includes('STALE_EVIDENCE') || msg.includes('EVIDENCE_UNKNOWN')) {
+        staleBlocked++
+        // RECORD IT, so the row stops holding a capacity slot and the reader
+        // gets a reason to rebuild the question from a current packet. Leaving
+        // it merely "unmarked for the next pass" is what let three blocking
+        // decisions sit undeliverable, because no next pass was ever going to
+        // come for them. See stale-question-regeneration.ts.
+        const n = markQuestionStaleBlocked(db, {
+          caseId: r.case_id, questionHash: r.question_hash, error: msg,
+        })
+        if (n >= MAX_STALE_RETRIES) staleExhausted++
+      }
       failures.push({ caseId: r.case_id, error: msg })
     }
   }
@@ -140,8 +160,21 @@ async function main(): Promise<void> {
     }
   }
 
+  // A QUESTION THAT WENT STALE TOO OFTEN IS AN OPERATIONAL FAILURE, AND SAYS SO.
+  // Regeneration is bounded on purpose; the whole point of the bound is that the
+  // giving-up is LOUD. Reported even at zero, for the same reason as everything
+  // else in this payload.
+  const exhausted = exhaustedStaleQuestions(db)
+  for (const q of exhausted) {
+    failures.push({
+      caseId: q.caseId,
+      error: `REPEATED_STALE: regenerated ${q.retryCount}x and delivery still refuses it (${q.lastError ?? 'no error recorded'})`,
+    })
+  }
+
   console.log('CosChannel:', JSON.stringify({
-    channel: cfg.channelId, pending: rows.length, sent, staleBlocked, failures,
+    channel: cfg.channelId, pending: rows.length, sent, staleBlocked, staleExhausted,
+    staleExhaustedCases: exhausted.map(q => q.caseId), failures,
     // Reported even at zero, same rule as the outbox: "nothing was held" and
     // "held messages are piling up unanswered" must not look the same.
     heldAnswered, heldOpen: heldOwnerMessages(db, 50).length,

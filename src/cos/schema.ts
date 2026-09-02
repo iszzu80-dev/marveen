@@ -2082,6 +2082,13 @@ export function initProgressionSchema(db: Database.Database): void {
     // without inventing a new ask.
     restated_at: 'INTEGER',
     restate_count: 'INTEGER NOT NULL DEFAULT 0',
+    // STALE-BLOCKED DELIVERY (owner directive 2026-09-02). A question the
+    // freshness gate refuses is still a real question, but it must stop holding
+    // a capacity slot and it must give the reader a reason to rebuild it. See
+    // stale-question-regeneration.ts for the freeze this ends.
+    stale_blocked_at: 'INTEGER',
+    stale_retry_count: 'INTEGER NOT NULL DEFAULT 0',
+    stale_last_error: 'TEXT',
   })
   db.exec(`CREATE INDEX IF NOT EXISTS idx_coq_open ON cos_owner_questions(answered_at, asked_at)`)
   // UNIQUE, so "a token is never reused for another question" is enforced by the

@@ -29,6 +29,7 @@ import { killSwitchRefusal } from './kill-switch.js'
 import { escalateSensitivity } from './sensitivity.js'
 import { egressTierFor, isProviderAllowedForSensitivity, providersAllowedFor } from './provider-data-policy.js'
 import type { CaseSensitivity } from './schema.js'
+import { staleBlockedCases } from './stale-question-regeneration.js'
 
 /**
  * The most sensitive thing in the context (§10, review #4 N4-1).
@@ -135,9 +136,27 @@ export function casesNeedingReading(db: Database.Database, limit: number): Reade
       }
     } catch { /* table absent on a fresh store: not a candidate, not an error */ }
   }
+  // A STALE-BLOCKED QUESTION IS ALSO A REASON TO READ (owner directive
+  // 2026-09-02). The rule above says a case is worth re-reading when a
+  // progression run finished after its last packet -- correct, and it left one
+  // case out: a question the delivery gate refused as stale needs a FRESH
+  // packet, and nothing was going to produce one. Three blocking decisions sat
+  // undeliverable for that reason, the oldest twenty-nine days.
+  //
+  // Put FIRST, ahead of the ordinary candidates: these are cases the owner is
+  // already waiting on, and the window (50) is the thing that kept them out.
+  // Bounded by MAX_STALE_RETRIES inside staleBlockedCases, so a case that can
+  // never be refreshed cannot monopolise the window either.
+  const stale = staleBlockedCases(db, limit)
+  const staleKey = new Set(stale.map(s => `${s.domain}/${s.caseId}`))
+  const staleCandidates: ReaderCandidate[] = stale.map(s => ({
+    domain: s.domain, caseId: s.caseId, runId: null, policyDecision: 'STALE_REGENERATION',
+  }))
+  const rest = out.filter(c => !staleKey.has(`${c.domain}/${c.caseId}`))
+
   // FAIR, not first-come: see roundRobinByDomain for what slicing a
   // personal-then-zst list costs the corporate namespace.
-  return roundRobinByDomain(out, limit)
+  return [...staleCandidates, ...roundRobinByDomain(rest, Math.max(0, limit - staleCandidates.length))]
 }
 
 /** Store one reading — successful or refused. Both are rows; see the schema
