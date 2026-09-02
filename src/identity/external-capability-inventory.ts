@@ -303,12 +303,24 @@ export const EXTERNAL_CAPABILITIES: readonly ExternalCapabilityEntry[] = Object.
     description: 'Send mail as Istvan. The loudest thing this system can do.',
     credential: 'google-private OAuth refresh token (gmail.send)',
     readOnly: false,
-    scopeEvidence: 'oauth2.googleapis.com/tokeninfo, 2026-09-02: the private account grants gmail.modify + gmail.readonly + calendar.events + calendar.readonly + drive.readonly. gmail.send is NOT among them.',
-    grantedScopes: [],
+    scopeEvidence: 'oauth2.googleapis.com/tokeninfo, 2026-09-02 (after the re-consent): gmail.send present on the private account',
+    grantedScopes: ['gmail.send'],
     credentialFiles: ['store/.google-private-creds.json'],
     measuredAt: '2026-09-02',
-    scopeGap:
-      'gmail.send is NOT granted on the private account (re-measured 2026-09-02, still absent). That is the credential GmailApiTransport loads by default and the personal COS send path uses, so the personal send is blocked AT THE PROVIDER, whatever this codebase decides -- and this gap is NOT the same shape as the label gap that sat next to it until 2026-09-02. That one was an accident of a re-auth and got fixed by one. This one needs a new browser consent from Istvan, and as of 2026-09-02 he has not been asked to give one, because a send right on the private mailbox is a capability we would not use and a mistake could use expensively. Draft is the terminus on this account by decision, not by oversight. The ZST account does hold gmail.send, which is why the corporate path works.',
+    // NO scopeGap: granted 2026-09-02, on Istvan's explicit instruction and
+    // AGAINST the recommendation recorded earlier the same day -- the advice was
+    // that a send right on the private mailbox is a capability we would not use
+    // and a mistake could use expensively. He decided otherwise; whose decision
+    // it was belongs in the record, because a capability nobody remembers
+    // choosing is one nobody thinks to revoke.
+    //
+    // THE RE-CONSENT ASKED FOR ALL SIX SCOPES, NOT JUST THIS ONE. An OAuth
+    // consent does not merge: what you do not ask for, it takes away. The
+    // narrow re-auths of 08-18 and 08-25 are what silently dropped gmail.modify
+    // and froze the mailbox cursor for two weeks. After this grant both were
+    // verified at the provider AND at the mailbox: tokeninfo lists all six, and
+    // three previously-labelled messages still read back with COS/Processed on
+    // them, so the new token did not cost us the old capability.
     requiredCapability: 'EXTERNAL_EFFECT',
     // A sent mail cannot be recalled, and can create obligations. Everything
     // about this entry is deliberately the strictest in the file.
