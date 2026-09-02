@@ -149,8 +149,19 @@ export function casesNeedingReading(db: Database.Database, limit: number): Reade
   // never be refreshed cannot monopolise the window either.
   const stale = staleBlockedCases(db, limit)
   const staleKey = new Set(stale.map(s => `${s.domain}/${s.caseId}`))
+  // THE RUN ID MUST BE REAL (found by live readback, 2026-09-02). The first cut
+  // passed runId: null here, so the regenerated question was written with no
+  // progression_run_id -- and delivery refused it with EVIDENCE_UNKNOWN instead
+  // of STALE_EVIDENCE. The same undeliverability under a different name, which
+  // is the worst kind of fix: it looks like progress in the counters.
+  const latestRun = db.prepare(
+    `SELECT progression_run_id AS id FROM case_progression_runs
+      WHERE domain = ? AND case_id = ? AND status = 'COMPLETED'
+      ORDER BY started_at DESC LIMIT 1`)
   const staleCandidates: ReaderCandidate[] = stale.map(s => ({
-    domain: s.domain, caseId: s.caseId, runId: null, policyDecision: 'STALE_REGENERATION',
+    domain: s.domain, caseId: s.caseId,
+    runId: (latestRun.get(s.domain, s.caseId) as { id: string } | undefined)?.id ?? null,
+    policyDecision: 'STALE_REGENERATION',
   }))
   const rest = out.filter(c => !staleKey.has(`${c.domain}/${c.caseId}`))
 

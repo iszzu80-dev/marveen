@@ -870,8 +870,28 @@ export function askPendingOwnerQuestions(
     //
     // One case can have at most one open question. The old row is marked
     // superseded, not answered — see the column comment in schema.ts.
+    //
+    // THE TOKEN IS INHERITED ACROSS A SUPERSEDE (found by live readback,
+    // 2026-09-02). A regenerated question is reworded by the model, so its ask
+    // hash differs and it opens a NEW row -- and the first cut gave that row a
+    // new token. Measured on the live store: PRI-DQ-2026-001 went Q39FB ->
+    // Q4ABB in a single cycle. A name that changes while the owner is deciding
+    // is worse than no name: he copies it, answers ten minutes later, and the
+    // token he types no longer exists.
+    //
+    // Inheriting is safe precisely because of the rule immediately above: one
+    // case has at most one open question. So the token names "the open question
+    // on this case", which is exactly the thing he needs to point at, and
+    // uniqueness is preserved because the old row is closed in the same
+    // statement.
+    const inherited = db.prepare(
+      `SELECT token FROM cos_owner_questions
+        WHERE case_id = ? AND question_hash != ? AND answered_at IS NULL
+          AND superseded_at IS NULL AND token IS NOT NULL LIMIT 1`,
+    ).get(row.case_id, question.hash) as { token: string } | undefined
+
     db.prepare(
-      `UPDATE cos_owner_questions SET superseded_at = ?
+      `UPDATE cos_owner_questions SET superseded_at = ?, token = NULL
         WHERE case_id = ? AND question_hash != ? AND answered_at IS NULL AND superseded_at IS NULL`,
     ).run(now, row.case_id, question.hash)
 
@@ -897,6 +917,15 @@ export function askPendingOwnerQuestions(
     // That order is the whole contract: a message carrying a token whose row was
     // never written would invite an answer nothing can bind, which is the exact
     // failure this replaces.
+    // A regenerated question is no longer stale-blocked: it was just rebuilt
+    // from a current packet, which is the whole point of the regeneration.
+    clearStaleBlock(db, row.case_id, question.hash)
+    if (inherited?.token) {
+      db.prepare(
+        `UPDATE cos_owner_questions SET token = ?
+          WHERE case_id = ? AND question_hash = ? AND token IS NULL`,
+      ).run(inherited.token, row.case_id, question.hash)
+    }
     const token = ensureQuestionToken(db, row.case_id, question.hash)
     const outbound = question.text + replyContractLine(token)
 

@@ -179,3 +179,66 @@ describe('stale-evidence regeneration', () => {
     expect(outstandingOwnerQuestions(db).map(q => q.caseId)).toEqual(['C-2'])
   })
 })
+
+describe('regeneration defects found by live readback, 2026-09-02', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('a regenerated question carries a REAL progression run id, not null', () => {
+    // The first cut passed runId: null for a stale candidate, so the rebuilt
+    // question had no progression_run_id and delivery refused it with
+    // EVIDENCE_UNKNOWN — the same undeliverability under a different name.
+    const db = getDb()
+    const h = seedQuestion('C-1')
+    db.prepare(
+      `INSERT INTO case_progression_runs
+         (progression_run_id, domain, case_id, status, trigger_type, started_at, case_version_after)
+       VALUES ('run-live','personal','C-1','COMPLETED','MANUAL',?,1)`).run(NOW + 500)
+    markQuestionStaleBlocked(db, { caseId: 'C-1', questionHash: h, error: 'STALE_EVIDENCE: x' })
+
+    const cand = casesNeedingReading(db, 10).find(c => c.caseId === 'C-1')
+    expect(cand?.runId).toBe('run-live')
+  })
+
+  it('THE TOKEN SURVIVES A REWORDING: a supersede hands its name to the replacement', () => {
+    // Measured live: PRI-DQ-2026-001 went Q39FB -> Q4ABB in one cycle, because
+    // the model reworded the ask, which changed the hash, which opened a new
+    // row with a new token. A name that changes while he is deciding is worse
+    // than no name — he copies it and answers ten minutes later.
+    const db = getDb()
+    seedQuestion('C-1', 'Melyik ajanlat?')
+    const first = (db.prepare(`SELECT token t FROM cos_owner_questions WHERE case_id='C-1'`)
+      .get() as { t: string }).t
+
+    // The same case, re-read, with a DIFFERENTLY WORDED ask -> new hash.
+    const packet = {
+      ballHolder: 'ISTVAN', facts: [{ statement: 'f', source: 'e' }],
+      missingRequirements: [{ what: 'Melyik ajanlatot valasztod a harombol?', whoHasIt: 'ISTVAN', why: null }],
+      uncertainty: [], confidence: 0.8,
+    }
+    db.prepare(
+      `INSERT INTO case_evidence_packets (case_id, domain, packet_json, plan_json, progression_run_id, created_at)
+       VALUES ('C-1','personal',?,?,'run-2',?)`,
+    ).run(JSON.stringify(packet),
+          JSON.stringify({ steps: [{ kind: 'ASK_OWNER', label: 'Melyik ajanlatot valasztod a harombol?', blockedBy: 'ISTVAN' }] }),
+          NOW + 600)
+    db.prepare(
+      `INSERT INTO case_progression_runs
+         (progression_run_id, domain, case_id, status, trigger_type, started_at, case_version_after)
+       VALUES ('run-2','personal','C-1','COMPLETED','MANUAL',?,1)`).run(NOW + 600)
+
+    askPendingOwnerQuestions(db, { now: NOW + 700, channel: { channel: CHANNEL, target: CHAT } })
+
+    const open = db.prepare(
+      `SELECT token t, question_hash h FROM cos_owner_questions
+        WHERE case_id='C-1' AND answered_at IS NULL AND superseded_at IS NULL`).all() as
+      Array<{ t: string; h: string }>
+    expect(open).toHaveLength(1)
+    expect(open[0].t).toBe(first)          // SAME NAME, new wording
+
+    // And the retired row does not keep the token, so uniqueness holds.
+    const retired = db.prepare(
+      `SELECT token t FROM cos_owner_questions WHERE case_id='C-1' AND superseded_at IS NOT NULL`)
+      .all() as Array<{ t: string | null }>
+    expect(retired.every(r => r.t === null)).toBe(true)
+  })
+})
