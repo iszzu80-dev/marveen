@@ -76,15 +76,44 @@ const norm = (s: string): string =>
   s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
 
 /** Requirement shapes this gate recognises. Each is a narrow vocabulary rather
- *  than a general matcher, for the reason in the header. */
-const DOCUMENT_REQUEST = [
+ *  than a general matcher, for the reason in the header.
+ *
+ *  TIGHTENED 2026-09-02, from a false suppression caught in the live measurement
+ *  BEFORE this shipped. The first version matched any requirement containing the
+ *  word "dokumentum", and it therefore suppressed:
+ *
+ *    "A Tárhelyen érkezett NAV 'Adózói rendelkezés' dokumentum átvétele és
+ *     ellenőrzése."
+ *
+ *  That is not a request for text we hold. It is an ACTION only Istvan can take,
+ *  on a portal we cannot reach, and suppressing it would have silently removed
+ *  a real obligation from his queue -- the precise failure this module's header
+ *  calls invisible from outside.
+ *
+ *  So a document-content request now needs BOTH halves, and must not be an
+ *  action: a document noun, AND a word that asks for its CONTENT, AND no verb
+ *  that makes the requirement something to DO. */
+const DOCUMENT_NOUN = [
   'dokumentum', 'dokumentumok', 'melleklet', 'mellekletek', 'csatolt', 'csatolmany',
-  'document', 'documents', 'attachment', 'attached', 'szovege', 'kiolvasott',
+  'document', 'documents', 'attachment', 'attached', 'szerzodes', 'contract',
+]
+const CONTENT_WORD = [
+  'szovege', 'szoveget', 'szoveg', 'tartalma', 'tartalmat', 'kiolvasott', 'kiolvasas',
+  'text', 'content', 'extracted', 'wording',
+]
+/** A requirement that asks him to DO something is never satisfied by a stored
+ *  file, however complete our copy of it is. */
+const ACTION_VERB = [
+  'atvetel', 'atveve', 'ellenorzes', 'ellenorzese', 'alairas', 'alairni', 'benyujt',
+  'beküld', 'bekuld', 'letolt', 'feltolt', 'megrendel', 'kifizet', 'jovahagy',
+  'dontes', 'valassz', 'valasztas', 'intezkedes',
+  'sign', 'submit', 'upload', 'download', 'approve', 'decide', 'collect', 'verify',
 ]
 
 const isDocumentRequest = (req: string): boolean => {
   const n = norm(req)
-  return DOCUMENT_REQUEST.some(w => n.includes(w))
+  if (ACTION_VERB.some(w => n.includes(w))) return false
+  return DOCUMENT_NOUN.some(w => n.includes(w)) && CONTENT_WORD.some(w => n.includes(w))
 }
 
 interface DocRow {

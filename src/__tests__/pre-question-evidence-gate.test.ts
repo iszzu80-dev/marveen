@@ -181,6 +181,31 @@ describe('pre-question evidence gate', () => {
     }).suppress).toBe(false)
   })
 
+
+  it('REGRESSION (live, 2026-09-02): "átvétele és ellenőrzése" is an ACTION, not a request for text we hold', () => {
+    // Caught by measuring the gate against the live store before it shipped.
+    // The first vocabulary matched the bare word "dokumentum" and suppressed
+    // this, which would have silently removed a real obligation from his queue:
+    // the document is on a government portal we cannot reach, and only he can
+    // collect it. A stored email thread about the notification is not the deed.
+    const req = "A Tárhelyen érkezett NAV 'Adózói rendelkezés' dokumentum átvétele és ellenőrzése."
+    seedCase('C-NAV', req)
+    addDocument('C-NAV', { text: GOOD_TEXT, state: 'EXTRACTED_VALID', filename: 'thread.txt' })
+    const v = evaluatePreQuestionEvidence(getDb(), {
+      namespace: 'personal', caseId: 'C-NAV', requirements: [req],
+    })
+    expect(v.suppress).toBe(false)
+    expect(v.verdicts[0].reason).toContain('no resolver recognised')
+  })
+
+  it('a document-CONTENT request still needs both halves: the noun and the ask for its text', () => {
+    seedCase('C-HALF', 'A csatolt dokumentum')       // noun only, no content word
+    addDocument('C-HALF', { text: GOOD_TEXT, state: 'EXTRACTED_VALID' })
+    expect(evaluatePreQuestionEvidence(getDb(), {
+      namespace: 'personal', caseId: 'C-HALF', requirements: ['A csatolt dokumentum'],
+    }).suppress).toBe(false)
+  })
+
   it('suppression is all-or-nothing: one unresolved requirement still asks', () => {
     seedCase('C-MIX', REQ)
     addDocument('C-MIX', { text: GOOD_TEXT, state: 'EXTRACTED_VALID' })
