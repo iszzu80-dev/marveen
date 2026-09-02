@@ -237,14 +237,36 @@ export const POLICY_FILES: readonly string[] = [
   'costops-pricing.json', 'costops-render-pricing.json', 'costops-fx.json',
   'billing-map.json',
   'auto-restart.json',
+  // Classified 2026-09-02. Both are operator-authored and behaviour-defining:
+  // which agents the fleet is supposed to be running, and which model each of
+  // them runs on. A restore without them brings back a fleet that is the wrong
+  // shape, on the wrong models, silently.
+  'agents-desired.json',
+  'runtime-model-overlay.json',
 ]
 
 /** Deliberately excluded: these ARE the secrets, and §8.2 puts them under a
  *  separate policy. Named here so the absence is visible in the manifest rather
- *  than looking like a file nobody thought about. */
+ *  than looking like a file nobody thought about.
+ *
+ *  The connector credentials below were UNCLASSIFIED until 2026-09-02. That was
+ *  not merely untidy: unclassified and excluded-secret produce the same backup
+ *  content, so the manifest could not distinguish "we decided not to back this
+ *  up" from "nobody looked at it". The owner's instruction was explicit —
+ *  a credential's sensitivity must be stated even when the file is encrypted at
+ *  rest, and it must not stay UNKNOWN by omission. */
 export const SECRET_FILES: readonly string[] = [
   'vault.json', '.vault-key', '.dashboard-token', '.claude-oauth-token',
   'test-user-creds.json',
+  // Connector / provider credentials (classified 2026-09-02).
+  '.google-private-client.json', '.google-private-creds.json',
+  '.google-zst-client.json', '.google-zst-creds.json',
+  '.google-tasks-creds.json',
+  '.cos-telegram-bot.json', '.cos-radar-bot.json',
+  '.nav-test-credentials.json', '.nav-test-credentials-mgmt.json',
+  '.barion-eskuvo-sandbox.json',
+  '.twilio-handover.json',   // carries TWILIO_AUTH_TOKEN
+  '.github-token', '.deepseek-key',
 ]
 
 /** Recomputable runtime state: a restore does not need it and a backup of it
@@ -258,6 +280,28 @@ export function isRuntimeState(name: string): boolean {
     || /^terminal-/.test(name)
     || /snapshot/.test(name)
     || /^command-task-health\.json$/.test(name)
+    // Watermarks for the PR-comment watcher: a seen-list and a per-PR
+    // last-seen id. Both are rebuilt by the next poll, so a backup of them
+    // would restore a stale position rather than a useful one.
+    || /^\.pr-comment-/.test(name)
+}
+
+/** Files whose CONTENT is a credential, for the permission control to check.
+ *
+ *  This is deliberately a PATTERN and not the hand-written list the maintenance
+ *  script used to carry. That list named four paths — the database, the store
+ *  directory, the dashboard token and the backup directory — and reported
+ *  "checked 4, fixed []" while `.vault-key` sat at mode 0664. A security control
+ *  whose coverage is a literal list is only as good as the last person who
+ *  remembered to extend it, and the same file's own E17 comment already says
+ *  what that failure looks like: success reported for something never examined.
+ *
+ *  Everything in SECRET_FILES is covered by name; the pattern catches the next
+ *  credential to be dropped into the store before anybody classifies it. */
+export function looksLikeCredentialFile(name: string): boolean {
+  if ((SECRET_FILES as readonly string[]).includes(name)) return true
+  return /(^|[.\-_])(creds?|credentials?|secret|token|key|vault|oauth)([.\-_]|$)/i.test(name)
+    || /-bot\.json$/.test(name)
 }
 
 export type PolicyFileStatus = 'BACKED_UP' | 'MISSING' | 'EXCLUDED_SECRET' | 'RUNTIME_STATE' | 'UNCLASSIFIED'

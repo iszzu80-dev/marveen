@@ -23,13 +23,13 @@
  *
  * Exit code 1 on any failure so a scheduler can tell.
  */
-import { existsSync, mkdirSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { getDb, initDatabase } from '../src/db.js'
 import { assertStorePermissions, anyTooOpen, missingPaths } from '../src/cos/store-security.js'
 import {
   createEncryptedBackup, pruneBackups, verifyEncryptedBackup,
-  createPolicyBackup, prunePolicyBackups, verifyPolicyBackup,
+  createPolicyBackup, prunePolicyBackups, verifyPolicyBackup, looksLikeCredentialFile,
 } from '../src/cos/backup.js'
 import {
   purgeExpiredAttachmentContent, deletedCasesEligibleForPurge, purgeExpiredEvidencePackets,
@@ -48,11 +48,27 @@ const report: Record<string, unknown> = { at: new Date(now * 1000).toISOString()
 // ── 1. store permissions ────────────────────────────────────────────────────
 // enforce:true — finding a world-readable case store and leaving it that way
 // would make this a report rather than a control.
+//
+// COVERAGE IS DERIVED, NOT LISTED (2026-09-02). This call used to name four
+// paths: the database, the store directory, the dashboard token and the backup
+// directory. It reported "checked 4, fixed []" every night while `.vault-key`
+// — the key that decrypts the vault — sat at mode 0664, along with three
+// connector credential files, an API key and a GitHub token. Nothing was
+// broken; the control simply never looked at them, which is the one answer a
+// security check must never give quietly. The fix is to derive the entry list
+// from the store's actual contents so a new credential is covered the moment it
+// lands, rather than when somebody remembers to add a line here.
+const credentialEntries = readdirSync('store')
+  .filter(n => looksLikeCredentialFile(n))
+  .filter(n => statSync(join('store', n)).isFile())
+  .map(n => ({ path: join('store', n), kind: 'file' as const }))
+
 const perms = assertStorePermissions([
   { path: DB_PATH, kind: 'file' },
   { path: 'store', kind: 'dir' },
   { path: 'store/.dashboard-token', kind: 'file' },
   { path: BACKUP_DIR, kind: 'dir' },
+  ...credentialEntries,
 ], { enforce: true })
 report.permissions = { checked: perms.length, fixed: perms.filter(p => p.fixed).map(p => p.path) }
 if (anyTooOpen(perms)) problems.push(`still over-open after enforcement: ${perms.filter(p => p.tooOpen).map(p => p.path).join(', ')}`)
