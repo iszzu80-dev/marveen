@@ -117,17 +117,31 @@ describe('stale-evidence regeneration', () => {
   })
 
   it('BOUNDED: after the third stale it stops regenerating and becomes a visible failure', () => {
+    // THE BOUND IS ASSERTED AS A NUMBER, NOT AS THE CONSTANT.
+    //
+    // The first version of this test looped `i < MAX_STALE_RETRIES` and checked
+    // the result against MAX_STALE_RETRIES. Raising the constant to 9999
+    // therefore left it green -- the detector matched its own parameter, so the
+    // one thing it existed to pin was the one thing it could not see. Caught by
+    // the mutation run, which is what that run is for.
+    expect(MAX_STALE_RETRIES).toBe(3)
+
     const db = getDb()
     const h = seedQuestion('C-1')
-    for (let i = 0; i < MAX_STALE_RETRIES; i++) {
-      markQuestionStaleBlocked(db, { caseId: 'C-1', questionHash: h, error: 'STALE_EVIDENCE: x' })
-    }
+    // Two strikes: still being regenerated.
+    markQuestionStaleBlocked(db, { caseId: 'C-1', questionHash: h, error: 'STALE_EVIDENCE: x' })
+    markQuestionStaleBlocked(db, { caseId: 'C-1', questionHash: h, error: 'STALE_EVIDENCE: x' })
+    expect(staleBlockedCases(db).some(c => c.caseId === 'C-1')).toBe(true)
+    expect(exhaustedStaleQuestions(db)).toHaveLength(0)
+
+    // The third is the bound.
+    markQuestionStaleBlocked(db, { caseId: 'C-1', questionHash: h, error: 'STALE_EVIDENCE: x' })
     // No longer offered for regeneration...
     expect(staleBlockedCases(db).some(c => c.caseId === 'C-1')).toBe(false)
     // ...and LOUD instead of quietly retrying for ever.
     const ex = exhaustedStaleQuestions(db)
     expect(ex.map(e => e.caseId)).toContain('C-1')
-    expect(ex[0].retryCount).toBe(MAX_STALE_RETRIES)
+    expect(ex[0].retryCount).toBe(3)
   })
 
   it('a successful delivery lifts the block but does NOT reset the counter', () => {
