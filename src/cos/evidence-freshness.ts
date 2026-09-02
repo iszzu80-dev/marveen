@@ -56,17 +56,49 @@ export function evaluateEvidenceFreshness(
   const current = currentEvidenceWatermark(db, watermark.domain, watermark.caseId)
   const reasons: string[] = []
   if (current.caseVersion === null) reasons.push('case no longer exists')
-  if (current.caseVersion !== null && current.caseVersion !== watermark.caseVersion) {
+
+  // RESTORE-AWARE VERSION COMPARISON (owner ruling, 2026-09-02).
+  //
+  // `case_version` is NOT a globally monotonic counter. A case restored after an
+  // incident starts a new canonical lineage and its version resets, so a
+  // watermark taken before the restore carries a HIGHER number than the case
+  // now has. The equality test read that as "the case moved" and refused
+  // delivery for ever: PRI-HOME-2026-004 sat at 223 -> 2 and was never going to
+  // pass, because every run it could point at belonged to the old lineage.
+  //
+  // The owner's ruling: the CURRENT canonical state is the authority, an old
+  // lineage's run cannot prove the current one's freshness, and where a reliable
+  // globally monotonic watermark exists it is preferred over the raw version.
+  //
+  // `event_id` is that watermark. It is an INTEGER PRIMARY KEY on an append-only
+  // table, a restore ADDS events rather than removing them, and the live numbers
+  // show it climbing straight through the incident (423 -> 517 across the
+  // restore). So when the version has moved BACKWARDS -- the signature of a
+  // restore -- the version says nothing usable and the event stream decides
+  // alone. Within a lineage (equal, or moved forward) both checks stand.
+  //
+  // This does NOT weaken the gate. An old pre-restore packet still fails, on the
+  // event signal, because the restore's own events land after it. What it stops
+  // is failing on the NUMBER when the number is not comparable.
+  const restored = current.caseVersion !== null && watermark.caseVersion > current.caseVersion
+  if (restored) {
+    reasons.push(
+      `NOTE lineage: case version ${watermark.caseVersion} -> ${current.caseVersion} is a restore, ` +
+      `not a move; freshness decided on the event watermark alone`,
+    )
+  } else if (current.caseVersion !== null && current.caseVersion !== watermark.caseVersion) {
     reasons.push(`case version moved ${watermark.caseVersion} -> ${current.caseVersion}`)
   }
   if (current.maxEventSeq > watermark.evidenceMaxEventSeq) {
     reasons.push(`new case event after evidence watermark: ${watermark.evidenceMaxEventSeq} -> ${current.maxEventSeq}`)
   }
+  // A NOTE is an explanation, never a refusal. Only real reasons make it stale.
+  const blocking = reasons.filter(r => !r.startsWith('NOTE '))
   return {
-    fresh: reasons.length === 0,
+    fresh: blocking.length === 0,
     currentCaseVersion: current.caseVersion,
     currentMaxEventSeq: current.maxEventSeq,
-    reasons: reasons.length ? reasons : ['evidence covers current case version and event stream'],
+    reasons: blocking.length ? reasons : (reasons.length ? reasons : ['evidence covers current case version and event stream']),
   }
 }
 
