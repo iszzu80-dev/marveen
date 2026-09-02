@@ -22,6 +22,7 @@ import {
   recordOwnerAnswer,
 } from '../cos/owner-question.js'
 import { looksLikeAQuestionBack, loadCosBotConfig } from '../cos/cos-telegram.js'
+import { handleOwnerUpdate, OWNER_ID } from '../cos/owner-inbox.js'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 
@@ -73,12 +74,52 @@ describe('held owner messages: the loop closes', () => {
       .filter(l => !/rejected/.test(l))
     expect(unguarded.length).toBeGreaterThan(0) // the shape still exists
     expect(returns.length).toBeGreaterThan(3)
+    // 2026-09-02, Question Channel Recovery. The ambiguous exit now calls
+    // `recordUnattributedResponse` instead of `holdOwnerMessage`. That is the
+    // SAME hold — it writes the identical row to cos_channel_held — plus the
+    // state and the candidate tokens that make an attribution failure visible
+    // as a failure instead of as five slots that never empty.
+    //
+    // So the accepted set is widened, and NOT the property. To make sure this
+    // widening cannot become the hole the header warns about, the source scan is
+    // now backed by the behavioural assertion below: the ambiguous branch is
+    // actually driven, and the row is actually there.
+    const HOLDERS = ['holdOwnerMessage', 'recordUnattributedResponse']
     for (const kind of ['notAnAnswer', 'ambiguous', 'unmatched']) {
       const at = body.indexOf(`result.${kind}++`)
       expect(at).toBeGreaterThan(-1)
       // The nearest preceding statement of substance must be a hold.
-      expect(body.slice(Math.max(0, at - 400), at)).toContain('holdOwnerMessage')
+      const before = body.slice(Math.max(0, at - 600), at)
+      expect(HOLDERS.some(h => before.includes(h))).toBe(true)
     }
+  })
+
+  it('BEHAVIOURAL: the ambiguous exit really writes the words, whatever the function is called', () => {
+    // The scan above reads source text. This one drives the branch and looks in
+    // the table, so renaming the holder cannot quietly empty the guarantee.
+    const db = getDb()
+    for (const id of ['H-1', 'H-2']) {
+      createCase(db, { caseId: id, title: `T ${id}`, caseType: 'ADMIN', status: 'NEW' }, T0)
+      db.prepare(
+        `INSERT INTO cos_owner_questions
+           (case_id, domain, question_hash, question_text, asked_at, channel, token)
+         VALUES (?, 'personal', ?, 'k?', ?, 'telegram:cos', ?)`,
+      ).run(id, `hash-${id}`, T0, `Q${id === 'H-1' ? 'AAAA' : 'BBBB'}`)
+    }
+    const result = {
+      channel: 'telegram:cos', read: 0, matched: 0, unmatched: 0,
+      ambiguous: 0, rejected: 0, notAnAnswer: 0,
+    }
+    handleOwnerUpdate(db, 'telegram:cos', {
+      updateId: 1, fromId: OWNER_ID, chatId: '8942301795', messageId: 900,
+      text: 'Én voltam, rendben van',
+    }, result)
+
+    expect(result.ambiguous).toBe(1)
+    const row = db.prepare(`SELECT text, state FROM cos_channel_held`).get() as
+      { text: string; state: string } | undefined
+    expect(row?.text).toBe('Én voltam, rendben van')
+    expect(row?.state).toBe('UNATTRIBUTED_RESPONSE')
   })
 
   it('the detector is crude in BOTH directions — which is why holding matters', () => {

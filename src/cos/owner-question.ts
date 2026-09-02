@@ -841,8 +841,15 @@ export function askPendingOwnerQuestions(
           opts.channel?.channel ?? null, opts.channel?.target ?? null,
           row.progression_run_id ?? null)
 
-    createAgentMessage('cos-reader', 'marveen', question.text, 'cos-owner-question')
-    appendDailyLog('marveen', `## COS kerdes Istvannak\n${question.text}`)
+    // THE TOKEN IS ASSIGNED AFTER THE ROW EXISTS AND BEFORE THE TEXT GOES OUT.
+    // That order is the whole contract: a message carrying a token whose row was
+    // never written would invite an answer nothing can bind, which is the exact
+    // failure this replaces.
+    const token = ensureQuestionToken(db, row.case_id, question.hash)
+    const outbound = question.text + replyContractLine(token)
+
+    createAgentMessage('cos-reader', 'marveen', outbound, 'cos-owner-question')
+    appendDailyLog('marveen', `## COS kerdes Istvannak (${token})\n${outbound}`)
     result.asked++
     if (!replacesOwn) netAdded++
   }
@@ -1103,13 +1110,115 @@ export function recordOwnerAnswer(
  *  A wrong attribution is worse than none: the wrong case gains a decision he
  *  never made, and the right one stays open. So ambiguity is now reported, not
  *  resolved. */
+// ── THE CORRELATION TOKEN ───────────────────────────────────────────────────
+//
+// Owner decision, 2026-09-02, after the channel stood frozen for seventeen days.
+//
+// WHAT ACTUALLY FROZE IT. On 2026-08-16 an answer arrived reading "Én voltam,
+// rendben van". Five questions were open; the message named none of them; the
+// rule correctly refused to guess, held the words and asked back. Nothing came
+// back. Because an open question is never superseded to make room -- the right
+// promise -- the five slots stayed occupied and no question was answered for
+// seventeen days, while seventeen more queued behind them including three
+// blocking decisions.
+//
+// So the missing piece was never the refusal. It was that the owner had no way
+// to NAME a question. The token is that way: four hex characters he can type.
+//
+// Preference order the owner set, and the order matchAnswerTarget implements:
+//   A) channel-native reply/thread binding, when the transport offers one
+//   B) an explicit token
+//   C) semantic attribution ONLY when exactly one question could be meant
+const TOKEN_ALPHABET = /^Q[0-9A-F]{4,12}$/
+const TOKEN_MIN_LEN = 4
+const TOKEN_MAX_LEN = 12
+
+/** The token a hash would produce at a given length. Deterministic, so the same
+ *  row yields the same candidate on every machine and after every restart. */
+export function deriveQuestionToken(questionHash: string, len = TOKEN_MIN_LEN): string {
+  return `Q${questionHash.slice(0, len).toUpperCase()}`
+}
+
+/**
+ * The token for this question row, assigned once and never changed.
+ *
+ * Collisions are resolved by LENGTHENING, and the result is persisted, because
+ * a token whose length depends on what else is open would rename itself between
+ * two sends -- and the owner has already copied the old one into a message.
+ * Uniqueness is additionally enforced by a partial unique index, so this
+ * function being wrong cannot produce two questions with one name.
+ */
+export function ensureQuestionToken(
+  db: Database.Database, caseId: string, questionHash: string,
+): string {
+  const existing = db.prepare(
+    `SELECT token FROM cos_owner_questions WHERE case_id = ? AND question_hash = ?`,
+  ).get(caseId, questionHash) as { token: string | null } | undefined
+  if (existing?.token) return existing.token
+
+  for (let len = TOKEN_MIN_LEN; len <= TOKEN_MAX_LEN; len++) {
+    const candidate = deriveQuestionToken(questionHash, len)
+    const taken = db.prepare(
+      `SELECT 1 FROM cos_owner_questions
+        WHERE token = ? AND NOT (case_id = ? AND question_hash = ?)`,
+    ).get(candidate, caseId, questionHash)
+    if (taken) continue
+    db.prepare(
+      `UPDATE cos_owner_questions SET token = ? WHERE case_id = ? AND question_hash = ?`,
+    ).run(candidate, caseId, questionHash)
+    return candidate
+  }
+  // Twelve hex characters colliding means the hash itself repeated; that is a
+  // different bug and must not be papered over with a random name.
+  throw new Error(`no free token for question ${caseId}/${questionHash}`)
+}
+
+/** The line appended to every outbound question so the reply has a contract. */
+export function replyContractLine(token: string): string {
+  return `\n\nVálasz: ${token}: <a válaszod>`
+}
+
+/**
+ * Find the token the owner named, if any.
+ *
+ * Deliberately strict about SHAPE (Q + 4-12 hex) and deliberately loose about
+ * decoration: "Válasz: Q33DB: nem kell", "q33db - nem kell" and a bare "Q33DB"
+ * all resolve. The strictness is what keeps an ordinary Hungarian sentence from
+ * accidentally naming a question; the looseness is what keeps the owner from
+ * having to remember a syntax at 7am.
+ *
+ * Returning a token is NOT the same as accepting it: the caller still has to
+ * find a row with that token, so a typo fails closed rather than binding to
+ * whatever was nearest.
+ */
+export function parseAnswerToken(text: string): string | null {
+  const m = /(?:^|[^0-9A-Za-z])([Qq][0-9A-Fa-f]{4,12})(?![0-9A-Za-z])/.exec(text)
+  if (!m) return null
+  const token = m[1].toUpperCase()
+  return TOKEN_ALPHABET.test(token) ? token : null
+}
+
+/** Tokens of the questions currently open on a channel, oldest first — the
+ *  candidate list a disambiguation prompt has to offer. */
+export function openQuestionTokens(
+  db: Database.Database, channel: string,
+): Array<{ token: string; caseId: string; domain: string; title: string | null }> {
+  return db.prepare(
+    `SELECT token, case_id AS caseId, domain, question_text AS title
+       FROM cos_owner_questions
+      WHERE channel = ? AND answered_at IS NULL AND superseded_at IS NULL
+        AND token IS NOT NULL
+      ORDER BY asked_at ASC`,
+  ).all(channel) as never
+}
+
 export type AnswerTarget = { caseId: string; domain: string } | 'AMBIGUOUS' | null
 
 export function matchAnswerTarget(
   db: Database.Database,
-  input: { channel: string; chatId?: string; replyToMessageId?: number },
+  input: { channel: string; chatId?: string; replyToMessageId?: number; text?: string },
 ): AnswerTarget {
-  // An explicit Telegram reply names the question exactly — no ambiguity to
+  // (A) An explicit Telegram reply names the question exactly — no ambiguity to
   // resolve, however many are open.
   if (input.replyToMessageId && input.chatId) {
     const exact = db.prepare(
@@ -1119,6 +1228,25 @@ export function matchAnswerTarget(
       { caseId: string; domain: string } | undefined
     if (exact) return exact
   }
+  // (B) An explicit token. Scoped to the channel it arrived on for the same
+  // reason the reply binding is: a token typed in one chat must not close a
+  // question the other chat is still displaying.
+  //
+  // A token that matches NOTHING OPEN is not treated as "no token given" —
+  // falling through to the single-open branch would let a typo answer an
+  // unrelated question, which is precisely the mis-attribution this whole
+  // mechanism exists to prevent. It returns AMBIGUOUS so the words are kept and
+  // the owner is asked again.
+  const named = input.text ? parseAnswerToken(input.text) : null
+  if (named) {
+    const hit = db.prepare(
+      `SELECT case_id AS caseId, domain FROM cos_owner_questions
+        WHERE channel = ? AND token = ? AND answered_at IS NULL AND superseded_at IS NULL`,
+    ).get(input.channel, named) as { caseId: string; domain: string } | undefined
+    return hit ?? 'AMBIGUOUS'
+  }
+  // (C) Semantic attribution, and only where it cannot be wrong: exactly one
+  // question is open, so there is nothing to confuse it with.
   const open = db.prepare(
     `SELECT case_id AS caseId, domain FROM cos_owner_questions
       WHERE channel = ? AND answered_at IS NULL AND superseded_at IS NULL
@@ -1127,6 +1255,86 @@ export function matchAnswerTarget(
   if (open.length === 0) return null
   if (open.length === 1) return open[0]
   return 'AMBIGUOUS'
+}
+
+/**
+ * An answer arrived and we could not tell which question it answers.
+ *
+ * THE ONE INVARIANT: this is a LOCAL data state, never a channel-wide lock. No
+ * question is marked answered, no capacity slot changes, no producer stops. The
+ * seventeen-day freeze happened because an attribution failure was allowed to
+ * become the channel's state; recording it as a row about ONE MESSAGE is the
+ * structural fix, not a nicer error message.
+ *
+ * The candidate tokens are frozen INTO THE ROW at the moment of the failure, so
+ * a disambiguation prompt written later asks about the questions that were
+ * actually open when he wrote, rather than whatever is open when somebody
+ * finally looks.
+ */
+export function recordUnattributedResponse(
+  db: Database.Database,
+  input: { channel: string; chatId?: string; messageId?: number; text: string; now?: number },
+): { candidateTokens: string[] } {
+  const now = input.now ?? Math.floor(Date.now() / 1000)
+  const candidates = openQuestionTokens(db, input.channel).map(q => q.token)
+  db.prepare(
+    `INSERT INTO cos_channel_held
+       (channel, chat_id, message_id, text, reason, received_at, state, candidate_tokens)
+     VALUES (?, ?, ?, ?, ?, ?, 'UNATTRIBUTED_RESPONSE', ?)
+     ON CONFLICT (channel, message_id) DO UPDATE
+       SET state = 'UNATTRIBUTED_RESPONSE',
+           candidate_tokens = excluded.candidate_tokens`,
+  ).run(
+    input.channel, input.chatId ?? null, input.messageId ?? null, input.text,
+    `valasz, de nem hozzarendelheto: ${candidates.length} nyitott kerdes, es az uzenet egyiket sem nevezte meg`,
+    now, JSON.stringify(candidates),
+  )
+  return { candidateTokens: candidates }
+}
+
+/** The one-line ask-back for an unattributed answer. Names the tokens, so the
+ *  next message can be one word plus a token. */
+export function buildDisambiguationPrompt(candidateTokens: string[]): string {
+  if (candidateTokens.length === 0) {
+    return 'Kaptam egy valaszt, de nincs nyitott kerdes, amire vonatkozhatna. Felirtam, nem veszett el.'
+  }
+  return [
+    'Megvan a valaszod, de nem tudom, melyik kerdesre. Nem talalgatok, mert egy rossz hozzarendeles',
+    'a te szavaidat tenne egy olyan ugyre, amit nem is emlitettel.',
+    `Nyitott kerdesek: ${candidateTokens.join(', ')}`,
+    'Ird ujra igy: "Valasz: <TOKEN>: ..." -- a szoveged megvan, nem kell ujragepelned.',
+  ].join('\n')
+}
+
+/**
+ * Surface an existing open question again, under the SAME identity.
+ *
+ * NOT a new question: no row is created, no capacity slot is consumed, the hash
+ * and the token do not move. The owner was explicit that an old question must
+ * not expire but must be re-raisable, and that supersede is for a genuinely
+ * changed ask — never for freeing a slot.
+ */
+export function restateQuestion(
+  db: Database.Database,
+  input: { caseId: string; questionHash: string; now?: number },
+): { token: string; restateCount: number; text: string } | null {
+  const now = input.now ?? Math.floor(Date.now() / 1000)
+  const row = db.prepare(
+    `SELECT question_text, token, restate_count FROM cos_owner_questions
+      WHERE case_id = ? AND question_hash = ? AND answered_at IS NULL AND superseded_at IS NULL`,
+  ).get(input.caseId, input.questionHash) as
+    { question_text: string; token: string | null; restate_count: number } | undefined
+  if (!row) return null
+  const token = row.token ?? ensureQuestionToken(db, input.caseId, input.questionHash)
+  // asked_at is NOT touched: it is when the question was first put to him, and
+  // moving it would erase the age that makes a three-week-old blocking decision
+  // visible as one.
+  db.prepare(
+    `UPDATE cos_owner_questions
+        SET restated_at = ?, restate_count = restate_count + 1
+      WHERE case_id = ? AND question_hash = ?`,
+  ).run(now, input.caseId, input.questionHash)
+  return { token, restateCount: (row.restate_count ?? 0) + 1, text: row.question_text }
 }
 
 

@@ -2047,8 +2047,38 @@ export function initProgressionSchema(db: Database.Database): void {
     // Nullable for the same reason as `channel`: rows asked before this column
     // existed have no run to name, and inventing one would fabricate provenance.
     progression_run_id: 'TEXT',
+    // THE CORRELATION TOKEN (owner decision 2026-09-02, Question Channel
+    // Recovery). A short, human-typeable name for THIS question row.
+    //
+    // Why a stored column and not a derived string. The token has to survive a
+    // restart and never move, and it also has to be unique. Derive-on-read gives
+    // you the first and loses the second: resolving a collision needs to know
+    // what other tokens exist, so the same row could render as Q6C7 today and
+    // Q6C73 tomorrow depending on what else happened to be open. A token that
+    // renames itself is worse than no token, because the owner has already
+    // copied the old one into a message.
+    //
+    // So it is assigned ONCE, at first ask, checked against every token ever
+    // issued, and then it is that row's name for good.
+    token: 'TEXT',
+    // RESTATEMENT (owner decision 2026-09-02). An old open question does not
+    // expire, but it may be surfaced again under the SAME identity. That is a
+    // reminder, not a new question: it must not open a row and must not take a
+    // second capacity slot. Recorded here so "we reminded him four times" is a
+    // fact rather than an impression, and so a restate can be rate-limited
+    // without inventing a new ask.
+    restated_at: 'INTEGER',
+    restate_count: 'INTEGER NOT NULL DEFAULT 0',
   })
   db.exec(`CREATE INDEX IF NOT EXISTS idx_coq_open ON cos_owner_questions(answered_at, asked_at)`)
+  // UNIQUE, so "a token is never reused for another question" is enforced by the
+  // database rather than by the function that happens to allocate them. Partial
+  // on NOT NULL: every question asked before 2026-09-02 has no token, and there
+  // are 53 of them — a plain UNIQUE would make them collide on NULL in some
+  // engines and, more importantly, backfilling tokens onto already-sent messages would
+  // invent a reply contract those messages never carried.
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_coq_token
+             ON cos_owner_questions(token) WHERE token IS NOT NULL`)
 
   // ── cos_channel_outbox ───────────────────────────────────────────────────
   //
@@ -2107,6 +2137,22 @@ export function initProgressionSchema(db: Database.Database): void {
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_held_open ON cos_channel_held(resolved_at, received_at)`)
+  // QUESTION CHANNEL RECOVERY (owner decision 2026-09-02).
+  //
+  // `state` separates the two reasons a message sits here, which used to look
+  // identical: HELD means nobody has dealt with it yet; UNATTRIBUTED_RESPONSE
+  // means it WAS an answer and we deliberately refused to guess which question
+  // it answered. The distinction is the owner's requirement that an attribution
+  // failure be a LOCAL data state and never a channel-wide lock — and you cannot
+  // report a state you did not record.
+  //
+  // `candidate_tokens` keeps the tokens that were open at the moment of the
+  // failure, so the disambiguation prompt asks about the questions that were
+  // actually candidates rather than whatever is open when somebody looks later.
+  ensureColumns(db, 'cos_channel_held', {
+    state: `TEXT NOT NULL DEFAULT 'HELD'`,
+    candidate_tokens: 'TEXT',
+  })
   db.exec(`CREATE INDEX IF NOT EXISTS idx_cep_conflict ON case_evidence_packets(conflict_reason, created_at)`)
 
   // ── Checkpoint E.5 (card 59c06cbc): structured escalation records ──────
