@@ -306,3 +306,28 @@ describe('the Reader is handed the dossier documents, not only the column ones',
     expect(docRefs('umbrella')).toEqual([])
   })
 })
+
+describe('the relation map survives a full packet', () => {
+  beforeEach(() => { initDatabase(':memory:'); newCase('umbrella') })
+
+  it('the dossier is not the half that falls off the end when documents arrive', () => {
+    linkThread('umbrella', T1); linkThread('umbrella', T2)
+    // Fill the packet well past its 40-item bound with documents.
+    for (let n = 0; n < 60; n++) {
+      const id = `doc-${n}`
+      getDb().prepare(
+        `INSERT INTO cos_documents (document_id, namespace, case_id, source, source_ref, filename,
+           mime_type, sha256, doc_kind, extracted_text, sensitivity, external_share_allowed, created_at, updated_at)
+         VALUES (@id, 'personal', 'umbrella', 'email', 'x', @fn, 'text/plain', @id, 'other', 'x',
+           'PERSONAL', 0, @now, @now)`,
+      ).run({ id, fn: `${id}.txt`, now: NOW })
+    }
+    const ctx = buildCaseContext(getDb(), 'personal', 'umbrella', NOW)
+    const sources = ctx.items.filter((i) => i.kind === 'CASE_SOURCE')
+    expect(sources.map((i) => i.provenance.reference).sort())
+      .toEqual([`GMAIL_THREAD:${T1}`, `GMAIL_THREAD:${T2}`].sort())
+    // The bound still bites -- it is a real bound, and the drop is still named.
+    expect(ctx.items.length).toBeLessThanOrEqual(40)
+    expect(ctx.excluded.some((e) => /over the 40-item context bound/.test(e.reason))).toBe(true)
+  })
+})
