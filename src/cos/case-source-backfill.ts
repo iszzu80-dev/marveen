@@ -228,3 +228,89 @@ export function backfillCaseSources(
 
   return counts
 }
+
+/** A CASE ID WRITTEN INTO A FILENAME IS A LINK, and it was being thrown away.
+ *
+ *  Measured on the live store 2026-09-03, in the pool cluster: SEVEN photos
+ *  named `PRI-HOME-2026-005_20260621_medenceoldal_*` are stored against a
+ *  DIFFERENT case (case-iszzu80-19fcbd3b431aa3c0), because `cos_documents`
+ *  holds exactly one `case_id` and the row got the case the mail arrived on.
+ *  The file's own name says which matter it documents. Asked for "all the
+ *  photos of the pool case", the umbrella case could offer two of twenty-two.
+ *
+ *  This is a DETERMINISTIC_IDENTIFIER match, not a guess: the identifier is a
+ *  case id from this store, matched whole. It is therefore canonical -- and it
+ *  ADDS a link rather than moving anything. The document keeps the case its row
+ *  names; the graph simply stops pretending that is the only case it belongs to.
+ *
+ *  Two guards against a false link, both mattering:
+ *   - the id must match at a NON-ALPHANUMERIC boundary, so `PRI-HOME-2026-005`
+ *     cannot claim a file named for `PRI-HOME-2026-0051`;
+ *   - ids shorter than 8 characters are skipped entirely. A short id is the one
+ *     that turns up inside an unrelated word or a hash, and a wrong canonical
+ *     link is worse than a missing one because it reads as a fact.
+ */
+export function linkDocumentsByCaseIdentifier(
+  db: Database.Database, namespace: CaseNamespace, now: number, opts: BackfillOptions = {},
+): BackfillCounts {
+  const counts = emptyCounts()
+  const by = opts.discoveredBy ?? 'cos-doc-identifier-link'
+  const caseTable = namespace === 'personal' ? 'personal_cases' : 'zst_cases'
+
+  const caseIds = (db.prepare(`SELECT case_id FROM ${caseTable}`).all() as { case_id: string }[])
+    .map((r) => r.case_id).filter((id) => id.length >= 8)
+  // Longest first, so a case id that contains a shorter one is credited before
+  // the shorter one gets a chance to match the same text.
+  caseIds.sort((a, b) => b.length - a.length)
+
+  const docs = db.prepare(
+    `SELECT document_id, case_id, filename, source_ref FROM cos_documents WHERE namespace = ?`,
+  ).all(namespace) as { document_id: string; case_id: string | null; filename: string | null; source_ref: string | null }[]
+
+  const boundary = (haystack: string, needle: string): boolean => {
+    let from = 0
+    for (;;) {
+      const i = haystack.indexOf(needle, from)
+      if (i < 0) return false
+      const before = i === 0 ? '' : haystack[i - 1]
+      const after = haystack[i + needle.length] ?? ''
+      const ok = (c: string) => c === '' || !/[A-Za-z0-9]/.test(c)
+      if (ok(before) && ok(after)) return true
+      from = i + 1
+    }
+  }
+
+  for (const d of docs) {
+    for (const field of ['filename', 'source_ref'] as const) {
+      const text = d[field]
+      if (!text) continue
+      for (const caseId of caseIds) {
+        if (!boundary(text, caseId)) continue
+        // Already the document's own case: the row says it, nothing to add.
+        if (d.case_id === caseId) continue
+        if (opts.dryRun) {
+          const existing = db.prepare(
+            `SELECT link_state FROM case_sources
+              WHERE namespace=? AND case_id=? AND source_type='DOCUMENT' AND source_ref=?`,
+          ).get(namespace, caseId, d.document_id) as { link_state: string } | undefined
+          tally(counts, `document.${field}`, {
+            linkId: '', state: 'CANONICAL',
+            outcome: !existing ? 'CREATED' : existing.link_state === 'CANONICAL' ? 'UNCHANGED' : 'UPGRADED',
+          })
+        } else {
+          tally(counts, `document.${field}`, linkCaseSource(db, {
+            namespace, caseId, sourceType: 'DOCUMENT', sourceRef: d.document_id,
+            linkMethod: 'DETERMINISTIC_IDENTIFIER',
+            evidence: `cos_documents.${field} ${JSON.stringify(text)} contains the case id ${caseId} `
+              + `(the row itself is filed under ${d.case_id ?? 'no case'})`,
+            discoveredBy: by,
+          }, now))
+        }
+        // One case per field: the longest match wins, and a file naming two
+        // cases in one filename is a case for a human, not for two links.
+        break
+      }
+    }
+  }
+  return counts
+}

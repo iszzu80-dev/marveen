@@ -31,6 +31,11 @@ export interface IntelligenceProjection {
    *  just ran, they are fixable, and a cycle that sees one should go red.
    *  Empty is the normal case. */
   anomalies: string[]
+  /** Commitments withheld from the owner's attention because the record says
+   *  the obligation is DISCHARGED. Counted, never silent: if this number grows
+   *  it means more closed work is being read, and if it ever hides something
+   *  real the count is where that shows. */
+  dischargedWithheld: number
   /** RECORD INTEGRITY FINDINGS: standing, historical defects in stored rows
    *  (a foreign object's status written onto a case event; a terminal row with
    *  no terminal event). Deliberately NOT anomalies.
@@ -101,14 +106,59 @@ export function projectIntelligence(
   }
   const cleanOpportunities = opportunities.filter((o) => !owed.has(o.caseId))
 
+  // A DISCHARGED OBLIGATION IS NOT A TASK, however new it is to the reader.
+  //
+  // Measured live on 2026-09-03, and it is why this exists: of 48 personal
+  // commitments, 9 were FULFILLED -- and all 9 were in the attention list. Every
+  // item the attention digest surfaced on its first three runs was a closed
+  // case. Two of them had a `next_action` that literally reads "Nincs további
+  // teendő" and "A biztonsági incidens lezárva"; the owner was being asked to do
+  // the sentence that says the matter is finished.
+  //
+  // The commitment projection reads closed cases ON PURPOSE -- it classifies the
+  // QUALITY of a closure (fulfilled, reopened, unevidenced), and it must see them
+  // to do that. The defect was one level out: the attention selector never asked
+  // for the classification before putting the item in front of a person.
+  //
+  // The gate is the RECORD, not the calendar. A date can be wrong about whether
+  // something still matters; "this obligation was discharged, here is the proof"
+  // cannot. So: FULFILLED (proved here), IMPORTED_CLOSURE (somebody else asserted
+  // it and we recorded the assertion) and SUPERSEDED (the work moved to another
+  // case) are withheld. OPEN, EXPIRED, REOPENED and UNKNOWN still surface --
+  // UNKNOWN especially, because "we cannot say it was done" is the one case where
+  // silence would be a real loss.
+  // CLOSED CLASSIFICATION IS NOT DELETED INFORMATION (owner ruling, 2026-09-03).
+  // The rule is about ONE surface: a discharged commitment must not be presented
+  // to the owner as an unfinished promise. It is not a global erasure. A case
+  // whose commitment is discharged still raises case-level attention on its own
+  // evidence, and IMPORTED_CLOSURE still speaks below, on the integrity surface,
+  // because "somebody else asserted this was done and we hold no local proof" is
+  // a real gap -- just not a task.
+  const DISCHARGED: ReadonlySet<string> = new Set(['FULFILLED', 'IMPORTED_CLOSURE', 'SUPERSEDED'])
+  const liveCommitments = commitments.filter((c) => !DISCHARGED.has(c.status))
+  const dischargedWithheld = commitments.length - liveCommitments.length
+
+  for (const c of commitments) {
+    if (c.status !== 'IMPORTED_CLOSURE') continue
+    integrityFindings.push(
+      `IMPORTED_CLOSURE ${c.caseId}: the case was imported already closed, so no LOCAL evidence of ` +
+      `fulfilment exists. Not an owner task -- the obligation is not presented as unfinished -- but ` +
+      `the absence of local proof is recorded here rather than lost.`,
+    )
+  }
+
   // A case may raise attention on its own evidence AND carry a commitment. When
   // both exist the commitment is the more specific statement, so the case-level
   // item stands down rather than saying the same thing twice.
-  const spokenFor = new Set(commitments.map((c) => c.caseId))
+  // NOTE the deliberate asymmetry: this uses the LIVE commitments, not all of
+  // them. A case whose commitment is discharged may still raise attention on its
+  // own evidence, and suppressing that because a FINISHED promise "already
+  // speaks for it" would silence the case twice over.
+  const spokenFor = new Set(liveCommitments.map((c) => c.caseId))
   const standaloneAttention = caseAttention.filter((a) => !spokenFor.has(a.caseId))
 
   const obligations: AttentionItem[] = [
-    ...commitments.map((c) => commitmentToAttention(c, now)),
+    ...liveCommitments.map((c) => commitmentToAttention(c, now)),
     ...decisions.map((d) => decisionToAttention(d, now)),
     ...standaloneAttention.map((a) => caseAttentionToAttention(a, now)),
   ]
@@ -131,6 +181,6 @@ export function projectIntelligence(
 
   return {
     commitments, decisions, opportunities: cleanOpportunities, caseAttention, attention,
-    anomalies, integrityFindings,
+    anomalies, integrityFindings, dischargedWithheld,
   }
 }

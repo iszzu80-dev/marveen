@@ -18,6 +18,7 @@
 // draft lands in the approval door like any other, and Istvan releases it.
 
 import type Database from 'better-sqlite3'
+import { caseThreadIds } from './case-sources.js'
 
 export interface FollowUpCandidate {
   caseId: string
@@ -73,7 +74,13 @@ export function followUpEligibility(
   if (!c) return { eligible: false, code: 'case_not_waiting', reason: `nincs ilyen ügy: ${caseId}` }
 
   // C's core restriction: an existing conversation, or nothing.
-  if (!c.gmail_thread_ids) {
+  //
+  // GRAPH CUTOVER, 2026-09-03: asked of the case-source graph, not of the
+  // `gmail_thread_ids` column. A case whose threads live only in the graph
+  // (every Sheet-migrated case, including the whole pool investigation) used to
+  // fail this test and be refused a follow-up for "no prior correspondence",
+  // while carrying up to eleven threads of it.
+  if (caseThreadIds(db, 'personal', caseId).threadIds.length === 0) {
     return { eligible: false, code: 'no_prior_conversation',
       reason: 'nincs korábbi levelezés — első megkeresést a rendszer sosem fogalmaz magától' }
   }
@@ -147,6 +154,58 @@ export function draftFollowUp(c: FollowUpCandidate): DraftedFollowUp {
   return { subject, body }
 }
 
+/** WHICH THREAD DOES A FOLLOW-UP GO INTO, now that a case can have several.
+ *
+ *  Until the graph existed this was `gmail_thread_ids[0]` -- defensible only
+ *  because the column never held a second element. It does now, so element zero
+ *  is an arbitrary choice with a real cost: a nudge delivered into the wrong
+ *  thread reads, to the person receiving it, as a letter about a different
+ *  matter entirely.
+ *
+ *  The rule is "where the conversation actually is": the thread with the most
+ *  recent known message, counting both what we ingested (`email_processing`)
+ *  and what we sent (`outbound_ledger.thread_ref`). One thread needs no
+ *  tie-break. Several threads with nothing to separate them is NOT resolved by
+ *  picking one -- it is reported as ambiguous and skipped, because a wrong
+ *  choice here is worse than no letter. */
+export function pickReplyThread(
+  db: Database.Database, caseId: string,
+): { threadId?: string; code?: string; reason?: string } {
+  const threads = caseThreadIds(db, 'personal', caseId).threadIds
+  if (threads.length === 0) {
+    return { code: 'no_prior_conversation', reason: 'nincs egyértelmű címzett vagy szál az ügyön' }
+  }
+  if (threads.length === 1) return { threadId: threads[0] }
+
+  const lastActivity = (threadId: string): number | null => {
+    const inbound = db.prepare(
+      `SELECT MAX(created_at) AS t FROM email_processing WHERE thread_id = ?`,
+    ).get(threadId) as { t: number | null }
+    let outbound: { t: number | null } = { t: null }
+    try {
+      outbound = db.prepare(
+        `SELECT MAX(COALESCE(applied_at, created_at)) AS t FROM outbound_ledger WHERE thread_ref = ?`,
+      ).get(threadId) as { t: number | null }
+    } catch { /* the ledger is optional on a fresh store */ }
+    const vals = [inbound?.t, outbound?.t].filter((v): v is number => typeof v === 'number')
+    return vals.length ? Math.max(...vals) : null
+  }
+
+  const scored = threads.map((t) => ({ t, at: lastActivity(t) }))
+    .filter((x): x is { t: string; at: number } => x.at !== null)
+    .sort((a, b) => b.at - a.at)
+
+  if (scored.length === 0) {
+    return { code: 'ambiguous_thread',
+      reason: `${threads.length} szál tartozik az ügyhöz és egyikről sincs helyben ismert üzenet — nem találgatunk, melyikbe menjen a levél` }
+  }
+  if (scored.length > 1 && scored[0].at === scored[1].at) {
+    return { code: 'ambiguous_thread',
+      reason: `${scored.length} szálon ugyanakkor volt az utolsó ismert üzenet — nem dönthető el, melyikben folyik a beszélgetés` }
+  }
+  return { threadId: scored[0].t }
+}
+
 /** Cases the system may draft a follow-up for right now, with the reasons for
  *  everything it left alone — a sweep that reports only what it did is
  *  indistinguishable from one that looked at nothing. */
@@ -175,16 +234,23 @@ export function sweepFollowUpCandidates(
   for (const r of rows) {
     const e = followUpEligibility(db, r.case_id, now)
     if (!e.eligible) { skipped.push({ caseId: r.case_id, code: e.code, reason: e.reason }); continue }
-    const thread = (() => { try { return (JSON.parse(r.gmail_thread_ids ?? '[]') as string[])[0] } catch { return undefined } })()
+    const pick = pickReplyThread(db, r.case_id)
     const recipient = (r.waiting_on ?? '').match(/[\w.+-]+@[\w.-]+/)?.[0]
-    if (!thread || !recipient) {
+    if (!pick.threadId || !recipient) {
       // The address must come from the case, never be inferred. A follow-up sent
       // to a guessed address is a new first contact, which is exactly what C
       // forbids.
-      skipped.push({ caseId: r.case_id, code: 'no_prior_conversation',
-        reason: 'nincs egyértelmű címzett vagy szál az ügyön' })
+      //
+      // And a case with SEVERAL threads and no way to tell which one the
+      // counterparty is in is not a case to guess about: `pickReplyThread`
+      // returns no thread and says why, rather than taking element zero. A
+      // follow-up in the wrong thread reads, to the recipient, as a letter
+      // about something else.
+      skipped.push({ caseId: r.case_id, code: pick.code ?? 'no_prior_conversation',
+        reason: pick.reason ?? 'nincs egyértelmű címzett vagy szál az ügyön' })
       continue
     }
+    const thread = pick.threadId
     eligible.push({
       caseId: r.case_id, title: r.title, recipient, threadId: thread,
       // The letter tells a REAL counterparty how long it has been since the

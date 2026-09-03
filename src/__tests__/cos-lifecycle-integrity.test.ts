@@ -190,3 +190,117 @@ describe('the three classes reach the commitment, not just the classifier', () =
     expect(p.anomalies).toEqual([])
   })
 })
+
+describe('a discharged obligation is not put in front of the owner', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  const commitmentCase = (id: string, nextAction: string) => {
+    createCase(getDb(), {
+      caseId: id, title: id, caseType: 'ADMIN', status: 'WAITING_EXTERNAL', actor: 'test',
+    } as never, NOW - 30 * DAY)
+    getDb().prepare(
+      `UPDATE personal_cases SET next_action=@a, next_action_owner='istvan', due_at=@d WHERE case_id=@id`,
+    ).run({ a: nextAction, d: NOW - 10 * DAY, id })
+  }
+
+  const inAttention = (caseId: string) => {
+    const p = projectIntelligence(getDb(), 'personal', NOW)
+    return [...p.attention.interrupt, ...p.attention.quiet]
+      .some((i) => (i.element as { caseId?: string }).caseId === caseId)
+  }
+
+  it('an OPEN overdue promise still reaches attention -- the control', () => {
+    commitmentCase('open-1', 'Indulás előtt ellenőrizni a vouchert')
+    expect(inAttention('open-1')).toBe(true)
+    expect(projectIntelligence(getDb(), 'personal', NOW).dischargedWithheld).toBe(0)
+  })
+
+  it('a FULFILLED promise does NOT, however new it is to the reader', () => {
+    // The live shape: a trip that happened, a case closed with a real event, and
+    // a leftover `next_action` that still reads like a task.
+    commitmentCase('done-1', 'Indulás előtt ellenőrizni a vouchert és az 1500 EUR kauciót')
+    transitionCase(getDb(), {
+      caseId: 'done-1', newStatus: 'COMPLETED', seenVersion: 1, actor: 'istvan',
+      reason: 'megtortent, lezarhato',
+    }, NOW - 5 * DAY)
+    const p = projectIntelligence(getDb(), 'personal', NOW)
+    expect(p.commitments.find((c) => c.caseId === 'done-1')!.status).toBe('FULFILLED')
+    expect(inAttention('done-1')).toBe(false)
+    // Withheld, NOT silently dropped: the count says one was held back.
+    expect(p.dischargedWithheld).toBe(1)
+  })
+
+  it('an UNKNOWN closure still surfaces -- "we cannot say it was done" must not go quiet', () => {
+    commitmentCase('orphan-1', 'Valamit el kell intezni')
+    getDb().prepare(`UPDATE personal_cases SET status='COMPLETED' WHERE case_id='orphan-1'`).run()
+    const p = projectIntelligence(getDb(), 'personal', NOW)
+    expect(p.commitments.find((c) => c.caseId === 'orphan-1')!.status).toBe('UNKNOWN')
+    expect(inAttention('orphan-1')).toBe(true)
+    expect(p.dischargedWithheld).toBe(0)
+  })
+})
+
+describe('lifecycle beats first-seen: a discharged promise is never an owner task', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  const fulfilledLongOverdue = (id: string) => {
+    createCase(getDb(), {
+      caseId: id, title: id, caseType: 'ADMIN', status: 'WAITING_EXTERNAL', actor: 'test',
+    } as never, NOW - 60 * DAY)
+    getDb().prepare(
+      `UPDATE personal_cases SET next_action='Indulas elott ellenorizni a vouchert',
+         next_action_owner='istvan', due_at=@d WHERE case_id=@id`,
+    ).run({ d: NOW - 45 * DAY, id })
+    transitionCase(getDb(), {
+      caseId: id, newStatus: 'COMPLETED', seenVersion: 1, actor: 'istvan', reason: 'megtortent',
+    }, NOW - 40 * DAY)
+  }
+
+  const ownerActionItems = (seen: { elementId: string }[] = []) => {
+    const p = projectIntelligence(getDb(), 'personal', NOW, seen as never)
+    return [...p.attention.interrupt, ...p.attention.quiet]
+  }
+
+  it('NOT an owner action when the reader has never seen it (firstSeen)', () => {
+    fulfilledLongOverdue('trip-1')
+    expect(ownerActionItems().some((i) => (i.element as { caseId?: string }).caseId === 'trip-1')).toBe(false)
+  })
+
+  it('NOT an owner action when the reader HAS seen it before either', () => {
+    fulfilledLongOverdue('trip-2')
+    const seen = [{ elementId: 'trip-2', band: 'ROUTINE', fingerprint: 'x', lastSurfacedAt: NOW - DAY }]
+    expect(ownerActionItems(seen as never).some(
+      (i) => (i.element as { caseId?: string }).caseId === 'trip-2')).toBe(false)
+  })
+
+  it('and the due date being long past does not resurrect it', () => {
+    fulfilledLongOverdue('trip-3')
+    const c = projectIntelligence(getDb(), 'personal', NOW).commitments.find((x) => x.caseId === 'trip-3')!
+    expect(c.status).toBe('FULFILLED')
+    expect(c.dueAt).toBeLessThan(NOW)
+    expect(ownerActionItems().some((i) => (i.element as { caseId?: string }).caseId === 'trip-3')).toBe(false)
+  })
+
+  it('an IMPORTED_CLOSURE is no owner task, but its missing local proof is still recorded', () => {
+    createCase(getDb(), {
+      caseId: 'imp-1', title: 'imp-1', caseType: 'ADMIN', status: 'WAITING_EXTERNAL', actor: 'test',
+    } as never, NOW - 30 * DAY)
+    getDb().prepare(
+      `UPDATE personal_cases SET next_action='valami', next_action_owner='istvan', due_at=@d WHERE case_id='imp-1'`,
+    ).run({ d: NOW - 10 * DAY })
+    getDb().prepare(
+      `INSERT INTO personal_case_events (case_id, case_version, actor, event_type, new_status, reason, source_system, created_at)
+       VALUES ('imp-1', 2, 'import', 'STATUS_CHANGED', 'COMPLETED', 'baseline import', 'drive-migration', ?)`,
+    ).run(NOW - 20 * DAY)
+    getDb().prepare(`UPDATE personal_cases SET status='COMPLETED' WHERE case_id='imp-1'`).run()
+    const p = projectIntelligence(getDb(), 'personal', NOW)
+    const c = p.commitments.find((x) => x.caseId === 'imp-1')!
+    if (c.status === 'IMPORTED_CLOSURE') {
+      expect([...p.attention.interrupt, ...p.attention.quiet]
+        .some((i) => (i.element as { caseId?: string }).caseId === 'imp-1')).toBe(false)
+      expect(p.integrityFindings.some((f) => f.startsWith('IMPORTED_CLOSURE imp-1'))).toBe(true)
+      // ...and it is NOT a run fault.
+      expect(p.anomalies).toEqual([])
+    }
+  })
+})

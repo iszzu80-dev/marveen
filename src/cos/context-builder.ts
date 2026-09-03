@@ -26,6 +26,7 @@
 // because "the Reader saw no calendar entries" and "there is no calendar
 // connector" lead to very different conclusions and must not look the same.
 import type Database from 'better-sqlite3'
+import { getCaseDossier } from './case-sources.js'
 import { CASE_SENSITIVITIES, type CaseSensitivity } from './schema.js'
 import { escalateSensitivity, coerceSensitivity } from './sensitivity.js'
 import { readDocumentBytes } from './cos-documents.js'
@@ -55,7 +56,7 @@ export interface ContextItem {
   /** CASE = the fields this system writes. CASE_INTAKE = title/description,
    *  which for an email-born case are the SENDER's words and are therefore
    *  carried separately and untrusted (§10.3, review #3 Ú-1). */
-  kind: 'CASE' | 'CASE_INTAKE' | 'CASE_EVENT' | 'EMAIL_THREAD' | 'DOCUMENT'
+  kind: 'CASE' | 'CASE_INTAKE' | 'CASE_EVENT' | 'EMAIL_THREAD' | 'DOCUMENT' | 'CASE_SOURCE'
   provenance: Provenance
   trust: TrustClass
   sensitivity: string
@@ -457,6 +458,48 @@ export function buildCaseContext(
       // Binary or undecodable content still yields the label form: a Reader
       // handed mojibake would report on the mojibake.
       content: documentContent(db, d),
+    })
+  }
+
+  // 4. THE DOSSIER ITSELF: what this case is made of, and WHY each piece is
+  //    part of it.
+  //
+  // Added with the graph cutover (2026-09-03). The Reader was already handed the
+  // documents and the events; what it could never see was the RELATION -- that
+  // this case owns two Gmail threads rather than one, that a thread it is
+  // reading is also claimed by a sibling case, or on what evidence any of that
+  // was decided. Answering the pool letter by hand required exactly that
+  // information and nothing else.
+  //
+  // CANONICAL links only. Candidates are deliberately withheld from the Reader's
+  // context: a guess presented next to established facts, in a list the model
+  // reasons over, is a guess that has been promoted by presentation. They are
+  // named in `excluded` instead, so their absence is visible rather than silent.
+  const dossier = getCaseDossier(db, namespace, caseId)
+  for (const link of dossier.canonical) {
+    items.push({
+      kind: 'CASE_SOURCE',
+      provenance: {
+        source: 'case-sources',
+        reference: `${link.sourceType}:${link.sourceRef}`,
+        retrievedAt: now,
+      },
+      // DELIBERATELY UNDERSTATED. The row is written by this system, so
+      // TRUSTED_CASE_FIELD would be literally accurate today -- but `evidence`
+      // is a free-text field that a future producer could fill from a subject
+      // line or a sender's own words, and the trust class is what decides
+      // whether text in it may be read as an instruction. Understating costs
+      // nothing (the item is still shown, still cited) and cannot be exploited.
+      trust: 'UNTRUSTED_SOURCE_DATA',
+      sensitivity,
+      content: `${link.sourceType} ${link.sourceRef} -- ${link.linkMethod}: ${link.evidence}`,
+    })
+  }
+  for (const cand of dossier.candidates) {
+    excluded.push({
+      reference: `${cand.sourceType}:${cand.sourceRef}`,
+      reason: `candidate link, not established (${cand.linkMethod}${
+        cand.confidence !== null ? `, confidence ${cand.confidence}` : ''}): ${cand.evidence}`,
     })
   }
 

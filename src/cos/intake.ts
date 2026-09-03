@@ -15,6 +15,7 @@
 // (heartbeat/LLM); this module executes it consistently and safely.
 
 import type Database from 'better-sqlite3'
+import { linkCaseSource, findCasesForSource } from './case-sources.js'
 import { createCase } from './case-store.js'
 import { claimMessage, localApply, excludeMessage, markDuplicate } from './email-ingest.js'
 import { effectiveSensitivity } from './sensitivity.js'
@@ -72,6 +73,30 @@ export interface IntakeResult {
 }
 
 function findActiveCaseByThread(db: Database.Database, threadId: string): { case_id: string } | undefined {
+  // GRAPH FIRST (cutover 2026-09-03). The case-source graph is the read source
+  // of truth for "which case is this thread about", and it is the only source
+  // that can answer for a case whose threads never reached the column -- every
+  // Sheet-migrated case, which is 21 of them carrying 55 threads.
+  //
+  // Only CANONICAL links are consulted. A semantic candidate must never route a
+  // live incoming message: that would canonicalise a guess by acting on it,
+  // which is precisely what the CANDIDATE state exists to prevent.
+  //
+  // Several canonical cases can claim one thread -- six threads in the live
+  // store do. The most recently updated OPEN case wins, deliberately and not by
+  // accident of row order: an old case kept alive by a shared thread should not
+  // capture a reply that belongs to the matter currently in motion.
+  const claims = findCasesForSource(db, 'personal', 'GMAIL_THREAD', threadId)
+  if (claims.length) {
+    const open = db.prepare(
+      `SELECT case_id FROM personal_cases
+        WHERE case_id IN (${claims.map(() => '?').join(',')})
+          AND archived_at IS NULL AND status NOT IN ('COMPLETED','CANCELLED','ARCHIVED')
+        ORDER BY updated_at DESC LIMIT 1`,
+    ).get(...claims.map((c) => c.caseId)) as { case_id: string } | undefined
+    if (open) return open
+  }
+
   const byCase = db.prepare(
     `SELECT case_id FROM personal_cases
      WHERE gmail_thread_ids LIKE ? AND archived_at IS NULL
@@ -92,6 +117,27 @@ function findActiveCaseByThread(db: Database.Database, threadId: string): { case
        AND c.status NOT IN ('COMPLETED','CANCELLED','ARCHIVED')
      ORDER BY l.created_at DESC LIMIT 1`
   ).get(threadId) as { case_id: string } | undefined
+}
+
+/** Write the intake's own evidence into the case-source graph.
+ *
+ *  EXPLICIT_RELATION, so canonical: this is not an inference about the message,
+ *  it IS the message that reached this case. Idempotent -- a re-run reports
+ *  UNCHANGED and writes nothing. */
+function recordIntakeSources(
+  db: Database.Database, caseId: string, input: EmailIntakeInput, now: number, why: string,
+): void {
+  if (input.threadId) {
+    linkCaseSource(db, {
+      namespace: 'personal', caseId, sourceType: 'GMAIL_THREAD', sourceRef: input.threadId,
+      linkMethod: 'EXPLICIT_RELATION', evidence: `${why} (message ${input.messageId})`,
+      discoveredBy: 'cos-intake',
+    }, now)
+  }
+  linkCaseSource(db, {
+    namespace: 'personal', caseId, sourceType: 'GMAIL_MESSAGE', sourceRef: input.messageId,
+    linkMethod: 'EXPLICIT_RELATION', evidence: why, discoveredBy: 'cos-intake',
+  }, now)
 }
 
 export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now: number): IntakeResult {
@@ -176,6 +222,11 @@ export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now:
         // record which case it belongs to even though it's a duplicate message
         db.prepare(`UPDATE email_processing SET case_id=@caseId, triage_receipt_id=@r WHERE gmail_account_id=@acc AND message_id=@mid`)
           .run({ caseId: existing.case_id, r: triageReceiptId, acc: input.accountId, mid: input.messageId })
+        // The message itself joins the case's dossier. The thread is already
+        // linked (it is how we found the case), but the MESSAGE is new evidence
+        // and nothing else records it against the case as a source.
+        recordIntakeSources(db, existing.case_id, input, now,
+          'intake: a message on a thread this case already owns')
         return { outcome: 'LINKED_DUPLICATE', caseId: existing.case_id, messageStatus: 'DUPLICATE' }
       }
     }
@@ -227,6 +278,11 @@ export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now:
       db.prepare(`UPDATE personal_cases SET ${keys.map((k) => `${k}=@${k}`).join(', ')} WHERE case_id=@id`)
         .run({ ...patch, id: caseId })
     }
+    // THE GRAPH IS WRITTEN HERE, not only by the backfill. A backfill that runs
+    // on a schedule leaves every case created between two runs invisible to the
+    // graph, and consumers would then be reading a source of truth that is
+    // hours stale. The column is still written above, as the legacy projection.
+    recordIntakeSources(db, caseId, input, now, 'intake: the message that opened the case')
     // Cross-thread linking (2026-08-09). Thread matching above only catches a
     // reply on a conversation we already know; a courier or a merchant writes on
     // its own thread about the same matter.

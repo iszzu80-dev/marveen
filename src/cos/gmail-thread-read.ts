@@ -191,24 +191,55 @@ export async function storeCaseThread(
   return { stored: true, messages: messages.length, reason: `${messages.length} üzenet eltárolva`, documentId: (doc as { documentId?: string }).documentId }
 }
 
-/** Cases that have a thread id but no stored thread document yet. */
+/** (case, thread) pairs whose thread text is not stored yet.
+ *
+ *  GRAPH CUTOVER, 2026-09-03. This used to read
+ *  `json_extract(gmail_thread_ids, '$[0]')` and check "does this CASE have any
+ *  email_thread document". Both halves silently truncated to one thread:
+ *
+ *    - the source could only ever name the first thread of a case, and
+ *    - once ANY thread was stored, the case dropped out of the queue, so a
+ *      second thread could never be fetched even if something had named it.
+ *
+ *  It now iterates the case-source graph, one row per (case, thread), and asks
+ *  the missing-document question PER THREAD -- `cos_documents.source_ref` holds
+ *  the thread id for every one of the stored email_thread documents, so this is
+ *  an exact question, not an approximation. The abandonment check is likewise
+ *  per thread: `cos_thread_fetch_failures` is keyed (case_id, thread_id), and
+ *  the old query ignored the thread half, so ONE unfetchable thread retired the
+ *  whole case.
+ *
+ *  The legacy column is still unioned in, so a case whose writer has not been
+ *  migrated cannot fall out of the queue -- but the graph is what is read
+ *  first, and `caseThreadIds` reports anything the graph is missing. */
 export function casesMissingThreadText(
   db: Database.Database, limit = 20,
 ): Array<{ case_id: string; thread_id: string }> {
+  const CANDIDATE_PAIRS = `
+    SELECT s.case_id AS case_id, s.source_ref AS thread_id, c.updated_at AS updated_at
+      FROM case_sources s
+      JOIN personal_cases c ON c.case_id = s.case_id
+     WHERE s.namespace = 'personal' AND s.source_type = 'GMAIL_THREAD'
+       AND s.link_state = 'CANONICAL' AND c.archived_at IS NULL
+    UNION
+    SELECT c.case_id, j.value, c.updated_at
+      FROM personal_cases c, json_each(c.gmail_thread_ids) j
+     WHERE c.gmail_thread_ids IS NOT NULL AND c.archived_at IS NULL`
+
+  const query = (withFailures: boolean) => `
+    SELECT p.case_id, p.thread_id FROM (${CANDIDATE_PAIRS}) p
+     WHERE NOT EXISTS (
+             SELECT 1 FROM cos_documents d
+              WHERE d.case_id = p.case_id AND d.doc_kind = 'email_thread'
+                AND d.source_ref = p.thread_id)
+    ${withFailures ? `AND NOT EXISTS (
+             SELECT 1 FROM cos_thread_fetch_failures f
+              WHERE f.case_id = p.case_id AND f.thread_id = p.thread_id
+                AND f.attempts >= ${THREAD_FETCH_MAX_ATTEMPTS})` : ''}
+     ORDER BY p.updated_at DESC LIMIT ?`
+
   try {
-    return db.prepare(
-      `SELECT c.case_id, json_extract(c.gmail_thread_ids, '$[0]') AS thread_id
-       FROM personal_cases c
-       WHERE c.gmail_thread_ids IS NOT NULL AND c.archived_at IS NULL
-         AND NOT EXISTS (
-           SELECT 1 FROM cos_documents d
-           WHERE d.case_id = c.case_id AND d.doc_kind = 'email_thread')
-         -- and not one we have already given up on
-         AND NOT EXISTS (
-           SELECT 1 FROM cos_thread_fetch_failures f
-           WHERE f.case_id = c.case_id AND f.attempts >= ${THREAD_FETCH_MAX_ATTEMPTS})
-       ORDER BY c.updated_at DESC LIMIT ?`
-    ).all(limit) as never
+    return db.prepare(query(true)).all(limit) as never
   } catch (e) {
     // The failures table may not exist yet on a fresh install; fall back to the
     // unfiltered query rather than returning nothing, because "no candidates"
@@ -216,19 +247,11 @@ export function casesMissingThreadText(
     //
     // Only that one cause is absorbed. A bare catch here also swallowed disk
     // errors and a corrupted personal_cases, and the fallback below would then
-    // fail too and return [] — "nothing to fetch" from a store that cannot be
+    // fail too and return [] -- "nothing to fetch" from a store that cannot be
     // read at all.
     if (!/no such table/i.test(String((e as Error)?.message ?? e))) throw e
     try {
-      return db.prepare(
-        `SELECT c.case_id, json_extract(c.gmail_thread_ids, '$[0]') AS thread_id
-         FROM personal_cases c
-         WHERE c.gmail_thread_ids IS NOT NULL AND c.archived_at IS NULL
-           AND NOT EXISTS (
-             SELECT 1 FROM cos_documents d
-             WHERE d.case_id = c.case_id AND d.doc_kind = 'email_thread')
-         ORDER BY c.updated_at DESC LIMIT ?`
-      ).all(limit) as never
+      return db.prepare(query(false)).all(limit) as never
     } catch (inner) {
       // The fallback failing means the CASES table is unreadable, not that the
       // optional failures table is absent. Returning [] here is the exact

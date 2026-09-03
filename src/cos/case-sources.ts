@@ -288,3 +288,45 @@ export function threadsForCase(
       ORDER BY first_seen_at`,
   ).all(namespace, caseId) as { source_ref: string }[]).map((r) => r.source_ref)
 }
+
+export interface CaseThreadSet {
+  /** Every thread the case is about: the graph's canonical links, plus any
+   *  legacy column entry the graph has not caught up with. Deduped, ordered
+   *  graph-first. THIS is what a consumer should iterate. */
+  threadIds: string[]
+  /** From the graph. */
+  fromGraph: string[]
+  /** In the legacy `gmail_thread_ids` column and NOT in the graph. Non-empty
+   *  means something wrote the column without writing a link -- worth knowing,
+   *  and worth counting, rather than silently absorbing. */
+  legacyOnly: string[]
+}
+
+/**
+ * THE THREAD SET A CONSUMER MUST USE, replacing `json_extract(...,'$[0]')`.
+ *
+ * The graph is the read source of truth. The legacy column is still unioned in
+ * so that a case created by a writer that has not been migrated yet cannot
+ * silently lose its thread -- but it is reported separately, so "the graph is
+ * behind" stays visible instead of being papered over.
+ */
+export function caseThreadIds(
+  db: Database.Database, namespace: CaseNamespace, caseId: string,
+): CaseThreadSet {
+  const fromGraph = threadsForCase(db, namespace, caseId)
+  const table = namespace === 'personal' ? 'personal_cases' : 'zst_cases'
+  let legacy: string[] = []
+  try {
+    const row = db.prepare(`SELECT gmail_thread_ids FROM ${table} WHERE case_id = ?`)
+      .get(caseId) as { gmail_thread_ids: string | null } | undefined
+    if (row?.gmail_thread_ids) {
+      const parsed = JSON.parse(row.gmail_thread_ids)
+      legacy = Array.isArray(parsed) ? parsed.map(String) : []
+    }
+  } catch {
+    // A malformed legacy column is not a reason to lose the graph's answer.
+    legacy = []
+  }
+  const legacyOnly = legacy.filter((t) => !fromGraph.includes(t))
+  return { threadIds: [...fromGraph, ...legacyOnly], fromGraph, legacyOnly }
+}

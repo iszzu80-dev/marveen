@@ -15,6 +15,7 @@ import { seedCaseProgressionState } from './case-progression-seed.js'
 import { projectZstOperationalIntake } from './zst-operational-projector.js'
 import { recordTemporalFact } from './temporal-facts.js'
 import { classifyActionability } from './actionability.js'
+import { linkCaseSource, findCasesForSource } from './case-sources.js'
 import { recordTriageReceipt, requireExactTriageReceipt } from './triage-provenance.js'
 
 export const INVOICE_CASE_TYPES = new Set(['INVOICE_INCOMING', 'INVOICE_OUTGOING'])
@@ -81,6 +82,22 @@ function recordLedger(db: Database.Database, input: ZstTriagedEmail, status: str
 }
 
 function findActiveZstCaseByThread(db: Database.Database, threadId: string): { case_id: string } | undefined {
+  // GRAPH FIRST (cutover 2026-09-03), CANONICAL links only, and strictly inside
+  // the ZST namespace -- `findCasesForSource` is namespace-scoped, so a personal
+  // case claiming the same thread cannot capture a ZST message. Connector
+  // identity is the scope boundary and this lookup does not weaken it.
+  const claims = findCasesForSource(db, 'zst', 'GMAIL_THREAD', threadId)
+  if (claims.length) {
+    const open = db.prepare(
+      `SELECT case_id FROM zst_cases
+        WHERE case_id IN (${claims.map(() => '?').join(',')})
+          AND archived_at IS NULL
+          AND status NOT IN ('COMPLETED','CANCELLED','ARCHIVED','FAILED_TERMINAL')
+        ORDER BY updated_at DESC LIMIT 1`,
+    ).get(...claims.map((c) => c.caseId)) as { case_id: string } | undefined
+    if (open) return open
+  }
+
   const byCase = db.prepare(
     `SELECT case_id FROM zst_cases
      WHERE gmail_thread_ids LIKE ? AND archived_at IS NULL
@@ -197,6 +214,23 @@ function ingestTriagedZstEmailInTx(db: Database.Database, input: ZstTriagedEmail
     const keys = Object.keys(patch)
     db.prepare(`UPDATE zst_cases SET ${keys.map((k) => `${k}=@${k}`).join(', ')} WHERE case_id=@id`)
       .run({ ...patch, id: caseId })
+
+    // The graph is written at intake, not only by the scheduled backfill: a case
+    // created between two backfill runs would otherwise be invisible to every
+    // consumer that now reads the graph as its source of truth.
+    if (input.threadId) {
+      linkCaseSource(db, {
+        namespace: 'zst', caseId, sourceType: 'GMAIL_THREAD', sourceRef: input.threadId,
+        linkMethod: 'EXPLICIT_RELATION',
+        evidence: `zst intake: the message that opened the case (message ${input.messageId})`,
+        discoveredBy: 'cos-zst-intake',
+      }, now)
+    }
+    linkCaseSource(db, {
+      namespace: 'zst', caseId, sourceType: 'GMAIL_MESSAGE', sourceRef: input.messageId,
+      linkMethod: 'EXPLICIT_RELATION', evidence: 'zst intake: the message that opened the case',
+      discoveredBy: 'cos-zst-intake',
+    }, now)
 
     // Semantic dates are evidence, not guessed scalar due_at values. Text
     // extraction starts UNVERIFIED and must pass TSCG verification before a

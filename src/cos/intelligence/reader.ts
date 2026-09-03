@@ -204,6 +204,8 @@ export interface ReaderResult {
    *  they describe history we do not rewrite, so they never reach zero, and a
    *  permanently-red gate is worse than no gate. */
   integrityFindings: number
+  /** Commitments the record says are discharged, withheld from attention. */
+  dischargedWithheld: number
   text: string | null
 }
 
@@ -321,7 +323,8 @@ export function runProjectionReader(
   const base: ReaderResult = {
     namespace, posted: false, spoke: spoken, stillQuiet, promotedByChange,
     quiet: p.attention.quiet.length, heldByCadence, researchTraces, opportunityInSpoken: 0,
-    anomalies: p.anomalies.length, integrityFindings: p.integrityFindings.length, text: null,
+    anomalies: p.anomalies.length, integrityFindings: p.integrityFindings.length,
+    dischargedWithheld: p.dischargedWithheld, text: null,
   }
   if (!speak.length) return base
 

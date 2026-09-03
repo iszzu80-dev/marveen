@@ -18,6 +18,7 @@
 // so later ASK_INFORMATION cases can show what was already tried.
 
 import type Database from 'better-sqlite3'
+import { caseThreadIds } from './case-sources.js'
 
 // ── Untrusted-data forward-flag (§10.1, guardrail from msg #20701) ──────
 //
@@ -164,25 +165,18 @@ export function resolveEmailThread(
 
   // 1. Get thread IDs and source references from the case.
   const caseRow = db.prepare(
-    `SELECT gmail_thread_ids, source_references FROM ${tableName} WHERE case_id = ?`,
-  ).get(caseId) as {
-    gmail_thread_ids: string | null
-    source_references: string | null
-  } | undefined
+    `SELECT source_references FROM ${tableName} WHERE case_id = ?`,
+  ).get(caseId) as { source_references: string | null } | undefined
 
   if (!caseRow) return { thread_ids: [], messages: [], has_history: false }
 
-  // Parse thread IDs from JSON array
-  let threadIds: string[] = []
-  try {
-    if (caseRow.gmail_thread_ids) {
-      const parsed = JSON.parse(caseRow.gmail_thread_ids)
-      if (Array.isArray(parsed)) threadIds = parsed
-    }
-  } catch {
-    // If JSON parsing fails, treat as single thread ID
-    if (caseRow.gmail_thread_ids) threadIds = [caseRow.gmail_thread_ids]
-  }
+  // GRAPH CUTOVER, 2026-09-03. The thread set comes from the case-source graph,
+  // with the legacy column unioned in by `caseThreadIds` so an unmigrated
+  // writer cannot lose a thread. This used to parse `gmail_thread_ids` alone --
+  // a column that, across the entire live store, had never held two ids -- so
+  // "ALL messages in the thread(s)", as the docstring above promises, was in
+  // practice always the messages of exactly one thread.
+  const threadIds: string[] = caseThreadIds(db, domain, caseId).threadIds
 
   // Parse source reference(s) — may be JSON array or plain scalar
   let sourceRefs: string[] = []

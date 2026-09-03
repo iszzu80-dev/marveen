@@ -53,6 +53,7 @@ for (const ns of ['personal', 'zst'] as const) {
       opportunityInSpoken: r.opportunityInSpoken,
       anomalies: r.anomalies,
       integrityFindings: r.integrityFindings,
+      dischargedWithheld: r.dischargedWithheld,
       ...(dry ? { text: r.text } : {}),
     }
     // A DERIVATION CONTRADICTION is not a reason to stay silent about the
