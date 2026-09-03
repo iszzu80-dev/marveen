@@ -44,6 +44,29 @@ export function projectIntelligence(
 
   const anomalies: string[] = []
 
+  // ── LIFECYCLE INTEGRITY, said out loud (owner ruling 2026-09-03) ──────────
+  //
+  // Both of these used to surface as a quiet UNKNOWN, which is the wrong shape:
+  // UNKNOWN says "we could not tell", and these say "the record is broken in a
+  // specific, nameable way". A silent UNKNOWN gets read as a thin record and
+  // filed; an anomaly gets read as a defect and fixed.
+  for (const c of commitments) {
+    for (const f of c.foreignStatusEvents) {
+      anomalies.push(
+        `FOREIGN_STATUS_EVENT ${c.caseId}: case event ${f.eventId} carries '${f.value}', ` +
+        `which is not a ${namespace} case status -- another object's lifecycle written onto the case. ` +
+        `Not used as completion or reopen evidence.`,
+      )
+    }
+    if (c.closureClass === 'TERMINAL_ROW_NO_EVENT') {
+      anomalies.push(
+        `TERMINAL_ROW_NO_EVENT ${c.caseId}: the row is ${'terminal'} and NO event carries a terminal status. ` +
+        `Something set the status without going through the canonical transition, so there is no record of ` +
+        `when or by what. Not reconstructible; stays UNKNOWN by design.`,
+      )
+    }
+  }
+
   // A case that is BOTH owed and merely suggested means one of the two
   // derivations is wrong about it. Reported, and the obligation wins, because
   // under-suggesting is a much cheaper error than under-obliging.

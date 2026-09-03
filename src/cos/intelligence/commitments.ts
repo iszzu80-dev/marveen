@@ -17,7 +17,10 @@
 // contradicting event flips it back with no migration, no refresh job, and no
 // window in which the stored answer and the evidence disagree.
 import type Database from 'better-sqlite3'
-import { FULFILLING_EVENT_TYPES, REOPENING_EVENT_TYPES } from '../case-event-types.js'
+import { FULFILLING_EVENT_TYPES, REOPENING_EVENT_TYPES, isCaseStatus } from '../case-event-types.js'
+import {
+  classifyReopen, classifyClosure, type ReopenClass, type ClosureClass,
+} from './lifecycle-classification.js'
 import {
   type Confidence, type IntelligenceElement, type Provenance,
   combineConfidence, elementId, makeElement,
@@ -31,6 +34,14 @@ export type CommitmentStatus =
   | 'REOPENED'    // was fulfilled, then later evidence contradicted it
   | 'EXPIRED'     // its moment passed with nothing evidencing it
   | 'UNKNOWN'     // the store cannot say -- reported, never rounded to OPEN
+  /** An external or baseline system imported the case already closed. Owner
+   *  ruling 2026-09-03: NOT fulfilled, because no local proof exists, and NOT
+   *  unknown, because we know exactly what happened -- somebody else asserted it
+   *  and we recorded the assertion faithfully. */
+  | 'IMPORTED_CLOSURE'
+  /** Closed HERE because the matter moved to another canonical case. The work
+   *  did not finish; it changed address, and `supersededBy` carries the address. */
+  | 'SUPERSEDED'
 
 /**
  * How well the STORE evidences that a terminal case actually ended. Measured,
@@ -77,6 +88,22 @@ export type ObligationEvidence =
 
 export interface Commitment extends IntelligenceElement {
   owner: CommitmentOwner
+  /** Set ONLY when `status` is REOPENED. Derived from the reopening event, never
+   *  from a rewritten history: the owner's 2026-09-03 ruling is that the 21
+   *  restore-artifacts must not read as business reopens, and the way to do that
+   *  is to classify, not to edit. */
+  reopenClass: ReopenClass | null
+  /** Set when a terminal row's closure cannot be explained by an ordinary
+   *  transition: imported closed, superseded by another case, or a terminal row
+   *  with no terminal event at all. Null when a normal close explains it. */
+  closureClass: ClosureClass | null
+  /** The successor case, when `closureClass` is SUPERSEDED_BY_TARGET. Provenance,
+   *  not decoration: a supersession with no target is a closure with a nicer name. */
+  supersededBy: string | null
+  /** Case events whose status columns carried a value outside this namespace's
+   *  vocabulary -- another object's lifecycle written onto the case. Reported,
+   *  never used as evidence. */
+  foreignStatusEvents: Array<{ eventId: number | string | null; value: string }>
   dueAt: number | null
   status: CommitmentStatus
   /** Set ONLY when `status` is UNKNOWN -- the tier of the closure record that
@@ -111,11 +138,30 @@ interface CaseRow {
 
 interface EventRow {
   event_id: string; case_id: string; event_type: string
-  new_status: string | null; reason: string | null; created_at: number
+  /** BOTH sides of the transition, and the actor and source that made it.
+   *  These were not selected until 2026-09-03, which is why the classification
+   *  below could only ever guess: a restore and a business reopen differ by
+   *  `source_system`, and an imported closure by `actor` -- columns the reader
+   *  was not fetching. A classifier starved of its discriminators returns
+   *  UNKNOWN and looks like a policy decision. */
+  previous_status: string | null
+  new_status: string | null
+  actor: string | null
+  source_system: string | null
+  reason: string | null
+  created_at: number
 }
 
 /** Statuses that mean the case itself reached an end. */
-const TERMINAL = new Set(['COMPLETED', 'CANCELLED', 'ARCHIVED'])
+/** Terminal statuses, PER NAMESPACE. This used to be one hard-coded set for
+ *  both, which quietly left `FAILED_TERMINAL` out of the ZST side -- a ZST case
+ *  in that state would not have been seen as closed at all. Zero rows carry it
+ *  today (measured 2026-09-03), so this fixes nothing visible and removes a trap
+ *  that was waiting for the first one. */
+const TERMINAL_BY_NS: Record<'personal' | 'zst', ReadonlySet<string>> = {
+  personal: new Set(['COMPLETED', 'CANCELLED', 'ARCHIVED']),
+  zst: new Set(['COMPLETED', 'CANCELLED', 'ARCHIVED', 'FAILED_TERMINAL']),
+}
 
 /** Events that EVIDENCE a commitment being met, and events that can CONTRADICT
  *  one, both taken from the SHARED lifecycle vocabulary rather than retyped
@@ -198,6 +244,7 @@ export function commitmentsForCase(
   // no next_action, so the rule that removes 48 false obligations removed the
   // two real findings with them. Silence about the worst-evidenced closures is
   // the opposite of what the rule was for.
+  const TERMINAL = TERMINAL_BY_NS[namespace]
   const unevidencedClosure = TERMINAL.has(row.status)
     && !events.some((e) => FULFILLING_EVENT.has(e.event_type) && e.new_status != null && TERMINAL.has(e.new_status))
 
@@ -234,16 +281,36 @@ export function commitmentsForCase(
 
   // ── the evidence, oldest first, so "later contradicts earlier" is just order ──
   const ordered = [...events].sort((a, b) => a.created_at - b.created_at)
+  // FOREIGN STATUSES ARE NOT EVIDENCE, and they are not silent either.
+  //
+  // Four events in the live store carried an outbound delivery's
+  // `RECOVERY_REQUIRED -> VERIFIED` in the case's own status columns, and one of
+  // them made PRI-CLAIM-2026-001 -- COMPLETED throughout -- read as a reopened
+  // obligation for a week. A value outside this namespace's case vocabulary did
+  // not come from this case's lifecycle, so it cannot evidence or contradict a
+  // completion. It is collected and reported instead of ignored: a reader who
+  // sees a case behaving oddly deserves to be shown the reason.
+  const foreignStatusEvents = ordered
+    .filter((e) => !isCaseStatus(namespace, e.new_status) || !isCaseStatus(namespace, (e as { previous_status?: string | null }).previous_status))
+    .map((e) => ({
+      eventId: e.event_id ?? null,
+      value: `${(e as { previous_status?: string | null }).previous_status ?? '-'} -> ${e.new_status ?? '-'}`,
+    }))
+
   const fulfilling = ordered.filter(
-    (e) => FULFILLING_EVENT.has(e.event_type) && e.new_status != null && TERMINAL.has(e.new_status),
+    (e) => FULFILLING_EVENT.has(e.event_type) && e.new_status != null
+      && isCaseStatus(namespace, e.new_status) && TERMINAL.has(e.new_status),
   )
   const lastFulfil = fulfilling.at(-1) ?? null
   const contradicting = lastFulfil
     ? ordered.filter(
         (e) => e.created_at > lastFulfil.created_at && REOPENING_EVENT.has(e.event_type)
-          && e.new_status != null && !TERMINAL.has(e.new_status),
+          && e.new_status != null && isCaseStatus(namespace, e.new_status) && !TERMINAL.has(e.new_status),
       )
     : []
+
+  // Derived first, because two of the branches below are decided by it.
+  const terminalClosure = TERMINAL.has(row.status) ? classifyClosure(ordered, TERMINAL) : null
 
   const proof: Provenance[] = []
   let status: CommitmentStatus
@@ -264,6 +331,19 @@ export function commitmentsForCase(
     status = 'FULFILLED'
     why = `evidenced by event ${lastFulfil.event_id} (${lastFulfil.event_type} -> ${lastFulfil.new_status})`
     proof.push({ source: 'CASE_EVENT', ref: lastFulfil.event_id, observedAt: lastFulfil.created_at, field: 'new_status' })
+  } else if (TERMINAL.has(row.status) && terminalClosure?.klass === 'IMPORTED_CLOSURE') {
+    // Imported closed. Named rather than reported as a gap: the record is
+    // complete about what it is, it simply is not a local fulfilment proof.
+    status = 'IMPORTED_CLOSURE'
+    why = `imported already closed by ${'the baseline import'} (event ${terminalClosure.evidenceEventId}) -- ` +
+      `an assertion made elsewhere, recorded faithfully, with no local proof of the work`
+    confidenceParts = ['MEDIUM']
+  } else if (TERMINAL.has(row.status) && terminalClosure?.klass === 'SUPERSEDED_BY_TARGET') {
+    status = 'SUPERSEDED'
+    why = terminalClosure.targetCaseId
+      ? `closed here because the matter moved to ${terminalClosure.targetCaseId} (event ${terminalClosure.evidenceEventId})`
+      : `closed here by a namespace move (event ${terminalClosure.evidenceEventId}) whose target could not be read from the record`
+    confidenceParts = terminalClosure.targetCaseId ? ['HIGH'] : ['LOW']
   } else if (TERMINAL.has(row.status)) {
     // The case says done and NO event evidences it. This is the case the whole
     // surface exists for: reported as UNKNOWN, never rounded up to FULFILLED.
@@ -312,6 +392,18 @@ export function commitmentsForCase(
       : { state: 'NONE' },
   }, now)
 
+  // DERIVED, never written back. The history says a case was closed and later
+  // moved; these two say what that MEANT, so a restore artifact stops reading as
+  // somebody's decision and an imported closure stops reading as a gap.
+  // THE FIRST contradicting event, not the last. The first one is what ENDED the
+  // fulfilment; anything after it is the case living its life afterwards. Taking
+  // the last one asked a later, unrelated transition why the case was reopened,
+  // and it did not know -- 13 of the 21 restore artifacts came back
+  // UNKNOWN_REOPEN on that mistake alone.
+  const reopenClass = status === 'REOPENED'
+    ? classifyReopen(contradicting[0] ?? null)
+    : null
+
   return [{
     ...el,
     owner: ownerOf(row),
@@ -320,6 +412,10 @@ export function commitmentsForCase(
     closureEvidence,
     obligationEvidence,
     reviewWakeAt,
+    reopenClass,
+    closureClass: terminalClosure?.klass ?? null,
+    supersededBy: terminalClosure?.targetCaseId ?? null,
+    foreignStatusEvents,
     fulfillment: { proven: proof.length > 0 && status === 'FULFILLED', proof, why },
   }]
 }
@@ -344,7 +440,7 @@ export function projectCommitments(
   let events: EventRow[] = []
   try {
     events = db.prepare(
-      `SELECT event_id, case_id, event_type, new_status, reason, created_at
+      `SELECT event_id, case_id, event_type, previous_status, new_status, actor, source_system, reason, created_at
        FROM ${eventTable} WHERE case_id IN (${placeholders})`,
     ).all(...ids) as EventRow[]
   } catch { events = [] }

@@ -77,3 +77,44 @@ export const REOPENING_EVENT_TYPES: ReadonlySet<string> = new Set<string>([
   // legacy, never observed in the live store:
   'REOPENED', 'CONTRADICTION_RECORDED',
 ])
+
+// ── THE CANONICAL CASE-STATUS VOCABULARY, for the same reason ───────────────
+//
+// On 2026-09-03 an audit found four case events whose `previous_status` and
+// `new_status` carried an OUTBOUND DELIVERY's lifecycle (`RECOVERY_REQUIRED ->
+// VERIFIED`) rather than the case's. `VERIFIED` is not a case status in either
+// namespace, but nothing checked, so a delivery's progress read as a case
+// reopen and PRI-CLAIM-2026-001 -- COMPLETED throughout, never reopened --
+// surfaced as a reopened obligation.
+//
+// A foreign object's status sitting in the case's status columns is
+// indistinguishable, to any reader, from a real transition. The statuses
+// themselves were already defined once, in schema.ts; they simply were not
+// being consulted by the lifecycle. They are now, on BOTH sides: the engine
+// refuses to write one, and the reader refuses to believe one.
+import { CASE_STATUSES, ZST_CASE_STATUSES } from './schema.js'
+
+export type CaseNamespace = 'personal' | 'zst'
+
+const VOCABULARY: Record<CaseNamespace, ReadonlySet<string>> = {
+  personal: new Set<string>(CASE_STATUSES),
+  zst: new Set<string>(ZST_CASE_STATUSES),
+}
+
+/** The statuses this namespace's cases may be in. Not a style rule: a value
+ *  outside it did not come from this case's lifecycle. */
+export function caseStatusVocabulary(ns: CaseNamespace): ReadonlySet<string> {
+  return VOCABULARY[ns]
+}
+
+/** `null` is legitimate -- most events carry no status at all. A non-null value
+ *  outside the vocabulary is the finding. */
+export function isCaseStatus(ns: CaseNamespace, status: string | null | undefined): boolean {
+  return status == null || VOCABULARY[ns].has(status)
+}
+
+/** Which namespace a case table belongs to. The engine is table-generic; this
+ *  is the one place that maps a table back to its vocabulary. */
+export function namespaceForCaseTable(table: string): CaseNamespace {
+  return table.startsWith('zst') ? 'zst' : 'personal'
+}

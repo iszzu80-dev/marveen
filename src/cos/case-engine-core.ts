@@ -15,7 +15,7 @@
 //     a live claim cannot be stolen, an expired one can, and the fence proves it.
 
 import type Database from 'better-sqlite3'
-import { CASE_EVENT } from './case-event-types.js'
+import { CASE_EVENT, isCaseStatus, namespaceForCaseTable, caseStatusVocabulary } from './case-event-types.js'
 import { ZST_MARKERS, CORPORATE_MARKERS } from './scope-gate.js'
 
 /** The three tables a case namespace owns. */
@@ -54,6 +54,29 @@ export const PERSONAL_STATUS_SETS: CaseStatusSets = {
 /** Thrown when an optimistic-concurrency transition loses the race (the row's
  *  version moved on since the caller read it). The caller must re-read and retry
  *  -- it MUST NOT assume its intended state was applied. */
+/**
+ * A value that is not one of this namespace's case statuses was offered for a
+ * case event's status column. Named rather than generic: the caller is almost
+ * always recording a DIFFERENT object's lifecycle (an outbound delivery, a
+ * question, a document) on the case, and the fix is to record it as a payload
+ * field, not as the case's status.
+ */
+export class ForeignCaseStatusError extends Error {
+  constructor(
+    readonly caseId: string,
+    readonly field: string,
+    readonly value: string,
+    readonly namespace: string,
+  ) {
+    super(
+      `case ${caseId}: ${field}='${value}' is not a ${namespace} case status. ` +
+      `A case event's status columns describe THIS case's lifecycle; another object's ` +
+      `state belongs in the payload. Vocabulary: ${[...caseStatusVocabulary(namespace as 'personal' | 'zst')].join(', ')}`,
+    )
+    this.name = 'ForeignCaseStatusError'
+  }
+}
+
 export class CaseConcurrencyError extends Error {
   readonly caseId: string
   readonly seenVersion: number
@@ -210,8 +233,28 @@ export function makeCaseEngine(
   const T = tables
   const TERMINAL_STATUSES = statusSets.terminal
   const ATTENTION_STATUSES = statusSets.attention
+  const NS = namespaceForCaseTable(T.cases)
+
+  /** THE WRITE-SIDE HALF OF THE FOREIGN-STATUS GUARD.
+   *
+   *  A case event's status columns describe THIS case's lifecycle and nothing
+   *  else. Four events in the live store carried an outbound delivery's
+   *  `RECOVERY_REQUIRED -> VERIFIED` instead, and one of them made a COMPLETED
+   *  case read as reopened for a week. The reader now refuses to believe such a
+   *  value; this refuses to write one, so the two halves cannot drift into
+   *  disagreeing about which events are real.
+   *
+   *  It throws rather than dropping the field: a caller who has a status to
+   *  record is making a claim, and silently discarding it would leave the same
+   *  ambiguity one layer down. */
+  function assertCaseStatus(field: string, value: string | null | undefined, caseId: string): void {
+    if (isCaseStatus(NS, value)) return
+    throw new ForeignCaseStatusError(caseId, field, String(value), NS)
+  }
 
   function appendCaseEvent(db: Database.Database, ev: AppendEventInput, now: number): number {
+    assertCaseStatus('previous_status', ev.previousStatus, ev.caseId)
+    assertCaseStatus('new_status', ev.newStatus, ev.caseId)
     const info = db.prepare(
       `INSERT INTO ${T.events}
          (case_id, case_version, actor, source_system, source_reference, event_type,
