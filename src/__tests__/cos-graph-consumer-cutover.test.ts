@@ -331,3 +331,35 @@ describe('the relation map survives a full packet', () => {
     expect(ctx.excluded.some((e) => /over the 40-item context bound/.test(e.reason))).toBe(true)
   })
 })
+
+describe('the map does not eat the territory', () => {
+  beforeEach(() => { initDatabase(':memory:'); newCase('umbrella') })
+
+  it('many linked documents cost ONE map line, and the content still arrives', () => {
+    linkThread('umbrella', T1); linkThread('umbrella', T2)
+    for (let n = 0; n < 22; n++) {
+      const id = `doc-${n}`
+      getDb().prepare(
+        `INSERT INTO cos_documents (document_id, namespace, case_id, source, source_ref, filename,
+           mime_type, sha256, doc_kind, extracted_text, sensitivity, external_share_allowed, created_at, updated_at)
+         VALUES (@id, 'personal', 'umbrella', 'email', 'x', @fn, 'text/plain', @id, 'other', @txt,
+           'PERSONAL', 0, @now, @now)`,
+      ).run({ id, fn: `${id}.txt`, txt: `content ${id}`, now: NOW })
+      linkCaseSource(getDb(), {
+        namespace: 'personal', caseId: 'umbrella', sourceType: 'DOCUMENT', sourceRef: id,
+        linkMethod: 'DETERMINISTIC_IDENTIFIER', evidence: 'filename names the case', discoveredBy: 'test',
+      }, NOW)
+    }
+    const ctx = buildCaseContext(getDb(), 'personal', 'umbrella', NOW)
+    const sources = ctx.items.filter((i) => i.kind === 'CASE_SOURCE')
+    // Both threads named individually; the 22 documents as ONE line.
+    expect(sources.filter((i) => i.provenance.reference.startsWith('GMAIL_THREAD:'))).toHaveLength(2)
+    const summary = sources.find((i) => i.provenance.reference === 'DOCUMENT:x22')!
+    expect(summary.content).toContain('22 document(s)')
+    expect(summary.content).toContain('DETERMINISTIC_IDENTIFIER')
+    // ...and the documents themselves still arrive, with content.
+    const docItems = ctx.items.filter((i) => i.kind === 'DOCUMENT')
+    expect(docItems.length).toBeGreaterThan(10)
+    expect(docItems[0].content).toContain('content doc-')
+  })
+})

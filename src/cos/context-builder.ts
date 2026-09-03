@@ -359,7 +359,26 @@ export function buildCaseContext(
   // reasons over, is a guess that has been promoted by presentation. They are
   // named in `excluded` instead, so their absence is visible rather than silent.
   const dossier = getCaseDossier(db, namespace, caseId)
-  for (const link of dossier.canonical) {
+  // DOCUMENT links are DELIBERATELY not one map line each. Twenty-two of them
+  // would be twenty-two lines about files the packet already carries as items,
+  // each with its own provenance -- and on the pool case that is exactly what
+  // happened on the first live readback: the map ate the territory, and the
+  // packet came back with 26 relation lines, no thread text and no documents.
+  // A document's provenance belongs on the document, so here they are ONE line
+  // that says how many and by what methods.
+  const docLinks = dossier.canonical.filter((l) => l.sourceType === 'DOCUMENT')
+  if (docLinks.length) {
+    const methods = [...new Set(docLinks.map((l) => l.linkMethod))].sort().join(', ')
+    items.push({
+      kind: 'CASE_SOURCE',
+      provenance: { source: 'case-sources', reference: `DOCUMENT:x${docLinks.length}`, retrievedAt: now },
+      trust: 'UNTRUSTED_SOURCE_DATA',
+      sensitivity,
+      content: `${docLinks.length} document(s) belong to this case, linked by: ${methods}. `
+        + `Each one carries its own provenance on its own item.`,
+    })
+  }
+  for (const link of dossier.canonical.filter((l) => l.sourceType !== 'DOCUMENT')) {
     items.push({
       kind: 'CASE_SOURCE',
       provenance: {
