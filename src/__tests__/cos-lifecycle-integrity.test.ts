@@ -76,8 +76,12 @@ describe('a foreign status is not case evidence, on either side', () => {
       `INSERT INTO personal_case_events (case_id, case_version, actor, event_type, previous_status, new_status, reason, created_at)
        VALUES ('claim-2', 2, 'istvan', 'STATUS_CHANGED', 'RECOVERY_REQUIRED', 'VERIFIED', 'outbound', ?)`,
     ).run(NOW)
-    const anomalies = projectIntelligence(getDb(), 'personal', NOW).anomalies
-    expect(anomalies.some(a => a.startsWith('FOREIGN_STATUS_EVENT claim-2'))).toBe(true)
+    const p = projectIntelligence(getDb(), 'personal', NOW)
+    expect(p.integrityFindings.some(a => a.startsWith('FOREIGN_STATUS_EVENT claim-2'))).toBe(true)
+    // ...and NOT as a run fault. This row is history we do not rewrite, so it is
+    // found on every run for ever; putting it in `anomalies` pinned the
+    // 10-minute cycle permanently red on 2026-09-03.
+    expect(p.anomalies).toEqual([])
   })
 })
 
@@ -175,13 +179,14 @@ describe('WHICH contradicting event is asked', () => {
 describe('the three classes reach the commitment, not just the classifier', () => {
   beforeEach(() => { initDatabase(':memory:') })
 
-  it('a terminal row with no terminal event is UNKNOWN and an ANOMALY, not a quiet gap', () => {
+  it('a terminal row with no terminal event is UNKNOWN and a NAMED INTEGRITY FINDING, not a quiet gap', () => {
     createCase(getDb(), { caseId: 'orphan', title: 't', caseType: 'ADMIN', status: 'WAITING_EXTERNAL', actor: 'test' } as never, NOW - DAY)
     getDb().prepare(`UPDATE personal_cases SET status='COMPLETED', next_action='do it', due_at=? WHERE case_id='orphan'`).run(NOW + DAY)
     const c = commitmentFor('orphan')!
     expect(c.status).toBe('UNKNOWN')
     expect(c.closureClass).toBe('TERMINAL_ROW_NO_EVENT')
-    expect(projectIntelligence(getDb(), 'personal', NOW).anomalies
-      .some(a => a.startsWith('TERMINAL_ROW_NO_EVENT orphan'))).toBe(true)
+    const p = projectIntelligence(getDb(), 'personal', NOW)
+    expect(p.integrityFindings.some(a => a.startsWith('TERMINAL_ROW_NO_EVENT orphan'))).toBe(true)
+    expect(p.anomalies).toEqual([])
   })
 })

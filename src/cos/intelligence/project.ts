@@ -25,9 +25,24 @@ export interface IntelligenceProjection {
    *  A case can matter without anyone having promised anything. */
   caseAttention: CaseAttention[]
   attention: SelectionResult
-  /** Cross-surface problems found while assembling, reported rather than fixed
-   *  silently. Empty is the normal case. */
+  /** DERIVATION CONTRADICTIONS: the projection disagreeing with ITSELF while
+   *  assembling this run -- two surfaces claiming the same case, or an asserted
+   *  invariant breached. These are RUN FAULTS: they are caused by the code that
+   *  just ran, they are fixable, and a cycle that sees one should go red.
+   *  Empty is the normal case. */
   anomalies: string[]
+  /** RECORD INTEGRITY FINDINGS: standing, historical defects in stored rows
+   *  (a foreign object's status written onto a case event; a terminal row with
+   *  no terminal event). Deliberately NOT anomalies.
+   *
+   *  These are not caused by the run and are not reconstructible -- we chose
+   *  not to rewrite the history that carries them -- so they will be found on
+   *  EVERY run, for ever. Feeding them to the cycle's failure list would have
+   *  pinned the 10-minute digest permanently red, which teaches the reader to
+   *  stop looking at `problems` and hides the next REAL fault in the same
+   *  field. Reported and counted on every run so the number is never silent;
+   *  never a failure. (2026-09-03, after doing exactly that for one cycle.) */
+  integrityFindings: string[]
 }
 
 export function projectIntelligence(
@@ -43,23 +58,29 @@ export function projectIntelligence(
   const caseAttention = projectCaseAttention(db, namespace, now)
 
   const anomalies: string[] = []
+  const integrityFindings: string[] = []
 
   // ── LIFECYCLE INTEGRITY, said out loud (owner ruling 2026-09-03) ──────────
   //
   // Both of these used to surface as a quiet UNKNOWN, which is the wrong shape:
   // UNKNOWN says "we could not tell", and these say "the record is broken in a
   // specific, nameable way". A silent UNKNOWN gets read as a thin record and
-  // filed; an anomaly gets read as a defect and fixed.
+  // filed; a NAMED finding gets read as a defect and fixed.
+  //
+  // They go to `integrityFindings`, not `anomalies`: they are standing facts
+  // about history we deliberately do not rewrite, so they are loud but never a
+  // run failure. See the interface comment for what that cost when it was got
+  // wrong.
   for (const c of commitments) {
     for (const f of c.foreignStatusEvents) {
-      anomalies.push(
+      integrityFindings.push(
         `FOREIGN_STATUS_EVENT ${c.caseId}: case event ${f.eventId} carries '${f.value}', ` +
         `which is not a ${namespace} case status -- another object's lifecycle written onto the case. ` +
         `Not used as completion or reopen evidence.`,
       )
     }
     if (c.closureClass === 'TERMINAL_ROW_NO_EVENT') {
-      anomalies.push(
+      integrityFindings.push(
         `TERMINAL_ROW_NO_EVENT ${c.caseId}: the row is ${'terminal'} and NO event carries a terminal status. ` +
         `Something set the status without going through the canonical transition, so there is no record of ` +
         `when or by what. Not reconstructible; stays UNKNOWN by design.`,
@@ -108,5 +129,8 @@ export function projectIntelligence(
     anomalies.push(`INVARIANT BREACH: opportunity ${l.element.id} reached the interrupt list`)
   }
 
-  return { commitments, decisions, opportunities: cleanOpportunities, caseAttention, attention, anomalies }
+  return {
+    commitments, decisions, opportunities: cleanOpportunities, caseAttention, attention,
+    anomalies, integrityFindings,
+  }
 }

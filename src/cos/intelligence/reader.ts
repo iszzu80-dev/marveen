@@ -198,7 +198,12 @@ export interface ReaderResult {
   researchTraces: EnrichmentTrace[]
   /** MUST be 0. Kept as a number rather than an assumption so a test can read it. */
   opportunityInSpoken: number
+  /** Derivation contradictions -- a RUN FAULT. The cycle fails on these. */
   anomalies: number
+  /** Standing record-integrity findings. Always reported, never a failure:
+   *  they describe history we do not rewrite, so they never reach zero, and a
+   *  permanently-red gate is worse than no gate. */
+  integrityFindings: number
   text: string | null
 }
 
@@ -316,7 +321,7 @@ export function runProjectionReader(
   const base: ReaderResult = {
     namespace, posted: false, spoke: spoken, stillQuiet, promotedByChange,
     quiet: p.attention.quiet.length, heldByCadence, researchTraces, opportunityInSpoken: 0,
-    anomalies: p.anomalies.length, text: null,
+    anomalies: p.anomalies.length, integrityFindings: p.integrityFindings.length, text: null,
   }
   if (!speak.length) return base
 

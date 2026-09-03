@@ -52,11 +52,20 @@ for (const ns of ['personal', 'zst'] as const) {
       quiet: r.quiet,
       opportunityInSpoken: r.opportunityInSpoken,
       anomalies: r.anomalies,
+      integrityFindings: r.integrityFindings,
       ...(dry ? { text: r.text } : {}),
     }
-    // The projection reporting a cross-surface anomaly is not a reason to stay
-    // silent about the attention, but it IS a reason the cycle should hear about
-    // it -- the runner turns a non-empty `problems` into a visible failure.
+    // A DERIVATION CONTRADICTION is not a reason to stay silent about the
+    // attention, but it IS a reason the cycle should hear about it -- the runner
+    // turns a non-empty `problems` into a visible failure.
+    //
+    // `integrityFindings` deliberately does NOT go here. Those are standing
+    // defects in stored history we chose not to rewrite; they are found on every
+    // run and would have pinned this 10-minute step red for ever, which trains
+    // the reader to ignore `problems` and buries the next real fault. They are
+    // carried in the step output above, where the count is visible and a CHANGE
+    // in it is readable. (2026-09-03: this step was red for one cycle for
+    // exactly that reason.)
     if (r.anomalies > 0) problems.push(`${ns}: projection reported ${r.anomalies} anomaly/anomalies`)
   } catch (e) {
     // A namespace that throws must not take the other one down with it, and it
