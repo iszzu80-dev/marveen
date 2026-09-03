@@ -2470,6 +2470,7 @@ export function initProgressionSchema(db: Database.Database): void {
   initIntelligenceReaderSchema(db)
   initKanbanProjectionSchema(db)
   initCaseResearchSchema(db)
+  initCaseSourceSchema(db)
 }
 
 /** PHASE 3 (P3-A) -- the DELIVERY LEDGER, and the reason it is not a second
@@ -2751,4 +2752,97 @@ export function initCaseResearchSchema(db: Database.Database): void {
              ON case_research_queries(namespace, case_id, created_at)`)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_research_status
              ON case_research_queries(status, created_at)`)
+}
+
+/** PRIORITY 1 -- THE CASE DOSSIER: one case, many sources, every link carrying
+ *  the reason it exists.
+ *
+ *  WHY A TABLE AND NOT ANOTHER COLUMN. `personal_cases.gmail_thread_ids` is a
+ *  JSON array that, measured on 2026-09-03 across the whole live store, had
+ *  NEVER held two thread ids -- not once, in either namespace. It is written at
+ *  exactly one moment (intake, from the message that opened the case) and never
+ *  appended to, and its readers use `json_extract(..., '$[0]')`, so the second
+ *  element would not have been read even if something had written it.
+ *
+ *  Meanwhile the same store held 55 thread ids for 21 cases inside the free-text
+ *  `source_references` blob left by the Sheet migration -- including the case
+ *  that carries the whole pool investigation, whose two threads sat in ONE
+ *  semicolon-joined string. The links existed. The canonical surface did not
+ *  have them, so nothing could read them, and a human (me, that morning) had to
+ *  hold four cases and three threads in their head to answer one letter.
+ *
+ *  Widening the column would have fixed the arity and none of the rest: a case
+ *  relates to documents, decisions, research results, external pages and
+ *  extractions, and none of those has a column at all.
+ *
+ *  WHAT A ROW MEANS. One row is one CLAIM that a source belongs to a case, and
+ *  it always carries HOW that claim was made (`link_method`) and WHAT it was
+ *  made from (`evidence`). A link with no evidence cannot be written.
+ *
+ *  THE STATE RULE, which is the whole point of the design: a link is CANONICAL
+ *  only if a deterministic fact put it there -- an explicit stored relation, a
+ *  message/reply relation, or an identifier match. Anything inferred from
+ *  meaning enters as CANDIDATE and STAYS a candidate until a decision promotes
+ *  it. The dossier reader returns the two groups separately, so a consumer
+ *  cannot silently treat a guess as a fact. (Owner ruling 2026-09-03:
+ *  "Bizonytalan linket ne canonicalizálj automatikusan.")
+ *
+ *  REJECTED is kept, not deleted: a candidate that was looked at and turned
+ *  down is the only thing that stops the same guess being re-proposed on every
+ *  run, and it is the record from which a false-link rate can be measured. */
+export function initCaseSourceSchema(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS case_sources (
+      link_id        TEXT PRIMARY KEY,
+      namespace      TEXT NOT NULL,
+      case_id        TEXT NOT NULL,
+      /* WHAT kind of thing is on the other end. Deliberately a closed list:
+         an open one lets a typo create a source class nothing reads. */
+      source_type    TEXT NOT NULL,
+      /* The identifier IN THAT TYPE'S OWN NAMESPACE -- a Gmail thread id, a
+         cos_documents.document_id, a decision id, a research ticket id, a URL.
+         Never a display string. */
+      source_ref     TEXT NOT NULL,
+      /* CANONICAL: the case IS about this. CANDIDATE: something thinks so and
+         nothing has decided. REJECTED: looked at, turned down, remembered so
+         it is not proposed again. */
+      link_state     TEXT NOT NULL,
+      /* HOW the claim was made. The state rule is enforced against this in
+         linkCaseSource(), not merely documented here. */
+      link_method    TEXT NOT NULL,
+      confidence     REAL,
+      /* WHAT it was made from, in words a human can check: which identifier
+         matched, which header, which field of which row. Required. */
+      evidence       TEXT NOT NULL,
+      /* WHO/WHAT produced the row -- a script name, a run id, 'istvan'. */
+      discovered_by  TEXT NOT NULL,
+      first_seen_at  INTEGER NOT NULL,
+      updated_at     INTEGER NOT NULL,
+      /* Set only when a human or a rule DECIDED about a candidate. */
+      decided_at     INTEGER,
+      decided_by     TEXT,
+      decision_note  TEXT,
+      CHECK (namespace IN ('personal','zst')),
+      CHECK (link_state IN ('CANONICAL','CANDIDATE','REJECTED')),
+      CHECK (source_type IN (
+        'GMAIL_THREAD','GMAIL_MESSAGE','DOCUMENT','CALENDAR_EVENT',
+        'OWNER_ASSERTION','DECISION','RESEARCH_RESULT','EXTERNAL_URL',
+        'STRUCTURED_EXTRACTION','CASE')),
+      CHECK (link_method IN (
+        'EXPLICIT_RELATION','MESSAGE_REFERENCE','DETERMINISTIC_IDENTIFIER',
+        'SEMANTIC_CANDIDATE','OWNER_CONFIRMED')),
+      /* One claim per (case, source). A second discovery of the same link
+         updates the row it already has; it does not stack duplicates that
+         would each have to be reviewed. */
+      UNIQUE (namespace, case_id, source_type, source_ref)
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_case_sources_case
+             ON case_sources(namespace, case_id, link_state)`)
+  /* THE REVERSE LOOKUP, which is the half the old column could not do at all:
+     given a thread, which cases claim it. The morning this was designed, a
+     reply landed in a thread no case knew about, and answering it needed the
+     OTHER direction of exactly this index. */
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_case_sources_ref
+             ON case_sources(namespace, source_type, source_ref, link_state)`)
 }
