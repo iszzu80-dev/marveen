@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { CASE_EVENT } from '../cos/case-event-types.js'
 import { commitmentsForCase } from '../cos/intelligence/commitments.js'
 import { commitmentToAttention } from '../cos/intelligence/attention.js'
 
@@ -89,7 +90,12 @@ describe('C -- follow_up_at WITHOUT a next_action is engine metadata, not a comm
   })
 
   it('but a COMPLETED case WITH an evidencing event stays out -- nothing was owed', () => {
-    const ev = [{ event_id: 'e1', case_id: 'c1', event_type: 'STATUS_CHANGE',
+    // The name comes from the shared vocabulary. It used to be the literal
+    // 'STATUS_CHANGE', which the detector never matched -- so this test asserted
+    // "an evidencing event keeps it out" while handing the detector an event it
+    // could not read. It passed on the other branch of the gate, not on the one
+    // it names.
+    const ev = [{ event_id: 'e1', case_id: 'c1', event_type: CASE_EVENT.STATUS_CHANGED,
       new_status: 'COMPLETED', reason: null, created_at: NOW - DAY }] as never
     expect(commitmentsForCase(row({ status: 'COMPLETED', follow_up_at: NOW - DAY }), ev, 'personal', NOW))
       .toEqual([])

@@ -58,6 +58,14 @@ export const DETECTOR_BEHAVIOUR_SCOPE: readonly string[] = [
   // ujjlenyomat mozdul vele. A `case-engine-core -> scope-gate` élet ez a sor
   // teszi zárttá; a zártsági teszt hozta elő, olvasásból nem látszott volna.
   'src/cos/scope-gate.ts',
+  // Életciklus-szótár (2026-09-03): ez mondja meg, MELYIK esemény számít
+  // lezárásnak és melyik újranyitásnak. Döntés, nem infrastruktúra -- pontosan
+  // az a fajta, amit a fejléc szerint a hash lefed --, ezért a hatókörbe kerül
+  // és a viselkedési ujjlenyomat mozdul vele. A `case-engine-core ->
+  // case-event-types` élet ez a sor teszi zárttá, és megint a zártsági teszt
+  // hozta elő: a szótárat bevezető változás olvasásra ártalmatlan
+  // átnevezésnek látszott.
+  'src/cos/case-event-types.ts',
   // Ügy-életciklus: ez dönti el, mi van nyitva, és mikor záródik.
   'src/cos/case-store.ts',
   'src/cos/case-engine-core.ts',
