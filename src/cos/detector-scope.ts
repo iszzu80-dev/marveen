@@ -69,6 +69,16 @@ export const DETECTOR_BEHAVIOUR_SCOPE: readonly string[] = [
   // Ügy-életciklus: ez dönti el, mi van nyitva, és mikor záródik.
   'src/cos/case-store.ts',
   'src/cos/case-engine-core.ts',
+  // Ugy-forras graf (2026-09-03): ez mondja meg, MELYIK UGYHOZ tartozik egy
+  // beerkezo szal, es milyen bizonyitek alapjan valik egy allitas kanonikussza.
+  // A `findActiveCaseByThread` innen kerdez eloszor, tehat ez dont arrol, hogy
+  // egy level UJ ugyet nyit-e vagy egy meglevohoz kapcsolodik -- pontosan az,
+  // amit a fejlec szerint a hash lefed ("MELYIK uzenetbol lesz ugy"). Ezert a
+  // hatokorbe kerul, NEM a deklaralt kivetelek koze, es a viselkedesi
+  // ujjlenyomat mozdul vele. Az `intake -> case-sources` es a
+  // `progression-resolver -> case-sources` elet ez a sor teszi zartta; megint a
+  // zartsagi teszt hozta elo, olvasasbol nem latszott volna.
+  'src/cos/case-sources.ts',
   'src/cos/case-link.ts',
   'src/cos/progression-completion.ts',
   'src/cos/progression-resolver.ts',
