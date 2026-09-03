@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { commitmentsForCase } from '../cos/intelligence/commitments.js'
+import { CASE_EVENT } from '../cos/case-event-types.js'
 import {
   makeElement, assertNotAuthorization, combineConfidence, IntelligenceInvariantError,
 } from '../cos/intelligence/element.js'
@@ -23,7 +24,11 @@ const caseRow = (over: Partial<Parameters<typeof commitmentsForCase>[0]> = {}) =
 }) as Parameters<typeof commitmentsForCase>[0]
 
 const ev = (over: Partial<Parameters<typeof commitmentsForCase>[1][number]>) => ({
-  event_id: 'e1', case_id: 'case-1', event_type: 'STATUS_CHANGE',
+  // The name comes from the SHARED vocabulary, never retyped. This line used to
+  // read 'STATUS_CHANGE' -- the same wrong name the detector carried -- so the
+  // unit tests agreed with the bug and the producer was the only one telling the
+  // truth. A literal here is how a one-letter drift survives a green suite.
+  event_id: 'e1', case_id: 'case-1', event_type: CASE_EVENT.STATUS_CHANGED,
   new_status: 'COMPLETED', reason: null, created_at: NOW - 2 * HOUR, ...over,
 }) as Parameters<typeof commitmentsForCase>[1][number]
 

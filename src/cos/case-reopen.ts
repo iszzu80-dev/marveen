@@ -52,6 +52,7 @@
 //   maker on the same fact — the disease P1 spent its whole packet removing.
 
 import type Database from 'better-sqlite3'
+import { CASE_EVENT } from './case-event-types.js'
 import { transitionCase, appendCaseEvent, getCase } from './case-store.js'
 import { transitionZstCase, appendZstCaseEvent, getZstCase } from './zst-case-store.js'
 import { REOPEN_WINDOW_SEC } from './proactive-case-bridge.js'
@@ -176,7 +177,7 @@ export function reopenCase(
 
     append(db, {
       caseId, caseVersion: v, actor: input.actor,
-      eventType: 'CASE_REOPENED',
+      eventType: CASE_EVENT.CASE_REOPENED,
       reason: input.reason,
       sourceSystem: input.evidence.sourceSystem,
       sourceReference: input.evidence.sourceReference,

@@ -15,6 +15,7 @@
 //     a live claim cannot be stolen, an expired one can, and the fence proves it.
 
 import type Database from 'better-sqlite3'
+import { CASE_EVENT } from './case-event-types.js'
 import { ZST_MARKERS, CORPORATE_MARKERS } from './scope-gate.js'
 
 /** The three tables a case namespace owns. */
@@ -498,7 +499,7 @@ export function makeCaseEngine(
         caseId: input.caseId,
         caseVersion: newVersion,
         actor: input.actor,
-        eventType: 'STATUS_CHANGED',
+        eventType: CASE_EVENT.STATUS_CHANGED,
         previousStatus: current.status,
         newStatus: input.newStatus,
         reason: input.reason ?? null,

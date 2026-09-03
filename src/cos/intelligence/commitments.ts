@@ -17,6 +17,7 @@
 // contradicting event flips it back with no migration, no refresh job, and no
 // window in which the stored answer and the evidence disagree.
 import type Database from 'better-sqlite3'
+import { FULFILLING_EVENT_TYPES, REOPENING_EVENT_TYPES } from '../case-event-types.js'
 import {
   type Confidence, type IntelligenceElement, type Provenance,
   combineConfidence, elementId, makeElement,
@@ -116,13 +117,19 @@ interface EventRow {
 /** Statuses that mean the case itself reached an end. */
 const TERMINAL = new Set(['COMPLETED', 'CANCELLED', 'ARCHIVED'])
 
-/** Events that EVIDENCE a commitment being met, as opposed to merely describing
- *  progress. Deliberately narrow: a status change to COMPLETED is evidence, an
- *  enrichment note is not. */
-const FULFILLING_EVENT = new Set(['STATUS_CHANGE', 'COMPLETED', 'OUTBOUND_VERIFIED', 'ANSWER_RECORDED'])
-
-/** Events that can CONTRADICT a fulfilment after the fact -- the reopen path. */
-const REOPENING_EVENT = new Set(['REOPENED', 'STATUS_CHANGE', 'CONTRADICTION_RECORDED', 'FOLLOW_UP_DUE'])
+/** Events that EVIDENCE a commitment being met, and events that can CONTRADICT
+ *  one, both taken from the SHARED lifecycle vocabulary rather than retyped
+ *  here. They used to be two hand-written lists beside the engine's own, and
+ *  they had drifted by one letter -- `STATUS_CHANGE` against the engine's
+ *  `STATUS_CHANGED` -- so neither set had ever matched a single row of the live
+ *  store. See src/cos/case-event-types.ts.
+ *
+ *  `FOLLOW_UP_DUE` is deliberately NOT carried over: it is a case STATUS, never
+ *  an event type, so its presence in the old reopen list was a category error
+ *  that could not have matched anything either. A reopen is recognised the way
+ *  it actually happens -- a later transition to a non-terminal status. */
+const FULFILLING_EVENT = FULFILLING_EVENT_TYPES
+const REOPENING_EVENT = REOPENING_EVENT_TYPES
 
 function ownerOf(row: CaseRow): CommitmentOwner {
   const o = (row.next_action_owner ?? row.owner ?? '').toLowerCase()
