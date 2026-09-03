@@ -144,6 +144,34 @@ describe('why a terminal row is terminal, when no transition says so', () => {
   })
 })
 
+describe('WHICH contradicting event is asked', () => {
+  beforeEach(() => { initDatabase(':memory:') })
+
+  it('the FIRST one -- the case living its life afterwards does not know why it was reopened', () => {
+    // Closed, restored, and then moved on. Asking the LAST transition returns
+    // UNKNOWN_REOPEN, because a later ordinary move carries no restore marker.
+    // That mistake alone put 13 of the 21 live restore artifacts in the wrong
+    // class, and it looked like a policy judgement rather than a missing lookup.
+    newCase('order-1')
+    transitionCase(getDb(), { caseId: 'order-1', newStatus: 'COMPLETED', seenVersion: 1, actor: 'test', reason: 'engine DoD' }, NOW - 3 * DAY)
+    appendCaseEvent(getDb(), {
+      caseId: 'order-1', caseVersion: 2, actor: 'marveen', eventType: 'STATUS_CHANGED',
+      previousStatus: 'COMPLETED', newStatus: 'READY', sourceSystem: 'manual_restore',
+      reason: 'Restored: closed by the progression engine on a generic, self-certified DoD',
+    } as never, NOW - 2 * DAY)
+    getDb().prepare(`UPDATE personal_cases SET status='READY' WHERE case_id='order-1'`).run()
+    // …and then an ordinary later move, with nothing mechanical about it.
+    appendCaseEvent(getDb(), {
+      caseId: 'order-1', caseVersion: 2, actor: 'istvan', eventType: 'STATUS_CHANGED',
+      previousStatus: 'READY', newStatus: 'EXECUTING', reason: 'picked it up',
+    } as never, NOW - DAY)
+
+    const c = commitmentFor('order-1')!
+    expect(c.status).toBe('REOPENED')
+    expect(c.reopenClass).toBe('RECOVERY_RESTORE')
+  })
+})
+
 describe('the three classes reach the commitment, not just the classifier', () => {
   beforeEach(() => { initDatabase(':memory:') })
 
