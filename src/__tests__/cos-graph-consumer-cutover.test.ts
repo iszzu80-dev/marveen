@@ -249,3 +249,60 @@ describe('a case id in a filename is a link, and the file keeps its own case too
     expect(linkDocumentsByCaseIdentifier(getDb(), 'personal', NOW + DAY).created).toBe(0)
   })
 })
+
+describe('the Reader is handed the dossier documents, not only the column ones', () => {
+  beforeEach(() => {
+    initDatabase(':memory:'); newCase('umbrella'); newCase('sibling')
+  })
+
+  const doc = (id: string, caseId: string, filename: string) =>
+    getDb().prepare(
+      `INSERT INTO cos_documents (document_id, namespace, case_id, source, source_ref, filename,
+         mime_type, sha256, doc_kind, extracted_text, sensitivity, external_share_allowed, created_at, updated_at)
+       VALUES (@id, 'personal', @caseId, 'email', 'x', @fn, 'text/plain', @id, 'other', @txt,
+         'PERSONAL', 0, @now, @now)`,
+    ).run({ id, caseId, fn: filename, txt: `content of ${id}`, now: NOW })
+
+  const docRefs = (caseId: string) =>
+    buildCaseContext(getDb(), 'personal', caseId, NOW).items
+      .filter((i) => i.kind === 'DOCUMENT').map((i) => i.provenance.reference).sort()
+
+  it('a document linked ONLY by the graph reaches the context, with its content', () => {
+    doc('doc-own', 'umbrella', 'own.txt')
+    doc('doc-linked', 'sibling', 'PRI-HOME-2026-005_photo.jpg')
+    linkCaseSource(getDb(), {
+      namespace: 'personal', caseId: 'umbrella', sourceType: 'DOCUMENT', sourceRef: 'doc-linked',
+      linkMethod: 'DETERMINISTIC_IDENTIFIER',
+      evidence: 'filename names the case', discoveredBy: 'test',
+    }, NOW)
+    expect(docRefs('umbrella')).toEqual(['doc-linked', 'doc-own'])
+    const linked = buildCaseContext(getDb(), 'personal', 'umbrella', NOW).items
+      .find((i) => i.provenance.reference === 'doc-linked')!
+    expect(linked.content).toContain('content of doc-linked')
+    // ...and the sibling keeps its own document. Nothing was moved.
+    expect(docRefs('sibling')).toEqual(['doc-linked'])
+  })
+
+  it('a CANDIDATE document link does not bring content into the context', () => {
+    doc('doc-guess', 'sibling', 'maybe.txt')
+    linkCaseSource(getDb(), {
+      namespace: 'personal', caseId: 'umbrella', sourceType: 'DOCUMENT', sourceRef: 'doc-guess',
+      linkMethod: 'SEMANTIC_CANDIDATE', evidence: 'looks related', discoveredBy: 'test',
+    }, NOW)
+    expect(docRefs('umbrella')).toEqual([])
+  })
+
+  it('a graph link cannot pull a document across the namespace boundary', () => {
+    getDb().prepare(
+      `INSERT INTO cos_documents (document_id, namespace, case_id, source, source_ref, filename,
+         mime_type, sha256, doc_kind, sensitivity, external_share_allowed, created_at, updated_at)
+       VALUES ('doc-zst', 'zst', 'sibling', 'email', 'x', 'z.txt', 'text/plain', 'h', 'other',
+         'ZST_INTERNAL', 0, @now, @now)`,
+    ).run({ now: NOW })
+    linkCaseSource(getDb(), {
+      namespace: 'personal', caseId: 'umbrella', sourceType: 'DOCUMENT', sourceRef: 'doc-zst',
+      linkMethod: 'DETERMINISTIC_IDENTIFIER', evidence: 'id match', discoveredBy: 'test',
+    }, NOW)
+    expect(docRefs('umbrella')).toEqual([])
+  })
+})

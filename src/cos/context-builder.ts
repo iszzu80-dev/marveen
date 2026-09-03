@@ -402,11 +402,31 @@ export function buildCaseContext(
   // the database cannot be leaked by a later bug. The `excluded` list below is
   // built by a SECOND query that deliberately looks at the other namespace, so
   // the exclusion is demonstrable rather than merely intended.
+  // THE CASE'S DOCUMENTS ARE THE DOSSIER'S, NOT ONLY THE COLUMN'S (2026-09-03).
+  //
+  // `cos_documents.case_id` holds exactly ONE case, and it gets the case the
+  // mail happened to arrive on. Measured in the pool cluster: twenty photos
+  // whose FILENAMES name PRI-HOME-2026-005 are filed against a sibling case, so
+  // asked for "the photos of the pool case" this query returned two of
+  // twenty-two. The graph knows the rest, by a deterministic identifier match.
+  //
+  // So the set is the union: rows that name the case, plus every CANONICAL
+  // DOCUMENT link in the dossier. Candidates stay out, as everywhere else. The
+  // namespace filter still runs in SQL on both halves -- the cross-domain
+  // boundary is not weakened by widening WHICH documents of this namespace are
+  // in scope.
   const docs = db.prepare(
     `SELECT document_id, doc_kind, filename, source, source_ref, sensitivity, content_purged_at,
             mime_type, extracted_text, extraction_state
-     FROM cos_documents WHERE namespace = ? AND case_id = ? ORDER BY created_at DESC LIMIT 20`
-  ).all(namespace, caseId) as Array<Record<string, unknown>>
+     FROM cos_documents
+      WHERE namespace = @ns
+        AND (case_id = @caseId
+             OR document_id IN (
+               SELECT source_ref FROM case_sources
+                WHERE namespace = @ns AND case_id = @caseId
+                  AND source_type = 'DOCUMENT' AND link_state = 'CANONICAL'))
+      ORDER BY created_at DESC LIMIT 40`
+  ).all({ ns: namespace, caseId }) as Array<Record<string, unknown>>
   for (const d of docs) {
     if (d.content_purged_at) {
       excluded.push({ reference: String(d.document_id), reason: 'content purged by retention policy' })
