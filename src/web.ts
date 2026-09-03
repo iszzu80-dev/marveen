@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { runLsof } from './lsof.js'
-import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL, DASHBOARD_ALLOWED_ORIGINS, MAIN_AGENT_ID } from './config.js'
+import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL, DASHBOARD_ALLOWED_ORIGINS, MAIN_AGENT_ID, resolveWebDir} from './config.js'
 import { loadOrCreateDashboardToken } from './web/dashboard-auth.js'
 import { resolveAuth, requiresAuth, isFederationWireEndpoint, type AuthResult } from './web/auth-gate.js'
 import { resolveApgPrincipal } from './web/apg-principal.js'
@@ -90,7 +90,12 @@ import { tryHandleFleet } from './web/routes/fleet.js'
 import { tryHandleVaultSshKeys } from './web/routes/vault-ssh-keys.js'
 import type { RouteContext } from './web/routes/types.js'
 
-const WEB_DIR = join(PROJECT_ROOT, 'web')
+// The frontend's home, resolved rather than assumed. See resolveWebDir() in
+// config.ts for why this stopped being `join(PROJECT_ROOT, 'web')`: a deployed
+// runtime must serve the frontend that shipped inside its own artifact, not the
+// one that happens to be in the shared checkout.
+const WEB_DIR_RESOLUTION = resolveWebDir()
+const WEB_DIR = WEB_DIR_RESOLUTION.dir
 
 function ensureDirs() {
   mkdirSync(AGENTS_BASE_DIR, { recursive: true })
@@ -101,6 +106,17 @@ export function startWebServer(port = 3420): http.Server {
   // browser origins mirror that -- anything else is rejected to prevent CSRF
   // from malicious websites the user may visit while the dashboard is running.
   ensureDirs()
+
+  // Said out loud on every boot. A frontend served from the checkout is not an
+  // error the runtime can refuse -- an old rollback artifact legitimately has no
+  // dist/static -- but it must never be something you have to go and measure to
+  // discover. `source: 'checkout'` in a deployed runtime means the page and the
+  // server no longer share one release identity.
+  if (WEB_DIR_RESOLUTION.source === 'release') {
+    logger.info({ webDir: WEB_DIR, source: WEB_DIR_RESOLUTION.source }, WEB_DIR_RESOLUTION.reason)
+  } else {
+    logger.warn({ webDir: WEB_DIR, source: WEB_DIR_RESOLUTION.source }, WEB_DIR_RESOLUTION.reason)
+  }
 
   const DASHBOARD_TOKEN = loadOrCreateDashboardToken()
   const allowedOrigins = new Set([

@@ -17,10 +17,10 @@
  * Usage: npx tsx scripts/build-release-dist.ts <releaseDir> [--expect-sha <sha>]
  */
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
-import { digestSourceTree, writeBuildProvenance, verifyRuntimeProvenance } from '../src/release/provenance.js'
+import { digestSourceTree, writeBuildProvenance, verifyRuntimeProvenance, STATIC_SUBDIR } from '../src/release/provenance.js'
 
 const args = process.argv.slice(2)
 const releaseDir = args[0]
@@ -37,6 +37,17 @@ const sourceSha = readFileSync(shaFile, 'utf8').trim()
 if (!/^[0-9a-f]{40}$/.test(sourceSha)) die(`.release-sha is not a commit sha: ${sourceSha}`)
 if (expectSha && sourceSha !== expectSha) die(`this artifact is ${sourceSha}, expected ${expectSha}`)
 
+// THE FRONTEND IS PART OF THE RELEASE (owner ruling, 2026-09-03). A candidate
+// that ships no web/ cannot be built, because the runtime it would produce could
+// only serve a frontend from somewhere outside its own identity -- which is the
+// exact defect this change exists to close. Refusing here rather than warning is
+// the point: a release that quietly builds without a frontend is indistinguishable
+// from one that has it.
+const webSrc = join(releaseDir, 'web')
+if (!existsSync(webSrc)) {
+  die(`${releaseDir} ships no web/ -- the frontend is part of the release artifact and this candidate has none`)
+}
+
 // ── 1. the source tree is MEASURED against git, not trusted ──────────────────
 // This is the step that turns .release-sha from a claim into a fact. A release
 // dir edited by hand -- the exact thing check 2 of the pinned guard exists for --
@@ -46,7 +57,7 @@ const scratch = mkdtempSync(join(tmpdir(), 'relverify-'))
 let fromGit: string
 try {
   mkdirSync(join(scratch, 'x'), { recursive: true })
-  const tar = execFileSync('git', ['-C', REPO, 'archive', sourceSha, 'src', 'package.json', 'tsconfig.json'], {
+  const tar = execFileSync('git', ['-C', REPO, 'archive', sourceSha, 'src', 'web', 'package.json', 'tsconfig.json'], {
     maxBuffer: 512 * 1024 * 1024, encoding: 'buffer',
   })
   const tarPath = join(scratch, 'a.tar')
@@ -73,6 +84,17 @@ try {
 }
 if (!existsSync(distDir)) die('tsc produced no dist')
 
+// ── 2b. the frontend moves INTO the artifact ────────────────────────────────
+// Copied, not symlinked and not left behind: the thing that gets installed as
+// $REPO/dist has to CONTAIN the page it serves, or the two halves can be
+// separated again by anything that moves the source directory afterwards.
+const staticDir = join(distDir, STATIC_SUBDIR)
+rmSync(staticDir, { recursive: true, force: true })
+cpSync(webSrc, staticDir, { recursive: true, dereference: true })
+if (!existsSync(join(staticDir, 'index.html'))) {
+  die(`the frontend copy produced no ${STATIC_SUBDIR}/index.html -- refusing to ship an artifact whose page is missing`)
+}
+
 // ── 3. provenance, written from what was actually produced ──────────────────
 const p = writeBuildProvenance(distDir, {
   sourceSha,
@@ -81,6 +103,7 @@ const p = writeBuildProvenance(distDir, {
   builder: 'build-release-dist.ts',
 })
 console.log(`built ${p.distFileCount} files, dist ${p.distHash.slice(0, 16)}, provenance written`)
+console.log(`frontend shipped inside the artifact: ${p.staticFileCount} files, ${p.staticTreeHash.slice(0, 16)}`)
 
 // ── 4. the builder verifies its own output, or the whole thing is theatre ────
 const v = verifyRuntimeProvenance(distDir, sourceSha)

@@ -22,7 +22,11 @@ import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from '
 import { join, relative, sep } from 'node:path'
 
 export const PROVENANCE_FILENAME = '.build-provenance.json'
-export const PROVENANCE_SCHEMA = 1
+export const PROVENANCE_SCHEMA = 2
+
+/** Where the frontend lives INSIDE the built artifact. One name, used by the
+ *  builder that puts it there and the runtime that serves it from there. */
+export const STATIC_SUBDIR = 'static'
 
 export interface FileDigest { path: string; sha256: string }
 
@@ -41,6 +45,16 @@ export interface BuildProvenance {
    *  deployed dist is what detects a post-build edit. */
   distHash: string
   distFileCount: number
+  /** Digest over the STATIC FRONTEND shipped inside the artifact (dist/static).
+   *  Separate from distHash so a report can name which half moved, even though
+   *  distHash covers these bytes too -- one number that changes tells you
+   *  something is wrong, two tell you where. */
+  staticTreeHash: string
+  staticFileCount: number
+  /** The frontend file list with content hashes, as the owner asked for it on
+   *  2026-09-03. Kept in full rather than summarised: `coscontrol.js` moving
+   *  must be readable off the manifest without recomputing anything. */
+  staticFiles: FileDigest[]
   builtAt: string
   /** The builder that produced it, so a hand-made manifest is at least visible. */
   builder: string
@@ -80,13 +94,24 @@ export function treeHash(files: FileDigest[]): string {
 
 const isJsArtifact = (rel: string) => /\.(js|mjs|cjs|json|d\.ts)$/.test(rel)
 
-/** The SOURCE digest: only what the compiler reads. package.json and
- *  tsconfig.json are included because they change the output. */
+/** The SOURCE digest: everything the RUNTIME is made of. package.json and
+ *  tsconfig.json are included because they change the compiler's output.
+ *
+ *  `web/` IS SOURCE (owner ruling, 2026-09-03). It used to be left out, and the
+ *  omission was not visible anywhere: the backend ran from an immutable pinned
+ *  artifact while the frontend it served came from the shared checkout, so the
+ *  live page moved every time develop moved and no digest disagreed. Including
+ *  it here is what makes a tampered `web/coscontrol.js` in a release directory
+ *  fail against `git archive <sha>` -- the same way a tampered `src/` already did. */
 export function digestSourceTree(releaseDir: string): string {
   const parts: FileDigest[] = []
   const srcDir = join(releaseDir, 'src')
   if (existsSync(srcDir)) {
     for (const f of digestTree(srcDir)) parts.push({ path: `src/${f.path}`, sha256: f.sha256 })
+  }
+  const webDir = join(releaseDir, 'web')
+  if (existsSync(webDir)) {
+    for (const f of digestTree(webDir)) parts.push({ path: `web/${f.path}`, sha256: f.sha256 })
   }
   for (const name of ['package.json', 'tsconfig.json']) {
     const p = join(releaseDir, name)
@@ -100,8 +125,20 @@ export function digestSourceTree(releaseDir: string): string {
  *  its own hash. */
 export function digestDistTree(distDir: string): { hash: string; count: number } {
   const files = digestTree(distDir, { exclude: (rel) => rel === PROVENANCE_FILENAME })
-    .filter((f) => isJsArtifact(f.path))
+    // `static/` is included WHOLESALE, not through the isJsArtifact filter: the
+    // frontend is html, css and images as much as it is js, and a filter that
+    // covered only the js would leave the page's markup outside the artifact
+    // hash while claiming the artifact was covered.
+    .filter((f) => isJsArtifact(f.path) || f.path === STATIC_SUBDIR || f.path.startsWith(`${STATIC_SUBDIR}/`))
   return { hash: treeHash(files), count: files.length }
+}
+
+/** The frontend's own digest and file list, measured from the built artifact. */
+export function digestStaticTree(distDir: string): { hash: string; count: number; files: FileDigest[] } {
+  const dir = join(distDir, STATIC_SUBDIR)
+  if (!existsSync(dir)) return { hash: '', count: 0, files: [] }
+  const files = digestTree(dir).map((f) => ({ path: `${STATIC_SUBDIR}/${f.path}`, sha256: f.sha256 }))
+  return { hash: treeHash(files), count: files.length, files }
 }
 
 export function writeBuildProvenance(
@@ -109,6 +146,7 @@ export function writeBuildProvenance(
   input: { sourceSha: string; releaseId: string; sourceTreeHash: string; builder: string; now?: Date },
 ): BuildProvenance {
   const { hash, count } = digestDistTree(distDir)
+  const st = digestStaticTree(distDir)
   const p: BuildProvenance = {
     schema: PROVENANCE_SCHEMA,
     sourceSha: input.sourceSha,
@@ -116,6 +154,9 @@ export function writeBuildProvenance(
     sourceTreeHash: input.sourceTreeHash,
     distHash: hash,
     distFileCount: count,
+    staticTreeHash: st.hash,
+    staticFileCount: st.count,
+    staticFiles: st.files,
     builtAt: (input.now ?? new Date()).toISOString(),
     builder: input.builder,
   }
@@ -170,13 +211,18 @@ export type ProvenanceFailure =
   | 'SOURCE_MISMATCH'    // the artifact proves a DIFFERENT commit than expected
   | 'MANIFEST_FORGED'    // the manifest's sourceSha does not match its own source digest
   | 'SOURCE_UNRESOLVABLE' // the claimed commit cannot be checked against git at all
+  | 'STATIC_MISSING'     // a built artifact that ships no frontend at all
+  | 'STATIC_TAMPERED'    // the frontend no longer hashes to what the build recorded
 
 export interface ProvenanceVerdict {
   ok: boolean
   failure?: ProvenanceFailure
   detail: string
   /** MEASURED from the deployed files, never from the pin. */
-  measured?: { sourceSha: string; distHash: string; distFileCount: number; releaseId: string }
+  measured?: {
+    sourceSha: string; distHash: string; distFileCount: number; releaseId: string
+    staticTreeHash: string; staticFileCount: number
+  }
 }
 
 /**
@@ -210,7 +256,29 @@ export function verifyRuntimeProvenance(distDir: string, expectedSha?: string): 
   }
 
   const { hash, count } = digestDistTree(distDir)
-  const measured = { sourceSha: m.sourceSha, distHash: hash, distFileCount: count, releaseId: m.releaseId }
+  const st = digestStaticTree(distDir)
+  const measured = {
+    sourceSha: m.sourceSha, distHash: hash, distFileCount: count, releaseId: m.releaseId,
+    staticTreeHash: st.hash, staticFileCount: st.count,
+  }
+
+  // THE FRONTEND IS PART OF THE RELEASE, so an artifact without one cannot pass.
+  // Checked BEFORE the dist hash, because "there is no frontend" and "the
+  // frontend changed" are different sentences and the reader deserves the right
+  // one. A manifest that records a frontend over a dist that has none would
+  // otherwise surface as a generic TAMPERED and send someone hunting a diff.
+  if (m.staticFileCount > 0 && st.count === 0) {
+    return {
+      ok: false, failure: 'STATIC_MISSING', measured,
+      detail: `the manifest records ${m.staticFileCount} frontend files but ${join(distDir, STATIC_SUBDIR)} does not exist: this runtime would serve a frontend from somewhere else`,
+    }
+  }
+  if (st.hash !== m.staticTreeHash) {
+    return {
+      ok: false, failure: 'STATIC_TAMPERED', measured,
+      detail: `the shipped frontend has changed since it was built: recorded ${String(m.staticTreeHash).slice(0, 16)} over ${m.staticFileCount} files, measured ${st.hash.slice(0, 16)} over ${st.count}`,
+    }
+  }
 
   // Recomputed FIRST, before the sha comparison: a tampered dist whose manifest
   // still names the right commit would otherwise pass on the strength of the
@@ -227,5 +295,8 @@ export function verifyRuntimeProvenance(distDir: string, expectedSha?: string): 
       detail: `deployed artifact was built from ${m.sourceSha}, expected ${expectedSha}`,
     }
   }
-  return { ok: true, measured, detail: `artifact proves ${m.sourceSha} (${count} files, dist ${hash.slice(0, 16)})` }
+  return {
+    ok: true, measured,
+    detail: `artifact proves ${m.sourceSha} (${count} files, dist ${hash.slice(0, 16)}, frontend ${st.count} files ${st.hash.slice(0, 16)})`,
+  }
 }

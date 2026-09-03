@@ -55,6 +55,18 @@ $DIRTY"
 git -C "$REPO" show "$GATE:scripts/run-pinned-cos-cycle.sh" >/dev/null 2>&1 \
   || die "no scripts/run-pinned-cos-cycle.sh at gate sha $GSHORT -- this candidate would deploy WITHOUT a gate"
 
+# THE FRONTEND IS PART OF THE RELEASE (owner ruling, 2026-09-03). Checked at the
+# PAYLOAD sha and checked HERE, before a single byte is written: a candidate with
+# no web/ would produce a runtime that can only serve a page from outside its own
+# release identity, and that is the defect this whole change closes. The build
+# refuses too; both refuse, because the build cannot see a candidate the cutover
+# never extracts, and the cutover cannot see a copy the build never makes.
+git -C "$REPO" ls-tree -d --name-only "$SHA" web >/dev/null 2>&1 \
+  && [ -n "$(git -C "$REPO" ls-tree -d --name-only "$SHA" web)" ] \
+  || die "candidate $SHORT ships no web/ -- the frontend is part of the release artifact and this candidate has none"
+git -C "$REPO" cat-file -e "$SHA:web/coscontrol.js" 2>/dev/null \
+  || die "candidate $SHORT has web/ but no web/coscontrol.js -- refusing to deploy a Mission Control with no control surface"
+
 echo "cutover: payload $SHORT, gate $GSHORT$([ $DRY = 1 ] && echo ' (DRY RUN)')"
 
 REL="$REPO/releases"
@@ -66,8 +78,16 @@ STAMP="$(date +%Y%m%dT%H%M%S)"
 run() { if [ $DRY = 1 ]; then say "would: $*"; else eval "$@"; fi; }
 
 # 1. Release artifacts: COPIES from the object store, not worktrees.
-for spec in "$CYCLE:scripts src package.json tsconfig.json" "$FEEDER:scripts/email-triage-fetch.py"; do
+for spec in "$CYCLE:scripts src web package.json tsconfig.json" "$FEEDER:scripts/email-triage-fetch.py"; do
   dir="${spec%%:*}"; paths="${spec#*:}"
+  # A release dir built BEFORE the frontend joined the artifact has no web/, and
+  # reusing it would produce exactly the split this change removes. Reuse is only
+  # safe when the artifact is complete, so an incomplete one is rebuilt rather
+  # than trusted for being present.
+  if [ -d "$dir" ] && [ "$dir" = "$CYCLE" ] && [ ! -d "$dir/web" ]; then
+    say "release $(basename "$dir") predates frontend packaging (no web/) -- rebuilding it"
+    run "rm -rf '$dir'"
+  fi
   if [ -d "$dir" ]; then say "release exists, reusing: $(basename "$dir")"; else
     run "mkdir -p '$dir'"
     run "git -C '$REPO' archive '$SHA' $paths | tar -x -C '$dir'"

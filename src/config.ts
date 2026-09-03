@@ -13,6 +13,56 @@ export const PROJECT_ROOT = join(__dirname, '..')
 export const STORE_DIR = join(PROJECT_ROOT, 'store')
 
 /**
+ * WHERE THE SERVED FRONTEND COMES FROM, and why this is not a one-liner.
+ *
+ * Until 2026-09-03 this was `join(PROJECT_ROOT, 'web')` and nothing else. On a
+ * deployed runtime PROJECT_ROOT is the SHARED CHECKOUT, so the backend ran from
+ * an immutable pinned artifact while the page it served came out of a mutable
+ * working tree sitting on develop. Nothing disagreed, because no digest covered
+ * the frontend: a provenance-verified cutover could install a proven backend and
+ * leave the browser being handed whatever develop happened to hold. That is how
+ * the 560ed6f5f release shipped a live backend whose own UI was not live.
+ *
+ * The owner's ruling (2026-09-03): "live backend source AND live frontend source
+ * ugyanabbol az immutable release identitybol szarmazik". So a BUILT runtime
+ * serves `dist/static`, which `build-release-dist.ts` copies out of the release
+ * artifact and the provenance manifest hashes file by file.
+ *
+ * The fallback is deliberately narrow and deliberately LOUD. It exists for two
+ * cases only: running from source in development (no dist at all), and a
+ * rollback to an artifact built before this change, which has no `static/` and
+ * would otherwise refuse to boot -- bricking rollback in the name of provenance
+ * would be the worse failure. It is never silent: `source` says which half the
+ * caller got, the server logs it at startup, and the release verifier REFUSES a
+ * built artifact that has no frontend of its own. The runtime stays able to
+ * boot; only the claim that it is correct is withheld.
+ */
+export interface WebDirResolution {
+  dir: string
+  source: 'release' | 'checkout'
+  reason: string
+}
+
+export function resolveWebDir(): WebDirResolution {
+  const inArtifact = join(__dirname, 'static')
+  if (existsSync(inArtifact)) {
+    return {
+      dir: inArtifact,
+      source: 'release',
+      reason: 'serving the frontend shipped inside the deployed artifact (dist/static)',
+    }
+  }
+  const fromCheckout = join(PROJECT_ROOT, 'web')
+  return {
+    dir: fromCheckout,
+    source: 'checkout',
+    reason: existsSync(join(__dirname, 'index.js'))
+      ? 'this built artifact ships no dist/static -- it predates frontend packaging, so the frontend is coming from the MUTABLE checkout and is not covered by the release identity'
+      : 'running from source (no build), so the frontend comes from the working tree',
+  }
+}
+
+/**
  * The store directory, resolved on EVERY call.
  *
  * T5 TEST<->RUNTIME FILESYSTEM ISOLATION (owner, 2026-08-31): "a test must not

@@ -30,7 +30,7 @@ function sourceTreeHashFromGit(repo: string, sha: string): string | null {
   try {
     const x = join(scratch, 'x'); mkdirSync(x, { recursive: true })
     const tarPath = join(scratch, 'a.tar')
-    writeFileSync(tarPath, execFileSync('git', ['-C', repo, 'archive', sha, 'src', 'package.json', 'tsconfig.json'],
+    writeFileSync(tarPath, execFileSync('git', ['-C', repo, 'archive', sha, 'src', 'web', 'package.json', 'tsconfig.json'],
       { maxBuffer: 512 * 1024 * 1024, encoding: 'buffer' }))
     execFileSync('tar', ['-x', '-f', tarPath, '-C', x])
     return digestSourceTree(x)
@@ -75,6 +75,15 @@ console.log(JSON.stringify({
   hashCheck: { ok: v.ok, failure: v.failure ?? null, detail: v.detail },
   gitCrossCheck: skipCross ? 'SKIPPED (--no-git-crosscheck)' : cross,
   measured: v.measured ?? null,
+  // The frontend, named separately in the output. The owner has to be able to
+  // read "which page is this runtime serving" off one command, without knowing
+  // that it is folded into distHash.
+  frontend: m ? {
+    inArtifact: (v.measured?.staticFileCount ?? 0) > 0,
+    files: v.measured?.staticFileCount ?? 0,
+    treeHash: v.measured?.staticTreeHash ?? null,
+    coscontrolJs: m.staticFiles?.find((f) => f.path === 'static/coscontrol.js')?.sha256 ?? null,
+  } : null,
   expected: expect ?? null,
 }, null, 2))
 process.exit(ok ? 0 : 94)
