@@ -110,8 +110,24 @@ export const WEIGHTS = {
 const TERM_CAP = 0.34
 /** How far outside a span still counts as near it. */
 export const NEAR_SPAN_DAYS = 7
-/** Below this, a proposal is not worth an owner's attention. */
-export const CANDIDATE_THRESHOLD = 0.35
+/**
+ * Below this, a proposal is not worth an owner's attention.
+ *
+ * CHOSEN FROM A SWEEP, and only because the point is strictly dominant. Over
+ * the live store, leave-one-out:
+ *
+ *   threshold   top-1    false candidates   unlabelled proposals
+ *      0.35     13/18            3                   19
+ *      0.45     13/18            1                   10
+ *      0.50     11/18            1                    7
+ *      0.65      9/18            0                    3
+ *
+ * 0.45 costs nothing in recall and removes two thirds of the noise; past it
+ * recall starts paying. This is not the tuning the owner ruled out -- that was
+ * inventing a threshold to RECOVER the historical set, and moving in this
+ * direction cannot do that. The floor was left where it stops being free.
+ */
+export const CANDIDATE_THRESHOLD = 0.45
 
 export const ALGORITHM_VERSION = 'local-lexical-v1'
 

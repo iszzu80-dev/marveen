@@ -139,8 +139,14 @@ describe('THE INDEPENDENCE RULE', () => {
     expect(r.confidence).toBeLessThan(CANDIDATE_THRESHOLD)
   })
 
-  it('HEADLINE: two independent families DO reach it', () => {
-    // Same shared term, but now the case also falls inside the trip's window.
+  it('HEADLINE: two independent families lift the cap -- but are NECESSARY, not sufficient', () => {
+    // The rule and the floor are two different things, and conflating them was
+    // tempting. Two families at their WEAKEST -- one date inside the window plus
+    // one shared word -- comes to 0.44, and the live store says what that value
+    // buys: a Netflix login proposed for the swimming-pool case, and two test
+    // fixtures proposed for it as well, every one of them at exactly 0.44.
+    // So the independence rule removes the cap; clearing the bar still needs
+    // evidence with some weight behind it.
     const inTrip: CandidateInput = {
       id: 'case-lorca', namespace: 'personal',
       text: 'Lorca szallas: erkezesi idot ker a szallasado, Valencia utan, 2026-08-14',
@@ -148,8 +154,30 @@ describe('THE INDEPENDENCE RULE', () => {
     }
     const r = scorePair(inTrip, TRIP, df, N)
     expect(new Set(r.features.map((f) => f.family)).size).toBeGreaterThanOrEqual(2)
+    expect(r.negatives.map((n) => n.name), 'the cap is lifted')
+      .not.toContain('SINGLE_FAMILY_ONLY')
+    // The cap being LIFTED is the thing to assert, and it shows as the score
+    // being the full sum of the evidence rather than a held-down value. A
+    // comparison against the threshold cannot show it here: a capped single
+    // family and this weakest possible pair both land on 0.44, which is exactly
+    // why the floor sits above them.
+    const raw = Number(r.features.reduce((sum, f) => sum + f.weight, 0).toFixed(4))
+    expect(r.confidence).toBe(raw)
+    expect(r.confidence).toBeLessThan(CANDIDATE_THRESHOLD)
+  })
+
+  it('a THIRD signal is what carries the weakest pair over the line', () => {
+    // The same case, with a shared vendor as well. This is the difference
+    // between "not obviously unrelated" and "worth an owner's attention".
+    const withVendor: CandidateInput = {
+      id: 'case-lorca-2', namespace: 'personal',
+      text: 'Lorca szallas Valencia utan 2026-08-14 From: "Booking.com" <noreply@booking.com>',
+      createdAtDay: day('2026-08-14'),
+    }
+    const target: CandidateInput = { ...TRIP, text: `${TRIP.text} From: "Booking.com" <noreply@booking.com>` }
+    const c = corpusOf(target, withVendor)
+    const r = scorePair(withVendor, target, documentFrequency(c), c.length)
     expect(r.confidence).toBeGreaterThanOrEqual(CANDIDATE_THRESHOLD)
-    expect(r.negatives.map((n) => n.name)).not.toContain('SINGLE_FAMILY_ONLY')
   })
 
   it('a shared reference number is decisive ALONE, because it is not a coincidence', () => {
@@ -229,10 +257,12 @@ describe('what a candidate may never do', () => {
   it('every candidate carries evidence a person can dispute', () => {
     const child: CandidateInput = {
       id: 'case-sixt', namespace: 'personal',
-      text: 'Sixt berles 9732668118 Valencia Ciudad de las Artes, atvetel 2026-08-18',
+      text: 'Sixt berles 9732668118 Valencia Granada Malaga, atvetel 2026-08-18 '
+        + 'From: SIXT <booking@sixt.com>',
       createdAtDay: day('2026-08-16'),
     }
-    const [c] = parentCandidates(child, [TRIP], corpusOf(TRIP, child))
+    const tripV: CandidateInput = { ...TRIP, text: `${TRIP.text} From: SIXT <booking@sixt.com>` }
+    const [c] = parentCandidates(child, [tripV], corpusOf(tripV, child))
     expect(c).toBeDefined()
     expect(c.reasons.length).toBe(c.features.length)
     expect(c.reasons.join(' ')).toMatch(/\w/)
@@ -341,18 +371,29 @@ describe('the filing date is corroboration, never a second family', () => {
     expect(r.confidence).toBeLessThan(CANDIDATE_THRESHOLD)
   })
 
-  it('MIRROR: a case naming its OWN dates inside the window is enough', () => {
+  it('MIRROR: a case naming its OWN dates counts as a real family', () => {
     // The distinction the demotion turns on: what the case is about versus when
-    // the intake happened to run.
+    // the intake happened to run. The dated case scores strictly higher on the
+    // same shared vocabulary, and its temporal feature is not corroboration.
     const namesDates: CandidateInput = {
       id: 'case-real', namespace: 'personal',
       text: 'Valencia szallas erkezes 2026-08-14 tavozas 2026-08-16',
       createdAtDay: day('2026-08-14'),
     }
-    const c = corpusOf(UMBRELLA, namesDates)
-    const r = scorePair(namesDates, UMBRELLA, documentFrequency(c), c.length)
-    expect(r.features.map((f) => f.name)).toContain('DATE_WITHIN_SPAN')
-    expect(r.confidence).toBeGreaterThanOrEqual(CANDIDATE_THRESHOLD)
+    const filedOnly: CandidateInput = {
+      id: 'case-filed', namespace: 'personal',
+      text: 'Valencia szallas', createdAtDay: day('2026-08-14'),
+    }
+    const c = corpusOf(UMBRELLA, namesDates, filedOnly)
+    const df2 = documentFrequency(c)
+    const real = scorePair(namesDates, UMBRELLA, df2, c.length)
+    const filed = scorePair(filedOnly, UMBRELLA, df2, c.length)
+    expect(real.features.map((f) => f.name)).toContain('DATE_WITHIN_SPAN')
+    expect(real.features.find((f) => f.name === 'DATE_WITHIN_SPAN')?.corroborationOnly)
+      .toBeUndefined()
+    expect(real.negatives.map((n) => n.name)).not.toContain('SINGLE_FAMILY_ONLY')
+    expect(filed.negatives.map((n) => n.name)).toContain('SINGLE_FAMILY_ONLY')
+    expect(real.confidence).toBeGreaterThan(filed.confidence)
   })
 })
 
