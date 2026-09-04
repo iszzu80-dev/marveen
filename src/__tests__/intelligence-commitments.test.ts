@@ -199,3 +199,45 @@ describe('recency and identity', () => {
     expect(c.provenance[0].field).toBe('title')
   })
 })
+
+// ── OWNER-DEFERRED CASES (2026-09-04) ────────────────────────────────────────
+//
+// Shipped-then-found. Two CostOps cases were parked with "ne generáljanak napi
+// owner attentiont pusztán az életkoruk miatt". The parking was verified
+// against the attention and decision surfaces and reported as quiet — and this
+// surface, never checked, admitted them on a different ground: a next_action
+// unique to the case. OBLIGATION's timer is 24 hours, so both were parked and
+// due to speak daily.
+describe('a case the owner parked owes nothing right now', () => {
+  const parked = (action: string) => caseRow({
+    due_at: null, follow_up_at: null,
+    next_action: action,
+  })
+
+  it('the marker takes it out of the commitment surface entirely', () => {
+    const out = commitmentsForCase(
+      parked('DEFERRED_BY_OWNER_PRIORITY — parked until the workstream is prioritised again'),
+      [], 'zst', NOW, 0)
+    expect(out).toEqual([])
+  })
+
+  it('the same text without the marker IS a commitment — the rule is the marker, not the parking', () => {
+    const out = commitmentsForCase(
+      parked('parked until the workstream is prioritised again'), [], 'zst', NOW, 0)
+    expect(out.length).toBe(1)
+  })
+
+  it('only as a PREFIX — prose that merely mentions it cannot silence an obligation', () => {
+    const out = commitmentsForCase(
+      parked('Ask the owner whether DEFERRED_BY_OWNER_PRIORITY applies here'), [], 'zst', NOW, 0)
+    expect(out.length).toBe(1)
+  })
+
+  it('but a REAL DEADLINE still admits it — deferral silences the clock, never a fact', () => {
+    const out = commitmentsForCase(
+      caseRow({ follow_up_at: null, due_at: NOW + 12 * HOUR,
+        next_action: 'DEFERRED_BY_OWNER_PRIORITY — parked' }),
+      [], 'zst', NOW, 0)
+    expect(out.length).toBe(1)
+  })
+})
