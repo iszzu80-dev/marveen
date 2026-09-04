@@ -98,6 +98,71 @@ for (const hostTz of ['Europe/Budapest', 'UTC', 'America/New_York']) {
     r.winterClock === 22 && r.summerClock === 22, [r.winterClock, r.summerClock])
 }
 
+// ── AGING CONTROL (owner addition to the live readback, 2026-09-04) ─────────
+//
+// An unchanged old case, evaluated at two different calendar days. The RENDERED
+// age may differ; the semantic fingerprint may not, no CHANGED trigger may
+// appear, and no material escalation may arise. This is the live half of the
+// standing invariant: relative time is presentation, not change evidence.
+{
+  const DAY = 86_400
+  const probe = `
+    const { caseAttentionFor, caseAttentionToAttention } =
+      require('${RUNTIME}/src/cos/intelligence/case-attention.ts')
+    const { fingerprintOf, materialEscalation } =
+      require('${RUNTIME}/src/cos/intelligence/reader.ts')
+    // A REAL, EMPTY store. Passing null threw -- and rightly: materialEscalation
+    // only swallows a missing TABLE, and rethrows everything else, so a null
+    // database surfaces instead of reading as "nothing escalated". An empty
+    // events table is the honest setup here: the probe is asking whether AGEING
+    // alone escalates, so the case must not have moved.
+    const { initDatabase, getDb } = require('${RUNTIME}/src/db.ts')
+    initDatabase(':memory:')
+    const probeDb = getDb()
+    const T0 = ${Math.floor(Date.now() / 1000)}
+    const updated = T0 - 40 * ${DAY}
+    const row = {
+      case_id: 'aging-probe', title: 'unchanged old case', description: null,
+      case_type: 'GENERAL_OPERATION', status: 'NEW', next_action: null,
+      blocked_reason: null, due_at: null, waiting_on: null,
+      related_document_ids: null, created_at: updated, updated_at: updated,
+    }
+    const at = (now) => {
+      const a = caseAttentionFor(row, 'zst', now)
+      return a ? caseAttentionToAttention(a, now) : null
+    }
+    const day1 = at(T0), day2 = at(T0 + ${DAY}), day9 = at(T0 + 8 * ${DAY})
+    const prev = day1 && {
+      element_id: day1.element.id, band: day1.band, fingerprint: fingerprintOf(day1),
+      first_surfaced_at: T0, last_surfaced_at: T0, times_surfaced: 2,
+    }
+    console.log('@@' + JSON.stringify({
+      produced: !!(day1 && day2 && day9),
+      fpStable: !!(day1 && day2 && day9)
+        && fingerprintOf(day1) === fingerprintOf(day2)
+        && fingerprintOf(day1) === fingerprintOf(day9),
+      statementStable: !!(day1 && day2) && day1.element.statement === day2.element.statement,
+      escalatedNextDay: !!(day2 && prev)
+        && materialEscalation(probeDb, 'zst', day2, prev, T0 + ${DAY}).escalated,
+      escalatedAWeekOn: !!(day9 && prev)
+        && materialEscalation(probeDb, 'zst', day9, prev, T0 + 8 * ${DAY}).escalated,
+    }))
+  `
+  let a: Record<string, unknown> = {}
+  try {
+    const out = execFileSync('npx', ['tsx', '-e', probe],
+      { encoding: 'utf8', env: { ...process.env, TZ: 'Europe/Budapest' }, cwd: RUNTIME })
+    a = JSON.parse((out.split('\n').find((l) => l.startsWith('@@')) ?? '@@{}').slice(2))
+  } catch (e) {
+    a = { error: e instanceof Error ? e.message.slice(0, 200) : String(e) }
+  }
+  check('[aging] the probe produced an item on all three days', a.produced === true, a)
+  check('[aging] the semantic fingerprint does NOT move across calendar days', a.fpStable === true, a)
+  check('[aging] the statement itself does not drift', a.statementStable === true, a)
+  check('[aging] no material escalation the next day', a.escalatedNextDay === false, a)
+  check('[aging] none a week later either', a.escalatedAWeekOn === false, a)
+}
+
 const failed = checks.filter(([, ok]) => !ok)
 console.log()
 for (const [label, ok, detail] of checks) {
