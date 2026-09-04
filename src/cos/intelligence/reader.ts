@@ -328,6 +328,11 @@ export interface LedgerRow {
   /** Which recipe produced `fingerprint`. Null on rows written before the
    *  column existed -- an unknown recipe, which is not a comparable one. */
   fingerprint_algo: string | null
+  /** IN-MEMORY ONLY, set by `reconcileFingerprintRecipe` for a row whose recipe
+   *  is out of date: whether the case moved while it sat there. Never stored --
+   *  it is a verdict about this run, and a stored verdict would be a second
+   *  truth about the case. */
+  recipeVerdict?: 'ADOPTED' | 'WITHHELD_BUSINESS_CHANGE'
 }
 
 export interface MaterialEscalation {
@@ -406,26 +411,7 @@ export function materialEscalation(
   // 4. THE CASE ITSELF MOVED. Read from its own log, which is the single truth,
   //    and the event's own reason becomes the readable justification the owner
   //    asked for.
-  const table = namespace === 'zst' ? 'zst_case_events' : 'personal_case_events'
-  //
-  // THE CATCH IS NARROW ON PURPOSE. It was a bare `catch {}` for one revision,
-  // and a mutation proved what that costs: deleting the `created_at` filter
-  // left the statement bound with one parameter too many, better-sqlite3 threw,
-  // the catch swallowed it, and the whole limb silently answered "nothing
-  // escalated" while a test asserting exactly that stayed green. A missing
-  // events table is a real condition on a fresh store; a malformed query is a
-  // bug, and a bug that returns "no news" is the quietest kind there is.
-  let ev: { event_type: string; reason: string | null } | undefined
-  try {
-    ev = db.prepare(
-      `SELECT event_type, reason FROM ${table}
-        WHERE case_id = ? AND created_at > ?
-        ORDER BY created_at DESC LIMIT 1`,
-    ).get(item.element.caseId, prev.last_surfaced_at) as typeof ev
-  } catch (e) {
-    if (!/no such table/i.test(e instanceof Error ? e.message : String(e))) throw e
-    ev = undefined
-  }
+  const ev = caseEventSince(db, namespace, item.element.caseId, prev.last_surfaced_at)
   if (ev) {
     reasons.push(`the case changed (${ev.event_type})`
       + (ev.reason ? `: ${ev.reason.slice(0, 120)}` : ''))
@@ -434,6 +420,40 @@ export function materialEscalation(
   return reasons.length
     ? { escalated: true, what: reasons.join('; ') }
     : { escalated: false, what: null }
+}
+
+/**
+ * The most recent thing the CASE's own log says happened after `since`, or
+ * undefined if it has been still.
+ *
+ * ONE definition, because there are two callers who must agree: the escalation
+ * limb that reports "the case changed", and the recipe reconciliation that
+ * decides whether a digest may be adopted silently. If those two ever disagreed
+ * about whether a case had moved, a real change could be adopted away by one
+ * while the other believed it had been reported.
+ *
+ * THE CATCH IS NARROW ON PURPOSE. It was a bare `catch {}` for one revision, and
+ * a mutation proved what that costs: deleting the `created_at` filter left the
+ * statement bound with one parameter too many, better-sqlite3 threw, the catch
+ * swallowed it, and the whole limb silently answered "nothing escalated" while a
+ * test asserting exactly that stayed green. A missing events table is a real
+ * condition on a fresh store; a malformed query is a bug, and a bug that returns
+ * "no news" is the quietest kind there is.
+ */
+export function caseEventSince(
+  db: Database.Database, namespace: string, caseId: string, since: number,
+): { event_type: string; reason: string | null } | undefined {
+  const table = namespace === 'zst' ? 'zst_case_events' : 'personal_case_events'
+  try {
+    return db.prepare(
+      `SELECT event_type, reason FROM ${table}
+        WHERE case_id = ? AND created_at > ?
+        ORDER BY created_at DESC LIMIT 1`,
+    ).get(caseId, since) as { event_type: string; reason: string | null } | undefined
+  } catch (e) {
+    if (!/no such table/i.test(e instanceof Error ? e.message : String(e))) throw e
+    return undefined
+  }
 }
 
 /** Which recipe `fingerprintOf` currently uses. Stored beside every digest.
@@ -506,49 +526,111 @@ export function fingerprintOf(item: AttentionItem): string {
  * adoption pass and the comparison, or a caller that skipped the pass.
  */
 export function identityChanged(prev: LedgerRow, item: AttentionItem): boolean {
-  if (prev.fingerprint_algo !== FINGERPRINT_ALGO) return false
+  if (prev.fingerprint_algo !== FINGERPRINT_ALGO) {
+    // NOT COMPARABLE, so this cannot be answered by digest. `reconcileFingerprintRecipe`
+    // has already asked the canonical record whether the case moved while the
+    // row sat on the old recipe, and left its verdict here. Undefined means
+    // nobody asked -- a rehearsal, or a caller that skipped the pass -- and the
+    // honest answer to a question nobody asked is "I did not observe a change",
+    // not "it changed".
+    return prev.recipeVerdict === 'WITHHELD_BUSINESS_CHANGE'
+  }
   return prev.fingerprint !== fingerprintOf(item)
 }
 
 /**
- * Bring ledger rows written under an older recipe up to the current one.
+ * Bring ledger rows written under an older recipe up to the current one --
+ * BUT ONLY WHERE NOTHING HAPPENED IN THE MEANTIME.
  *
- * WITHOUT SPEAKING, and without touching a single clock: `last_surfaced_at` and
- * `times_surfaced` are utterance facts, and no utterance happened here. Only
- * the digest and its recipe change, so the row still records truthfully when we
- * last spoke and how often.
+ * Owner ruling, 2026-09-04, and it closes a hole in the first cut of this:
  *
- * It runs over every EVALUATED item rather than every spoken one, and that is
- * the point. Adopting only what speaks would leave a quiet case carrying an
- * incomparable digest for ever, and `identityChanged` answers false for those --
- * so a case that never speaks could never be promoted BY a change again. That
- * failure is silent, which makes it worse than the noise this fixes.
+ *   A) old recipe, canonical facts unchanged since the last evaluation
+ *      -> silent adopt, no delivery, utterance counters untouched
+ *   B) old recipe, the case or its evidence DID change since then
+ *      -> no silent adopt; the real change stays visible
+ *
+ * The first version adopted unconditionally, which would have made the
+ * migration a swallower of exactly the news it exists to stop faking. A case
+ * that moved while its row sat on the old recipe would have had the new digest
+ * written over the old one without anyone ever comparing them, and the change
+ * would have vanished -- silently, permanently, and in a way no counter showed.
+ *
+ * NO NEW TRUTH STORE, per the same ruling. The watermark is the one already
+ * here: `last_surfaced_at` is when we last spoke, provenance carries when each
+ * row said what it said, and the case's own event log carries what it did. All
+ * three already exist and none of them is a snapshot of case state.
+ *
+ * It runs over every EVALUATED item rather than every spoken one. Adopting only
+ * what speaks would leave a quiet case carrying an incomparable digest for ever,
+ * and a row on an old recipe cannot be compared -- so a case that never speaks
+ * could never be promoted BY a change again. That failure is silent, which makes
+ * it worse than the noise this fixes.
+ *
+ * `write: false` classifies without touching the database, so a rehearsal reads
+ * exactly as the real run would without consuming anything.
  */
-export function adoptStaleFingerprints(
+export function reconcileFingerprintRecipe(
   db: Database.Database, namespace: string,
   ledger: Map<string, LedgerRow>, items: readonly AttentionItem[],
-): number {
-  const stale = items.filter((it) => {
-    const prev = ledger.get(it.element.id)
-    return prev !== undefined && prev.fingerprint_algo !== FINGERPRINT_ALGO
-  })
-  if (stale.length === 0) return 0
+  { write }: { write: boolean },
+): { adopted: number; withheld: number } {
+  let adopted = 0
+  let withheld = 0
+  const writes: Array<[string, string]> = []
 
-  const stmt = db.prepare(
-    `UPDATE intelligence_surfaced SET fingerprint = ?, fingerprint_algo = ?
-      WHERE namespace = ? AND element_id = ?`,
-  )
-  db.transaction(() => {
-    for (const it of stale) {
-      const fp = fingerprintOf(it)
-      stmt.run(fp, FINGERPRINT_ALGO, namespace, it.element.id)
-      // Keep the in-memory ledger honest too, so comparisons later in THIS run
-      // read the adopted value rather than the one we just replaced.
-      const prev = ledger.get(it.element.id)!
-      ledger.set(it.element.id, { ...prev, fingerprint: fp, fingerprint_algo: FINGERPRINT_ALGO })
+  for (const it of items) {
+    const prev = ledger.get(it.element.id)
+    if (prev === undefined || prev.fingerprint_algo === FINGERPRINT_ALGO) continue
+
+    // DID ANYTHING ACTUALLY HAPPEN since we last spoke about this? Two
+    // independent witnesses, and either one is enough:
+    //   - evidence filed after that moment (provenance carries its own clock);
+    //   - the case's own log recording that it moved.
+    // The second exists because the first can miss a status transition that
+    // leaves the row's timestamp alone, which is a real shape and not a
+    // hypothetical -- it is what broke the provenance-only fingerprint.
+    const freshest = Math.max(
+      0, ...(it.element.provenance ?? []).map((p) => p.observedAt),
+    )
+    const businessChanged =
+      freshest > prev.last_surfaced_at
+      || caseEventSince(db, namespace, it.element.caseId, prev.last_surfaced_at) !== undefined
+
+    if (businessChanged) {
+      // Left on the old recipe DELIBERATELY. The next run, after the change has
+      // been reported and `recordSurfaced` has written a current digest, will
+      // find nothing to reconcile.
+      withheld += 1
+      ledger.set(it.element.id, { ...prev, recipeVerdict: 'WITHHELD_BUSINESS_CHANGE' })
+      continue
     }
-  })()
-  return stale.length
+
+    adopted += 1
+    const fp = fingerprintOf(it)
+    writes.push([it.element.id, fp])
+    // Keep the in-memory ledger honest too, so comparisons later in THIS run
+    // read the adopted value rather than the one it replaced.
+    ledger.set(it.element.id, {
+      ...prev,
+      ...(write ? { fingerprint: fp, fingerprint_algo: FINGERPRINT_ALGO } : {}),
+      recipeVerdict: 'ADOPTED',
+    })
+  }
+
+  // ONE gate on the write, not two. An earlier cut also skipped building the
+  // statement when `write` was false, and a mutation showed what that costs:
+  // deleting either guard left the other one still working, so neither could be
+  // proved to be doing anything.
+  if (write && writes.length) {
+    const stmt = db.prepare(
+      `UPDATE intelligence_surfaced SET fingerprint = ?, fingerprint_algo = ?
+        WHERE namespace = ? AND element_id = ?`,
+    )
+    db.transaction(() => {
+      for (const [id, fp] of writes) stmt.run(fp, FINGERPRINT_ALGO, namespace, id)
+    })()
+  }
+  return { adopted, withheld }
 }
 
 export function loadLedger(db: Database.Database, namespace: string): Map<string, LedgerRow> {
@@ -615,6 +697,11 @@ export interface ReaderResult {
    *  reported as cases that changed, and a reader has to be able to see that
    *  the migration happened rather than infer it from a quiet digest. */
   adoptedFingerprints: number
+  /** Rows on an old recipe that were NOT adopted, because the case moved while
+   *  they sat there. These stay visible as changes rather than being migrated
+   *  away, and the count is here so that "the migration swallowed something"
+   *  is a question with an answer rather than an inference. */
+  withheldFingerprints: number
   /** Items that spoke. Bounded by the policy's `maxInterruptions`. */
   spoke: SpokenItem[]
   /** Held back by the anti-spam rule and NOT promoted: nothing about them changed. */
@@ -709,10 +796,12 @@ export function runProjectionReader(
   // A rehearsal still writes nothing: `identityChanged` refuses to compare an
   // unadopted row rather than calling it changed, so a dry run reads correctly
   // without this pass. It is the real run that has to converge.
-  const adoptedFingerprints = dryRun ? 0 : adoptStaleFingerprints(db, namespace, ledger, [
+  const recipe = reconcileFingerprintRecipe(db, namespace, ledger, [
     ...p.attention.interrupt, ...p.attention.quiet,
     ...p.attention.suppressed.map((sx) => sx.item),
-  ])
+  ], { write: !dryRun })
+  const adoptedFingerprints = recipe.adopted
+  const withheldFingerprints = recipe.withheld
 
   const decide = (item: AttentionItem, quietWhenSuppressed: boolean): SpokenItem => {
     const prev = ledger.get(item.element.id)
@@ -879,7 +968,7 @@ export function runProjectionReader(
     : spoken
 
   const base: ReaderResult = {
-    namespace, posted: false, spoke: spokenNow, stillQuiet, promotedByChange, adoptedFingerprints,
+    namespace, posted: false, spoke: spokenNow, stillQuiet, promotedByChange, adoptedFingerprints, withheldFingerprints,
     quiet: p.attention.quiet.length, heldByCadence, heldByQuietHours,
     inQuietHours, morningRelease, researchTraces, opportunityInSpoken: 0,
     anomalies: p.anomalies.length, integrityFindings: p.integrityFindings.length,

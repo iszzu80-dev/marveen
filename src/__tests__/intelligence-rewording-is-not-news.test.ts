@@ -29,7 +29,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import Database from 'better-sqlite3'
 import { initIntelligenceReaderSchema } from '../cos/schema.js'
 import {
-  fingerprintOf, identityChanged, adoptStaleFingerprints, recordSurfaced,
+  fingerprintOf, identityChanged, reconcileFingerprintRecipe, recordSurfaced,
   loadLedger, FINGERPRINT_ALGO, type LedgerRow,
 } from '../cos/intelligence/reader.js'
 import type { AttentionItem } from '../cos/intelligence/attention.js'
@@ -158,7 +158,7 @@ describe('a digest under an older recipe is adopted, never announced', () => {
     ).run()
 
     const ledger = loadLedger(db, 'zst')
-    expect(adoptStaleFingerprints(db, 'zst', ledger, [item()])).toBe(1)
+    expect(reconcileFingerprintRecipe(db, 'zst', ledger, [item()], { write: true }).adopted).toBe(1)
 
     const after = loadLedger(db, 'zst').get('case-attention:zst:zst-1')!
     expect(after.fingerprint_algo).toBe(FINGERPRINT_ALGO)
@@ -172,7 +172,7 @@ describe('a digest under an older recipe is adopted, never announced', () => {
     ).run()
     const before = loadLedger(db, 'zst').get('case-attention:zst:zst-1')!
 
-    adoptStaleFingerprints(db, 'zst', loadLedger(db, 'zst'), [item()])
+    reconcileFingerprintRecipe(db, 'zst', loadLedger(db, 'zst'), [item()], { write: true }).adopted
     const after = loadLedger(db, 'zst').get('case-attention:zst:zst-1')!
 
     expect(after.first_surfaced_at).toBe(before.first_surfaced_at)
@@ -187,7 +187,7 @@ describe('a digest under an older recipe is adopted, never announced', () => {
     ).run()
 
     const ledger = loadLedger(db, 'zst')
-    adoptStaleFingerprints(db, 'zst', ledger, [item()])
+    reconcileFingerprintRecipe(db, 'zst', ledger, [item()], { write: true }).adopted
 
     // Asserted on the VALUES, not through identityChanged: an un-updated row
     // still answers "not changed" (its recipe is stale), so going through the
@@ -206,7 +206,7 @@ describe('a digest under an older recipe is adopted, never announced', () => {
     ).run()
 
     const ledger = loadLedger(db, 'zst')
-    adoptStaleFingerprints(db, 'zst', ledger, [item()])
+    reconcileFingerprintRecipe(db, 'zst', ledger, [item()], { write: true }).adopted
 
     const moved = item({
       provenance: [{ source: 'CASE_EVENT', ref: 'ev-new', observedAt: T0 }],
@@ -216,7 +216,7 @@ describe('a digest under an older recipe is adopted, never announced', () => {
 
   it('adopts nothing when every row is already current', () => {
     recordSurfaced(db, 'zst', [item()], T0 - 86_400)
-    expect(adoptStaleFingerprints(db, 'zst', loadLedger(db, 'zst'), [item()])).toBe(0)
+    expect(reconcileFingerprintRecipe(db, 'zst', loadLedger(db, 'zst'), [item()], { write: true }).adopted).toBe(0)
   })
 
   it('adopts a QUIET item, not only one that is about to speak', () => {
@@ -228,7 +228,7 @@ describe('a digest under an older recipe is adopted, never announced', () => {
       `UPDATE intelligence_surfaced SET fingerprint = 'old', fingerprint_algo = NULL`,
     ).run()
     // Passed in as part of the population; nothing here marks it as speaking.
-    expect(adoptStaleFingerprints(db, 'zst', loadLedger(db, 'zst'), [item()])).toBe(1)
+    expect(reconcileFingerprintRecipe(db, 'zst', loadLedger(db, 'zst'), [item()], { write: true }).adopted).toBe(1)
   })
 })
 
@@ -315,5 +315,155 @@ describe('the semantic core still moves the fingerprint', () => {
       [0, 1, 7, 30, 365].map((d) => at(CASE, T0 + d * 86_400).element.changeKey),
     )
     expect(keys.size).toBe(1)
+  })
+})
+
+// MIGRATION SAFETY. Owner ruling, 2026-09-04, after reading the first cut:
+//
+//   "OLD RECIPE -> SILENT ADOPT csak akkor mehet, ha a régi fingerprint
+//    létrejötte / utolsó értékelése óta NEM történt valódi canonical
+//    case/evidence változás."
+//
+// The hole it closes: adoption that does not ask whether anything happened will
+// write a current digest over an incomparable one and take a real change with
+// it. Nobody is told, no counter moves, and the case simply stops having
+// changed. That is the quietest failure this module can have, and it would have
+// been introduced by the fix for a loud one.
+describe('a recipe migration must not swallow a real change', () => {
+  let db: Database.Database
+
+  /** Must match the case id `item()` builds, or the event log lookup silently
+   *  finds nothing and every negative control passes for the wrong reason. */
+  const CASE = 'zst-1'
+  const SPOKE_AT = T0 - 3 * 86_400
+
+  /** An element whose evidence is OLDER than the last time we spoke: nothing
+   *  has happened since. */
+  const still = () => item({
+    provenance: [{ source: 'CASE', ref: CASE, observedAt: SPOKE_AT - 86_400 }],
+  })
+
+  /** The same element, with evidence filed AFTER we last spoke. */
+  const moved = () => item({
+    provenance: [{ source: 'CASE_EVENT', ref: 'ev-new', observedAt: SPOKE_AT + 3600 }],
+  })
+
+  /** A row sitting on the old recipe, last spoken at SPOKE_AT. */
+  function legacyRow(): void {
+    recordSurfaced(db, 'zst', [still()], SPOKE_AT)
+    db.prepare(
+      `UPDATE intelligence_surfaced SET fingerprint = 'old-recipe-digest', fingerprint_algo = NULL`,
+    ).run()
+  }
+
+  /** The case's own log says it moved, without any provenance moving. */
+  function caseEvent(at: number): void {
+    db.exec(`CREATE TABLE IF NOT EXISTS zst_case_events (
+      case_id TEXT, case_version INTEGER, actor TEXT, event_type TEXT,
+      reason TEXT, created_at INTEGER)`)
+    db.prepare(
+      `INSERT INTO zst_case_events (case_id,case_version,actor,event_type,reason,created_at)
+       VALUES (?,1,'test','STATUS_CHANGED','supplier answered',?)`,
+    ).run(CASE, at)
+  }
+
+  beforeEach(() => {
+    db = new Database(':memory:')
+    initIntelligenceReaderSchema(db)
+  })
+
+  it('POSITIVE: nothing happened -> silent adoption, zero notification', () => {
+    legacyRow()
+    const ledger = loadLedger(db, 'zst')
+    const r = reconcileFingerprintRecipe(db, 'zst', ledger, [still()], { write: true })
+
+    expect(r).toEqual({ adopted: 1, withheld: 0 })
+    // Silent: nothing to say about it afterwards.
+    expect(identityChanged(ledger.get('case-attention:zst:zst-1')!, still())).toBe(false)
+    const after = loadLedger(db, 'zst').get('case-attention:zst:zst-1')!
+    expect(after.fingerprint_algo).toBe(FINGERPRINT_ALGO)
+    expect(after.fingerprint).toBe(fingerprintOf(still()))
+  })
+
+  it('POSITIVE: and the utterance counters are untouched', () => {
+    legacyRow()
+    const before = loadLedger(db, 'zst').get('case-attention:zst:zst-1')!
+    reconcileFingerprintRecipe(db, 'zst', loadLedger(db, 'zst'), [still()], { write: true })
+    const after = loadLedger(db, 'zst').get('case-attention:zst:zst-1')!
+    expect(after.times_surfaced).toBe(before.times_surfaced)
+    expect(after.last_surfaced_at).toBe(before.last_surfaced_at)
+    expect(after.first_surfaced_at).toBe(before.first_surfaced_at)
+  })
+
+  it('NEGATIVE: new EVIDENCE since we last spoke -> not adopted, still visible', () => {
+    legacyRow()
+    const ledger = loadLedger(db, 'zst')
+    const r = reconcileFingerprintRecipe(db, 'zst', ledger, [moved()], { write: true })
+
+    expect(r).toEqual({ adopted: 0, withheld: 1 })
+    // The change survives the migration.
+    expect(identityChanged(ledger.get('case-attention:zst:zst-1')!, moved())).toBe(true)
+    // And the row was left alone, so nothing was written over.
+    const after = loadLedger(db, 'zst').get('case-attention:zst:zst-1')!
+    expect(after.fingerprint).toBe('old-recipe-digest')
+    expect(after.fingerprint_algo).toBe(null)
+  })
+
+  it('NEGATIVE: the CASE LOG moved, with provenance frozen -> still visible', () => {
+    // The witness that provenance alone cannot provide: a status transition
+    // that leaves the row's own timestamp untouched.
+    legacyRow()
+    caseEvent(SPOKE_AT + 3600)
+    const ledger = loadLedger(db, 'zst')
+    const r = reconcileFingerprintRecipe(db, 'zst', ledger, [still()], { write: true })
+
+    expect(r).toEqual({ adopted: 0, withheld: 1 })
+    expect(identityChanged(ledger.get('case-attention:zst:zst-1')!, still())).toBe(true)
+  })
+
+  it('an event from BEFORE we last spoke is not a reason to withhold', () => {
+    // The boundary, in the direction that would make the migration never finish.
+    legacyRow()
+    caseEvent(SPOKE_AT - 3600)
+    const r = reconcileFingerprintRecipe(
+      db, 'zst', loadLedger(db, 'zst'), [still()], { write: true })
+    expect(r).toEqual({ adopted: 1, withheld: 0 })
+  })
+
+  it('a rehearsal classifies without writing', () => {
+    legacyRow()
+    const r = reconcileFingerprintRecipe(
+      db, 'zst', loadLedger(db, 'zst'), [still()], { write: false })
+    expect(r).toEqual({ adopted: 1, withheld: 0 })
+    // Nothing on disk moved.
+    const after = loadLedger(db, 'zst').get('case-attention:zst:zst-1')!
+    expect(after.fingerprint).toBe('old-recipe-digest')
+    expect(after.fingerprint_algo).toBe(null)
+  })
+
+  it('a rehearsal still SEES a withheld change, so a dry run reads true', () => {
+    legacyRow()
+    const ledger = loadLedger(db, 'zst')
+    reconcileFingerprintRecipe(db, 'zst', ledger, [moved()], { write: false })
+    expect(identityChanged(ledger.get('case-attention:zst:zst-1')!, moved())).toBe(true)
+  })
+
+  it('mixed population: each row is judged on its own case', () => {
+    // The whole population is reconciled, and one moving case must not drag the
+    // still ones along with it, nor be adopted along with them.
+    legacyRow()
+    const other = {
+      ...still(),
+      element: { ...still().element, id: 'case-attention:zst:zst-2', caseId: 'zst-2' },
+    } as ReturnType<typeof still>
+    recordSurfaced(db, 'zst', [other], SPOKE_AT)
+    db.prepare(`UPDATE intelligence_surfaced SET fingerprint='old2', fingerprint_algo=NULL
+                 WHERE element_id='case-attention:zst:zst-2'`).run()
+    caseEvent(SPOKE_AT + 3600) // moves zst-1 only; zst-2 has been still
+
+    const movedOne = moved()
+    const r = reconcileFingerprintRecipe(
+      db, 'zst', loadLedger(db, 'zst'), [movedOne, other], { write: true })
+    expect(r).toEqual({ adopted: 1, withheld: 1 })
   })
 })
