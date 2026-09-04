@@ -101,7 +101,15 @@ run "cp '$FEEDER/scripts/email-triage-fetch.py' '$FEEDER/email-triage-fetch.py'"
 
 # 2. The release store is the LIVE database, by symlink. The guard re-checks this
 #    by INODE, because a path can point anywhere.
-[ -e "$CYCLE/store" ]        || run "ln -s '$REPO/store' '$CYCLE/store'"
+[ -e "$CYCLE/store" ]        || # THE CONFIG IS PART OF THE RUNTIME, and it was not linked until now.
+# `readEnvFile()` resolves .env from PROJECT_ROOT, which for a release artifact is
+# the release directory itself -- and that directory has no .env. So the pinned
+# cycle could never read SCHEDULER_TZ, and APP_TZ fell back to whatever timezone
+# the HOST was in. It happened to be Europe/Budapest, which is why nothing looked
+# wrong: the quiet-hours policy (22:00-07:00 Europe/Budapest) was holding by
+# accident of the box rather than by decision. Owner release gate, 2026-09-04.
+run "ln -s '$REPO/.env' '$CYCLE/.env'"
+run "ln -s '$REPO/store' '$CYCLE/store'"
 [ -e "$CYCLE/node_modules" ] || run "ln -s '$REPO/node_modules' '$CYCLE/node_modules'"
 
 # 3. The gate, from the gate sha, as an artifact.
