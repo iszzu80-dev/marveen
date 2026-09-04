@@ -266,6 +266,19 @@ describe('the semantic layer has a production caller', () => {
     expect(selfParent).toEqual([])
   })
 
+  it('the source never proposes the case it just opened', () => {
+    // That relation is already CANONICAL -- intake wrote it moments earlier --
+    // so proposing it is noise, and a reader cannot tell a proposal for an
+    // existing link from a proposal for a new one. Found in the production
+    // rehearsal on the live store, not by inspection.
+    seedNeonDossier()
+    const r = zstIntake(zstMail(), NOW)
+    const selfProposals = candidates().filter(
+      (c) => c.relation_type === 'SOURCE_CASE_CANDIDATE' && c.target_case_id === r.caseId,
+    )
+    expect(selfProposals).toEqual([])
+  })
+
   it('a candidate never becomes a parent by itself', () => {
     seedNeonDossier()
     const r = personalIntake({
