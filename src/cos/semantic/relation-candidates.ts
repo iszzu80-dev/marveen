@@ -64,7 +64,23 @@ export interface NegativeFeature {
 
 export interface CandidateInput {
   id: string
+  /**
+   * The STORE this belongs to. A hard boundary: cross-namespace is refused.
+   *
+   * NOT the mailbox. The owner's rule is "cross-mailbox candidate = YES,
+   * cross-namespace canonicalization = NO", and collapsing the two would have
+   * refused the very acceptance case for this feature: the Neon billing threads
+   * arrive on the ZST account while the dossier that wants them,
+   * CORP-CLOUD-2026-001, lives in the personal store. Which account received a
+   * message is evidence about the message; which store a case lives in is a
+   * boundary about authority. They are different facts and they are stored
+   * apart.
+   */
   namespace: string
+  /** Which account this arrived on, when that is known. Recorded in the
+   *  evidence so a cross-mailbox proposal is legible as one, never used as a
+   *  boundary. */
+  mailbox?: string
   /** Everything the case says about itself: title, description, next action. */
   text: string
   /** When it entered the store. */
@@ -74,6 +90,8 @@ export interface CandidateInput {
 export interface RelationCandidate {
   relationType: RelationType
   namespace: string
+  /** Present when the source and the target came in on different accounts. */
+  crossMailbox?: { sourceMailbox: string; targetMailbox?: string }
   sourceRef: string
   targetCaseId: string
   confidence: number
@@ -338,9 +356,21 @@ export function parentCandidates(
       confidence = Math.min(1, features.reduce((sum, f) => sum + f.weight, 0))
     }
     if (confidence < CANDIDATE_THRESHOLD) continue
+    const crossMailbox = source.mailbox && source.mailbox !== t.mailbox
+      ? { sourceMailbox: source.mailbox, ...(t.mailbox ? { targetMailbox: t.mailbox } : {}) }
+      : undefined
+    if (crossMailbox) {
+      features.push({
+        family: 'VENDOR', name: 'CROSS_MAILBOX', weight: 0,
+        reason: `it arrived on the ${crossMailbox.sourceMailbox} account`
+          + (crossMailbox.targetMailbox ? `, the case on ${crossMailbox.targetMailbox}` : ''),
+        corroborationOnly: true,
+      })
+    }
     out.push({
       relationType: 'CASE_PARENT_CANDIDATE',
       namespace: source.namespace,
+      ...(crossMailbox ? { crossMailbox } : {}),
       sourceRef: source.id,
       targetCaseId: t.id,
       confidence: Number(confidence.toFixed(4)),
