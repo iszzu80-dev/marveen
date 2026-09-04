@@ -327,6 +327,112 @@ export interface LedgerRow {
   times_surfaced: number
 }
 
+export interface MaterialEscalation {
+  escalated: boolean
+  /** What changed since the previous delivery, in words, or null. Required by
+   *  the owner: a bypass whose reason cannot be read afterwards is a bypass
+   *  nobody can audit. */
+  what: string | null
+}
+
+const BAND_SEVERITY: Record<string, number> = {
+  SAFETY: 0, OBLIGATION: 1, BLOCKING: 2, INFORMATIONAL: 3, OPPORTUNITY: 4,
+}
+
+/**
+ * HAS ANYTHING MATERIAL HAPPENED SINCE WE LAST SPOKE?
+ *
+ * Owner ruling 2026-09-04, in two halves that pull against each other:
+ * *"suppressed != ineligible, de urgent != automatikusan redeliver."* Being held
+ * by anti-spam must never mean an item is not looked at again; being urgent must
+ * never mean it repeats while nothing about it moves.
+ *
+ * WHERE THE ANSWER COMES FROM, and this was rewritten once. The first version
+ * stored the prior deadline, owner and statement in the delivery ledger. The
+ * projection guard rejected it, correctly: that ledger is exempt from the
+ * no-second-truth rule only because it holds UTTERANCE facts, and a case fact
+ * kept beside them is exactly the second truth the exemption was granted
+ * against. So nothing about the case is shadowed here. The question is answered
+ * from the case's OWN event log, plus the two utterance facts already stored.
+ *
+ * MERE TIME IS NOT ESCALATION. Ageing writes no events, so it cannot produce
+ * one. The single place time legitimately does is the actionable window, which
+ * the owner named explicitly -- and it is a CROSSING, computed from the deadline
+ * and the moment we last spoke, so it fires once rather than for ever after.
+ *
+ * KNOWN LIMIT, stated rather than papered over: a case event records THAT the
+ * case changed and why, not a field-level diff -- `payload` is null for status
+ * transitions. So an edit that makes a case LESS urgent (a deadline pushed
+ * further out) also reads as a material change and buys one redelivery. It is
+ * bounded at one per real case change and can never fire on ageing, which is
+ * the failure the ruling was aimed at.
+ */
+export function materialEscalation(
+  db: Database.Database, namespace: string, item: AttentionItem,
+  prev: LedgerRow | undefined, now: number,
+): MaterialEscalation {
+  if (!prev) return { escalated: false, what: null }
+  const reasons: string[] = []
+
+  // 1. THE CROSSING. Pure function of the deadline and the two moments; the
+  //    previous side of it needs no storage because it can be recomputed.
+  const el = item.element as { dueAt?: number | null }
+  const dueAt = typeof el.dueAt === 'number' ? el.dueAt : null
+  if (dueAt !== null) {
+    const inWindowNow = dueAt >= now && dueAt <= quietHoursEndAt(now)
+    const then = prev.last_surfaced_at
+    const inWindowThen = dueAt >= then && dueAt <= quietHoursEndAt(then)
+    if (inWindowNow && !inWindowThen) {
+      reasons.push('its deadline entered the window where acting is still possible')
+    }
+  }
+
+  // 2. THE BAND ROSE. Both sides are utterance facts already in the ledger.
+  if ((BAND_SEVERITY[item.band] ?? 9) < (BAND_SEVERITY[prev.band] ?? 9)) {
+    reasons.push(`its band rose from ${prev.band} to ${item.band}`)
+  }
+
+  // 3. THE SENTENCE CHANGED while the band did not. The fingerprint hashes
+  //    band + statement, so equal bands and different fingerprints isolate a
+  //    changed statement exactly -- without the band sneaking in, which matters
+  //    because a band FALLING is not an escalation.
+  if (prev.band === item.band && prev.fingerprint !== fingerprintOf(item)) {
+    reasons.push('new evidence changed what it says')
+  }
+
+  // 4. THE CASE ITSELF MOVED. Read from its own log, which is the single truth,
+  //    and the event's own reason becomes the readable justification the owner
+  //    asked for.
+  const table = namespace === 'zst' ? 'zst_case_events' : 'personal_case_events'
+  //
+  // THE CATCH IS NARROW ON PURPOSE. It was a bare `catch {}` for one revision,
+  // and a mutation proved what that costs: deleting the `created_at` filter
+  // left the statement bound with one parameter too many, better-sqlite3 threw,
+  // the catch swallowed it, and the whole limb silently answered "nothing
+  // escalated" while a test asserting exactly that stayed green. A missing
+  // events table is a real condition on a fresh store; a malformed query is a
+  // bug, and a bug that returns "no news" is the quietest kind there is.
+  let ev: { event_type: string; reason: string | null } | undefined
+  try {
+    ev = db.prepare(
+      `SELECT event_type, reason FROM ${table}
+        WHERE case_id = ? AND created_at > ?
+        ORDER BY created_at DESC LIMIT 1`,
+    ).get(item.element.caseId, prev.last_surfaced_at) as typeof ev
+  } catch (e) {
+    if (!/no such table/i.test(e instanceof Error ? e.message : String(e))) throw e
+    ev = undefined
+  }
+  if (ev) {
+    reasons.push(`the case changed (${ev.event_type})`
+      + (ev.reason ? `: ${ev.reason.slice(0, 120)}` : ''))
+  }
+
+  return reasons.length
+    ? { escalated: true, what: reasons.join('; ') }
+    : { escalated: false, what: null }
+}
+
 /**
  * What was said, reduced to a digest.
  *
@@ -522,13 +628,32 @@ export function runProjectionReader(
   // changed inside its quiet window. That is a different mechanism from the
   // top-N cut the owner named, and folding it in would be me extending the
   // ruling again rather than applying it. Raised instead of assumed.
-  const eligiblePopulation = [...p.attention.interrupt, ...p.attention.quiet]
+  // Owner extension, 2026-09-04: the suppressed set is IN. *"A suppression NEM
+  // jelentheti azt, hogy egy tetelt nem vizsgalunk ujra."* Being held by
+  // anti-spam is a delivery decision; it must not quietly become a decision
+  // that the item is no longer allowed to be urgent.
+  const suppressedItems = p.attention.suppressed.map((sx) => sx.item)
+  const eligiblePopulation = [
+    ...p.attention.interrupt, ...p.attention.quiet, ...suppressedItems,
+  ]
 
   // THE BYPASS, one rule for the night and the day alike (owner, 2026-09-04):
   // *"Ugyanaz az alapelv mukodjon nappal is."* A SECURITY label no longer walks
   // past the cadence on its own; an active, worsening or owner-actionable
   // security incident still does, because that is what the harm test asks.
-  const bypass = eligiblePopulation.filter((i) => quietHoursDecision(i, now).breaks)
+  const suppressedIds = new Set(suppressedItems.map((i) => i.element.id))
+  const escalationReason = new Map<string, string>()
+  const bypass = eligiblePopulation.filter((i) => {
+    if (!quietHoursDecision(i, now).breaks) return false
+    // ...and for an item the anti-spam layer is holding, urgency alone is not
+    // enough. *"urgent != automatikusan redeliver."* Something must have moved
+    // since we last spoke, and the reason is kept so the override can be read
+    // back afterwards rather than merely trusted.
+    if (!suppressedIds.has(i.element.id)) return true
+    const esc = materialEscalation(db, namespace, i, ledger.get(i.element.id), now)
+    if (esc.escalated && esc.what) escalationReason.set(i.element.id, esc.what)
+    return esc.escalated
+  })
   const bypassIds = new Set(bypass.map((i) => i.element.id))
 
   const changedSinceLastTime = (item: AttentionItem): boolean => {

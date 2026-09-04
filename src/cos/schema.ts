@@ -2514,6 +2514,14 @@ export function initIntelligenceReaderSchema(db: Database.Database): void {
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_intel_surfaced_ns
              ON intelligence_surfaced(namespace, last_surfaced_at)`)
+  /* NO CASE STATE HERE, and this is a fence somebody has to keep choosing.
+     I added an `escalation_json` column to this table on 2026-09-04 to answer
+     "what changed since the last delivery", holding dueAt, owner and statement.
+     The projection guard caught it: this ledger is exempt from the
+     no-second-truth rule ONLY because it holds utterance facts, and a case fact
+     kept here is precisely the second truth the exemption was granted against.
+     The column is gone. The question is answered from the CASE's own event log,
+     which is the single truth, plus the utterance facts already stored. */
 }
 
 /** PHASE 3 (P3-C) -- the HUMAN-ACTION KANBAN PROJECTION INDEX.
