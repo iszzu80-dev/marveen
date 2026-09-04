@@ -19,6 +19,7 @@ import { linkCaseSource, findCasesForSource } from './case-sources.js'
 import { createCase } from './case-store.js'
 import { claimMessage, localApply, excludeMessage, markDuplicate } from './email-ingest.js'
 import { effectiveSensitivity } from './sensitivity.js'
+import { evaluateIntakeCandidates, type IntakeCandidateResult } from './semantic/intake-candidates.js'
 import { suggestLinks, linkCases } from './case-link.js'
 import { IDEMPOTENCY_HEADER } from './adapters/gmail-send.js'
 import type { CaseSensitivity } from './schema.js'
@@ -81,6 +82,12 @@ export interface IntakeResult {
   caseId?: string
   messageStatus: string
   sensitivity?: CaseSensitivity
+  /** What the semantic layer PROPOSED about this message, when it ran. Counts
+   *  only -- the proposals themselves live in `semantic_relation_candidates`
+   *  and are read from the board. Present so that "no candidates" can be told
+   *  apart from "the layer did not run", which is the whole reason the readback
+   *  of the previous release could not pass this item. */
+  semanticCandidates?: IntakeCandidateResult
 }
 
 function findActiveCaseByThread(db: Database.Database, threadId: string): { case_id: string } | undefined {
@@ -391,6 +398,26 @@ export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now:
       ).run({ id: caseId, reason: `${c.caseId} (${c.strength}): ${c.evidence}`, now })
     }
 
+    // SEMANTIC PROPOSALS, and this is the only place they are produced in
+    // production. Everything above has already had its turn: a seen message, a
+    // reply relation naming its parent, a thread a case owns, and the
+    // identifier-based suggestion just now. All of them failed to place this
+    // message, and a standalone case has been opened with no canonical parent.
+    // That is precisely the state the owner asked this layer to speak into.
+    //
+    // It writes to `semantic_relation_candidates` and nothing else: no canonical
+    // edge, no parent assignment, no merge, no namespace migration, no outward
+    // action. It cannot throw into the intake -- an email must not be lost
+    // because a proposal engine had an opinion it could not finish.
+    const semanticCandidates = evaluateIntakeCandidates(db, {
+      sourceRef: input.threadId ?? input.messageId,
+      sourceKind: input.threadId ? 'GMAIL_THREAD' : 'GMAIL_MESSAGE',
+      mailbox: input.accountId,
+      text: `${input.subject}\n${input.from}\n${input.snippet}`,
+      arrivedAtDay: Math.floor(now / 86_400),
+      newCase: { caseId, namespace: 'personal' },
+    }, now)
+
     localApply(db, input.accountId, input.messageId, caseId, now)
     // Seed progression state for the new case so it doesn't stagnate at NEW.
     // Guarded by table existence — if the progression schema hasn't been deployed
@@ -406,7 +433,10 @@ export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now:
          VALUES ('personal', ?, 1, 'internal', ?, ?, ?)`,
       ).run(caseId, now, now, now)
     }
-    return { outcome: 'CASE_CREATED', caseId, messageStatus: 'LOCAL_APPLIED', sensitivity: tier }
+    return {
+      outcome: 'CASE_CREATED', caseId, messageStatus: 'LOCAL_APPLIED', sensitivity: tier,
+      semanticCandidates,
+    }
   })
   return tx()
 }
