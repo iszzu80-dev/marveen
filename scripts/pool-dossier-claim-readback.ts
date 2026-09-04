@@ -40,7 +40,7 @@ console.log('\nrun:', JSON.stringify(r))
 
 const again = extractDossierClaims(db, 'personal', ROOT, (id) => bodies[id] ?? null, now + 60)
 console.log('second run (idempotence):',
-  JSON.stringify({ written: again.claimsWritten, refreshed: again.claimsRefreshed }))
+  JSON.stringify({ written: again.claimsWritten, changed: again.claimsChanged, unchanged: again.claimsUnchanged }))
 
 const FIELDS: Array<[string, string | null]> = [
   ['PART_NUMBER', null],

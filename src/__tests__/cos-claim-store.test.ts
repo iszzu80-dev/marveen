@@ -80,20 +80,60 @@ describe('reprocessing', () => {
 
   it('is idempotent: the same run twice writes nothing the second time', () => {
     const first = recordClaims(db, 'personal', CASE, [claim()], NOW)
-    expect(first).toEqual({ written: 1, refreshed: 0 })
+    expect(first).toEqual({ written: 1, changed: 0, unchanged: 0 })
     const second = recordClaims(db, 'personal', CASE, [claim()], NOW + 600)
-    expect(second).toEqual({ written: 0, refreshed: 1 })
+    expect(second).toEqual({ written: 0, changed: 0, unchanged: 1 })
     expect(claimsForField(db, 'personal', CASE, 'PACKAGE_PRICE', 'gross')).toHaveLength(1)
   })
 
-  it('keeps first_seen_at while moving last_seen_at', () => {
+  it('HEADLINE: an unchanged re-run moves NO timestamp at all', () => {
+    // The owner's release gate: idempotent persistence must not mean "we
+    // UPDATEd every row again". Measured on the real dossier before it was
+    // believed -- the first cut left the content byte-identical and still moved
+    // a last_seen_at on all 113 rows, and a timestamp that moves without a
+    // change is exactly the watermark a downstream reader mistakes for one.
     recordClaims(db, 'personal', CASE, [claim()], NOW)
-    recordClaims(db, 'personal', CASE, [claim()], NOW + 600)
+    const before = db.prepare(`SELECT * FROM structured_claims`).get() as Record<string, unknown>
+    const r = recordClaims(db, 'personal', CASE, [claim()], NOW + 600)
+    const after = db.prepare(`SELECT * FROM structured_claims`).get() as Record<string, unknown>
+
+    expect(r).toEqual({ written: 0, changed: 0, unchanged: 1 })
+    // EVERY column, not a chosen few: a whole-row comparison cannot be fooled
+    // by the one field somebody forgot to list.
+    expect(after).toEqual(before)
+  })
+
+  it('a real correction DOES move last_changed_at, so the column still works', () => {
+    // The negative control. A guard that froze the timestamp unconditionally
+    // would pass the test above and be useless.
+    recordClaims(db, 'personal', CASE, [claim()], NOW)
+    const r = recordClaims(db, 'personal', CASE, [claim({ normalizedValue: '69131' })], NOW + 600)
+    expect(r).toEqual({ written: 0, changed: 1, unchanged: 0 })
     const row = db.prepare(
-      `SELECT first_seen_at, last_seen_at FROM structured_claims`,
-    ).get() as { first_seen_at: number; last_seen_at: number }
+      `SELECT first_seen_at, last_changed_at, normalized_value FROM structured_claims`,
+    ).get() as { first_seen_at: number; last_changed_at: number; normalized_value: string }
     expect(row.first_seen_at).toBe(NOW)
-    expect(row.last_seen_at).toBe(NOW + 600)
+    expect(row.last_changed_at).toBe(NOW + 600)
+    expect(row.normalized_value).toBe('69131')
+  })
+
+  it('a change in ANY semantic field is noticed, not just the value', () => {
+    // The comparison lists its fields by hand, which is exactly the kind of
+    // list that goes stale. Each one is driven here.
+    const variants: Array<Partial<StructuredClaim>> = [
+      { normalizedValue: 'X' }, { normalizedUnit: 'EUR' }, { originalValue: 'other' },
+      { confidence: 'LOW' }, { status: 'CUE_WITHOUT_VALUE' }, { provenance: 'different' },
+      { attributionStatus: 'QUOTED_ORIGIN_UNRESOLVED', assertedBy: null },
+    ]
+    for (const v of variants) {
+      const fresh = new Database(':memory:')
+      initClaimStoreSchema(fresh)
+      recordClaims(fresh, 'personal', CASE, [claim()], NOW)
+      const r = recordClaims(fresh, 'personal', CASE, [claim(v)], NOW + 60)
+      expect({ variant: Object.keys(v)[0], ...r })
+        .toEqual({ variant: Object.keys(v)[0], written: 0, changed: 1, unchanged: 0 })
+      fresh.close()
+    }
   })
 
   it('HEADLINE: a NEW extractor version does not overwrite the old claim', () => {
@@ -105,7 +145,7 @@ describe('reprocessing', () => {
       claim({ extractorVersion: 'pool-lexical-v3', normalizedValue: '69131' }),
     ], NOW + 600)
 
-    expect(v2.written).toBe(1)
+    expect(v2).toEqual({ written: 1, changed: 0, unchanged: 0 })
     const rows = claimsForField(db, 'personal', CASE, 'PACKAGE_PRICE', 'gross')
     expect(rows).toHaveLength(2)
     expect(rows.map((r) => r.extractorVersion).sort())
@@ -202,7 +242,7 @@ describe('the store refuses a claim that asserts itself', () => {
          normalized_unit, original_value, source_id, source_type, source_timestamp,
          channel, span_kind, span_start, span_end, span_marker,
          attribution_status, asserted_by, confidence, extraction_status,
-         extractor_version, provenance, first_seen_at, last_seen_at)
+         extractor_version, provenance, first_seen_at, last_changed_at)
       VALUES ('x','personal',?,'PACKAGE_PRICE','gross','1','HUF','1 Ft',
               'msg-1','GMAIL_MESSAGE',1,NULL,'AUTHORED',0,1,NULL,
               'AUTHOR_ASSERTED','msg-1','HIGH','EXTRACTED_VALID','v1','p',1,1)

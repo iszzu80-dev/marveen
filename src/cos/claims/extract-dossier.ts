@@ -29,7 +29,11 @@ export interface DossierExtractionResult {
    *  twenty sources and reported only its claims would look complete. */
   sourcesWithoutText: number
   claimsWritten: number
-  claimsRefreshed: number
+  /** Held and genuinely different from what we held. */
+  claimsChanged: number
+  /** Held and byte-identical, so nothing at all was written for them. On a
+   *  scheduled re-run over unchanged sources this should be the whole set. */
+  claimsUnchanged: number
   /** Per-source failures, with the reason. An extraction that throws on one
    *  mail must not lose the other nineteen, and must not hide that it did. */
   failures: Array<{ sourceId: string; reason: string }>
@@ -53,7 +57,8 @@ export function extractDossierClaims(
   const sources = dossierSources(db, namespace, rootCaseId)
   const result: DossierExtractionResult = {
     caseId: rootCaseId, sourcesSeen: sources.length, sourcesRead: 0,
-    sourcesWithoutText: 0, claimsWritten: 0, claimsRefreshed: 0, failures: [],
+    sourcesWithoutText: 0, claimsWritten: 0, claimsChanged: 0, claimsUnchanged: 0,
+    failures: [],
   }
   const all: StructuredClaim[] = []
 
@@ -85,6 +90,7 @@ export function extractDossierClaims(
 
   const written = recordClaims(db, namespace, rootCaseId, all, now)
   result.claimsWritten = written.written
-  result.claimsRefreshed = written.refreshed
+  result.claimsChanged = written.changed
+  result.claimsUnchanged = written.unchanged
   return result
 }
