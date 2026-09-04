@@ -101,6 +101,114 @@ export const READER_POLICY: InterruptionPolicy = {
  */
 export const MIN_DIGEST_INTERVAL_SECONDS = 3600
 
+/**
+ * QUIET HOURS, and the one way they could do harm.
+ *
+ * Owner ruling 2026-09-04, verbatim: "22:00-07:00 kozott NE kuldj user-facing
+ * digestet. Az ejszakai teteleket gyujtsd, es 7 utan egy csomagban surface-eld."
+ * It came from a measured night: between 03:10 and 06:20 this reader spoke eight
+ * times and raised 21 items, every one of them correct, none of them urgent, and
+ * all of them into a channel whose owner was asleep. The cadence floor bounded
+ * the RATE and had nothing to say about the HOUR.
+ *
+ * The danger of the feature is not that it holds too much. It is that a rule
+ * written to stop backlog noise also gags a genuine emergency, and does so
+ * invisibly -- the digest simply says nothing, exactly as it does on a quiet
+ * night. So the exemptions are enumerated, and what CANNOT be detected is
+ * enumerated with them rather than left as an implied capability.
+ *
+ * WHAT BREAKS QUIET HOURS:
+ *
+ *   A STATED DEADLINE FALLING WITHIN THE NEXT 24 HOURS. `dueAt` is the date the
+ *   record carries, not an inference. A deadline that has ALREADY passed does
+ *   not break quiet hours: waking the owner at 03:00 cannot un-pass it, and it
+ *   will lead the morning package instead.
+ *
+ *   SAFETY. AUTHORITATIVE_NOTICE_UNREAD is the class the owner previously
+ *   designated HIGH/P0 by name, and the cadence floor already exempts it. Muting
+ *   it here would be this module quietly widening a rule the owner wrote to
+ *   silence a backlog, into one that also silences an authority notice.
+ *
+ * WHAT THIS LAYER CANNOT DETECT, stated so it is not mistaken for covered: the
+ * owner also named "security incident" and "production/system failure with
+ * immediate harm" as P0. Neither has any signal in the intelligence projection
+ * today -- there is no field, on any element, that asserts either. They
+ * therefore cannot break quiet hours FROM HERE, and a surface that can assert
+ * them must carry its own path to the owner. An exemption that cannot fire is
+ * worse than a declared absence, because everyone downstream believes it is on.
+ *
+ * WAITING_EXTERNAL never breaks quiet hours -- owner, same ruling. An item does
+ * not become urgent because nobody replied to it.
+ */
+export const QUIET_HOURS_START = 22
+export const QUIET_HOURS_END = 7
+export const P0_DEADLINE_HORIZON_SECONDS = 24 * 3600
+
+/** Hour-of-day in the app timezone. Uses the SAME `APP_TZ` the digest already
+ *  stamps its day with, so the quiet window and the daily-log date can never
+ *  disagree about which day it is. */
+export function hourInAppTz(now: number): number {
+  return clockInAppTz(now).hour
+}
+
+/** Hour, minute and second in the app timezone, from one formatter call so the
+ *  three cannot straddle a tick and disagree. */
+export function clockInAppTz(now: number): { hour: number; minute: number; second: number } {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: APP_TZ, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).formatToParts(new Date(now * 1000))
+  const get = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? '0')
+  // 24 is a legal rendering of midnight in en-GB h23/h24 handling; normalise it,
+  // because an hour of 24 would read as "not quiet" at exactly 00:00:00.
+  return { hour: get('hour') % 24, minute: get('minute'), second: get('second') }
+}
+
+/** The window wraps midnight, so this is an OR and not a range test. */
+export function isWithinQuietHours(now: number): boolean {
+  const h = hourInAppTz(now)
+  return h >= QUIET_HOURS_START || h < QUIET_HOURS_END
+}
+
+/** True only for the two exemptions above. Everything else waits for 07:00. */
+export function breaksQuietHours(item: AttentionItem, now: number): boolean {
+  if (item.band === 'SAFETY') return true
+  const dueAt = (item.element as { dueAt?: number | null }).dueAt
+  if (typeof dueAt !== 'number') return false
+  return dueAt >= now && dueAt - now <= P0_DEADLINE_HORIZON_SECONDS
+}
+
+/**
+ * THE MORNING PACKAGE, and why the cap has to move for it.
+ *
+ * "Az ejszakai teteleket gyujtsd, es 7 utan EGY CSOMAGBAN surface-eld." With the
+ * cap left at three, the night's backlog would come out three an hour from 07:00
+ * -- the same instalment drip the owner objected to, merely starting later. So
+ * the first utterance of the day after the window closes is allowed a wider cap.
+ *
+ * It is a CAP and not an unbounded release: after a long outage the held set can
+ * be arbitrarily large, and a hundred-line message is another way of saying
+ * nothing. The rest stays on the board, which is where a backlog belongs.
+ */
+export const MORNING_RELEASE_MAX_INTERRUPTIONS = 12
+
+/** The first run of the day after quiet hours ended: nothing has spoken in this
+ *  namespace since the window closed. Derived from the ledger, so a restart does
+ *  not hand out a second morning package. */
+export function isMorningRelease(now: number, lastSpokeAt: number): boolean {
+  if (isWithinQuietHours(now)) return false
+  // A namespace that has NEVER spoken has no night to have been held through.
+  // Without this, an empty ledger looks like "silent since the window closed"
+  // and the very first digest a fresh install ever sends would arrive under the
+  // wide cap -- a twelve-item wall as an opening line, from a rule that exists
+  // to release a backlog that was actually withheld.
+  if (lastSpokeAt <= 0) return false
+  const { hour, minute, second } = clockInAppTz(now)
+  // Outside quiet hours means QUIET_HOURS_END <= hour < QUIET_HOURS_START, so
+  // this is always the number of seconds elapsed since 07:00 local TODAY.
+  const sinceWindowClosed = (hour - QUIET_HOURS_END) * 3600 + minute * 60 + second
+  return lastSpokeAt < now - sinceWindowClosed
+}
+
 export interface LedgerRow {
   element_id: string
   band: string
@@ -192,6 +300,17 @@ export interface ReaderResult {
   /** Held by the once-an-hour cadence floor: first-time, unchanged, non-SAFETY
    *  items that would otherwise have delivered the backlog in instalments. */
   heldByCadence: number
+  /** Held because the owner is asleep: items that were otherwise ready to speak,
+   *  suppressed by the 22:00-07:00 window and DELIBERATELY NOT written to the
+   *  ledger, so each keeps its utterance for the morning package. */
+  heldByQuietHours: number
+  /** Whether this run fell inside the quiet window at all. Separates "held
+   *  nothing because nothing qualified" from "held nothing because the window
+   *  was not open" -- a zero means two different things otherwise. */
+  inQuietHours: boolean
+  /** Whether this run was the first after the window closed, and therefore spoke
+   *  under the wider morning cap rather than the hourly three. */
+  morningRelease: boolean
   /** research result -> evidence -> projection item -> changed surface. Present
    *  whether or not anything was spoken, because a finding that reached a QUIET
    *  item still reached a surface. */
@@ -234,7 +353,19 @@ export function runProjectionReader(
   dryRun = false,
 ): ReaderResult {
   const ledger = loadLedger(db, namespace)
-  const raw = projectIntelligence(db, namespace, now, ledgerToSeen(ledger), policy)
+
+  // `lastSpokeAt` is read BEFORE the projection because the morning release has
+  // to widen the cap that `projectIntelligence` itself applies when it builds the
+  // interrupt list. Computing it later, next to the cadence floor, would have
+  // left the release capped at three by a decision already taken upstream.
+  const lastSpokeAt = Math.max(0, ...[...ledger.values()].map((r) => r.last_surfaced_at))
+  const inQuietHours = isWithinQuietHours(now)
+  const morningRelease = isMorningRelease(now, lastSpokeAt)
+  const effectivePolicy: InterruptionPolicy = morningRelease
+    ? { ...policy, maxInterruptions: MORNING_RELEASE_MAX_INTERRUPTIONS }
+    : policy
+
+  const raw = projectIntelligence(db, namespace, now, ledgerToSeen(ledger), effectivePolicy)
 
   // P3-B2: the research ledger stops being a dead end. The enrichment is applied
   // to the PROJECTION, never to a case, and it is applied here rather than inside
@@ -260,10 +391,9 @@ export function runProjectionReader(
     }
   }
 
-  // The cadence floor. `lastSpokeAt` is the most recent utterance in THIS
-  // namespace; the two namespaces keep separate clocks, because a busy company
-  // day must not silence a personal deadline.
-  const lastSpokeAt = Math.max(0, ...[...ledger.values()].map((r) => r.last_surfaced_at))
+  // The cadence floor. `lastSpokeAt` (read above) is the most recent utterance in
+  // THIS namespace; the two namespaces keep separate clocks, because a busy
+  // company day must not silence a personal deadline.
   const withinCadence = lastSpokeAt > 0 && now - lastSpokeAt < MIN_DIGEST_INTERVAL_SECONDS
 
   const mayPassCadence = (item: AttentionItem): boolean => {
@@ -291,7 +421,7 @@ export function runProjectionReader(
   let stillQuiet = 0
   for (const s of p.attention.suppressed) {
     const prev = ledger.get(s.item.element.id)
-    if (prev && prev.fingerprint !== fingerprintOf(s.item) && speak.length < policy.maxInterruptions
+    if (prev && prev.fingerprint !== fingerprintOf(s.item) && speak.length < effectivePolicy.maxInterruptions
         && mayPassCadence(s.item)) {
       speak.push(s.item)
       spoken.push(decide(s.item, true))
@@ -320,15 +450,34 @@ export function runProjectionReader(
   // into an acceptance metric. Skipped on a dry run like every other write.
   if (!dryRun) markChangedSurface(db, researchTraces)
 
+  // QUIET HOURS, applied LAST and to the final speaking set.
+  //
+  // Placed here on purpose. Filtering earlier would have hidden the held items
+  // from the promotion and cadence bookkeeping above, so the counters would have
+  // reported a quiet night rather than a suppressed one, and the difference
+  // between "nothing qualified" and "the owner was asleep" would be unreadable
+  // from the run result -- which is the only place anyone can check that this
+  // feature is behaving.
+  //
+  // NOTHING IS RECORDED FOR A HELD ITEM. `recordSurfaced` below runs only over
+  // what actually spoke, so a suppressed item keeps its utterance and leads the
+  // morning package instead of having been silently marked as told. That is the
+  // same trap the dry-run flag exists for, arriving through a second door.
+  const exempt = inQuietHours ? speak.filter((i) => breaksQuietHours(i, now)) : speak
+  const heldByQuietHours = speak.length - exempt.length
+  const exemptIds = new Set(exempt.map((i) => i.element.id))
+  const spokenNow = inQuietHours ? spoken.filter((sp) => exemptIds.has(sp.id)) : spoken
+
   const base: ReaderResult = {
-    namespace, posted: false, spoke: spoken, stillQuiet, promotedByChange,
-    quiet: p.attention.quiet.length, heldByCadence, researchTraces, opportunityInSpoken: 0,
+    namespace, posted: false, spoke: spokenNow, stillQuiet, promotedByChange,
+    quiet: p.attention.quiet.length, heldByCadence, heldByQuietHours,
+    inQuietHours, morningRelease, researchTraces, opportunityInSpoken: 0,
     anomalies: p.anomalies.length, integrityFindings: p.integrityFindings.length,
     dischargedWithheld: p.dischargedWithheld, text: null,
   }
-  if (!speak.length) return base
+  if (!exempt.length) return base
 
-  const text = buildDigestText(namespace, spoken)
+  const text = buildDigestText(namespace, spokenNow)
   const day = todayOverride ?? new Date().toLocaleDateString('en-CA', { timeZone: APP_TZ })
   const doPost = post ?? ((t: string) => {
     createAgentMessage('cos-attention', 'marveen', t, 'cos-attention-digest')
@@ -340,7 +489,7 @@ export function runProjectionReader(
   // marks it as told. Same ordering, same reason, as the radar digest.
   if (dryRun) return { ...base, posted: false, text }
   doPost(text)
-  recordSurfaced(db, namespace, speak, now)
+  recordSurfaced(db, namespace, exempt, now)
   return { ...base, posted: true, text }
 }
 

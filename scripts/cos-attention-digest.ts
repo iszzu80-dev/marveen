@@ -49,6 +49,13 @@ for (const ns of ['personal', 'zst'] as const) {
       promotedByChange: r.promotedByChange,
       stillQuiet: r.stillQuiet,
       heldByCadence: r.heldByCadence,
+      // QUIET HOURS, reported even when zero. A run that held nothing because
+      // the window was shut and a run that held nothing because nothing
+      // qualified look identical from `spoke: 0`, and only one of them means
+      // the owner has a package waiting at 07:00.
+      heldByQuietHours: r.heldByQuietHours,
+      inQuietHours: r.inQuietHours,
+      morningRelease: r.morningRelease,
       quiet: r.quiet,
       opportunityInSpoken: r.opportunityInSpoken,
       anomalies: r.anomalies,
