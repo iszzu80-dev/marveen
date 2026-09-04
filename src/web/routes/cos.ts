@@ -14,6 +14,8 @@ import { listActiveCases, listTodayCases } from '../../cos/case-store.js'
 import { listActiveZstCases, listTodayZstCases } from '../../cos/zst-case-store.js'
 import { dueZstItems } from '../../cos/zst-watch.js'
 import { ingestTriagedEmail, type TriagedEmail } from '../../cos/triage-bridge.js'
+import { resolveReferencesForIntake } from '../../cos/intake-resolve.js'
+import { liveIntakeMailboxes } from '../../cos/intake-mailboxes.js'
 import { ingestTriagedZstEmail, type ZstTriagedEmail } from '../../cos/zst-intake.js'
 import {
   draftZstSend, approveZstSend, rejectZstSend, dispatchZstSend,
@@ -239,9 +241,30 @@ export async function tryHandleCos(ctx: RouteContext): Promise<boolean> {
       return true
     }
     const zstTarget = scope.target === 'zst'
+    // The parent lookup happens HERE, before the bridge, and deliberately so.
+    // `ingestTriagedEmail` is one immediate transaction; an async mailbox
+    // round-trip inside it would hold the write lock across a network call.
+    //
+    // This line is also the whole difference between a feature and a library.
+    // The reply/reference resolver shipped with its own wrapper and no caller:
+    // every real email still reached `ingestEmail` directly, so nothing on the
+    // live path ever asked what a message replied to, while a hundred tests
+    // agreed the resolver worked. It did work. It was just never asked.
+    //
+    // Failure is swallowed on purpose: an unreachable mailbox costs the parent
+    // route, and the message is ingested exactly as it would have been before
+    // this existed. Losing a link is recoverable; refusing the letter is not.
+    let referenceResolution
+    if (!zstTarget) {
+      try {
+        referenceResolution = await resolveReferencesForIntake(
+          getDb(), { threadId: input.threadId, headers: input.headers }, liveIntakeMailboxes(),
+        )
+      } catch { referenceResolution = undefined }
+    }
     const routed = zstTarget
       ? ingestTriagedZstEmail(getDb(), toZstTriagedEmail(input), now)
-      : ingestTriagedEmail(getDb(), input, now)
+      : ingestTriagedEmail(getDb(), { ...input, referenceResolution }, now)
     // F-13: the gate's VERDICT goes in the scope column, and the reason for a
     // review goes in scope_review_reason.
     //

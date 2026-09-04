@@ -26,6 +26,12 @@ import {
   combineConfidence, elementId, makeElement,
 } from './element.js'
 
+/** Prefix an owner uses to park a case: no execution is expected until the
+ *  resume trigger stated in the same field. Introduced 2026-09-04 alongside the
+ *  first two deferred cases, because the status vocabulary has no DEFERRED and
+ *  inventing one would have left every existing consumer unable to read it. */
+export const DEFERRED_MARKER = 'DEFERRED_BY_OWNER_PRIORITY'
+
 export type CommitmentOwner = 'OWNER' | 'ENGINE' | 'EXTERNAL' | 'UNKNOWN'
 
 export type CommitmentStatus =
@@ -259,7 +265,30 @@ export function commitmentsForCase(
   // every template, named or not: an obligation repeated verbatim across cases
   // is the engine's execution metadata, because one case's promise is not, word
   // for word, seventeen other cases' promise.
-  const caseSpecificAction = hasAction && sharedActionCount === 0
+  // AN OWNER-DEFERRED CASE OWES NOTHING RIGHT NOW.
+  //
+  // Found by shipping it. On 2026-09-04 two CostOps cases were parked at the
+  // owner's instruction with "ne generáljanak napi owner attentiont pusztán az
+  // életkoruk miatt", and the parking was checked against the attention and
+  // decision surfaces — status out of BLOCKED, out of the AWAITING_* set — and
+  // reported as quiet. It was not. THIS surface was never checked, and it
+  // admits a commitment on a different ground entirely: a next_action unique to
+  // the case. The parked note IS unique, so the first digest after the change
+  // raised both cases as OBLIGATION, whose timer is 24 hours. Parked, and due
+  // to speak every day.
+  //
+  // The marker is not a string trick standing in for a state. It is the owner's
+  // recorded decision that no execution is expected until a named trigger, and
+  // "nothing is owed right now" is exactly what a commitment surface should
+  // conclude from that. Required as a PREFIX so that prose mentioning the term
+  // cannot silence a real obligation.
+  //
+  // What deliberately does NOT change: the case stays open, keeps its action
+  // text, and still surfaces on real evidence — a deadline admits it through
+  // EXPLICIT_DEADLINE below, and an unevidenced closure through its own branch.
+  // Deferral silences the clock, never a fact.
+  const deferred = row.next_action?.trimStart().startsWith(DEFERRED_MARKER) ?? false
+  const caseSpecificAction = hasAction && sharedActionCount === 0 && !deferred
   const obligationEvidence: ObligationEvidence | null =
       hasDeadline ? 'EXPLICIT_DEADLINE'
     : caseSpecificAction ? 'CASE_SPECIFIC_ACTION'

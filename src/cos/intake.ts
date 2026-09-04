@@ -23,6 +23,7 @@ import { suggestLinks, linkCases } from './case-link.js'
 import { IDEMPOTENCY_HEADER } from './adapters/gmail-send.js'
 import type { CaseSensitivity } from './schema.js'
 import { requireExactTriageReceipt } from './triage-provenance.js'
+import type { ReplyReferenceResolution } from './reply-reference.js'
 
 export interface EmailIntakeInput {
   /** Stage 2G provenance, forwarded from the bridge so the gate can re-derive
@@ -58,6 +59,16 @@ export interface EmailIntakeInput {
   to?: string
   /** When to check for a reply (OUTBOUND) / next wake. */
   followUpAt?: number
+  /** What this message replies to, ALREADY RESOLVED by the caller.
+   *
+   *  The resolution needs a mailbox lookup and this function is synchronous and
+   *  pure by design, so the I/O stays at the edge — the same reason `threadId`
+   *  arrives resolved rather than being derived here. `resolveEmailIntake`
+   *  performs it; a caller that skips it simply gets today's behaviour.
+   *
+   *  Consulted ONLY when the thread is unknown to us. A known thread is the
+   *  stronger statement: it says this conversation is already ours. */
+  referenceResolution?: ReplyReferenceResolution
 }
 
 /** W12: ALREADY_PROCESSED joins the set. It was previously only a BRIDGE
@@ -126,8 +137,17 @@ function findActiveCaseByThread(db: Database.Database, threadId: string): { case
  *  UNCHANGED and writes nothing. */
 function recordIntakeSources(
   db: Database.Database, caseId: string, input: EmailIntakeInput, now: number, why: string,
+  /** Skip the thread link because the caller already wrote a better one.
+   *
+   *  `linkCaseSource` refreshes the EVIDENCE of a same-standing link but keeps
+   *  the METHOD of whichever write came first, so writing the generic thread
+   *  link after a MESSAGE_REFERENCE one silently replaces "replies to <id> on
+   *  thread <id> in mailbox <x>" with "intake: ...". The specific reason is the
+   *  whole value of the reference route; losing it leaves a canonical link
+   *  nobody can check. Caught by a test that asserted the mailbox name survived. */
+  opts: { skipThread?: boolean } = {},
 ): void {
-  if (input.threadId) {
+  if (input.threadId && !opts.skipThread) {
     linkCaseSource(db, {
       namespace: 'personal', caseId, sourceType: 'GMAIL_THREAD', sourceRef: input.threadId,
       linkMethod: 'EXPLICIT_RELATION', evidence: `${why} (message ${input.messageId})`,
@@ -215,6 +235,47 @@ export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now:
 
     claimMessage(db, input.accountId, input.messageId, now)
 
+    // THE PARENT ROUTE. Tried only after the thread route has failed, and the
+    // order is the claim: a thread we already own says "this conversation is
+    // ours"; a reply relation says "this message answers one that is". The
+    // first is about the conversation, the second about a single message, and
+    // when both are available the conversation wins.
+    //
+    // Without this, a provider that files a reply on a fresh thread opens a
+    // second case beside the one already holding the matter. That happened
+    // twice on 2026-09-03/04 and had to be repaired by hand both times.
+    const byReference = input.threadId && findActiveCaseByThread(db, input.threadId)
+      ? undefined
+      : input.referenceResolution
+    if (byReference?.kind === 'RESOLVED') {
+      markDuplicate(db, input.accountId, input.messageId, now)
+      db.prepare(`UPDATE email_processing SET case_id=@caseId, triage_receipt_id=@r WHERE gmail_account_id=@acc AND message_id=@mid`)
+        .run({ caseId: byReference.caseId, r: triageReceiptId, acc: input.accountId, mid: input.messageId })
+      // MESSAGE_REFERENCE, not EXPLICIT_RELATION: the evidence is the reply
+      // relation between two messages, which is a different (and weaker-sounding
+      // but equally checkable) fact than "this message arrived at this case".
+      // Both are canonical because both are stored relations, not inferences.
+      if (input.threadId) {
+        linkCaseSource(db, {
+          namespace: 'personal', caseId: byReference.caseId, sourceType: 'GMAIL_THREAD',
+          sourceRef: input.threadId, linkMethod: 'MESSAGE_REFERENCE',
+          evidence: `message ${input.messageId} replies to ${byReference.viaMessageId}, which is on thread ${byReference.viaThreadId} (mailbox ${byReference.viaMailbox}) — already this case's`,
+          discoveredBy: 'cos-intake:reply-reference',
+        }, now)
+      }
+      recordIntakeSources(db, byReference.caseId, input, now,
+        `intake: resolved by reply reference to ${byReference.viaMessageId}`,
+        { skipThread: true })
+      return { outcome: 'LINKED_DUPLICATE', caseId: byReference.caseId, messageStatus: 'DUPLICATE' }
+    }
+
+    // AMBIGUOUS: several open cases claim the parent conversation. The message
+    // opens its own case as it would have anyway, and every claimant is recorded
+    // as a CANDIDATE so the ambiguity is visible instead of being resolved by
+    // whoever reads the board first. Owner ruling 2026-09-04: no canonical
+    // auto-link on a multi-case relation.
+    const ambiguous = byReference?.kind === 'AMBIGUOUS' ? byReference : undefined
+
     if (input.threadId) {
       const existing = findActiveCaseByThread(db, input.threadId)
       if (existing) {
@@ -283,6 +344,27 @@ export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now:
     // graph, and consumers would then be reading a source of truth that is
     // hours stale. The column is still written above, as the legacy projection.
     recordIntakeSources(db, caseId, input, now, 'intake: the message that opened the case')
+
+    // THE AMBIGUITY IS RECORDED, NOT DISCARDED.
+    //
+    // The parent conversation is claimed by several open cases, so no canonical
+    // link may be written (owner ruling 2026-09-04) — but staying silent would
+    // be worse than either choice it refused to make: the relation is real, and
+    // dropping it means the next reader re-derives it, or does not.
+    //
+    // CANDIDATE is exactly what the state is for: a true statement that this
+    // case may belong with those, carrying its own evidence, and never acted on
+    // by the router (`findActiveCaseByThread` reads CANONICAL only).
+    if (ambiguous) {
+      for (const claimant of ambiguous.caseIds) {
+        linkCaseSource(db, {
+          namespace: 'personal', caseId: claimant, sourceType: 'GMAIL_MESSAGE',
+          sourceRef: input.messageId, linkMethod: 'SEMANTIC_CANDIDATE',
+          evidence: `message ${input.messageId} replies to ${ambiguous.viaMessageId} on thread ${ambiguous.viaThreadId} (mailbox ${ambiguous.viaMailbox}), which ${ambiguous.caseIds.length} open cases claim: ${ambiguous.caseIds.join(', ')} — no canonical link may be drawn from an ambiguous parent`,
+          discoveredBy: 'cos-intake:reply-reference-ambiguous',
+        }, now)
+      }
+    }
     // Cross-thread linking (2026-08-09). Thread matching above only catches a
     // reply on a conversation we already know; a courier or a merchant writes on
     // its own thread about the same matter.

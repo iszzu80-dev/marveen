@@ -14,6 +14,7 @@
 import type Database from 'better-sqlite3'
 import { openBatch, TRIAGE_BATCH_PREFIX } from './email-ingest.js'
 import { ingestEmail, type EmailIntakeInput, type IntakeOutcome } from './intake.js'
+import type { ReplyReferenceResolution } from './reply-reference.js'
 import type { CaseSensitivity } from './schema.js'
 import { recordTriageReceipt } from './triage-provenance.js'
 
@@ -46,6 +47,17 @@ export interface TriagedEmail {
   triageModel?: string
   triagePromptFingerprint?: string
   triageDecidedAt?: number
+  /** What this message replies to, ALREADY resolved by the caller.
+   *
+   *  It arrives pre-resolved because it cannot be resolved here: the lookup
+   *  needs a mailbox, and this function's body is one immediate transaction.
+   *  `resolveReferencesForIntake` is the intended producer, called before the
+   *  transaction opens.
+   *
+   *  Absent means "not asked" or "nothing found" — never "no parent". The
+   *  intake treats it exactly as it did before this field existed, so a caller
+   *  that does not resolve loses the parent route and nothing else. */
+  referenceResolution?: ReplyReferenceResolution
 }
 
 export type BridgeOutcome = IntakeOutcome | 'ALREADY_PROCESSED'
@@ -123,6 +135,10 @@ function ingestTriagedEmailInTx(db: Database.Database, input: TriagedEmail, now:
     declaredSensitivity: input.declaredSensitivity, direction: input.direction,
     followUpAt: input.followUpAt, headers: input.headers,
     priority: input.priority,
+    // The parent route only exists if this line is here. Without it the field
+    // stops at the bridge and the intake never sees it — which is precisely how
+    // the feature spent its first day live-inert.
+    referenceResolution: input.referenceResolution,
     // Stage 2G: forwarded VERBATIM. The receipt above was written from these
     // values, and the intake re-derives the fingerprint from what it receives —
     // so dropping them here would make the gate reject the very receipt this
