@@ -6,6 +6,7 @@
 // transactional and idempotent per (account,message).
 
 import type Database from 'better-sqlite3'
+import { evaluateIntakeCandidates, type IntakeCandidateResult } from './semantic/intake-candidates.js'
 import { createZstCase, type ZstWorkspace } from './zst-case-store.js'
 import { effectiveZstSensitivity, coerceZstSensitivity } from './zst-sensitivity.js'
 import { IDEMPOTENCY_HEADER } from './adapters/gmail-send.js'
@@ -72,6 +73,7 @@ export interface ZstIntakeResult {
   sensitivity?: string
   actionability?: string
   extractionState?: 'NOT_ATTEMPTED' | 'ATTEMPTED' | 'FAILED'
+  semanticCandidates?: IntakeCandidateResult
 }
 
 function recordLedger(db: Database.Database, input: ZstTriagedEmail, status: string, caseId: string | null, now: number, receiptId?: string): void {
@@ -271,11 +273,29 @@ function ingestTriagedZstEmailInTx(db: Database.Database, input: ZstTriagedEmail
       throw new Error(`ZST_INTAKE_ORPHAN: ${actionability.reasons.join('; ')}`)
     }
 
+    // SEMANTIC PROPOSALS. Same rule as the personal path and the same position
+    // in it: every deterministic route above has already failed, and a
+    // standalone case has just been opened with no canonical parent.
+    //
+    // A message on the ZST account is offered into BOTH stores, because which
+    // account carried it is evidence and not authority -- the acceptance case
+    // for this whole layer is a Neon billing thread arriving here while the
+    // dossier that wants it lives in the personal store. What stays refused is
+    // the canonical consequence: a proposal is a row in one table, never an edge.
+    const semanticCandidates = evaluateIntakeCandidates(db, {
+      sourceRef: input.threadId ?? input.messageId,
+      sourceKind: input.threadId ? 'GMAIL_THREAD' : 'GMAIL_MESSAGE',
+      mailbox: input.accountId,
+      text: `${input.subject}\n${input.from}\n${input.snippet}`,
+      arrivedAtDay: Math.floor(now / 86_400),
+      newCase: { caseId, namespace: 'zst' },
+    }, now)
+
     recordLedger(db, input, 'LOCAL_APPLIED', caseId, now, triageReceiptId)
     seedCaseProgressionState(db, 'zst', caseId, now)
     return {
       outcome: 'CASE_CREATED', caseId, messageStatus: 'LOCAL_APPLIED', sensitivity: tier,
-      actionability: actionability.classification, extractionState,
+      actionability: actionability.classification, extractionState, semanticCandidates,
     }
   })
   return tx()

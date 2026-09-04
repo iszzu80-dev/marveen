@@ -112,6 +112,19 @@ export interface InfrastructureDeclaration {
 
 /** Amit a hatókör elér, és szándékosan nincs hashelve. */
 export const DECLARED_INFRASTRUCTURE: Readonly<Record<string, InfrastructureDeclaration>> = {
+  'src/cos/semantic/intake-candidates.ts': {
+    why:
+      'JAVASLATOT ir, nem dontest hoz. A hash azt fedi le, MELYIK uzenetbol lesz ugy es '
+      + 'mikor esedekes -- ez a modul egyikbe sem szol bele: a determinisztikus utak mar '
+      + 'lefutottak, az ugy mar letrejott, es ez a `semantic_relation_candidates` tablaba '
+      + 'ir, amit a router (`findActiveCaseByThread`) nem olvas. Canonical elt nem ir, '
+      + 'szulot nem rendel, ugyet nem von ossze, namespace-t nem migral, kifele nem hat.\n'
+      + 'A hatokorbe tenni azzal jarna, hogy a pontozomotor minden hangolasa lejaratja a '
+      + 'detektor kalibraciojat -- egy kapu, ami zajbol tuzel, az a kapu, amit kikapcsolnak.\n'
+      + 'AMI EZT MEGFORDITJA, es akkor a hatokorbe KELL kerulnie: ha valaha canonical elt '
+      + 'ir, ha egy javaslat befolyasolja, hogy egy uzenetbol ugy lesz-e, vagy ha barmi '
+      + 'automatikusan cselekszik egy candidate soron.',
+  },
   'src/db.ts': {
     why:
       'kapcsolat és séma-bootstrap (`getDb`), nem döntési logika. Ha ez hashelve lenne, '
