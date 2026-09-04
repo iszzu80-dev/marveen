@@ -184,8 +184,19 @@ export function evaluateIntakeCandidates(
         text: source.text,
         createdAtDay: source.arrivedAtDay,
       }
+      // THE CASE THIS SOURCE JUST OPENED IS NOT A PROPOSAL. The thread already
+      // belongs to it canonically -- that link was written moments ago -- so a
+      // candidate row saying it might is noise at best, and at worst a reader
+      // seeing a proposal for a relation that already exists.
+      //
+      // NOT redundant with `scorePair`'s SELF refusal, which compares ids: here
+      // the source is a THREAD and the target is a CASE, so those ids differ
+      // and that guard never fires. Found in the production rehearsal, where
+      // the freshly created case came back as its own thread's best match.
       const sourceProposals = sourceCaseCandidates(
-        asSource, targets, corpus, CANDIDATES_PER_RELATION,
+        asSource,
+        targets.filter((t) => t.id !== source.newCase?.caseId),
+        corpus, CANDIDATES_PER_RELATION,
       )
       if (sourceProposals.length) {
         result.sourceCandidates += recordCandidates(db, sourceProposals, {
