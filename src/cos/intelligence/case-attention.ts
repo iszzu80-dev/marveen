@@ -65,6 +65,18 @@ export interface CaseAttention extends IntelligenceElement {
    *  behind it does not. Reported as unknown, never as fulfilled or overdue --
    *  there is no evidence the owner collected it, and none that they did not. */
   contentUnknown: boolean
+  /** The deadline the RECORD states, carried through verbatim, or null when the
+   *  case states none.
+   *
+   *  Exposed because `reason` cannot answer "is there a deadline". The reason
+   *  branches are an ordered if/else and USER_ACTION_REQUIRED is tested BEFORE
+   *  the deadline branch, so a case that is both INFO_REQUIRED and due tomorrow
+   *  reports USER_ACTION_REQUIRED and its deadline becomes invisible. A reader
+   *  that needed to know "does this fall due within 24 hours" -- the owner's
+   *  quiet-hours exemption, 2026-09-04 -- would have silently found no deadline
+   *  on exactly the cases most likely to have one. This field is the fact; the
+   *  reason stays the classification. */
+  dueAt: number | null
 }
 
 /** The sender, from the one place the intake records it. Null when absent -- an
@@ -140,7 +152,7 @@ export function caseAttentionFor(
     contradiction: { state: 'NONE' },
   }, now)
 
-  return { ...el, reason, contentUnknown }
+  return { ...el, reason, contentUnknown, dueAt: row.due_at ?? null }
 }
 
 /** Band and factors for a case-derived attention item.
