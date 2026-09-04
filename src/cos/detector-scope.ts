@@ -79,6 +79,17 @@ export const DETECTOR_BEHAVIOUR_SCOPE: readonly string[] = [
   // `progression-resolver -> case-sources` elet ez a sor teszi zartta; megint a
   // zartsagi teszt hozta elo, olvasasbol nem latszott volna.
   'src/cos/case-sources.ts',
+  // Szulo-utvonal (2026-09-04): ez donti el, hogy egy valasz MELYIK ugyhoz
+  // csatlakozik, amikor a szalat meg nem ismerjuk -- vagyis pontosan azt, amit
+  // a fejlec szerint a hash lefed ("MELYIK uzenetbol lesz ugy"). A
+  // `reply-reference` a szabaly (egy igenylo -> kanonikus, tobb -> jelolt), az
+  // `intake-resolve` az a lepes, ami eldonti, MEGKERDEZZUK-e egyaltalan. Mindket
+  // valtozas mozditja a viselkedest, tehat mozditsa az ujjlenyomatot is.
+  // Az `intake -> reply-reference` es a `triage-bridge -> intake-resolve` elet
+  // ez a ket sor teszi zartta; megint a zartsagi teszt hozta elo, olvasasbol nem
+  // latszott volna.
+  'src/cos/reply-reference.ts',
+  'src/cos/intake-resolve.ts',
   'src/cos/case-link.ts',
   'src/cos/progression-completion.ts',
   'src/cos/progression-resolver.ts',

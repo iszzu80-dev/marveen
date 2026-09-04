@@ -12,7 +12,9 @@
 
 import type Database from 'better-sqlite3'
 import { ingestEmail, type EmailIntakeInput, type IntakeResult } from './intake.js'
-import { resolveCaseByReplyReference, type ThreadLookup } from './reply-reference.js'
+import {
+  resolveCaseByReplyReference, type ThreadLookup, type ReplyReferenceResolution,
+} from './reply-reference.js'
 import { findCasesForSource } from './case-sources.js'
 
 export interface Mailbox {
@@ -55,18 +57,40 @@ export async function ingestEmailWithReferences(
   mailboxes: ReadonlyArray<Mailbox>,
   now: number,
 ): Promise<IntakeResult> {
+  const referenceResolution = await resolveReferencesForIntake(db, input, mailboxes)
+  return ingestEmail(db, referenceResolution ? { ...input, referenceResolution } : input, now)
+}
+
+/**
+ * The lookup ALONE, without the ingest that usually follows it.
+ *
+ * It is separate because the live path could not use the wrapper. Real triaged
+ * mail enters through `ingestTriagedEmail`, which is synchronous and runs the
+ * idempotency check and its writes inside ONE immediate transaction; an async
+ * mailbox round-trip cannot go in there, and wrapping the transaction would put
+ * the network call inside the lock.
+ *
+ * That mattered more than it sounds. The wrapper shipped with no production
+ * caller at all: every real email still went straight to `ingestEmail`, so the
+ * whole reply/reference route was dead code that only tests ever reached, and
+ * its tests passed the entire time. Resolving BEFORE the transaction and passing
+ * the answer in is what actually put it on the live path.
+ */
+export async function resolveReferencesForIntake(
+  db: Database.Database,
+  input: Pick<EmailIntakeInput, 'threadId' | 'headers'>,
+  mailboxes: ReadonlyArray<Mailbox>,
+): Promise<ReplyReferenceResolution | undefined> {
   const threadKnown = input.threadId ? openCasesClaimingThread(db, input.threadId).length > 0 : false
-  if (threadKnown || !input.headers) return ingestEmail(db, input, now)
+  if (threadKnown || !input.headers) return undefined
 
   const headers = input.headers
   const pick = (name: string) =>
     Object.entries(headers).find(([k]) => k.toLowerCase() === name)?.[1] ?? null
 
-  const referenceResolution = await resolveCaseByReplyReference(
+  return await resolveCaseByReplyReference(
     { inReplyTo: pick('in-reply-to'), references: pick('references') },
     mailboxes,
     (threadId) => openCasesClaimingThread(db, threadId),
   ) ?? undefined
-
-  return ingestEmail(db, { ...input, referenceResolution }, now)
 }

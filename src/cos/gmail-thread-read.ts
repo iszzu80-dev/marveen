@@ -66,6 +66,38 @@ export class GmailThreadReader {
     return j.access_token
   }
 
+  /** The conversation a MESSAGE belongs to, by its RFC822 Message-ID.
+   *
+   *  This is the read half of the lookup the send path already does privately
+   *  (GmailApiTransport.resolveThreadId). It lives here because the intake needs
+   *  it too, and because a caller that only wants to LOOK should never be handed
+   *  an object that can send.
+   *
+   *  `rfc822msgid:` indexes the id the SENDER stamped, so it answers for inbound
+   *  mail. It does not answer for our own sent copies — Gmail rewrites those —
+   *  which is exactly why the intake asks about a message it RECEIVED and never
+   *  about one it wrote.
+   *
+   *  Returns null for "asked, no such message here", and THROWS for "could not
+   *  ask" (auth, network, quota). The difference is load-bearing: the resolver
+   *  keeps searching after a null and skips the mailbox after a throw, and
+   *  collapsing the two would let an unreachable mailbox read as an empty one.
+   */
+  async lookupThreadByMessageId(messageId: string): Promise<string | null> {
+    const bare = messageId.trim().replace(/^</, '').replace(/>$/, '')
+    if (!bare) return null
+    const tok = await this.accessToken(Date.now())
+    const q = encodeURIComponent(`rfc822msgid:${bare}`)
+    const r = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${q}&maxResults=1`,
+      { headers: { Authorization: `Bearer ${tok}` }, signal: AbortSignal.timeout(this.timeoutMs) },
+    )
+    if (r.status === 404) return null
+    if (!r.ok) throw new Error(`message-id lookup failed: ${r.status}`)
+    const j = await r.json() as { messages?: Array<{ id: string; threadId?: string }> }
+    return j.messages?.[0]?.threadId ?? null
+  }
+
   async fetchThread(threadId: string): Promise<ThreadMessage[]> {
     const tok = await this.accessToken(Date.now())
     const r = await fetch(
