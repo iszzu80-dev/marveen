@@ -218,6 +218,48 @@ if [ $DRY = 0 ]; then
   # the pin, measured from the deployed artifact -- the half the gate cannot do.
   ( cd "$CYCLE" && MARVEEN_REPO_ROOT="$REPO" npx tsx scripts/verify-runtime-provenance.ts --expect-from-pin ) \
     || die "the DEPLOYED runtime does not prove the sha the pin declares" 
+
+  # 8. POLICY-CRITICAL RUNTIME CONFIG (owner gate, 2026-09-04).
+  #
+  # Quiet hours are 22:00-07:00 Europe/Budapest, which makes the application
+  # timezone a POLICY value. A host fallback is therefore not an acceptable
+  # production configuration even when it happens to give the right answer --
+  # and on 2026-09-04 it did give the right answer, for the wrong reason, on a
+  # box that merely happened to be in Budapest.
+  #
+  # The link is checked before the value: a dangling or unreadable symlink would
+  # otherwise surface as "system-default" and read like a policy failure rather
+  # than a broken link.
+  [ -L "$CYCLE/.env" ] || die "the release carries no .env link -- the pinned runtime cannot read policy config"
+  LINK_TARGET="$(readlink "$CYCLE/.env")"
+  [ "$LINK_TARGET" = "$REPO/.env" ] \
+    || die "the release .env link points at '$LINK_TARGET', not the intended '$REPO/.env'"
+  [ -r "$CYCLE/.env" ] || die "the release .env link is not readable: $CYCLE/.env -> $LINK_TARGET"
+
+  # ATTESTATION IS THE POLICY VALUE AND ITS SOURCE, NOTHING ELSE. Not the file,
+  # not a digest of it, not any other key in it. A release report is not a place
+  # where secrets go to be summarised.
+  TZ_ATTEST="$( cd "$CYCLE" && npx tsx -e "
+    const { APP_TZ, SCHEDULER_TZ_CONFIGURED } = require('./src/config.ts')
+    console.log(JSON.stringify({
+      effectiveTimezone: APP_TZ,
+      configSource: SCHEDULER_TZ_CONFIGURED ? 'explicit .env' : 'system-default (host fallback)',
+      hostTz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    }))" 2>/dev/null | tail -1 )"
+  echo "  runtime timezone attestation: $TZ_ATTEST"
+  case "$TZ_ATTEST" in
+    *'"configSource":"explicit .env"'*) : ;;
+    *) die "REFUSED: the runtime timezone is not explicitly configured.
+$TZ_ATTEST
+A host/system fallback is not an acceptable production configuration for a
+policy value; set SCHEDULER_TZ in $REPO/.env." ;;
+  esac
+  case "$TZ_ATTEST" in
+    *'"effectiveTimezone":"Europe/Budapest"'*) : ;;
+    *) die "REFUSED: the runtime timezone is not Europe/Budapest.
+$TZ_ATTEST" ;;
+  esac
+
   echo "cutover staged and gate-verified. Restart the runtime, then read the pin back."
 else
   echo "dry run complete; nothing written."
