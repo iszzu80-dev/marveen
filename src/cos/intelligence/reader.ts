@@ -505,27 +505,48 @@ export function runProjectionReader(
   // company day must not silence a personal deadline.
   const withinCadence = lastSpokeAt > 0 && now - lastSpokeAt < MIN_DIGEST_INTERVAL_SECONDS
 
-  const mayPassCadence = (item: AttentionItem): boolean => {
-    if (!withinCadence) return true
-    // STILL THE CATEGORY TEST HERE, and deliberately so.
-    //
-    // I changed this line too when the night rule changed, reasoning it was the
-    // same mistake one level down. It is not the same decision. The owner's
-    // ruling was about the NIGHT INTERRUPT -- what may wake him -- and the
-    // cadence floor answers a different question: whether a backlog may arrive
-    // in instalments during the day. A SAFETY item jumping the hourly cadence
-    // at two in the afternoon costs a notification; jumping the night costs
-    // sleep. Extending the ruling from one to the other is his call, not a
-    // tidiness I get to apply on his behalf, so it is left alone and raised.
-    if (item.band === 'SAFETY') return true
+  // THE ELIGIBLE POPULATION, and it is not the shortlist.
+  //
+  // Owner invariant, 2026-09-04: *"Barmilyen cadence-bypass / quiet-hours-break
+  // ertekeles a TELJES eligible populationbol induljon. Ne egy mar top-N-re
+  // levagott nappali vagy ejszakai shortlistbol. A prioritasi shortlist csak
+  // presentation/delivery reteg legyen, ne eligibility gate."*
+  //
+  // `p.attention.interrupt` is capped at three by the interruption policy. That
+  // cap answers "how much may I say at once", which is a delivery question. It
+  // was silently answering "what is allowed to be urgent" as well, and the two
+  // are not the same: a genuinely time-critical item ranked fourth was
+  // ineligible for a bypass it plainly deserved.
+  //
+  // NOT included: `p.attention.suppressed`, the anti-spam set whose band has not
+  // changed inside its quiet window. That is a different mechanism from the
+  // top-N cut the owner named, and folding it in would be me extending the
+  // ruling again rather than applying it. Raised instead of assumed.
+  const eligiblePopulation = [...p.attention.interrupt, ...p.attention.quiet]
+
+  // THE BYPASS, one rule for the night and the day alike (owner, 2026-09-04):
+  // *"Ugyanaz az alapelv mukodjon nappal is."* A SECURITY label no longer walks
+  // past the cadence on its own; an active, worsening or owner-actionable
+  // security incident still does, because that is what the harm test asks.
+  const bypass = eligiblePopulation.filter((i) => quietHoursDecision(i, now).breaks)
+  const bypassIds = new Set(bypass.map((i) => i.element.id))
+
+  const changedSinceLastTime = (item: AttentionItem): boolean => {
     const prev = ledger.get(item.element.id)
     // A band change or a changed sentence IS the news; only a first-time,
     // unchanged, non-urgent item is held for the next window.
     return !!prev && (prev.band !== item.band || prev.fingerprint !== fingerprintOf(item))
   }
+  const mayPassCadence = (item: AttentionItem): boolean =>
+    !withinCadence || bypassIds.has(item.element.id) || changedSinceLastTime(item)
 
-  const eligible = p.attention.interrupt.filter(mayPassCadence)
-  const heldByCadence = p.attention.interrupt.length - eligible.length
+  const heldByCadence = p.attention.interrupt.filter((i) => !mayPassCadence(i)).length
+  // The shortlist supplies the ordinary delivery; the bypass adds anything the
+  // harm test found anywhere in the population, shortlist or not.
+  const eligible = [
+    ...p.attention.interrupt.filter(mayPassCadence),
+    ...bypass.filter((i) => !p.attention.interrupt.includes(i)),
+  ]
   const speak: AttentionItem[] = [...eligible]
   const spoken: SpokenItem[] = eligible.map((i) => decide(i, false))
 
@@ -594,7 +615,7 @@ export function runProjectionReader(
   // So at night the exemption is drawn from every item the projection produced.
   // Reaching him at 03:00 is a different question from earning a slot in the
   // daily three, and it deserves to be asked of the whole board.
-  const nightPool = inQuietHours ? [...p.attention.interrupt, ...p.attention.quiet] : speak
+  const nightPool = inQuietHours ? eligiblePopulation : speak
   const exempt = inQuietHours ? nightPool.filter((i) => breaksQuietHours(i, now)) : speak
   const heldByQuietHours = speak.filter((i) => !exempt.includes(i)).length
   const exemptIds = new Set(exempt.map((i) => i.element.id))

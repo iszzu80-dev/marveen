@@ -352,14 +352,53 @@ describe('THE CADENCE FLOOR -- the backlog does not arrive in instalments', () =
     expect(later.spoke.length).toBe(3)
   })
 
-  it('SAFETY is never held: an authority notice speaks inside the window', () => {
+  it('SAFETY alone is HELD by the floor -- the label is not a bypass', () => {
+    // REWRITTEN 2026-09-04 on an owner ruling that overturned what this test
+    // asserted, and the change is declared rather than quietly applied:
+    // "A SECURITY cimke onmagaban NE kerulje meg az utemet. Ugyanaz az alapelv
+    // mukodjon nappal is." An authority notice with nothing to do about it
+    // before the next delivery is a normal-cadence item.
     runProjectionReader(getDb(), 'zst', NOW, sink().post)
     zst({ case_id: 'nav', title: 'NAV irat', description: 'From: ertesites@tarhely.gov.hu', updated_at: NOW })
     const s = sink()
     const r = runProjectionReader(getDb(), 'zst', NOW + 600, s.post)
+    expect(r.posted).toBe(false)
+    expect(r.heldByCadence).toBeGreaterThan(0)
+    expect(s.posts).toEqual([])
+  })
+
+  it('MIRROR: an owner-actionable deadline inside the window DOES bypass the floor', () => {
+    // Without this the test above proves only that the floor holds everything.
+    // The bypass is the harm test, not the band: this item speaks because
+    // waiting for the next delivery would lose the deadline, and because the
+    // next step is HIS.
+    runProjectionReader(getDb(), 'zst', NOW, sink().post)
+    getDb().prepare(
+      `INSERT INTO zst_cases (case_id,title,description,case_type,status,next_action,next_action_owner,due_at,waiting_on,related_document_ids,created_at,updated_at)
+       VALUES ('urgent','Hatarido mindjart',NULL,'REGULATORY_DEADLINE','AWAITING_SELECTION','Istvan dontese','OWNER',?,NULL,NULL,?,?)`,
+    ).run(NOW + 1800, NOW, NOW)
+    const s = sink()
+    const r = runProjectionReader(getDb(), 'zst', NOW + 600, s.post)
     expect(r.posted).toBe(true)
-    expect(r.spoke.every((x) => x.band === 'SAFETY')).toBe(true)
-    expect(s.posts[0]).toContain('BIZTONSAG')
+    expect(r.spoke.some((x) => x.caseId === 'urgent')).toBe(true)
+  })
+
+  it('THE SHORTLIST IS PRESENTATION, NOT ELIGIBILITY -- a bypass ranked below the cap still speaks', () => {
+    // The owner's invariant. `interrupt` is capped at three, and that cap was
+    // silently deciding what was allowed to be urgent as well as how much could
+    // be said at once. Here the urgent item is deliberately buried under a
+    // backlog so it cannot make the top three.
+    for (let i = 0; i < 12; i++) {
+      zst({ case_id: `bulk${i}`, title: `bulk ${i}`, updated_at: NOW - i })
+    }
+    getDb().prepare(
+      `INSERT INTO zst_cases (case_id,title,description,case_type,status,next_action,next_action_owner,due_at,waiting_on,related_document_ids,created_at,updated_at)
+       VALUES ('buried','Eltemetett hatarido',NULL,'REGULATORY_DEADLINE','AWAITING_SELECTION','Istvan dontese','OWNER',?,NULL,NULL,?,?)`,
+    ).run(NOW + 1800, NOW - 40 * DAY, NOW - 40 * DAY)
+    const s = sink()
+    const r = runProjectionReader(getDb(), 'zst', NOW, s.post)
+    expect(r.spoke.some((x) => x.caseId === 'buried'),
+      'a time-critical item must not be ineligible merely for ranking fourth').toBe(true)
   })
 
   it('a CHANGE is never held either -- that is the news the floor must not eat', () => {
