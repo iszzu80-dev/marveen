@@ -29,6 +29,11 @@ export default defineConfig({
     // for the 2026-07-27 incident this prevents). Runs in every worker before
     // any test module is imported.
     setupFiles: [
+      // The clock BEFORE anything reads it: APP_TZ falls back to the system
+      // zone, so an unpinned suite tests whichever timezone the host happens to
+      // be in. Five quiet-hours tests were green here and red on CI for exactly
+      // that reason.
+      './src/__tests__/setup/pin-timezone.ts',
       './src/__tests__/setup/assert-not-live-install.ts',
       // Per-worker credential store. See the file header for the run-10 race.
       './src/__tests__/setup/isolate-credential-store.ts',
