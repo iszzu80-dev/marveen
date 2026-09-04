@@ -133,8 +133,27 @@ export function caseAttentionFor(
     statement = `blocked on ${row.waiting_on?.trim() || 'an external party'}`
     provenance = prov(row.waiting_on?.trim() ? 'waiting_on' : 'status')
   } else if (now - row.updated_at > STALE_AFTER) {
+    // AN ABSOLUTE DATE, NOT A DRIFTING COUNT, and the difference is not cosmetic.
+    //
+    // This read `open and untouched for N days`, and the reader fingerprints
+    // `band + statement`. So N rose at every midnight, the fingerprint moved
+    // with it, and an item that had not changed in any way announced itself as
+    // NEWS every single day -- for ever, and more insistently the longer it was
+    // ignored. Measured on the live ZST board on 2026-09-04: three-item batches
+    // marked "valtozott" in cycle after cycle, all of them 26 days old and none
+    // of them changed.
+    //
+    // It is the owner's own rule turned inside out. "Nem material escalation:
+    // pusztan az ido mulasa; az ugy puszta oregedese." The ageing counter WAS
+    // the change signal, so the notification clock was rewriting the business
+    // state -- the exact defect the repeated-reminder work exists to prevent.
+    //
+    // The date it derives from is stable, says strictly more (a reader can see
+    // WHEN, not just how long ago), and cannot drift. Same lesson as a stored
+    // title that said "ma": a record must not contain a value whose meaning
+    // moves with the reader.
     reason = 'STALE_UNRESOLVED'
-    statement = `open and untouched for ${Math.floor((now - row.updated_at) / DAY)} days`
+    statement = `open and untouched since ${new Date(row.updated_at * 1000).toISOString().slice(0, 10)}`
     provenance = prov('updated_at')
   }
 
