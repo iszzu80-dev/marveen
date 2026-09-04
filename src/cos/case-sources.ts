@@ -20,6 +20,20 @@ export type LinkMethod =
 
 export type LinkState = 'CANONICAL' | 'CANDIDATE' | 'REJECTED'
 
+/** Whether the thing on the other end can still be fetched.
+ *
+ *  A SEPARATE AXIS FROM `LinkState`, and the separation is the point. The state
+ *  says whether the case IS about this source; this says whether the source can
+ *  still be read. A deleted thread does not stop being what the case was about,
+ *  so marking it REJECTED would be a lie about the relation in order to record a
+ *  fact about the content.
+ *
+ *  Found 2026-09-04: three threads had been abandoned after three 404s each,
+ *  and their links still read as ordinary healthy CANONICAL rows. The dossier
+ *  said the case was about eleven conversations; one of them could no longer be
+ *  opened, and nothing anywhere said so. */
+export type ContentState = 'AVAILABLE' | 'CONTENT_UNAVAILABLE'
+
 /** The methods that may put a link straight into CANONICAL.
  *
  *  Each one is a FACT already recorded somewhere else: a stored relation, a
@@ -33,6 +47,13 @@ const DETERMINISTIC: ReadonlySet<LinkMethod> = new Set<LinkMethod>([
 ])
 
 export interface CaseSourceLink {
+  /** Whether the source can still be fetched. Defaults to AVAILABLE; only a
+   *  fetch that came back gone may set it otherwise. */
+  contentState: ContentState
+  /** When the source was last found missing. Null while AVAILABLE. */
+  contentCheckedAt: number | null
+  /** What said it was gone, in words a human can check. */
+  contentNote: string | null
   linkId: string
   namespace: CaseNamespace
   caseId: string
@@ -86,6 +107,11 @@ interface Row {
   confidence: number | null; evidence: string; discovered_by: string
   first_seen_at: number; updated_at: number
   decided_at: number | null; decided_by: string | null; decision_note: string | null
+  /* Optional in the type because a store created before these columns existed
+     still returns rows without them; `toLink` supplies the default. */
+  content_state?: string | null
+  content_checked_at?: number | null
+  content_note?: string | null
 }
 
 const toLink = (r: Row): CaseSourceLink => ({
@@ -95,7 +121,69 @@ const toLink = (r: Row): CaseSourceLink => ({
   confidence: r.confidence, evidence: r.evidence, discoveredBy: r.discovered_by,
   firstSeenAt: r.first_seen_at, updatedAt: r.updated_at,
   decidedAt: r.decided_at, decidedBy: r.decided_by, decisionNote: r.decision_note,
+  // A store predating the column reads as AVAILABLE rather than undefined: the
+  // absence of a "this is gone" record is exactly the claim that it is not.
+  contentState: (r.content_state as ContentState | null) ?? 'AVAILABLE',
+  contentCheckedAt: r.content_checked_at ?? null,
+  contentNote: r.content_note ?? null,
 })
+
+/**
+ * Record that a source can no longer be fetched — WITHOUT touching the relation.
+ *
+ * The link stays exactly as it was: same state, same method, same evidence. All
+ * that changes is the answer to "can this still be read", because those are two
+ * different questions and a vanished thread does not stop being what the case
+ * was about.
+ *
+ * Requires a note. A source marked gone with no statement of what said so is the
+ * same shape the `evidence` requirement exists to prevent one level up: a
+ * durable claim nobody can check.
+ *
+ * Idempotent, and deliberately does not re-stamp `content_checked_at` on a
+ * repeat: the interesting timestamp is when it was FIRST found missing, not
+ * when the latest sweep confirmed it again.
+ */
+export function markSourceContentUnavailable(
+  db: Database.Database,
+  input: { namespace: CaseNamespace; caseId: string; sourceType: CaseSourceType; sourceRef: string; note: string },
+  now: number,
+): { linkId: string; changed: boolean } {
+  const note = input.note?.trim()
+  if (!note) {
+    throw new Error(
+      `markSourceContentUnavailable: note is required (${input.caseId} -> ${input.sourceType}:${input.sourceRef})`)
+  }
+  const linkId = caseSourceLinkId(input.namespace, input.caseId, input.sourceType, input.sourceRef)
+  const existing = db.prepare(`SELECT content_state FROM case_sources WHERE link_id = ?`).get(linkId) as
+    { content_state: string | null } | undefined
+  if (!existing) return { linkId, changed: false }
+  if (existing.content_state === 'CONTENT_UNAVAILABLE') return { linkId, changed: false }
+  db.prepare(
+    `UPDATE case_sources SET content_state='CONTENT_UNAVAILABLE', content_checked_at=@now,
+       content_note=@note, updated_at=@now WHERE link_id=@id`,
+  ).run({ id: linkId, now, note })
+  return { linkId, changed: true }
+}
+
+/** The source can be read again — a mailbox restore, a re-share, a fixed token.
+ *  Clears the note as well: a stale "gone since March" on a living source is
+ *  worse than no note at all. */
+export function markSourceContentAvailable(
+  db: Database.Database,
+  input: { namespace: CaseNamespace; caseId: string; sourceType: CaseSourceType; sourceRef: string },
+  now: number,
+): { linkId: string; changed: boolean } {
+  const linkId = caseSourceLinkId(input.namespace, input.caseId, input.sourceType, input.sourceRef)
+  const existing = db.prepare(`SELECT content_state FROM case_sources WHERE link_id = ?`).get(linkId) as
+    { content_state: string | null } | undefined
+  if (!existing || (existing.content_state ?? 'AVAILABLE') === 'AVAILABLE') return { linkId, changed: false }
+  db.prepare(
+    `UPDATE case_sources SET content_state='AVAILABLE', content_checked_at=@now,
+       content_note=NULL, updated_at=@now WHERE link_id=@id`,
+  ).run({ id: linkId, now })
+  return { linkId, changed: true }
+}
 
 /**
  * Record one claim that a source belongs to a case.
@@ -228,6 +316,15 @@ export interface CaseDossier {
   rejected: CaseSourceLink[]
   /** Canonical only, grouped -- the shape a dossier reader actually wants. */
   byType: Record<CaseSourceType, string[]>
+  /** Canonical links whose source can no longer be fetched.
+   *
+   *  A SEPARATE LIST, not a filter applied to the others. These are still the
+   *  case's sources and still appear in `canonical` and `byType`, because the
+   *  relation is intact; what this list adds is the one thing a reader could
+   *  not otherwise learn — that opening them will fail. Hiding them would swap
+   *  a visible gap for an invisible one, which is the trade this whole field
+   *  exists to refuse. */
+  unavailable: CaseSourceLink[]
 }
 
 const EMPTY_BY_TYPE = (): Record<CaseSourceType, string[]> => ({
@@ -253,6 +350,7 @@ export function getCaseDossier(
     candidates: links.filter((l) => l.linkState === 'CANDIDATE'),
     rejected: links.filter((l) => l.linkState === 'REJECTED'),
     byType,
+    unavailable: links.filter((l) => l.linkState === 'CANONICAL' && l.contentState === 'CONTENT_UNAVAILABLE'),
   }
 }
 

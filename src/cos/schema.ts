@@ -2822,8 +2822,22 @@ export function initCaseSourceSchema(db: Database.Database): void {
       decided_at     INTEGER,
       decided_by     TEXT,
       decision_note  TEXT,
+      /* CAN THE THING ON THE OTHER END STILL BE FETCHED.
+         Separate from link_state on purpose, because they answer different
+         questions: link_state is whether the case IS about this source,
+         content_state is whether the source can still be read. A deleted
+         thread does not stop being what the case was about.
+         AVAILABLE (default) | CONTENT_UNAVAILABLE (fetch returned 404/gone).
+         Found 2026-09-04: three threads had been abandoned after repeated 404s
+         and their links still read as ordinary healthy CANONICAL rows, so a
+         dossier reader could not tell a live source from a vanished one. */
+      content_state  TEXT NOT NULL DEFAULT 'AVAILABLE',
+      /* When the source was last found missing, and what said so. */
+      content_checked_at INTEGER,
+      content_note   TEXT,
       CHECK (namespace IN ('personal','zst')),
       CHECK (link_state IN ('CANONICAL','CANDIDATE','REJECTED')),
+      CHECK (content_state IN ('AVAILABLE','CONTENT_UNAVAILABLE')),
       CHECK (source_type IN (
         'GMAIL_THREAD','GMAIL_MESSAGE','DOCUMENT','CALENDAR_EVENT',
         'OWNER_ASSERTION','DECISION','RESEARCH_RESULT','EXTERNAL_URL',
@@ -2837,6 +2851,16 @@ export function initCaseSourceSchema(db: Database.Database): void {
       UNIQUE (namespace, case_id, source_type, source_ref)
     )
   `)
+  // ADDITIVE, for stores created before content_state existed. The CHECK in the
+  // CREATE TABLE above does not reach an already-created table -- SQLite cannot
+  // add one -- so an old store gets the column and the default without the
+  // constraint. Stated rather than glossed: the writer enforces the vocabulary,
+  // and on a fresh store the schema does too.
+  ensureColumns(db, 'case_sources', {
+    content_state: `TEXT NOT NULL DEFAULT 'AVAILABLE'`,
+    content_checked_at: 'INTEGER',
+    content_note: 'TEXT',
+  })
   db.exec(`CREATE INDEX IF NOT EXISTS idx_case_sources_case
              ON case_sources(namespace, case_id, link_state)`)
   /* THE REVERSE LOOKUP, which is the half the old column could not do at all:
