@@ -474,12 +474,20 @@ export const FINGERPRINT_ALGO = 'v2-provenance'
 export function fingerprintOf(item: AttentionItem): string {
   // Sorted so that provenance ARRIVING in a different order is not a change;
   // the set and its timestamps are the fact, the array order is incidental.
-  const evidence = item.element.provenance
+  // `?? []` because a crash here would take down the whole cycle. Provenance is
+  // required on every element by construction, so an element without it is a bug
+  // somewhere upstream -- but the reader's job is to say what it can see, and an
+  // element with no traceable evidence is honestly identified by its case and
+  // band alone rather than by an exception.
+  const evidence = (item.element.provenance ?? [])
     .map((p) => `${p.source}:${p.ref}@${p.observedAt}`)
     .sort()
     .join('|')
+  // `changeKey` first: when a producer has named its semantic facts, those are
+  // the identity and provenance merely corroborates it.
   return createHash('sha256')
-    .update(`${item.band} ${item.element.kind} ${item.element.caseId} ${evidence}`)
+    .update(`${item.band} ${item.element.kind} ${item.element.caseId} `
+          + `${item.element.changeKey ?? ''} ${evidence}`)
     .digest('hex')
     .slice(0, 16)
 }

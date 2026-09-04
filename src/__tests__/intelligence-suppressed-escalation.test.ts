@@ -30,7 +30,14 @@ const NOON = Date.UTC(2027, 0, 15, 11, 0, 0) / 1000
 const LAST_SPOKE = NOON - 6 * HOUR
 
 const item = (el: Record<string, unknown>, band = 'OBLIGATION'): AttentionItem =>
-  ({ band, element: { id: 'e1', caseId: 'c1', statement: 'a thing', ...el } } as unknown as AttentionItem)
+  ({ band, element: {
+    id: 'e1', caseId: 'c1', statement: 'a thing',
+    // Every real element carries provenance, and since 2026-09-04 that is what
+    // the fingerprint is taken over. A fixture without it would be testing a
+    // shape the projection cannot produce.
+    provenance: [{ source: 'CASE', ref: 'c1', observedAt: LAST_SPOKE - DAY }],
+    ...el,
+  } } as unknown as AttentionItem)
 
 const ledgerFor = (it: AttentionItem, at = LAST_SPOKE): LedgerRow => ({
   element_id: 'e1', band: it.band, fingerprint: fingerprintOf(it),
@@ -64,7 +71,17 @@ describe("the owner's five controls", () => {
 
   it('B) suppressed SECURITY + new active-compromise evidence -> speaks again', () => {
     const before = item({ dueAt: null }, 'SAFETY')
-    const after = item({ dueAt: null, statement: 'active compromise observed' }, 'SAFETY')
+    // The evidence is what moved -- a new observation, filed after we last
+    // spoke. Re-wording the sentence over the SAME rows would no longer count,
+    // and must not: that is the manufactured-news defect this suite also pins.
+    const after = item({
+      dueAt: null,
+      statement: 'active compromise observed',
+      provenance: [
+        { source: 'CASE', ref: 'c1', observedAt: LAST_SPOKE - DAY },
+        { source: 'CASE_EVENT', ref: 'ev-compromise', observedAt: NOON - HOUR },
+      ],
+    }, 'SAFETY')
     const esc = materialEscalation(getDb(), 'personal', after, ledgerFor(before), NOON)
     expect(esc.escalated).toBe(true)
     expect(esc.what).toContain('new evidence changed what it says')
@@ -156,7 +173,12 @@ describe('what counts, and what refuses to count', () => {
     const cols = (getDb().prepare(`PRAGMA table_info("intelligence_surfaced")`).all() as Array<{ name: string }>)
       .map((c) => c.name).sort()
     expect(cols).toEqual([
-      'band', 'element_id', 'fingerprint', 'first_surfaced_at',
+      'band', 'element_id', 'fingerprint',
+      // Which recipe produced `fingerprint`. It describes OUR digest, not the
+      // case -- delete every row and the reader repeats itself once, which is
+      // the same test the exemption has always had to pass.
+      'fingerprint_algo',
+      'first_surfaced_at',
       'last_surfaced_at', 'namespace', 'times_surfaced',
     ])
   })

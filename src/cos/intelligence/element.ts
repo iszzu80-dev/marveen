@@ -80,6 +80,27 @@ export interface IntelligenceElement {
   /** Age of the FRESHEST provenance, in seconds, at evaluation time. */
   recencySeconds: number
   contradiction: ContradictionState
+  /**
+   * THE FACTS THAT DECIDE WHETHER THIS IS STILL THE SAME CLAIM.
+   *
+   * A producer that knows which of its inputs are semantic says so here, and
+   * the reader's change digest is taken over this rather than over the rendered
+   * sentence. Optional: an element that does not set it is identified by its
+   * provenance alone, which is stable but coarser.
+   *
+   * IT EXISTS BECAUSE BOTH OBVIOUS CHOICES ARE WRONG. Hashing the sentence makes
+   * every re-phrasing look like news -- measured twice on the live board, once
+   * from a drifting day count and once from the fix for it. Hashing only the
+   * provenance is quiet in the other direction: a case whose STATUS moves
+   * without its timestamp moving is a real change that nothing would notice, and
+   * a missed change is silent where a false one at least argues with you.
+   *
+   * So: stable, absolute, chosen. Owner's rule, 2026-09-04 -- "CHANGE /
+   * IDENTITY: csak stabil, absolute facts. URGENCY / RANKING: olvashatja az
+   * aktuális időt." A rendered age, an "N days ago", or anything else computed
+   * from the clock at read time must never appear in it.
+   */
+  changeKey?: string
 }
 
 export class IntelligenceInvariantError extends Error {

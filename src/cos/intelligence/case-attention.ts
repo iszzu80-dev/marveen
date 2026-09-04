@@ -171,6 +171,16 @@ export function caseAttentionFor(
     caseId: row.case_id,
     namespace,
     statement: `${row.title?.trim() || row.case_id}: ${statement}`,
+    // THE SEMANTIC CORE, named rather than scraped back out of the sentence.
+    // Every part is a stored value: the attention reason, the status, the
+    // deadline as an epoch, who we are blocked on. None of them moves because
+    // time passed, and all of them move when the case does -- including the
+    // case that broke the provenance-only version, a status transition that
+    // leaves `updated_at` untouched.
+    changeKey: [
+      reason, row.status, row.due_at ?? '', row.waiting_on?.trim() ?? '',
+      hasDocument ? 'doc' : 'nodoc',
+    ].join('|'),
     provenance,
     confidence: reason === 'STALE_UNRESOLVED' ? 'MEDIUM' : 'HIGH',
     contradiction: { state: 'NONE' },
