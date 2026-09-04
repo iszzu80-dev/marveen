@@ -29,3 +29,16 @@
 // disagree, which is the exact shape of the bug this closes.
 
 process.env.TZ = 'Europe/Budapest'
+
+// ON LEAKAGE (owner, 2026-09-04): "a test suite sajat TZ pinje maradjon
+// determinisztikus es ne szivarogjon mas, elteroe timezone-semantikaju
+// suite-okba."
+//
+// This pin is global and unconditional, and the whole suite is green under it
+// (644 files) including a run with the host forced to UTC. No suite currently
+// encodes non-Budapest semantics, so nothing is being overridden today.
+//
+// If one ever needs to, it must pass the zone EXPLICITLY to the code under test
+// rather than reach for the ambient one -- a suite that depends on the process
+// zone is the bug this file exists to close, and inheriting it from a different
+// direction would not be an improvement.
