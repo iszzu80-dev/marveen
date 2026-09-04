@@ -485,10 +485,38 @@ async function run(): Promise<void> {
       healthB.failureMode === "MONITOR_STATE_STALE", healthB.failureMode);
   }
   {
-    // Scenario C: no state file at all → gate blocks non-core (existing behavior, preserved)
+    // Scenario C: no state file at all. WHICH answer that deserves depends on
+    // something this test used to leave to the host it ran on.
+    //
+    // It asserted a single universal rule — no state file, therefore blocked —
+    // and passed here for four days for the wrong reason: this machine HAS the
+    // monitor installed, so it was exercising the fail-closed branch without
+    // saying so. On CI, where no systemd unit exists, the same line ran the
+    // never-installed branch and went red. The gate had not regressed; the
+    // test simply could not say which of the two worlds it was in.
+    //
+    // Both are pinned now, via the unit-path injection the gate exposes for
+    // exactly this, so the assertions hold on a developer box and a bare runner
+    // alike — and, more to the point, each branch is now claimed out loud.
     teardown();
+
+    // C1 — the guard IS installed and is not reporting. This is what
+    // fail-closed is for, and it is the behaviour the original line meant.
+    const unitDir = mkdtempSync(join(tmpdir(), "mp-unit-"));
+    const unitFile = join(unitDir, "marveen-memory-monitor.timer");
+    writeFileSync(unitFile, "[Timer]\n");
+    process.env.MARVEEN_MEM_PRESSURE_TEST_UNIT_PATH = unitFile;
     const rC = memoryPressureGate("non-core-agent");
-    ok("T6c: no state file → non-core blocked (fail-closed, pre-existing behavior)", !rC.allowed, rC);
+    ok("T6c: installed guard + no state file → non-core blocked (fail-closed)", !rC.allowed, rC);
+
+    // C2 — the monitor was never installed here. Blocking would refuse every
+    // non-core start on a host that never had a guard to lose, which is the
+    // three-state split's whole point; without this half, C1 alone would still
+    // pass against a gate that blocked unconditionally.
+    process.env.MARVEEN_MEM_PRESSURE_TEST_UNIT_PATH = "";
+    const rC2 = memoryPressureGate("non-core-agent");
+    ok("T6c: never-installed guard + no state file → non-core allowed", rC2.allowed, rC2);
+    delete process.env.MARVEEN_MEM_PRESSURE_TEST_UNIT_PATH;
 
     // ── T7: release mismatch → unhealthy (Istvan requirement 3, 2026-07-20) ──
     // A state file can be fresh, recent and status=ok and STILL be written by a
