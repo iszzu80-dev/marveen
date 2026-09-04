@@ -39,6 +39,19 @@ export interface Feature {
   weight: number
   /** What a person would check to agree or disagree. */
   reason: string
+  /**
+   * CORROBORATION ONLY: this may add confidence but may NOT be one of the two
+   * independent families the rule demands.
+   *
+   * Measured, not assumed. The first replay proposed a parent for 50 of 96
+   * parentless cases, and the reasons said why: "the day it was FILED falls
+   * inside the target's window" plus "both use the uncommon term 'nincs'".
+   * Most of this store was filed in the same fortnight as the trip, so the
+   * filing date joins almost anything to it -- and it is a fact about when the
+   * intake ran, not about what the case is. Paired with any shared word it
+   * manufactured a second family out of nothing.
+   */
+  corroborationOnly?: boolean
 }
 
 export interface NegativeFeature {
@@ -82,8 +95,13 @@ export interface RelationCandidate {
  */
 export const WEIGHTS = {
   SHARED_IDENTIFIER: 0.60,
+  /** The umbrella's evidence is its CHILDREN. See siblingBridge below. */
+  SIBLING_IDENTIFIER_BRIDGE: 0.55,
   DATE_WITHIN_SPAN: 0.30,
   DATE_NEAR_SPAN: 0.12,
+  /** The case names no dates of its own, so the filing date stands in.
+   *  Corroboration only -- it can never be one of the two required families. */
+  FILED_WITHIN_SPAN: 0.10,
   SHARED_RARE_TERM: 0.14,
   SHARED_DOMAIN: 0.18,
 } as const
@@ -149,12 +167,18 @@ export function scorePair(
     const near = !inside && points.some((p) =>
       p >= span.from - NEAR_SPAN_DAYS && p <= span.to + NEAR_SPAN_DAYS)
     const label = own.length ? 'the dates it names' : 'the day it was filed'
-    if (inside) {
+    if (inside && !own.length) {
+      features.push({
+        family: 'TEMPORAL', name: 'FILED_WITHIN_SPAN', weight: WEIGHTS.FILED_WITHIN_SPAN,
+        reason: `${label} falls inside the target's window (weak: when the intake ran, not what the case is about)`,
+        corroborationOnly: true,
+      })
+    } else if (inside) {
       features.push({
         family: 'TEMPORAL', name: 'DATE_WITHIN_SPAN', weight: WEIGHTS.DATE_WITHIN_SPAN,
         reason: `${label} fall inside the target's window`,
       })
-    } else if (near) {
+    } else if (near && own.length) {
       features.push({
         family: 'TEMPORAL', name: 'DATE_NEAR_SPAN', weight: WEIGHTS.DATE_NEAR_SPAN,
         reason: `${label} fall within ${NEAR_SPAN_DAYS} days of the target's window`,
@@ -194,8 +218,8 @@ export function scorePair(
     })
   }
 
-  // THE INDEPENDENCE RULE.
-  const familiesFiring = new Set(features.map((f) => f.family))
+  // THE INDEPENDENCE RULE. Corroboration-only features do not count towards it.
+  const familiesFiring = new Set(features.filter((f) => !f.corroborationOnly).map((f) => f.family))
   const decisive = features.some((f) => f.name === 'SHARED_IDENTIFIER')
   let confidence = Math.min(1, features.reduce((s, f) => s + f.weight, 0))
 
@@ -220,30 +244,90 @@ export function scorePair(
 }
 
 /**
+ * THE UMBRELLA'S EVIDENCE IS ITS CHILDREN.
+ *
+ * Measured, and it is the single most useful thing the first replay reported.
+ * Six of eighteen positives were missed outright, all of them Spanish-trip
+ * bookings, and the reason is structural rather than a matter of weights:
+ * `PRI-TRIP-2026-001` is a two-line umbrella that names a window and three
+ * cities. It carries no booking reference, so `SHARED_IDENTIFIER` -- the one
+ * decisive feature in the engine -- can never fire between a child and it.
+ *
+ * But it fires beautifully between SIBLINGS. `D014745393` appears in the
+ * Centauro case and in the deposit-card case; `D014889443` in two Hertz cases,
+ * one of which the human never attached. Matching a case to an umbrella through
+ * a sibling that already belongs to it uses the strong signal that actually
+ * exists in the data, and it is what the owner asked for in as many words: the
+ * engine should give parent candidates FROM the Valencia cluster.
+ *
+ * Bounded: only the umbrella's own children are consulted, and a bridge is
+ * claimed only on a shared identifier -- the one signal with no innocent
+ * explanation. A bridge built on shared words would propagate every weak guess
+ * across a whole cluster at once.
+ */
+function siblingBridge(
+  source: CandidateInput,
+  children: readonly CandidateInput[],
+  df: Map<string, number>,
+  corpusSize: number,
+): Feature | null {
+  for (const child of children) {
+    // No self-check here on purpose. `scorePair` already refuses a pair with
+    // the same id on both sides and returns no features, so a guard here would
+    // be a second line that LOOKS load-bearing and can never fire -- a mutation
+    // proved exactly that by deleting it with every test still green.
+    const { features } = scorePair(source, child, df, corpusSize)
+    const shared = features.find((f) => f.name === 'SHARED_IDENTIFIER')
+    if (shared) {
+      return {
+        family: 'IDENTIFIER', name: 'SIBLING_IDENTIFIER_BRIDGE',
+        weight: WEIGHTS.SIBLING_IDENTIFIER_BRIDGE,
+        reason: `${shared.reason.replace('both name', 'it shares')} with ${child.id}, `
+          + 'which already belongs to this case',
+      }
+    }
+  }
+  return null
+}
+
+/**
  * Parent candidates for one case, best first.
  *
  * Bounded by construction: `topN` limits what is returned, and the caller
- * supplies the target set, so nothing here can widen its own search.
+ * supplies both the target set and each target's children, so nothing here can
+ * widen its own search.
  */
 export function parentCandidates(
   source: CandidateInput,
   targets: readonly CandidateInput[],
   corpus: readonly string[],
   topN = 3,
+  childrenOf: ReadonlyMap<string, readonly CandidateInput[]> = new Map(),
 ): RelationCandidate[] {
   const df = documentFrequency(corpus)
   const fp = algorithmFingerprint()
   const out: RelationCandidate[] = []
   for (const t of targets) {
-    const { features, negatives, confidence } = scorePair(source, t, df, corpus.length)
-    if (negatives.some((n) => n.disqualifying)) continue
+    const direct = scorePair(source, t, df, corpus.length)
+    if (direct.negatives.some((n) => n.disqualifying)) continue
+
+    let { features, negatives, confidence } = direct
+    const bridge = siblingBridge(source, childrenOf.get(t.id) ?? [], df, corpus.length)
+    if (bridge) {
+      // A bridge is decisive, so it replaces the independence verdict rather
+      // than being added under it: the SINGLE_FAMILY_ONLY cap must not hold
+      // down a proposal resting on a shared booking reference.
+      features = [bridge, ...features]
+      negatives = negatives.filter((n) => n.name !== 'SINGLE_FAMILY_ONLY')
+      confidence = Math.min(1, features.reduce((sum, f) => sum + f.weight, 0))
+    }
     if (confidence < CANDIDATE_THRESHOLD) continue
     out.push({
       relationType: 'CASE_PARENT_CANDIDATE',
       namespace: source.namespace,
       sourceRef: source.id,
       targetCaseId: t.id,
-      confidence,
+      confidence: Number(confidence.toFixed(4)),
       features,
       negatives,
       reasons: features.map((f) => f.reason),
@@ -261,7 +345,8 @@ export function sourceCaseCandidates(
   targets: readonly CandidateInput[],
   corpus: readonly string[],
   topN = 3,
+  childrenOf: ReadonlyMap<string, readonly CandidateInput[]> = new Map(),
 ): RelationCandidate[] {
-  return parentCandidates(source, targets, corpus, topN)
+  return parentCandidates(source, targets, corpus, topN, childrenOf)
     .map((c) => ({ ...c, relationType: 'SOURCE_CASE_CANDIDATE' as const }))
 }

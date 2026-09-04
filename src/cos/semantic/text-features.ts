@@ -51,7 +51,14 @@ export function terms(text: string): string[] {
  * firing on the calendar.
  */
 export function identifiers(text: string): string[] {
-  const withoutDates = text.replace(FULL_DATE_RE, ' ')
+  // BOTH date shapes, and the short one was found the hard way. The trip
+  // umbrella is titled "Spanyol ut 2026-08-11 -- 08-23", and only the full date
+  // was being stripped: "08-23" survived, has four digits, and matched the
+  // identifier shape. So the umbrella "carried" the references 08-23, 08-20,
+  // 08-11, 08-14 and 08-15, and any case mentioning one of those days shared a
+  // DECISIVE identifier with it. The single strongest feature in the engine,
+  // firing on the calendar.
+  const withoutDates = text.replace(FULL_DATE_RE, ' ').replace(SHORT_DATE_RE, ' ')
   const found = withoutDates.match(IDENTIFIER_RE) ?? []
   return [...new Set(found.map((s) => s.toUpperCase()).filter((s) => s.replace(/\D/g, '').length >= 4))]
 }

@@ -51,6 +51,13 @@ describe('the feature extractor says what it found, not what it guessed', () => 
     expect(identifiers('Centauro berles D014745393 atvetel 2026-08-11'))
       .toEqual(['D014745393'])
     expect(identifiers('foglalas 2026-08-11 -- 2026-08-23')).toEqual([])
+    // THE SHORT FORM TOO. A live umbrella is titled "Spanyol ut 2026-08-11 --
+    // 08-23"; only the full date was stripped, so "08-23" survived as a
+    // four-digit token and the umbrella appeared to carry five booking
+    // references. Every case naming one of those days shared a DECISIVE
+    // identifier with it -- the strongest feature in the engine, firing on the
+    // calendar.
+    expect(identifiers('Spanyol ut 2026-08-11 -- 08-23 (Valencia)')).toEqual([])
   })
 
   it('a bare MM-DD is read against the years the same text names', () => {
@@ -242,6 +249,110 @@ describe('what a candidate may never do', () => {
     w.SHARED_IDENTIFIER = original
     expect(after).not.toBe(before)
     expect(algorithmFingerprint()).toBe(before)
+  })
+})
+
+describe('the umbrella carries the evidence of its children', () => {
+  // The first replay missed six of eighteen positives, all Spanish-trip
+  // bookings, for a structural reason no weight could fix: the umbrella is two
+  // lines naming a window and three cities and holds no booking reference, so
+  // the one decisive feature could never fire against it. Between SIBLINGS it
+  // fires perfectly.
+  const UMBRELLA: CandidateInput = {
+    id: 'PRI-TRIP-2026-001', namespace: 'personal',
+    text: 'Spanyol ut 2026-08-11 -- 08-23 (Valencia, Granada, Malaga). Ernyo-ugy.',
+    createdAtDay: day('2026-08-16'),
+  }
+  const EXISTING_CHILD: CandidateInput = {
+    id: 'case-centauro', namespace: 'personal',
+    text: 'Centauro berles D014745393 kaucio-kartya megerosites kerve',
+    createdAtDay: day('2026-08-08'),
+  }
+  const NEWCOMER: CandidateInput = {
+    id: 'case-discovercars', namespace: 'personal',
+    text: 'DiscoverCars VLC berles D014745393 Hyundai i30 atvetel',
+    createdAtDay: day('2026-08-10'),
+  }
+  const corpus = corpusOf(UMBRELLA, EXISTING_CHILD, NEWCOMER)
+  const children = new Map([[UMBRELLA.id, [EXISTING_CHILD]]])
+
+  it('HEADLINE: a case sharing a booking reference with a child is proposed for the parent', () => {
+    const [c] = parentCandidates(NEWCOMER, [UMBRELLA], corpus, 3, children)
+    expect(c).toBeDefined()
+    expect(c.features.map((f) => f.name)).toContain('SIBLING_IDENTIFIER_BRIDGE')
+    expect(c.reasons.join(' ')).toContain('case-centauro')
+    expect(c.reasons.join(' ')).toContain('D014745393')
+  })
+
+  it('MIRROR: without the sibling, the same case is NOT proposed', () => {
+    // Without this the headline proves only that the case matches the umbrella
+    // directly, which is exactly what it was measured NOT to do.
+    expect(parentCandidates(NEWCOMER, [UMBRELLA], corpus, 3, new Map())).toEqual([])
+  })
+
+  it('the bridge rests on a shared REFERENCE, never on shared words', () => {
+    // A bridge built on vocabulary would propagate one weak guess across a
+    // whole cluster in a single step.
+    const wordsOnly: CandidateInput = {
+      id: 'case-words', namespace: 'personal',
+      text: 'Centauro berles kaucio-kartya megerosites kerve',
+      createdAtDay: day('2027-04-01'),
+    }
+    const c2 = corpusOf(UMBRELLA, EXISTING_CHILD, wordsOnly)
+    const r = parentCandidates(wordsOnly, [UMBRELLA], c2, 3, children)
+    expect(r.flatMap((x) => x.features.map((f) => f.name)))
+      .not.toContain('SIBLING_IDENTIFIER_BRIDGE')
+  })
+
+  it('a case is never bridged to itself', () => {
+    // The guard that makes this true lives in scorePair, not in the bridge
+    // loop: a mutation deleted the loop's own self-check and every test stayed
+    // green, because the pair-level refusal had already handled it. The line
+    // is gone; this test now names where the behaviour actually comes from.
+    const selfChildren = new Map([[UMBRELLA.id, [NEWCOMER]]])
+    expect(parentCandidates(NEWCOMER, [UMBRELLA], corpus, 3, selfChildren)).toEqual([])
+    expect(scorePair(NEWCOMER, NEWCOMER, documentFrequency(corpus), corpus.length)
+      .negatives.find((n) => n.name === 'SELF')?.disqualifying).toBe(true)
+  })
+})
+
+describe('the filing date is corroboration, never a second family', () => {
+  // Measured: the first replay proposed a parent for 50 of 96 parentless cases,
+  // and the printed reasons said why -- "the day it was FILED falls inside the
+  // window" plus a shared Hungarian function word. Most of this store was filed
+  // in the same fortnight as the trip. Demoting it cut those 50 to 19.
+  const UMBRELLA: CandidateInput = {
+    id: 'PRI-TRIP-2026-001', namespace: 'personal',
+    text: 'Spanyol ut 2026-08-11 -- 08-23 (Valencia, Granada, Malaga)',
+    createdAtDay: day('2026-08-16'),
+  }
+
+  it('HEADLINE: filed-inside plus a shared word is not enough', () => {
+    const filedDuring: CandidateInput = {
+      id: 'case-unrelated', namespace: 'personal',
+      text: 'Valencia emlitese egy egeszen mas ugyben',
+      createdAtDay: day('2026-08-14'),
+    }
+    const c = corpusOf(UMBRELLA, filedDuring)
+    const r = scorePair(filedDuring, UMBRELLA, documentFrequency(c), c.length)
+    expect(r.features.map((f) => f.name)).toContain('FILED_WITHIN_SPAN')
+    expect(r.features.find((f) => f.name === 'FILED_WITHIN_SPAN')?.corroborationOnly).toBe(true)
+    expect(r.negatives.map((n) => n.name)).toContain('SINGLE_FAMILY_ONLY')
+    expect(r.confidence).toBeLessThan(CANDIDATE_THRESHOLD)
+  })
+
+  it('MIRROR: a case naming its OWN dates inside the window is enough', () => {
+    // The distinction the demotion turns on: what the case is about versus when
+    // the intake happened to run.
+    const namesDates: CandidateInput = {
+      id: 'case-real', namespace: 'personal',
+      text: 'Valencia szallas erkezes 2026-08-14 tavozas 2026-08-16',
+      createdAtDay: day('2026-08-14'),
+    }
+    const c = corpusOf(UMBRELLA, namesDates)
+    const r = scorePair(namesDates, UMBRELLA, documentFrequency(c), c.length)
+    expect(r.features.map((f) => f.name)).toContain('DATE_WITHIN_SPAN')
+    expect(r.confidence).toBeGreaterThanOrEqual(CANDIDATE_THRESHOLD)
   })
 })
 
