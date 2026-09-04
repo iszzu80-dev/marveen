@@ -86,10 +86,21 @@ describe('the other reasons, each naming something in the record', () => {
     }
   })
 
-  it('a passed deadline names how long ago, from due_at', () => {
+  it('a passed deadline names the DEADLINE, not how long ago', () => {
+    // REWRITTEN 2026-09-04 on an owner ruling that overturned what this asserted,
+    // and declared rather than quietly changed. It required the statement to
+    // contain "3 days ago" -- a rendered age, which grows every night, so the
+    // fingerprint drifted and an unchanged overdue case announced itself as
+    // CHANGED daily. Standing invariant now: "relative time is presentation, not
+    // change evidence"; canonical evidence is the absolute date, and the age is
+    // computed at render time from it.
+    //
+    // The urgency factor still reads the clock, and should: urgency is a
+    // ranking input recomputed every pass, not part of the item's identity.
     const a = caseAttentionFor(row({ ...plain, status: 'READY', due_at: NOW - 3 * DAY }), 'zst', NOW)!
     expect(a.reason).toBe('EXPLICIT_DEADLINE_PASSED')
-    expect(a.statement).toContain('3 days ago')
+    expect(a.statement).toContain('passed on')
+    expect(a.statement, 'no rendered age may appear in the statement').not.toMatch(/\d+ days ago/)
     expect(caseAttentionToAttention(a, NOW).factors.urgency).toBe(1)
   })
 

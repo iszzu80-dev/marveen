@@ -126,7 +126,12 @@ export function caseAttentionFor(
     provenance = prov('status')
   } else if (row.due_at != null && row.due_at < now) {
     reason = 'EXPLICIT_DEADLINE_PASSED'
-    statement = `a stated deadline passed ${Math.floor((now - row.due_at) / DAY)} days ago`
+    // THE DEADLINE, not the days since it. Same defect as STALE_UNRESOLVED had,
+    // in the other branch: "passed N days ago" grows every night, so the
+    // fingerprint drifts and an unchanged overdue case reads as CHANGED daily.
+    // Found by the general invariant test rather than by inspection -- fixing
+    // the one branch I had seen would have left this one drifting.
+    statement = `a stated deadline passed on ${new Date(row.due_at * 1000).toISOString().slice(0, 10)}`
     provenance = prov('due_at')
   } else if (row.waiting_on?.trim() || row.status === 'WAITING_EXTERNAL') {
     reason = 'BLOCKED_EXTERNAL_DEPENDENCY'
