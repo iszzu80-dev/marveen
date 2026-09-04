@@ -137,8 +137,17 @@ function findActiveCaseByThread(db: Database.Database, threadId: string): { case
  *  UNCHANGED and writes nothing. */
 function recordIntakeSources(
   db: Database.Database, caseId: string, input: EmailIntakeInput, now: number, why: string,
+  /** Skip the thread link because the caller already wrote a better one.
+   *
+   *  `linkCaseSource` refreshes the EVIDENCE of a same-standing link but keeps
+   *  the METHOD of whichever write came first, so writing the generic thread
+   *  link after a MESSAGE_REFERENCE one silently replaces "replies to <id> on
+   *  thread <id> in mailbox <x>" with "intake: ...". The specific reason is the
+   *  whole value of the reference route; losing it leaves a canonical link
+   *  nobody can check. Caught by a test that asserted the mailbox name survived. */
+  opts: { skipThread?: boolean } = {},
 ): void {
-  if (input.threadId) {
+  if (input.threadId && !opts.skipThread) {
     linkCaseSource(db, {
       namespace: 'personal', caseId, sourceType: 'GMAIL_THREAD', sourceRef: input.threadId,
       linkMethod: 'EXPLICIT_RELATION', evidence: `${why} (message ${input.messageId})`,
@@ -255,7 +264,8 @@ export function ingestEmail(db: Database.Database, input: EmailIntakeInput, now:
         }, now)
       }
       recordIntakeSources(db, byReference.caseId, input, now,
-        `intake: resolved by reply reference to ${byReference.viaMessageId}`)
+        `intake: resolved by reply reference to ${byReference.viaMessageId}`,
+        { skipThread: true })
       return { outcome: 'LINKED_DUPLICATE', caseId: byReference.caseId, messageStatus: 'DUPLICATE' }
     }
 
