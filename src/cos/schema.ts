@@ -2869,4 +2869,44 @@ export function initCaseSourceSchema(db: Database.Database): void {
      OTHER direction of exactly this index. */
   db.exec(`CREATE INDEX IF NOT EXISTS idx_case_sources_ref
              ON case_sources(namespace, source_type, source_ref, link_state)`)
+
+  /* SEMANTIC RELATION CANDIDATES -- proposals, kept apart from the graph.
+     A SEPARATE TABLE, not a link_state on case_sources, and that is the point.
+     The owner's ruling is that a candidate produces no canonical link, no parent
+     assignment, no case merge and no namespace migration; a row that lives in
+     the relation table and merely says CANDIDATE is one careless query away from
+     being read as a relation. Here it cannot be: a consumer of the case graph
+     never sees this table unless it asks for it by name.
+     Every field the owner listed is a column, including the ones that are only
+     ever read by a person: `reasons` is what the proposal claims in words,
+     `negatives` is what argued against it, and `algorithm_fingerprint` says
+     which version of which rules produced it, so a run is reproducible or
+     visibly is not. A bare similarity score was explicitly ruled out. */
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS semantic_relation_candidates (
+      id                    TEXT PRIMARY KEY,
+      relation_type         TEXT NOT NULL,
+      namespace             TEXT NOT NULL,
+      source_ref            TEXT NOT NULL,
+      source_kind           TEXT NOT NULL,
+      target_case_id        TEXT NOT NULL,
+      confidence            REAL NOT NULL,
+      features_json         TEXT NOT NULL,
+      negatives_json        TEXT NOT NULL,
+      reasons_json          TEXT NOT NULL,
+      source_mailbox        TEXT,
+      target_mailbox        TEXT,
+      algorithm_fingerprint TEXT NOT NULL,
+      provenance            TEXT NOT NULL,
+      created_at            INTEGER NOT NULL,
+      updated_at            INTEGER NOT NULL,
+      UNIQUE(relation_type, namespace, source_ref, target_case_id, algorithm_fingerprint),
+      CHECK (relation_type IN ('CASE_PARENT_CANDIDATE','SOURCE_CASE_CANDIDATE')),
+      CHECK (confidence >= 0 AND confidence <= 1)
+    )
+  `)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_semantic_candidates_target
+             ON semantic_relation_candidates(namespace, target_case_id, confidence)`)
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_semantic_candidates_source
+             ON semantic_relation_candidates(namespace, source_ref, confidence)`)
 }
