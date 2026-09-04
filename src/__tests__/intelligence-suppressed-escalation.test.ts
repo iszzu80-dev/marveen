@@ -20,7 +20,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
-import { materialEscalation, fingerprintOf, type LedgerRow } from '../cos/intelligence/reader.js'
+import { materialEscalation, fingerprintOf, type LedgerRow, FINGERPRINT_ALGO} from '../cos/intelligence/reader.js'
 import type { AttentionItem } from '../cos/intelligence/attention.js'
 
 const HOUR = 3600
@@ -35,6 +35,7 @@ const item = (el: Record<string, unknown>, band = 'OBLIGATION'): AttentionItem =
 const ledgerFor = (it: AttentionItem, at = LAST_SPOKE): LedgerRow => ({
   element_id: 'e1', band: it.band, fingerprint: fingerprintOf(it),
   first_surfaced_at: at, last_surfaced_at: at, times_surfaced: 1,
+  fingerprint_algo: FINGERPRINT_ALGO,
 })
 
 /** A case event written AFTER the last delivery: the case itself moved. */

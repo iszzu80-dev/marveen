@@ -22,7 +22,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import { caseAttentionFor, caseAttentionToAttention } from '../cos/intelligence/case-attention.js'
-import { fingerprintOf, materialEscalation, type LedgerRow } from '../cos/intelligence/reader.js'
+import { fingerprintOf, materialEscalation, type LedgerRow, FINGERPRINT_ALGO} from '../cos/intelligence/reader.js'
 import type { AttentionItem } from '../cos/intelligence/attention.js'
 
 const DAY = 86_400
@@ -77,6 +77,7 @@ describe('the same unchanged case is the same thing whenever you look at it', ()
     const prev: LedgerRow = {
       element_id: first.element.id, band: first.band, fingerprint: fingerprintOf(first),
       first_surfaced_at: T0, last_surfaced_at: T0, times_surfaced: 4,
+      fingerprint_algo: FINGERPRINT_ALGO,
     }
     for (const [label, now] of VANTAGES.slice(1)) {
       const later = itemAt(now)!

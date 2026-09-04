@@ -2508,12 +2508,32 @@ export function initIntelligenceReaderSchema(db: Database.Database): void {
       first_surfaced_at INTEGER NOT NULL,
       last_surfaced_at  INTEGER NOT NULL,
       times_surfaced    INTEGER NOT NULL DEFAULT 1,
+      /* WHICH RECIPE produced the fingerprint above. Null means "before this column
+         existed", which is the same thing as an unknown recipe.
+
+         It exists because a digest is only comparable to another digest of the
+         SAME inputs, and on 2026-09-04 that stopped being true: the release
+         re-worded every attention sentence (relative age out, absolute date in)
+         while the fingerprint still hashed the sentence. Every stored digest
+         went stale at once, and each case, on its next evaluation, read as
+         "new evidence changed what it says" about evidence that had not moved.
+         96 items at three per run -- a month of manufactured news.
+
+         A change of RECIPE is not a change in the case. Storing which recipe a
+         digest came from is what lets the reader tell those two apart instead
+         of guessing. */
+      fingerprint_algo  TEXT,
       PRIMARY KEY (namespace, element_id),
       CHECK (namespace IN ('personal','zst'))
     )
   `)
   db.exec(`CREATE INDEX IF NOT EXISTS idx_intel_surfaced_ns
              ON intelligence_surfaced(namespace, last_surfaced_at)`)
+  /* The table predates the column, so an existing store needs it added. */
+  if (!db.prepare(`PRAGMA table_info(intelligence_surfaced)`).all()
+        .some((c: any) => c.name === 'fingerprint_algo')) {
+    db.exec(`ALTER TABLE intelligence_surfaced ADD COLUMN fingerprint_algo TEXT`)
+  }
   /* NO CASE STATE HERE, and this is a fence somebody has to keep choosing.
      I added an `escalation_json` column to this table on 2026-09-04 to answer
      "what changed since the last delivery", holding dueAt, owner and statement.
