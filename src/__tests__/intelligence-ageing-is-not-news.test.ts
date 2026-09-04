@@ -17,7 +17,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import { caseAttentionFor, caseAttentionToAttention } from '../cos/intelligence/case-attention.js'
-import { fingerprintOf, materialEscalation, type LedgerRow } from '../cos/intelligence/reader.js'
+import { fingerprintOf, materialEscalation, type LedgerRow, FINGERPRINT_ALGO} from '../cos/intelligence/reader.js'
 
 const DAY = 86_400
 const BASE = Date.UTC(2027, 0, 15, 11, 0, 0) / 1000
@@ -71,6 +71,9 @@ describe('a case that merely gets older says the same thing', () => {
     const prev: LedgerRow = {
       element_id: before.element.id, band: before.band, fingerprint: fingerprintOf(before),
       first_surfaced_at: BASE, last_surfaced_at: BASE, times_surfaced: 3,
+      // The CURRENT recipe on purpose: a fixture carrying a stale one would be
+      // adopted rather than compared, and this test would stop testing anything.
+      fingerprint_algo: FINGERPRINT_ALGO,
     }
     const after = attentionAt(BASE + 3 * DAY, updatedAt)
     const esc = materialEscalation(getDb(), 'zst', after, prev, BASE + 3 * DAY)

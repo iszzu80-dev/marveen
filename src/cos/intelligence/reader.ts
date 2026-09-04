@@ -325,6 +325,9 @@ export interface LedgerRow {
   first_surfaced_at: number
   last_surfaced_at: number
   times_surfaced: number
+  /** Which recipe produced `fingerprint`. Null on rows written before the
+   *  column existed -- an unknown recipe, which is not a comparable one. */
+  fingerprint_algo: string | null
 }
 
 export interface MaterialEscalation {
@@ -396,7 +399,7 @@ export function materialEscalation(
   //    band + statement, so equal bands and different fingerprints isolate a
   //    changed statement exactly -- without the band sneaking in, which matters
   //    because a band FALLING is not an escalation.
-  if (prev.band === item.band && prev.fingerprint !== fingerprintOf(item)) {
+  if (prev.band === item.band && identityChanged(prev, item)) {
     reasons.push('new evidence changed what it says')
   }
 
@@ -433,26 +436,125 @@ export function materialEscalation(
     : { escalated: false, what: null }
 }
 
+/** Which recipe `fingerprintOf` currently uses. Stored beside every digest.
+ *
+ *  Bump this whenever the INPUTS below change. Nothing else needs doing: a
+ *  digest whose recipe is not this one is adopted rather than compared, so a
+ *  bump migrates the ledger silently instead of announcing itself as news. */
+export const FINGERPRINT_ALGO = 'v2-provenance'
+
 /**
- * What was said, reduced to a digest.
+ * What the RECORDS say, reduced to a digest.
  *
  * The band alone is not enough and the reason is worth stating: `elementId` is
  * deliberately stable across evidence changes, so a case whose attention REASON
  * flips (say USER_ACTION_REQUIRED to EXPLICIT_DEADLINE_PASSED) keeps its id, and
  * if the band happens to be unchanged too, a band-only comparison sees nothing
- * and stays quiet through a genuine change. The statement carries the reason, so
- * hashing the statement notices.
+ * and stays quiet through a genuine change. Something has to notice.
+ *
+ * IT USED TO BE THE SENTENCE, and that was the bug. Hashing the rendered
+ * sentence makes the digest an artefact of how we PHRASE things, so every
+ * change of phrasing reads as a change in the world. Two separate incidents
+ * came from that single choice: `open and untouched for N days` moved the
+ * digest at every midnight, and then the fix for it -- re-wording to an
+ * absolute date -- invalidated all 163 stored digests at once and would have
+ * reported ninety-six unchanged cases as changed, three per run, for a month.
+ *
+ * Owner's rule, 2026-09-04: "CHANGE / IDENTITY: csak stabil, absolute facts.
+ * URGENCY / RANKING: olvashatja az aktuális időt." So the digest is taken over
+ * the stable facts this element rests on -- which rows, and when each of those
+ * rows said what it said. Provenance is exactly that and it is already required
+ * on every element, so there is nothing new to maintain.
+ *
+ * What this still notices, which is the whole job: a new row, a row that moved,
+ * a changed set of rows -- any of which IS new evidence. What it no longer
+ * notices is us choosing different words for the same facts, or a clock ticking
+ * past midnight. Neither of those is news.
  */
 export function fingerprintOf(item: AttentionItem): string {
+  // Sorted so that provenance ARRIVING in a different order is not a change;
+  // the set and its timestamps are the fact, the array order is incidental.
+  // `?? []` because a crash here would take down the whole cycle. Provenance is
+  // required on every element by construction, so an element without it is a bug
+  // somewhere upstream -- but the reader's job is to say what it can see, and an
+  // element with no traceable evidence is honestly identified by its case and
+  // band alone rather than by an exception.
+  const evidence = (item.element.provenance ?? [])
+    .map((p) => `${p.source}:${p.ref}@${p.observedAt}`)
+    .sort()
+    .join('|')
+  // `changeKey` first: when a producer has named its semantic facts, those are
+  // the identity and provenance merely corroborates it.
   return createHash('sha256')
-    .update(`${item.band} ${item.element.statement}`)
+    .update(`${item.band} ${item.element.kind} ${item.element.caseId} `
+          + `${item.element.changeKey ?? ''} ${evidence}`)
     .digest('hex')
     .slice(0, 16)
 }
 
+/**
+ * Did the EVIDENCE move since we last spoke about this?
+ *
+ * The single place that answers it, because there were three and they have to
+ * agree: a promotion path that thinks something changed and a delivery path
+ * that thinks it did not produce an item that speaks with no reason to.
+ *
+ * A digest written under a different recipe is NOT COMPARABLE, and answering
+ * "changed" for it would be inventing an observation we never made. Those rows
+ * are adopted by `adoptStaleFingerprints` before anything reads them; this
+ * guard is here for the ones that slip past -- a row written between the
+ * adoption pass and the comparison, or a caller that skipped the pass.
+ */
+export function identityChanged(prev: LedgerRow, item: AttentionItem): boolean {
+  if (prev.fingerprint_algo !== FINGERPRINT_ALGO) return false
+  return prev.fingerprint !== fingerprintOf(item)
+}
+
+/**
+ * Bring ledger rows written under an older recipe up to the current one.
+ *
+ * WITHOUT SPEAKING, and without touching a single clock: `last_surfaced_at` and
+ * `times_surfaced` are utterance facts, and no utterance happened here. Only
+ * the digest and its recipe change, so the row still records truthfully when we
+ * last spoke and how often.
+ *
+ * It runs over every EVALUATED item rather than every spoken one, and that is
+ * the point. Adopting only what speaks would leave a quiet case carrying an
+ * incomparable digest for ever, and `identityChanged` answers false for those --
+ * so a case that never speaks could never be promoted BY a change again. That
+ * failure is silent, which makes it worse than the noise this fixes.
+ */
+export function adoptStaleFingerprints(
+  db: Database.Database, namespace: string,
+  ledger: Map<string, LedgerRow>, items: readonly AttentionItem[],
+): number {
+  const stale = items.filter((it) => {
+    const prev = ledger.get(it.element.id)
+    return prev !== undefined && prev.fingerprint_algo !== FINGERPRINT_ALGO
+  })
+  if (stale.length === 0) return 0
+
+  const stmt = db.prepare(
+    `UPDATE intelligence_surfaced SET fingerprint = ?, fingerprint_algo = ?
+      WHERE namespace = ? AND element_id = ?`,
+  )
+  db.transaction(() => {
+    for (const it of stale) {
+      const fp = fingerprintOf(it)
+      stmt.run(fp, FINGERPRINT_ALGO, namespace, it.element.id)
+      // Keep the in-memory ledger honest too, so comparisons later in THIS run
+      // read the adopted value rather than the one we just replaced.
+      const prev = ledger.get(it.element.id)!
+      ledger.set(it.element.id, { ...prev, fingerprint: fp, fingerprint_algo: FINGERPRINT_ALGO })
+    }
+  })()
+  return stale.length
+}
+
 export function loadLedger(db: Database.Database, namespace: string): Map<string, LedgerRow> {
   const rows = db.prepare(
-    `SELECT element_id, band, fingerprint, first_surfaced_at, last_surfaced_at, times_surfaced
+    `SELECT element_id, band, fingerprint, first_surfaced_at, last_surfaced_at,
+            times_surfaced, fingerprint_algo
        FROM intelligence_surfaced WHERE namespace = ?`,
   ).all(namespace) as LedgerRow[]
   return new Map(rows.map((r) => [r.element_id, r]))
@@ -470,16 +572,20 @@ export function recordSurfaced(
 ): void {
   const stmt = db.prepare(
     `INSERT INTO intelligence_surfaced
-       (namespace, element_id, band, fingerprint, first_surfaced_at, last_surfaced_at, times_surfaced)
-     VALUES (?, ?, ?, ?, ?, ?, 1)
+       (namespace, element_id, band, fingerprint, first_surfaced_at, last_surfaced_at,
+        times_surfaced, fingerprint_algo)
+     VALUES (?, ?, ?, ?, ?, ?, 1, ?)
      ON CONFLICT(namespace, element_id) DO UPDATE SET
        band = excluded.band,
        fingerprint = excluded.fingerprint,
+       fingerprint_algo = excluded.fingerprint_algo,
        last_surfaced_at = excluded.last_surfaced_at,
        times_surfaced = intelligence_surfaced.times_surfaced + 1`,
   )
   const tx = db.transaction(() => {
-    for (const it of items) stmt.run(namespace, it.element.id, it.band, fingerprintOf(it), now, now)
+    for (const it of items) {
+      stmt.run(namespace, it.element.id, it.band, fingerprintOf(it), now, now, FINGERPRINT_ALGO)
+    }
   })
   tx()
 }
@@ -504,6 +610,11 @@ export interface SpokenItem {
 export interface ReaderResult {
   namespace: 'personal' | 'zst'
   posted: boolean
+  /** Ledger rows migrated to the current digest recipe on THIS run, silently.
+   *  Auditable on purpose: this is the number that would otherwise have been
+   *  reported as cases that changed, and a reader has to be able to see that
+   *  the migration happened rather than infer it from a quiet digest. */
+  adoptedFingerprints: number
   /** Items that spoke. Bounded by the policy's `maxInterruptions`. */
   spoke: SpokenItem[]
   /** Held back by the anti-spam rule and NOT promoted: nothing about them changed. */
@@ -590,6 +701,19 @@ export function runProjectionReader(
   const p = enriched.projection
   const researchTraces = enriched.traces
 
+  // BEFORE ANYTHING COMPARES A DIGEST, bring rows written under an older recipe
+  // up to the current one. Over the WHOLE evaluated population -- every bucket,
+  // not just what is about to speak -- because a row left on an old recipe can
+  // never be found to have changed, and that silence would be invisible.
+  //
+  // A rehearsal still writes nothing: `identityChanged` refuses to compare an
+  // unadopted row rather than calling it changed, so a dry run reads correctly
+  // without this pass. It is the real run that has to converge.
+  const adoptedFingerprints = dryRun ? 0 : adoptStaleFingerprints(db, namespace, ledger, [
+    ...p.attention.interrupt, ...p.attention.quiet,
+    ...p.attention.suppressed.map((sx) => sx.item),
+  ])
+
   const decide = (item: AttentionItem, quietWhenSuppressed: boolean): SpokenItem => {
     const prev = ledger.get(item.element.id)
     const trigger: SpokenItem['trigger'] =
@@ -660,7 +784,7 @@ export function runProjectionReader(
     const prev = ledger.get(item.element.id)
     // A band change or a changed sentence IS the news; only a first-time,
     // unchanged, non-urgent item is held for the next window.
-    return !!prev && (prev.band !== item.band || prev.fingerprint !== fingerprintOf(item))
+    return !!prev && (prev.band !== item.band || identityChanged(prev, item))
   }
   const mayPassCadence = (item: AttentionItem): boolean =>
     !withinCadence || bypassIds.has(item.element.id) || changedSinceLastTime(item)
@@ -686,7 +810,7 @@ export function runProjectionReader(
   let stillQuiet = 0
   for (const s of p.attention.suppressed) {
     const prev = ledger.get(s.item.element.id)
-    if (prev && prev.fingerprint !== fingerprintOf(s.item) && speak.length < effectivePolicy.maxInterruptions
+    if (prev && identityChanged(prev, s.item) && speak.length < effectivePolicy.maxInterruptions
         && mayPassCadence(s.item)) {
       speak.push(s.item)
       spoken.push(decide(s.item, true))
@@ -755,7 +879,7 @@ export function runProjectionReader(
     : spoken
 
   const base: ReaderResult = {
-    namespace, posted: false, spoke: spokenNow, stillQuiet, promotedByChange,
+    namespace, posted: false, spoke: spokenNow, stillQuiet, promotedByChange, adoptedFingerprints,
     quiet: p.attention.quiet.length, heldByCadence, heldByQuietHours,
     inQuietHours, morningRelease, researchTraces, opportunityInSpoken: 0,
     anomalies: p.anomalies.length, integrityFindings: p.integrityFindings.length,

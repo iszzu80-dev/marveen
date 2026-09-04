@@ -128,7 +128,12 @@ describe('PHASE 2 IS A PROJECTION -- it writes nothing and cannot be a second tr
     const FORBIDDEN = /status|verdict|due|owner|statement|confidence|resolution|priority|state|completed/i
     for (const c of cols) expect(c).not.toMatch(FORBIDDEN)
     expect(cols.sort()).toEqual([
-      'band', 'element_id', 'fingerprint', 'first_surfaced_at',
+      'band', 'element_id', 'fingerprint',
+      // Names the recipe that produced `fingerprint`. Metadata about OUR digest,
+      // not a fact about the case -- it cannot disagree with the case because it
+      // says nothing about it.
+      'fingerprint_algo',
+      'first_surfaced_at',
       'last_surfaced_at', 'namespace', 'times_surfaced',
     ])
   })
