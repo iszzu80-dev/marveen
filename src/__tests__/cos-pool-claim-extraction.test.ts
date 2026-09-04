@@ -155,6 +155,37 @@ describe("what Kállai himself asserts", () => {
     expect(av[0].attributionStatus).toBe('AUTHOR_ASSERTED')
   })
 
+  it('HEADLINE: a value is read from its cue\'s OWN sentence, not the one before', () => {
+    // Found by the dossier readback on the live store, and it was producing a
+    // WRONG claim rather than a missing one. Kállai's two facts sit on
+    // consecutive lines: production "2027 januárban", then the colleague's
+    // "februári kiadási dátum" for the Hungarian handover. The local-release
+    // rule gated on its own cue and then read the first month in the segment,
+    // so it reported January as the Hungarian release -- contradicting the
+    // source it claimed to be quoting.
+    const cs = kallai()
+    const prod = valued(cs, 'AVAILABILITY', 'production')
+    expect(prod).toHaveLength(1)
+    expect(prod[0].normalizedValue).toBe('2027-01')
+
+    const local = find(cs, 'AVAILABILITY', 'local_release')
+    expect(local).toHaveLength(1)
+    // It must NOT have borrowed January from the sentence above.
+    expect(local[0].normalizedValue).not.toBe('2027-01')
+  })
+
+  it('a month with no year is recorded verbatim, never completed by inference', () => {
+    // "februári" names no year. Completing it from a year in another sentence
+    // would be inference, and this layer does not infer -- but staying silent
+    // would be wrong too, because the source really does address the field.
+    const local = find(kallai(), 'AVAILABILITY', 'local_release')[0]
+    expect(local.status).toBe('CUE_WITHOUT_VALUE')
+    expect(local.normalizedValue).toBe('')
+    expect(local.originalValue).toBe('februári')
+    expect(local.attributionStatus).toBe('AUTHOR_ASSERTED')
+    expect(local.provenance).toContain('without inferring')
+  })
+
   it('the vendor identity comes from the envelope, not the prose', () => {
     const v = find(kallai(), 'VENDOR_IDENTITY')
     expect(v).toHaveLength(1)
@@ -196,6 +227,27 @@ describe('what the extractor refuses to do', () => {
     expect(p).toHaveLength(1)
     expect(p[0].status).toBe('NO_CUE')
     expect(p[0].normalizedValue).toBe('')
+  })
+
+  it('a bare uppercase WORD is not a part number', () => {
+    // Found in the dossier readback: "MESSAGE", out of an upper-cased forward
+    // banner, was being filed as a part number at HIGH confidence. Every real
+    // code here carries digits.
+    const cs = extractPoolClaims({
+      sourceId: 'pn1', sourceType: 'GMAIL_MESSAGE', sourceTimestamp: KALLAI_TS,
+      text: 'A cikkszám ügyében: ORIGINAL MESSAGE FORWARDED',
+    })
+    expect(valued(cs, 'PART_NUMBER')).toEqual([])
+  })
+
+  it('but a real code with digits still reads', () => {
+    for (const code of ['PLYCOMP112X', 'PLYCOMP112SKX', 'KPCOV52']) {
+      const cs = extractPoolClaims({
+        sourceId: 'pn2', sourceType: 'GMAIL_MESSAGE', sourceTimestamp: KALLAI_TS,
+        text: `a cikkszám ${code}`,
+      })
+      expect(valued(cs, 'PART_NUMBER')[0].normalizedValue).toBe(code)
+    }
   })
 
   it('records a cue whose value it could not read, instead of staying silent', () => {
