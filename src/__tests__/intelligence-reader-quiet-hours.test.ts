@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { initDatabase, getDb } from '../db.js'
 import {
   runProjectionReader, loadLedger, READER_POLICY,
-  isWithinQuietHours, breaksQuietHours, isMorningRelease,
+  isWithinQuietHours, breaksQuietHours, quietHoursDecision, quietHoursEndAt, isMorningRelease,
   QUIET_HOURS_START, QUIET_HOURS_END, MORNING_RELEASE_MAX_INTERRUPTIONS,
 } from '../cos/intelligence/reader.js'
 import type { AttentionItem } from '../cos/intelligence/attention.js'
@@ -105,23 +105,116 @@ describe('THE HELD ITEM KEEPS ITS UTTERANCE -- the failure nobody would see', ()
 })
 
 describe('what may break the window', () => {
-  it('SAFETY speaks at 03:00 -- an authority notice is not a backlog item', () => {
-    initDatabase(':memory:'); authorityNotice()
-    const s = sink()
-    const r = runProjectionReader(getDb(), 'zst', NIGHT, s.post)
-    expect(r.posted).toBe(true)
-    expect(r.spoke.map((x) => x.band)).toContain('SAFETY')
-    expect(r.heldByQuietHours).toBe(0)
+  // REWRITTEN 2026-09-04 on an owner ruling that overturned the rule these
+  // tests encoded, and the change is declared rather than quietly applied:
+  // "Ne kategória önmagában döntsön az éjszakai interruptról."
+  //
+  // Two assertions were deleted because they asserted the defect. One said a
+  // SAFETY item always speaks at 03:00; one said any deadline inside 24 hours
+  // does. The new rule asks whether waiting until the window opens materially
+  // increases the harm, loses an opportunity, or blocks a time-critical owner
+  // action -- and the owner asked specifically for positive AND negative
+  // controls, not category tests, so each limb below is paired with the case
+  // that must NOT fire it.
+
+  const item = (el: Record<string, unknown>, band = 'OBLIGATION') =>
+    ({ band, element: el } as unknown as AttentionItem)
+
+  it('HEADLINE: a deadline that expires BEFORE the window opens breaks it', () => {
+    // 03:00 now, due 05:00. Waiting for the 07:00 package misses it outright.
+    const d = quietHoursDecision(item({ dueAt: NIGHT + 2 * HOUR }), NIGHT)
+    expect(d.breaks).toBe(true)
+    expect(d.limb).toBe('OPPORTUNITY_LOST')
   })
 
-  it('a deadline falling inside 24 hours breaks the window', () => {
-    const item = { band: 'OBLIGATION', element: { dueAt: NIGHT + 6 * HOUR } } as unknown as AttentionItem
-    expect(breaksQuietHours(item, NIGHT)).toBe(true)
+  it('NEGATIVE CONTROL: a deadline AFTER the window opens does not', () => {
+    // 03:00 now, due 09:00. The morning package reaches him at 07:00, in time.
+    // The old rule woke him for this, because six hours is "inside 24".
+    const d = quietHoursDecision(item({ dueAt: NIGHT + 6 * HOUR }), NIGHT)
+    expect(d.breaks).toBe(false)
+    expect(d.reason).toContain('beyond the quiet window')
   })
 
-  it('a deadline further out does NOT', () => {
-    const item = { band: 'OBLIGATION', element: { dueAt: NIGHT + 3 * DAY } } as unknown as AttentionItem
-    expect(breaksQuietHours(item, NIGHT)).toBe(false)
+  it('the boundary is the window, not a horizon: exactly at 07:00 still breaks', () => {
+    const endsAt = quietHoursEndAt(NIGHT)
+    expect(quietHoursDecision(item({ dueAt: endsAt }), NIGHT).breaks).toBe(true)
+    expect(quietHoursDecision(item({ dueAt: endsAt + 1 }), NIGHT).breaks).toBe(false)
+  })
+
+  it('HEADLINE: if the owner cannot act, nothing wakes him -- whatever the band', () => {
+    // The capability gate. Waking someone to watch a clock they cannot move is
+    // the definition of a pointless interrupt.
+    const d = quietHoursDecision(
+      item({ dueAt: NIGHT + 2 * HOUR, owner: 'EXTERNAL' }, 'SAFETY'), NIGHT)
+    expect(d.breaks).toBe(false)
+    expect(d.reason).toContain('moves nothing')
+  })
+
+  it('MIRROR: the same item owned by HIM does break, so the gate is what decided', () => {
+    const d = quietHoursDecision(
+      item({ dueAt: NIGHT + 2 * HOUR, owner: 'OWNER' }, 'SAFETY'), NIGHT)
+    expect(d.breaks).toBe(true)
+  })
+
+  it('UNKNOWN ownership is not evidence that it is somebody else\'s', () => {
+    // The bug this forbids was nearly shipped: the gate first read
+    // `owner !== 'OWNER'`, which treats a never-filled column as proof the
+    // owner cannot act. Measured on the live shape, that silenced the one item
+    // in the set that could actually lose something before morning.
+    const d = quietHoursDecision(item({ dueAt: NIGHT + 2 * HOUR, owner: 'UNKNOWN' }), NIGHT)
+    expect(d.breaks).toBe(true)
+    expect(d.limb).toBe('OPPORTUNITY_LOST')
+
+    // ...while a POSITIVE statement of other ownership still refuses.
+    for (const owner of ['ENGINE', 'EXTERNAL']) {
+      expect(quietHoursDecision(item({ dueAt: NIGHT + 2 * HOUR, owner }), NIGHT).breaks,
+        `${owner} must not wake him`).toBe(false)
+    }
+  })
+
+  it('HEADLINE: SAFETY alone no longer breaks the window', () => {
+    // The direct reversal. An authority notice with no deadline and nothing
+    // declared as accruing is a real item and a morning item.
+    const d = quietHoursDecision(item({ dueAt: null }, 'SAFETY'), NIGHT)
+    expect(d.breaks).toBe(false)
+    expect(d.limb).toBeNull()
+  })
+
+  it('MIRROR: a SAFETY item with declared accruing harm DOES break', () => {
+    // So the band is not being ignored -- the evidence is what changed.
+    const d = quietHoursDecision(
+      item({ dueAt: null, harmGrowsOvernight: true }, 'SAFETY'), NIGHT)
+    expect(d.breaks).toBe(true)
+    expect(d.limb).toBe('HARM_GROWS')
+  })
+
+  it('HEADLINE: an overdue deadline with growing harm breaks, the owner\'s carve-out', () => {
+    const d = quietHoursDecision(
+      item({ dueAt: NIGHT - HOUR, harmGrowsOvernight: true }), NIGHT)
+    expect(d.breaks).toBe(true)
+    expect(d.limb).toBe('HARM_GROWS')
+  })
+
+  it('HARM_GROWS must be DECLARED -- a merely old item is not an emergency at 04:00', () => {
+    // The failure mode this forbids: deriving "harm is accruing" from staleness,
+    // which would make every neglected case urgent by the small hours. The
+    // staleness has to sit on `factors`, where the ranker actually puts it --
+    // the first version of this test put it on the element, so a mutation that
+    // read `item.factors.staleness` sailed straight through it.
+    const ancient = {
+      band: 'OBLIGATION',
+      element: { dueAt: null, recencySeconds: 400 * DAY },
+      factors: { risk: 0, urgency: 0, staleness: 1, blockedness: 0, unresolvedContradiction: 0 },
+    } as unknown as AttentionItem
+    expect(ancient.factors.staleness).toBe(1)
+    expect(quietHoursDecision(ancient, NIGHT).breaks).toBe(false)
+  })
+
+  it('outside the window the decision is not consulted at all', () => {
+    // Sanity on the caller\'s side: at noon nothing is held, so a false here
+    // would be invisible.
+    expect(isWithinQuietHours(NOON)).toBe(false)
+    expect(isWithinQuietHours(NIGHT)).toBe(true)
   })
 
   it('a deadline that ALREADY PASSED does not -- waking the owner cannot un-pass it', () => {
@@ -152,7 +245,28 @@ describe('THE MIXED NIGHT -- one item speaks, the rest must not be marked as tol
   // exempt item forces the post-and-record path to run WHILE held items exist.
   beforeEach(() => {
     initDatabase(':memory:')
-    authorityNotice()                                   // SAFETY, breaks the window
+    // The speaker is now a case whose DEADLINE falls inside the window, because
+    // that is what breaks through under the new rule. It used to be the
+    // authority notice, which broke through on its band alone -- and no longer
+    // does. (Giving the notice a due_at is not a substitute: a dated notice
+    // stops being AUTHORITATIVE_NOTICE_UNREAD and leaves the SAFETY band, which
+    // is how the first attempt at this fixture silently emptied the set.)
+    //
+    // AWAITING_SELECTION and not READY, and the reason is worth recording: the
+    // case-attention producer has NO "deadline approaching" branch. Its only
+    // deadline reason is EXPLICIT_DEADLINE_PASSED, so a case whose deadline is
+    // still ahead earns no attention item at all and never reaches this filter.
+    // The status is what puts it in the set (USER_ACTION_REQUIRED); the due_at
+    // is what breaks the window once it is there.
+    // next_action_owner = OWNER is load-bearing, not decoration. Without it the
+    // commitment derives owner ENGINE, and the capability gate refuses it -- as
+    // it should. That is what the first version of this fixture ran into: the
+    // deadline was real, the hour was right, and the next step still belonged
+    // to the engine, so waking him would have moved nothing.
+    getDb().prepare(
+      `INSERT INTO zst_cases (case_id,title,description,case_type,status,next_action,next_action_owner,due_at,waiting_on,related_document_ids,created_at,updated_at)
+       VALUES ('z1','Hatarido hajnalban',NULL,'REGULATORY_DEADLINE','AWAITING_SELECTION','Istvan dontese','OWNER',?,NULL,NULL,?,?)`,
+    ).run(NIGHT + 2 * HOUR, NOON - 7 * DAY, NOON - 7 * DAY)
     for (let i = 0; i < 4; i++) {                       // ordinary, must be held
       getDb().prepare(
         `INSERT INTO zst_cases (case_id,title,description,case_type,status,next_action,due_at,waiting_on,related_document_ids,created_at,updated_at)
@@ -167,7 +281,8 @@ describe('THE MIXED NIGHT -- one item speaks, the rest must not be marked as tol
 
     expect(r.posted).toBe(true)
     expect(s.posts).toHaveLength(1)
-    expect(r.spoke.every((x) => x.band === 'SAFETY')).toBe(true)
+    expect(r.spoke).toHaveLength(1)
+    expect(r.spoke[0].id).toContain('z1')
     expect(r.heldByQuietHours).toBeGreaterThan(0)
 
     const ledger = loadLedger(getDb(), 'zst')

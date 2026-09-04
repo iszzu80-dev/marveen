@@ -169,12 +169,121 @@ export function isWithinQuietHours(now: number): boolean {
   return h >= QUIET_HOURS_START || h < QUIET_HOURS_END
 }
 
-/** True only for the two exemptions above. Everything else waits for 07:00. */
+/** The next moment the window opens, from `now`. */
+export function quietHoursEndAt(now: number): number {
+  const { hour, minute, second } = clockInAppTz(now)
+  const secondsIntoDay = hour * 3600 + minute * 60 + second
+  const endSeconds = QUIET_HOURS_END * 3600
+  const delta = secondsIntoDay < endSeconds
+    ? endSeconds - secondsIntoDay
+    : (24 * 3600 - secondsIntoDay) + endSeconds
+  return now + delta
+}
+
+/** Which limb of the owner's rule fired. Named, because "it broke through" is
+ *  not a reason and cannot be argued with at three in the morning. */
+export type BreakLimb = 'OPPORTUNITY_LOST' | 'OWNER_ACTION_BLOCKED' | 'HARM_GROWS'
+
+export interface QuietHoursDecision {
+  breaks: boolean
+  limb: BreakLimb | null
+  /** One sentence, for the message and for the audit. */
+  reason: string
+}
+
+/**
+ * MAY THIS WAKE HIM.
+ *
+ * Owner ruling, 2026-09-04, and it replaced a rule that asked the wrong
+ * question entirely: *"Ne kategória önmagában döntsön az éjszakai interruptról."*
+ *
+ *     QUIET_HOURS_BREAK = waiting until morning materially increases the harm,
+ *     loses an opportunity, or blocks a time-critical owner action.
+ *
+ * The previous version returned true for every SAFETY item and for any deadline
+ * inside a fixed horizon. Both are category tests wearing a threshold: a
+ * security notice nobody can act on before Monday woke him at 03:00, and a
+ * deadline twenty hours out did too, while a deadline expiring at 05:00 that he
+ * genuinely could have met was treated identically.
+ *
+ * THE FIRST GATE IS CAPABILITY, NOT SEVERITY. If the owner is not the one who
+ * can act, nothing here is urgent enough to wake him, whatever its band: waking
+ * someone to watch a clock they cannot move is the definition of a pointless
+ * interrupt. That single check removes most false wake-ups, and it removes them
+ * for a reason that survives being questioned.
+ *
+ * HARM_GROWS must be DECLARED, never inferred. There is no field from which
+ * "the damage is still accruing" can be read honestly, and inventing one from
+ * staleness would make every old item an emergency by four in the morning. So
+ * absence means no, and an already-passed deadline stays quiet by default --
+ * exactly the owner's words: *"Ha már tegnap lejárt és 03:00-kor nincs érdemi
+ * teendő, várjon reggelig."*
+ */
+export function quietHoursDecision(
+  item: AttentionItem, now: number, windowEndsAt = quietHoursEndAt(now),
+): QuietHoursDecision {
+  const el = item.element as {
+    dueAt?: number | null
+    owner?: string
+    /** Declared by the producer: the harm is still accruing AND a step tonight
+     *  changes the outcome. Never derived here. */
+    harmGrowsOvernight?: boolean
+  }
+
+  // GATE 1 -- can he do anything about it?
+  //
+  // It fires on a POSITIVE statement that somebody else owns the next step, not
+  // on the absence of one. UNKNOWN means nobody recorded an owner, and reading
+  // that as "not his" would be treating missing evidence as evidence -- which,
+  // measured on the live shape, silenced the one item that could actually lose
+  // something overnight: a commitment due in two hours whose owner column was
+  // never filled in.
+  if (el.owner === 'ENGINE' || el.owner === 'EXTERNAL') {
+    return {
+      breaks: false, limb: null,
+      reason: `the next step belongs to ${el.owner.toLowerCase()}, not to him; waking him moves nothing`,
+    }
+  }
+
+  const dueAt = typeof el.dueAt === 'number' ? el.dueAt : null
+
+  // OPPORTUNITY_LOST -- the window shuts before the quiet hours do.
+  if (dueAt !== null && dueAt >= now && dueAt <= windowEndsAt) {
+    return {
+      breaks: true, limb: 'OPPORTUNITY_LOST',
+      reason: 'the deadline falls before the quiet window ends, so waiting for morning misses it',
+    }
+  }
+
+  // HARM_GROWS -- declared, and only meaningful while it is still growing.
+  if (el.harmGrowsOvernight === true) {
+    return {
+      breaks: true, limb: 'HARM_GROWS',
+      reason: 'the producer declared that the damage keeps accruing and a step tonight changes it',
+    }
+  }
+
+  // Everything else waits, and the reason says which case it is.
+  if (dueAt !== null && dueAt < now) {
+    return {
+      breaks: false, limb: null,
+      reason: 'the deadline has already passed and nothing was declared to be still accruing; '
+        + 'waking him cannot un-miss it',
+    }
+  }
+  return {
+    breaks: false, limb: null,
+    reason: dueAt === null
+      ? 'no deadline, and nothing declared as accruing overnight'
+      : 'the deadline is beyond the quiet window; the morning package reaches him in time',
+  }
+}
+
+/** The predicate the reader uses. Kept as a thin wrapper so callers that only
+ *  need yes/no do not have to carry the reason, and so the reason exists for
+ *  the ones that do. */
 export function breaksQuietHours(item: AttentionItem, now: number): boolean {
-  if (item.band === 'SAFETY') return true
-  const dueAt = (item.element as { dueAt?: number | null }).dueAt
-  if (typeof dueAt !== 'number') return false
-  return dueAt >= now && dueAt - now <= P0_DEADLINE_HORIZON_SECONDS
+  return quietHoursDecision(item, now).breaks
 }
 
 /**
@@ -398,6 +507,16 @@ export function runProjectionReader(
 
   const mayPassCadence = (item: AttentionItem): boolean => {
     if (!withinCadence) return true
+    // STILL THE CATEGORY TEST HERE, and deliberately so.
+    //
+    // I changed this line too when the night rule changed, reasoning it was the
+    // same mistake one level down. It is not the same decision. The owner's
+    // ruling was about the NIGHT INTERRUPT -- what may wake him -- and the
+    // cadence floor answers a different question: whether a backlog may arrive
+    // in instalments during the day. A SAFETY item jumping the hourly cadence
+    // at two in the afternoon costs a notification; jumping the night costs
+    // sleep. Extending the ruling from one to the other is his call, not a
+    // tidiness I get to apply on his behalf, so it is left alone and raised.
     if (item.band === 'SAFETY') return true
     const prev = ledger.get(item.element.id)
     // A band change or a changed sentence IS the news; only a first-time,
@@ -463,10 +582,31 @@ export function runProjectionReader(
   // what actually spoke, so a suppressed item keeps its utterance and leads the
   // morning package instead of having been silently marked as told. That is the
   // same trap the dry-run flag exists for, arriving through a second door.
-  const exempt = inQuietHours ? speak.filter((i) => breaksQuietHours(i, now)) : speak
-  const heldByQuietHours = speak.length - exempt.length
+  // THE NIGHT LOOKS AT THE WHOLE BOARD, not at the daytime shortlist.
+  //
+  // `speak` is what survived the interrupt cap and the cadence -- a ranking
+  // built for ordinary hours. Filtering only that for exemptions made the
+  // owner's rule decorative, and measurably so: in the live shape a commitment
+  // due in two hours (urgency 0.99) sits in the QUIET set while three undated
+  // stale cases hold the three interrupt slots. The one item that could lose an
+  // opportunity before morning was the one item the night could not see.
+  //
+  // So at night the exemption is drawn from every item the projection produced.
+  // Reaching him at 03:00 is a different question from earning a slot in the
+  // daily three, and it deserves to be asked of the whole board.
+  const nightPool = inQuietHours ? [...p.attention.interrupt, ...p.attention.quiet] : speak
+  const exempt = inQuietHours ? nightPool.filter((i) => breaksQuietHours(i, now)) : speak
+  const heldByQuietHours = speak.filter((i) => !exempt.includes(i)).length
   const exemptIds = new Set(exempt.map((i) => i.element.id))
-  const spokenNow = inQuietHours ? spoken.filter((sp) => exemptIds.has(sp.id)) : spoken
+  // An exempt item that never made the daytime shortlist has no utterance yet,
+  // so one is built for it here. Without this the wider night pool above would
+  // widen nothing: the item would be exempt and still silent, which is the
+  // quietest kind of bug -- a rule that passes its own unit tests and changes
+  // no behaviour.
+  const spokenById = new Map(spoken.map((sp) => [sp.id, sp]))
+  const spokenNow = inQuietHours
+    ? exempt.map((i) => spokenById.get(i.element.id) ?? decide(i, false))
+    : spoken
 
   const base: ReaderResult = {
     namespace, posted: false, spoke: spokenNow, stillQuiet, promotedByChange,
