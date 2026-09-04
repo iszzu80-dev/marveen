@@ -29,6 +29,18 @@ export interface OutboundEmail {
   subject: string
   body: string
   headers: Record<string, string>
+  /** The conversation this message belongs to, when it is a reply.
+   *
+   *  Setting `In-Reply-To`/`References` is NOT enough for a provider that
+   *  threads server-side: those headers make the RECIPIENT's client show the
+   *  message in context, while the provider files our own copy wherever it
+   *  likes. Gmail files it in a NEW thread unless the send request itself
+   *  names the thread — so the reply comes back on a conversation the case
+   *  does not know, and a second, orphaned case opens on it.
+   *
+   *  Optional because a first contact has no thread. When absent, a transport
+   *  MAY derive it from `In-Reply-To` rather than start a new conversation. */
+  threadId?: string
   /** Optional file attachments (P4). Populated only from documents that passed the
    *  share gate (resolveShareableAttachments) — the adapter never attaches raw. */
   attachments?: OutboundAttachment[]

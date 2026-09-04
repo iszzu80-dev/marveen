@@ -212,15 +212,58 @@ export class GmailApiTransport implements MailTransport {
     return j.access_token
   }
 
+  /**
+   * The thread this send belongs in, or undefined for a new conversation.
+   *
+   * FOUND BY SENDING ONE (2026-09-04). A reply went out with `In-Reply-To` and
+   * `References` correctly set, and Gmail still filed our copy in a brand-new
+   * thread: those headers are for the RECIPIENT's client, and the API threads
+   * on the `threadId` field of the send request, which nothing was setting.
+   * The recipient saw a proper reply; WE got a second conversation, so their
+   * answer would have come back on a thread the case did not know — and the
+   * intake would have opened an orphaned case on it. The link had to be
+   * repaired by hand afterwards.
+   *
+   * Derivation, in order:
+   *   1. an explicit `email.threadId` — the caller knows best;
+   *   2. otherwise the thread of the message named in `In-Reply-To`, looked up
+   *      by `rfc822msgid:`. This is the important half: a field the caller has
+   *      to remember is a field the caller will forget, and it was forgotten
+   *      the first time this path carried a real customer reply.
+   *
+   * A lookup failure returns undefined rather than throwing: sending on a new
+   * thread is a smaller harm than not sending an owner-approved reply at all.
+   * `rfc822msgid:` works here because the id belongs to an INBOUND message the
+   * provider indexed — unlike our own sent ids, which Gmail rewrites.
+   */
+  private async resolveThreadId(email: OutboundEmail, token: string): Promise<string | undefined> {
+    if (email.threadId) return email.threadId
+    const inReplyTo = email.headers['In-Reply-To']?.trim()
+    if (!inReplyTo) return undefined
+    const bare = inReplyTo.replace(/^</, '').replace(/>$/, '')
+    if (!bare) return undefined
+    try {
+      const q = `rfc822msgid:${bare}`
+      const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(q)}&maxResults=1`
+      const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(this.readbackTimeoutMs) })
+      if (!r.ok) return undefined
+      const j = await r.json() as { messages?: Array<{ id: string; threadId?: string }> }
+      return j.messages?.[0]?.threadId
+    } catch {
+      return undefined
+    }
+  }
+
   async send(email: OutboundEmail): Promise<{ messageId: string; threadId?: string }> {
     const marker = email.headers[IDEMPOTENCY_HEADER]
     if (!marker) throw new Error('outbound email missing idempotency marker header')
     const token = await this.accessToken(Date.now())
     const raw = buildRawMessage(email, marker, this.from, this.embedBodyMarker)
+    const threadId = await this.resolveThreadId(email, token)
     const r = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ raw }),
+      body: JSON.stringify(threadId ? { raw, threadId } : { raw }),
       signal: AbortSignal.timeout(this.sendTimeoutMs),
     })
     if (!r.ok) throw new Error(`gmail send failed: ${r.status} ${await r.text()}`)
