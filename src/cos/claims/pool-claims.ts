@@ -27,9 +27,9 @@
 import {
   normaliseExtractionText, parseHufAmounts, nameFromSender,
 } from '../zst-extract-common.js'
-import { splitQuotedBody } from './quoted-text.js'
+import { segmentBody, type SegmentKind } from './segments.js'
 import type {
-  ClaimType, ClaimAttribution, ClaimConfidence, ExtractionStatus,
+  ClaimType, AttributionStatus, ClaimConfidence, ExtractionStatus,
   StructuredClaim, ClaimSource,
 } from './claim-types.js'
 
@@ -37,7 +37,16 @@ import type {
  *  text. Stored on every claim, so a re-extraction under new rules is
  *  distinguishable from the source having changed -- the same lesson the
  *  attention ledger learned the hard way on 2026-09-04. */
-export const EXTRACTOR_FINGERPRINT = 'pool-lexical-v1'
+export const EXTRACTOR_VERSION = 'pool-lexical-v2-segments'
+
+/** Claim types this extractor has NO rule for yet. Listed explicitly so their
+ *  absence is reported as UNSUPPORTED -- a fact about the extractor -- rather
+ *  than looking like a source that stayed silent about warranty. */
+export const UNSUPPORTED_TYPES: readonly ClaimType[] = [
+  'POOL_MODEL', 'MANUFACTURER', 'PRODUCT_FAMILY', 'QUANTITY_REQUIRED',
+  'DIMENSION', 'COMPATIBILITY', 'TOTAL_PRICE', 'VAT', 'SHIPPING_COST',
+  'LEAD_TIME', 'WARRANTY', 'RETURN_POLICY',
+]
 
 export interface ClaimTextSource extends ClaimSource {
   /** The mail body or document text. */
@@ -200,77 +209,140 @@ const RULES: readonly Rule[] = [
   },
 ]
 
+/** A segment's kind decides the attribution, and nothing else does. */
+const ATTRIBUTION: Record<SegmentKind, AttributionStatus | null> = {
+  AUTHORED: 'AUTHOR_ASSERTED',
+  QUOTED: 'QUOTED_ORIGIN_UNRESOLVED',
+  FORWARDED: 'FORWARDED_ORIGIN_UNRESOLVED',
+  // A signature is not a claim. Nothing is extracted from it at all, so it has
+  // no attribution to give.
+  SIGNATURE: null,
+}
+
 /**
  * Read one source into claims.
  *
- * The author's text and the quoted text are extracted SEPARATELY, and the
- * quoted half is attributed to nobody. Both halves are kept: the quote is real
- * evidence that the text was in this message, and dropping it would lose the
- * reply context that makes a thread readable.
+ * Segments are extracted SEPARATELY and never merged: the owner's standing
+ * invariant is that a message is not an attribution unit, and merging the
+ * halves is precisely how the vendor ends up asserting the buyer's question.
  *
- * Returns every claim it can support. It does not deduplicate across sources,
- * does not rank, and does not decide anything -- two sources contradicting each
- * other yield two claims, which is the point.
+ * Quoted and forwarded claims are RECORDED but not attributed. They are real
+ * evidence that the text was present in this source, and dropping them would
+ * lose the reply context that makes a thread readable.
+ *
+ * Returns every claim it can support, plus an explicit row for each field it
+ * looked for and did not find, and for each field it has no rule for. It does
+ * not deduplicate across sources, does not rank, and decides nothing.
  */
 export function extractPoolClaims(src: ClaimTextSource): StructuredClaim[] {
   const out: StructuredClaim[] = []
-  const { authored, quoted, separator } = splitQuotedBody(src.text)
+  const source: ClaimSource = {
+    sourceId: src.sourceId, sourceType: src.sourceType,
+    sourceTimestamp: src.sourceTimestamp,
+    ...(src.channel ? { channel: src.channel } : {}),
+  }
+  const envelopeParty = src.from ? nameFromSender(src.from) : null
 
-  const runHalf = (text: string, attribution: ClaimAttribution): void => {
-    if (!text.trim()) return
-    const normalised = normaliseExtractionText(text)
+  const push = (c: Omit<StructuredClaim, 'source' | 'extractorVersion'>): void => {
+    // THE INVARIANT, enforced where a violation would be created rather than
+    // asserted in a comment: a party is not a message id.
+    if (c.assertedBy !== null && c.assertedBy === source.sourceId) {
+      throw new Error(
+        `claim invariant: assertedBy must not equal sourceId (${source.sourceId})`,
+      )
+    }
+    out.push({ ...c, source, extractorVersion: EXTRACTOR_VERSION })
+  }
+
+  const segments = segmentBody(src.text)
+  const seenTypes = new Set<string>()
+
+  for (const seg of segments) {
+    const attribution = ATTRIBUTION[seg.kind]
+    if (attribution === null) continue  // SIGNATURE: not a claim
+    const normalised = normaliseExtractionText(seg.text)
+    const span = {
+      segmentKind: seg.kind, start: seg.start, end: seg.end, marker: seg.marker,
+    }
+
     for (const rule of RULES) {
+      const key = `${rule.claimType}:${rule.field ?? ''}`
       if (!rule.cue.test(normalised)) continue
+      seenTypes.add(key)
       const hit = rule.read(normalised)
       const status: ExtractionStatus =
         hit === null ? 'CUE_WITHOUT_VALUE'
-        : attribution === 'QUOTED' ? 'QUOTED_CONTEXT'
-        : src.truncated ? 'PARTIAL_SOURCE'
-        : 'OK'
-      out.push({
+        : src.truncated ? 'LOW_QUALITY_PARTIAL_SOURCE'
+        : 'EXTRACTED_VALID'
+      push({
         claimType: rule.claimType,
         field: rule.field ?? null,
         normalizedValue: hit?.value ?? '',
         normalizedUnit: hit?.unit ?? null,
-        sourceValue: hit?.source ?? '',
-        source: {
-          sourceId: src.sourceId, sourceType: src.sourceType,
-          sourceTimestamp: src.sourceTimestamp,
-          ...(src.channel ? { channel: src.channel } : {}),
-        },
-        attribution,
-        // A cue that fired without a readable value is a weak observation, and
-        // saying so is the whole reason the status exists.
+        originalValue: hit?.source ?? '',
+        span,
+        attributionStatus: attribution,
+        // Filled ONLY where the segment's own author wrote it, and taken from
+        // the envelope rather than from anything the prose says.
+        assertedBy: attribution === 'AUTHOR_ASSERTED' ? envelopeParty : null,
         confidence: hit === null ? 'LOW' : rule.confidence,
         status,
         provenance: hit === null
           ? `a ${rule.claimType} cue appeared but no value could be read from it`
-          : attribution === 'QUOTED'
-            ? `${rule.provenance}; found in text quoted below "${separator ?? 'a reply separator'}", so it is NOT this author's assertion`
-            : rule.provenance,
+          : attribution === 'AUTHOR_ASSERTED'
+            ? rule.provenance
+            : `${rule.provenance}; read from ${seg.kind.toLowerCase()} text opened by "${seg.marker ?? 'a separator'}", so the original asserter is unresolved`,
       })
     }
   }
 
-  runHalf(authored, 'AUTHOR')
-  runHalf(quoted, 'QUOTED')
-
-  // VENDOR IDENTITY is a fact about the message, not about its text, so it is
-  // read from the envelope and only ever attributed to the author.
-  const vendor = src.from ? nameFromSender(src.from) : null
-  if (vendor) {
-    out.push({
-      claimType: 'VENDOR_IDENTITY', field: null,
-      normalizedValue: vendor, normalizedUnit: null, sourceValue: src.from!,
-      source: {
-        sourceId: src.sourceId, sourceType: src.sourceType,
-        sourceTimestamp: src.sourceTimestamp,
-        ...(src.channel ? { channel: src.channel } : {}),
+  // WHAT WAS LOOKED FOR AND NOT FOUND. Recorded per rule, once, so that "no
+  // source mentions availability" is a readable answer rather than an inference
+  // from missing rows.
+  const authored = segments.find((s2) => s2.kind === 'AUTHORED')
+  for (const rule of RULES) {
+    const key = `${rule.claimType}:${rule.field ?? ''}`
+    if (seenTypes.has(key)) continue
+    push({
+      claimType: rule.claimType, field: rule.field ?? null,
+      normalizedValue: '', normalizedUnit: null, originalValue: '',
+      span: {
+        segmentKind: 'AUTHORED',
+        start: authored?.start ?? 0, end: authored?.end ?? src.text.length,
+        marker: null,
       },
-      attribution: 'AUTHOR',
+      attributionStatus: 'AUTHOR_ASSERTED',
+      assertedBy: envelopeParty,
       confidence: 'HIGH',
-      status: 'OK',
-      provenance: 'the sender of the message',
+      status: 'NO_CUE',
+      provenance: `a rule for ${rule.claimType} ran and found no cue in this source`,
+    })
+  }
+
+  // AND WHAT WE CANNOT LOOK FOR AT ALL. A statement about this extractor.
+  for (const t of UNSUPPORTED_TYPES) {
+    push({
+      claimType: t, field: null,
+      normalizedValue: '', normalizedUnit: null, originalValue: '',
+      span: { segmentKind: 'AUTHORED', start: 0, end: 0, marker: null },
+      attributionStatus: 'AUTHOR_ASSERTED',
+      assertedBy: envelopeParty,
+      confidence: 'LOW',
+      status: 'UNSUPPORTED',
+      provenance: `this extractor (${EXTRACTOR_VERSION}) has no rule for ${t}; its absence says nothing about the source`,
+    })
+  }
+
+  if (envelopeParty) {
+    push({
+      claimType: 'VENDOR_IDENTITY', field: null,
+      normalizedValue: envelopeParty, normalizedUnit: null, originalValue: src.from!,
+      span: { segmentKind: 'AUTHORED', start: 0, end: 0, marker: null },
+      attributionStatus: 'AUTHOR_ASSERTED',
+      assertedBy: envelopeParty,
+      confidence: 'HIGH',
+      status: 'EXTRACTED_VALID',
+      provenance: 'the envelope sender of the message',
     })
   }
   return out
