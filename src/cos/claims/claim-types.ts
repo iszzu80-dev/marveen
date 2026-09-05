@@ -134,6 +134,18 @@ export interface StructuredClaim {
    * the confusion this whole design exists to prevent.
    */
   assertedBy: string | null
+  /**
+   * The sender's display name, when the envelope carried one.
+   *
+   * PRESENTATION ONLY, and separate from `assertedBy` on purpose (owner,
+   * 2026-09-05). A display name is chosen by the sender, is not unique, and is
+   * absent from plenty of real mail; making it the principal would mean the
+   * same party is a different party depending on what they typed into their
+   * mail client that month. It is kept because dropping it would make every
+   * readback less legible than it is today, and it is kept HERE because a field
+   * named `display` cannot be mistaken for an identity.
+   */
+  assertedByName: string | null
   confidence: ClaimConfidence
   status: ExtractionStatus
   /** WHY it was read that way, in words. A score with no reason is not

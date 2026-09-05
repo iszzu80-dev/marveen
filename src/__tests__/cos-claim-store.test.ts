@@ -28,10 +28,11 @@ function claim(over: Partial<StructuredClaim> = {}): StructuredClaim {
     source: { sourceId: 'msg-1', sourceType: 'GMAIL_MESSAGE', sourceTimestamp: KALLAI_TS },
     span: { segmentKind: 'AUTHORED', start: 0, end: 40, marker: null },
     attributionStatus: 'AUTHOR_ASSERTED',
-    assertedBy: 'fluidra.com',
+    assertedBy: 'kkallai@fluidra.com',
+    assertedByName: 'Krisztian Kállai',
     confidence: 'HIGH', status: 'EXTRACTED_VALID',
     provenance: 'an amount stands after a gross-price cue',
-    extractorVersion: 'pool-lexical-v2-segments',
+    extractorVersion: 'pool-lexical-v3-typed-source-email-principal',
     ...over,
   }
 }
@@ -140,16 +141,20 @@ describe('reprocessing', () => {
     // The owner's rule, and the direction matters. The attention ledger learned
     // the same lesson the other way round the same day: there a recipe change
     // silently invented news; here it would silently destroy evidence.
+    const current = claim().extractorVersion
     recordClaims(db, 'personal', CASE, [claim()], NOW)
     const v2 = recordClaims(db, 'personal', CASE, [
-      claim({ extractorVersion: 'pool-lexical-v3', normalizedValue: '69131' }),
+      claim({ extractorVersion: 'some-later-recipe', normalizedValue: '69131' }),
     ], NOW + 600)
 
     expect(v2).toEqual({ written: 1, changed: 0, unchanged: 0 })
     const rows = claimsForField(db, 'personal', CASE, 'PACKAGE_PRICE', 'gross')
     expect(rows).toHaveLength(2)
+    // Read from the factory rather than pinned to a literal: this test is about
+    // one version not overwriting another, and a recipe bump broke it once for
+    // reasons that had nothing to do with what it checks.
     expect(rows.map((r) => r.extractorVersion).sort())
-      .toEqual(['pool-lexical-v2-segments', 'pool-lexical-v3'])
+      .toEqual([current, 'some-later-recipe'].sort())
   })
 
   it('a corrected value under the SAME version replaces, not accumulates', () => {
@@ -250,8 +255,12 @@ describe('the store refuses a claim that asserts itself', () => {
   })
 
   it('and the extractor refuses to build one', () => {
+    // The sourceId here is the SENDER ADDRESS, which is what the principal now
+    // is. The earlier version of this test passed a bare domain, and it stopped
+    // being able to go red the moment the principal stopped being a domain --
+    // a guard that cannot reach its own failure proves nothing.
     expect(() => extractPoolClaims({
-      sourceId: 'fluidra.com', sourceType: 'GMAIL_MESSAGE', sourceTimestamp: KALLAI_TS,
+      sourceId: 'billing@fluidra.com', sourceType: 'GMAIL_MESSAGE', sourceTimestamp: KALLAI_TS,
       from: 'billing@fluidra.com', text: 'A bruttó ár 69 130 Ft.',
     })).toThrow(/assertedBy must not equal sourceId/)
   })

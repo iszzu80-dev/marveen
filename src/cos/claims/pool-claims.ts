@@ -25,7 +25,7 @@
 // stored a supplier's bank account as an invoice number, at HIGH confidence).
 
 import {
-  normaliseExtractionText, parseHufAmounts, nameFromSender,
+  normaliseExtractionText, parseHufAmounts,
 } from '../zst-extract-common.js'
 import { segmentBody, type SegmentKind } from './segments.js'
 import type {
@@ -37,7 +37,7 @@ import type {
  *  text. Stored on every claim, so a re-extraction under new rules is
  *  distinguishable from the source having changed -- the same lesson the
  *  attention ledger learned the hard way on 2026-09-04. */
-export const EXTRACTOR_VERSION = 'pool-lexical-v2-segments'
+export const EXTRACTOR_VERSION = 'pool-lexical-v3-typed-source-email-principal'
 
 /** Claim types this extractor has NO rule for yet. Listed explicitly so their
  *  absence is reported as UNSUPPORTED -- a fact about the extractor -- rather
@@ -255,6 +255,74 @@ const RULES: readonly Rule[] = [
   },
 ]
 
+/**
+ * THE SENDER PRINCIPAL: the normalised full address, and nothing shorter.
+ *
+ * Owner ruling, 2026-09-05, after 24 live claims recorded `gmail.com` as their
+ * asserter. Three candidates were on the table and only one of them identifies
+ * a party:
+ *
+ *   the DOMAIN alone is not a party. `gmail.com` did not say anything; one of
+ *   its two billion mailboxes did, and the store cannot tell which.
+ *
+ *   the LOCAL PART alone is not a party either. `info@fluidra.com` and
+ *   `info@piscinarium.es` are two organisations, and `info` would merge them.
+ *
+ *   the DISPLAY NAME is not a party: the sender chooses it, it repeats, and it
+ *   is missing from plenty of real mail -- including the owner's own, which is
+ *   how the domain fallback was reached in the first place.
+ *
+ * So the principal is the whole address, lowercased. When no address can be
+ * parsed there is NO principal: null, and the claim carries no asserter. That is
+ * the correct outcome, because a claim attributed to the wrong party is worse
+ * than one attributed to nobody.
+ *
+ * This deliberately does NOT reuse `nameFromSender` from zst-extract-common,
+ * whose contract is a display-name-else-domain id compared against itself
+ * during ZST reconciliation. Same input, different question; sharing the
+ * function would have coupled an evidence principal to an invoice supplier id.
+ */
+export function senderPrincipal(from: string): string | null {
+  const angled = /<([^>]+)>/.exec(from)
+  const candidate = (angled ? angled[1] : from).trim()
+  const addr = /[^\s<>,;:"]+@[\w.-]+\.[A-Za-z]{2,}/.exec(candidate)
+  return addr ? addr[0].toLowerCase() : null
+}
+
+/** The display name, if the envelope carried one. Presentation, never identity. */
+export function senderDisplayName(from: string): string | null {
+  const disp = /"?([^"<]+?)"?\s*</.exec(from)
+  const name = disp?.[1]?.trim()
+  return name ? name : null
+}
+
+/**
+ * Mailbox providers whose domain says nothing about an organisation.
+ *
+ * The point is not the completeness of this list. It is the DIRECTION of the
+ * mistake it prevents: an unknown domain is treated as possibly organisational
+ * and produces a vendor claim a reader can reject, while a known consumer
+ * provider produces none. Being wrong about a corporate domain costs a claim
+ * somebody can dismiss; being wrong the other way puts `gmail.com` in the store
+ * as a supplier, which is what happened.
+ */
+const CONSUMER_MAILBOX_DOMAINS = new Set([
+  'gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.com', 'live.com',
+  'msn.com', 'yahoo.com', 'yahoo.co.uk', 'ymail.com', 'icloud.com', 'me.com',
+  'mac.com', 'aol.com', 'proton.me', 'protonmail.com', 'gmx.com', 'gmx.net',
+  'mail.com', 'zoho.com', 'yandex.com', 'yandex.ru',
+  'freemail.hu', 'citromail.hu', 'indamail.hu', 'vipmail.hu', 't-online.hu',
+])
+
+/** The organisation a sender address evidences, or null when it evidences none. */
+export function organisationFromAddress(address: string): string | null {
+  const at = address.lastIndexOf('@')
+  if (at < 0) return null
+  const domain = address.slice(at + 1).toLowerCase()
+  if (!domain.includes('.')) return null
+  return CONSUMER_MAILBOX_DOMAINS.has(domain) ? null : domain
+}
+
 /** A segment's kind decides the attribution, and nothing else does. */
 const ATTRIBUTION: Record<SegmentKind, AttributionStatus | null> = {
   AUTHORED: 'AUTHOR_ASSERTED',
@@ -287,7 +355,8 @@ export function extractPoolClaims(src: ClaimTextSource): StructuredClaim[] {
     sourceTimestamp: src.sourceTimestamp,
     ...(src.channel ? { channel: src.channel } : {}),
   }
-  const envelopeParty = src.from ? nameFromSender(src.from) : null
+  const envelopeParty = src.from ? senderPrincipal(src.from) : null
+  const envelopeName = src.from ? senderDisplayName(src.from) : null
 
   const push = (c: Omit<StructuredClaim, 'source' | 'extractorVersion'>): void => {
     // THE INVARIANT, enforced where a violation would be created rather than
@@ -334,6 +403,7 @@ export function extractPoolClaims(src: ClaimTextSource): StructuredClaim[] {
         // Filled ONLY where the segment's own author wrote it, and taken from
         // the envelope rather than from anything the prose says.
         assertedBy: attribution === 'AUTHOR_ASSERTED' ? envelopeParty : null,
+        assertedByName: attribution === 'AUTHOR_ASSERTED' ? envelopeName : null,
         confidence: recovered ? rule.confidence : 'LOW',
         status,
         provenance: !recovered
@@ -362,6 +432,7 @@ export function extractPoolClaims(src: ClaimTextSource): StructuredClaim[] {
       },
       attributionStatus: 'AUTHOR_ASSERTED',
       assertedBy: envelopeParty,
+      assertedByName: envelopeName,
       confidence: 'HIGH',
       status: 'NO_CUE',
       provenance: `a rule for ${rule.claimType} ran and found no cue in this source`,
@@ -376,22 +447,51 @@ export function extractPoolClaims(src: ClaimTextSource): StructuredClaim[] {
       span: { segmentKind: 'AUTHORED', start: 0, end: 0, marker: null },
       attributionStatus: 'AUTHOR_ASSERTED',
       assertedBy: envelopeParty,
+      assertedByName: envelopeName,
       confidence: 'LOW',
       status: 'UNSUPPORTED',
       provenance: `this extractor (${EXTRACTOR_VERSION}) has no rule for ${t}; its absence says nothing about the source`,
     })
   }
 
+  // VENDOR IDENTITY IS NOT THE SENDER PRINCIPAL. Owner ruling, 2026-09-05:
+  // "sender principal != vendor identity ... Vendor/organization claim csak
+  // olyan evidence-bol jojjon, ami tenylegesen szervezetet allit vagy bizonyit."
+  //
+  // An envelope proves WHO wrote, not WHICH ORGANISATION they wrote for. The
+  // only organisational evidence an envelope carries is the domain, and only
+  // when that domain belongs to an organisation rather than to a mailbox
+  // provider. So a corporate domain yields a vendor claim; a consumer address
+  // yields an explicit NO_CUE, because "we looked at the envelope and it names
+  // no organisation" is a finding, while silence would read as "no rule ran".
+  //
+  // The previous rule emitted the display name or the domain unconditionally.
+  // Live, that recorded `gmail.com` as a vendor and `Krisztian Kallai`, a
+  // person, as another. Both were wrong in the same way: a party is not an
+  // organisation.
   if (envelopeParty) {
+    const organisation = organisationFromAddress(envelopeParty)
     push({
       claimType: 'VENDOR_IDENTITY', field: null,
-      normalizedValue: envelopeParty, normalizedUnit: null, originalValue: src.from!,
+      normalizedValue: organisation ?? '',
+      normalizedUnit: null,
+      originalValue: src.from!,
       span: { segmentKind: 'AUTHORED', start: 0, end: 0, marker: null },
       attributionStatus: 'AUTHOR_ASSERTED',
       assertedBy: envelopeParty,
+      assertedByName: envelopeName,
+      // HIGH either way, and deliberately. Confidence is about the READING, not
+      // about what the value implies downstream: parsing a domain out of an
+      // envelope is unambiguous, and so is finding a consumer provider there.
+      // Grading it down because a domain does not establish WHICH entity is the
+      // counterparty would be a role judgement wearing a confidence score, which
+      // is the sort of quiet ranking this layer must not carry. The caveat
+      // belongs in the provenance, where a reader can weigh it.
       confidence: 'HIGH',
-      status: 'EXTRACTED_VALID',
-      provenance: 'the envelope sender of the message',
+      status: organisation ? 'EXTRACTED_VALID' : 'NO_CUE',
+      provenance: organisation
+        ? `the envelope sender is at ${organisation}, a domain that is not a consumer mailbox provider, so it evidences that organisation -- it does not establish which of its people or entities is the counterparty`
+        : 'the envelope sender is at a consumer mailbox provider, which evidences no organisation at all; a vendor claim would have to come from evidence that names one',
     })
   }
   return out
