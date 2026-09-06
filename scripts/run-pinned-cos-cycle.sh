@@ -27,6 +27,21 @@
 set -uo pipefail
 
 REPO="${MARVEEN_REPO_ROOT:-$HOME/marveen}"
+
+# THE MEASURING TOOL SHIPS WITH THE GUARD, not with the checkout.
+#
+# Caught while installing this change: check 5 called
+# "$REPO/scripts/artifact-manifest.py" -- the SHARED checkout, sitting on
+# develop. That is the 2026-08-26 defect exactly, one level down: the guard is
+# pinned and hashed, and it would have shelled out to a file any merge can move.
+# A gate whose measuring instrument is not pinned is not pinned.
+#
+# So the tool is resolved next to THIS script, inside the guard release, and its
+# absence is a refusal rather than a fallback to the checkout copy. A fallback
+# would restore the hole quietly on the one day the artifact is incomplete.
+GUARD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MANIFEST_TOOL="$GUARD_DIR/artifact-manifest.py"
+
 RELEASE="$REPO/releases/cos-cycle-current"
 RUNTIME_PIN="$REPO/releases/dashboard-runtime-pin.json"
 FEEDER="$REPO/releases/scheduled-scripts-current/email-triage-fetch.py"
@@ -180,7 +195,8 @@ PYEOF
 fi
 if [ -n "$DIST_WANT" ]; then
   [ -d "$DIST" ] || fail "the pin declares a distTreeHash but there is no $DIST to measure"
-  MEASURED="$(python3 "$REPO/scripts/artifact-manifest.py" "$DIST" 2>/dev/null || true)"
+  [ -f "$MANIFEST_TOOL" ] || fail "the guard release carries no artifact-manifest.py beside it ($MANIFEST_TOOL); a gate whose measuring instrument lives in the moving checkout is not a pinned gate"
+  MEASURED="$(python3 "$MANIFEST_TOOL" "$DIST" 2>/dev/null || true)"
   DIST_HAVE="$(printf '%s' "$MEASURED" | python3 -c "import json,sys;print(json.load(sys.stdin)['treeHash'])" 2>/dev/null || true)"
   DIST_FILES="$(printf '%s' "$MEASURED" | python3 -c "import json,sys;print(json.load(sys.stdin)['fileCount'])" 2>/dev/null || true)"
   [ -n "$DIST_HAVE" ] || fail "could not measure the deployed artifact at $DIST; an unmeasurable runtime is not a verified one"

@@ -125,6 +125,9 @@ describe('release artifact proof — the pin declares, the artifact proves', () 
     const guardDir = join(root, 'releases', `guard-${releaseSha.slice(0, 9)}`)
     mkdirSync(guardDir, { recursive: true })
     writeFileSync(join(guardDir, 'run-pinned-cos-cycle.sh'), readFileSync(GUARD_SRC))
+    // The measuring tool ships INSIDE the guard release, not in the checkout --
+    // a gate that shells out to a file any merge can move is not pinned.
+    writeFileSync(join(guardDir, 'artifact-manifest.py'), readFileSync(MANIFEST_SRC))
     symlinkSync(guardDir, join(root, 'releases', 'guard-current'))
 
     // The deployed artifact.
@@ -323,6 +326,24 @@ describe('release artifact proof — the pin declares, the artifact proves', () 
       expect(out.code, out.out).toBe(0)
       expect(out.out).toContain('"runtimeFreshness":"verified"')
     })
+  })
+
+  it('the guard refuses when its own measuring tool is missing, rather than reaching into the checkout', () => {
+    // The 2026-08-26 defect one level down: the guard is pinned and hashed, and
+    // check 5 used to shell out to $REPO/scripts/artifact-manifest.py, which any
+    // merge can move. A fallback would have restored the hole quietly.
+    rmSync(join(root, 'releases', 'guard-current', 'artifact-manifest.py'))
+    const pinPath = join(root, 'releases', 'dashboard-runtime-pin.json')
+    const pin = JSON.parse(readFileSync(pinPath, 'utf-8')) as Record<string, unknown>
+    pin.guardSha256 = sha256File(join(root, 'releases', 'guard-current', 'run-pinned-cos-cycle.sh'))
+    writeFileSync(pinPath, JSON.stringify(pin, null, 1))
+
+    // The checkout copy is present and correct; the gate must not use it.
+    expect(existsSync(join(root, 'scripts', 'artifact-manifest.py'))).toBe(true)
+
+    const out = runGate(root)
+    expect(out.code).toBe(90)
+    expect(out.out).toContain('not a pinned gate')
   })
 
   it('the live install carries a distTreeHash, so production is actually covered', () => {
