@@ -19,8 +19,13 @@ function pdf(...streamBodies: string[]): Buffer {
 
 /** One numbered object carrying a deflated stream. */
 function pdfObj(num: number, dict: string, body: string): Buffer {
+  return pdfObjGen(num, 0, dict, body)
+}
+
+/** The same, at an explicit generation. */
+function pdfObjGen(num: number, gen: number, dict: string, body: string): Buffer {
   return Buffer.concat([
-    Buffer.from(`${num} 0 obj\n${dict}\nstream\n`, 'latin1'),
+    Buffer.from(`${num} ${gen} obj\n${dict}\nstream\n`, 'latin1'),
     deflateSync(Buffer.from(body, 'latin1')),
     Buffer.from('\nendstream\nendobj\n', 'latin1'),
   ])
@@ -212,6 +217,21 @@ describe('pdfText', () => {
     const r = pdfText(bytes)
     expect(r.text).toContain('first half')
     expect(r.text).toContain('second half')
+  })
+
+  it('PDF-STREAM-004: a page reference honours the GENERATION number', () => {
+    // `/Contents 5 1 R` must not select `5 0 obj`. Discarding the generation
+    // picks the wrong stream while still calling itself positive
+    // identification, which is worse than the blacklist it replaced.
+    const bytes = Buffer.concat([
+      Buffer.from('%PDF-1.4\n4 0 obj\n<< /Type /Page /Contents 5 1 R >>\nendobj\n', 'latin1'),
+      pdfObjGen(5, 0, '<< /Length 0 >>', 'BT (superseded generation) Tj ET'),
+      pdfObjGen(5, 1, '<< /Length 0 >>', 'BT (the referenced generation) Tj ET'),
+    ])
+    const r = pdfText(bytes)
+    expect(r.contentSelection).toBe('PAGE_CONTENTS')
+    expect(r.text).toContain('the referenced generation')
+    expect(r.text).not.toContain('superseded')
   })
 
   it('says out loud when it had to fall back to the weaker rule', () => {

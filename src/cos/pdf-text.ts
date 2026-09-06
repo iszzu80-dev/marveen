@@ -23,7 +23,7 @@
 // than an empty one.
 import { inflateSync } from 'node:zlib'
 
-interface PdfStream { dict: string; body: Buffer; objNum: number | null }
+interface PdfStream { dict: string; body: Buffer; objRef: string | null }
 
 /**
  * Streams that could plausibly BE page content, each with the dictionary that
@@ -71,11 +71,13 @@ function streams(pdf: Buffer): PdfStream[] {
     // else's declaration.
     const objStart = hay.lastIndexOf(' obj', m.index)
     const dict = objStart >= 0 && m.index - objStart < 4096 ? hay.slice(objStart, m.index) : ''
-    // The object NUMBER, so a page's /Contents reference can be resolved to a
-    // stream instead of guessed at.
+    // The object's FULL identity -- number AND generation. Codex review
+    // PDF-STREAM-004: discarding the generation lets `/Contents 5 1 R` select
+    // an unreferenced `5 0 obj`, which is precisely the wrong stream dressed as
+    // positive identification.
     const header = objStart >= 0 ? hay.slice(Math.max(0, objStart - 24), objStart) : ''
-    const num = /(\d+)\s+\d+\s*$/.exec(header)
-    const objNum = num ? Number(num[1]) : null
+    const num = /(\d+)\s+(\d+)\s*$/.exec(header)
+    const objRef = num ? `${num[1]} ${num[2]}` : null
     const raw = pdf.subarray(start, end)
     let body: Buffer
     try {
@@ -86,7 +88,7 @@ function streams(pdf: Buffer): PdfStream[] {
       // a fact for the classifier, not a reason to lose the others.
       body = raw
     }
-    out.push({ dict, body, objNum })
+    out.push({ dict, body, objRef })
   }
   return out
 }
@@ -110,13 +112,13 @@ function isPageContentCandidate(s: PdfStream): boolean {
  * the result says which path was taken, so a caller is never left guessing
  * whether the strict rule applied.
  */
-function pageContentObjects(pdf: string): Set<number> {
-  const wanted = new Set<number>()
+function pageContentObjects(pdf: string): Set<string> {
+  const wanted = new Set<string>()
   for (const m of pdf.matchAll(/\/Type\s*\/Page[^s]([\s\S]{0,2000}?)(?:endobj|>>\s*stream)/g)) {
-    const contents = /\/Contents\s*(?:(\d+)\s+\d+\s*R|\[([^\]]*)\])/.exec(m[1])
+    const contents = /\/Contents\s*(?:(\d+)\s+(\d+)\s*R|\[([^\]]*)\])/.exec(m[1])
     if (!contents) continue
-    if (contents[1]) { wanted.add(Number(contents[1])); continue }
-    for (const ref of (contents[2] ?? '').matchAll(/(\d+)\s+\d+\s*R/g)) wanted.add(Number(ref[1]))
+    if (contents[1]) { wanted.add(`${contents[1]} ${contents[2]}`); continue }
+    for (const ref of (contents[3] ?? '').matchAll(/(\d+)\s+(\d+)\s*R/g)) wanted.add(`${ref[1]} ${ref[2]}`)
   }
   return wanted
 }
@@ -211,11 +213,11 @@ function literalBytes(src: string): number[] {
  * specific and worth keeping: a NON-EMPTY CMap and still-garbled output means
  * the map is being applied in the wrong place, not that it is missing.
  */
-function renderText(chunks: PdfStream[], cmap: CMap, pages: Set<number>): string {
+function renderText(chunks: PdfStream[], cmap: CMap, pages: Set<string>): string {
   const parts: string[] = []
   for (const c of chunks) {
     if (pages.size > 0) {
-      if (c.objNum === null || !pages.has(c.objNum)) continue
+      if (c.objRef === null || !pages.has(c.objRef)) continue
     } else if (!isPageContentCandidate(c)) continue
     const t = c.body.toString('latin1')
     // ONLY inside text objects, and only strings that are OPERANDS of a
@@ -333,7 +335,7 @@ export function pdfText(bytes: Buffer): PdfTextResult {
     streams: chunks.length,
     cmapEntries: cmap.map.size,
     streamsSkipped: pages.size > 0
-      ? chunks.filter((c) => c.objNum === null || !pages.has(c.objNum)).length
+      ? chunks.filter((c) => c.objRef === null || !pages.has(c.objRef)).length
       : chunks.filter((c) => !isPageContentCandidate(c)).length,
     codeBytes: cmap.codeBytes,
     contentSelection: pages.size > 0 ? 'PAGE_CONTENTS' : 'TYPE_BLACKLIST',
