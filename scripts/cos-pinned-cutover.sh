@@ -165,6 +165,20 @@ else
   ( cd "$CYCLE" && npx tsx scripts/verify-runtime-provenance.ts --dist "$REPO/dist" --expect "$SHA" >/dev/null ) \
     || die "the INSTALLED dist does not prove $SHORT -- the copy did not land intact"
   say "deployed dist re-verified in place"
+
+  # THE ARTIFACT'S OWN IDENTITY, written into the artifact and measured for the
+  # pin. Added 2026-09-06: until then this script rewrote the pin from a fixed
+  # key set that had no dist field at all, so the pin it produced declared a sha
+  # and said nothing about the bytes deployed under it. The gate now requires
+  # that declaration for any pin dated at or after the hardening, so a cutover
+  # that omitted it would move the pointers and then be refused by its own
+  # verification step -- half-deployed, which is the one outcome this script
+  # exists to prevent.
+  #
+  # The tool comes from the CANDIDATE release, not from the shared checkout: the
+  # thing that measures a release must ship with it.
+  run "python3 '$CYCLE/scripts/artifact-manifest.py' '$REPO/dist' --write '$SHA'"
+  say "artifact manifest written into the deployed dist"
 fi
 
 # 5b. ONLY NOW do the pointers move.
@@ -193,6 +207,12 @@ repo, sha, gate, gshort, prev, note = sys.argv[1:7]
 pinp = os.path.join(repo, 'releases', 'dashboard-runtime-pin.json')
 old = json.load(open(pinp))
 h = lambda p: hashlib.sha256(open(p,'rb').read()).hexdigest()
+# The DEPLOYED artifact, measured -- not the release directory it was copied
+# from, and not a value carried over from the previous pin. "PIN DECLARES,
+# ARTIFACT PROVES" is only true if the thing measured is the thing running.
+man = json.load(open(os.path.join(repo, 'dist', '.artifact-manifest.json')))
+if man['releaseSha'] != sha:
+    raise SystemExit(f"deployed manifest declares {man['releaseSha']} but the cutover is for {sha}")
 pin = {
  'note': old.get('note',''),
  'deployedAt': subprocess.check_output(['date','--iso-8601=seconds']).decode().strip(),
@@ -202,11 +222,13 @@ pin = {
  'previousRuntime': f'dist.pre-{prev}',
  'guardSha256': h(os.path.join(repo,'releases',f'guard-{gshort}','run-pinned-cos-cycle.sh')),
  'preflightSha256': h(os.path.join(repo,'scripts','cos-cycle-preflight.sh')),
+ 'distTreeHash': man['treeHash'],
+ 'distFileCount': man['fileCount'],
  'ciEvidence': 'FILL IN: workflow, both events, run ids, at this exact sha',
  'rollbackProvenance': old.get('rollbackProvenance'),
 }
 json.dump(pin, open(pinp,'w'), indent=1)
-print('  pin rewritten: guardSha256', pin['guardSha256'][:12], '| preflightSha256', pin['preflightSha256'][:12])
+print('  pin rewritten: guardSha256', pin['guardSha256'][:12], '| preflightSha256', pin['preflightSha256'][:12], '| distTreeHash', pin['distTreeHash'][:12], f"({pin['distFileCount']} files)")
 PY
 fi
 
