@@ -156,6 +156,16 @@ export function initClaimStoreSchema(db: Database.Database): void {
  * rendered amount: re-rendering a claim in another zone must not be capable of
  * making it look like a different claim.
  */
+/**
+ * The separator between identity fields, written as an ESCAPE and never as a
+ * raw byte. NUL is the right separator -- no field can contain it, so no pair
+ * of field values can be joined into the same string two ways. But a literal
+ * NUL in the source makes the whole FILE binary to grep, git diff and every
+ * acceptance gate that reads source text, and this is the one file those gates
+ * most need to be able to read. The byte hashed is identical either way.
+ */
+const FIELD_SEP = '\u0000'
+
 export function claimId(c: StructuredClaim, caseId: string): string {
   const parts = [
     caseId, c.claimType, c.field ?? '',
@@ -170,7 +180,7 @@ export function claimId(c: StructuredClaim, caseId: string): string {
     c.span.segmentKind, String(c.span.start), String(c.span.end),
     c.extractorVersion,
   ]
-  return `clm:${createHash('sha256').update(parts.join(' ')).digest('hex').slice(0, 32)}`
+  return `clm:${createHash('sha256').update(parts.join(FIELD_SEP)).digest('hex').slice(0, 32)}`
 }
 
 export interface RecordClaimsResult {
