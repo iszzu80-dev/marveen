@@ -136,6 +136,7 @@ describe('release artifact proof — the pin declares, the artifact proves', () 
     writeFileSync(join(root, 'releases', 'dashboard-runtime-pin.json'), JSON.stringify({
       note: 'test fixture',
       activationCandidateSha: releaseSha,
+      deployedAt: '2026-09-06T12:00:00+02:00',
       guardSha256: sha256File(join(guardDir, 'run-pinned-cos-cycle.sh')),
       preflightSha256: sha256File(join(root, 'scripts', 'cos-cycle-preflight.sh')),
     }, null, 1))
@@ -227,18 +228,44 @@ describe('release artifact proof — the pin declares, the artifact proves', () 
     expect(out.out).toContain('manifest claims tree')
   })
 
-  it('a pin with no distTreeHash still runs, but REPORTS the skip out loud', () => {
-    // Tolerated so a pin written before this hardening keeps the live cycle
-    // running. It must never look like a pass.
+  /** Drop distTreeHash and set the pin's own deployment date. */
+  function unpinnedArtifact(deployedAt: string | null): void {
     const pinPath = join(root, 'releases', 'dashboard-runtime-pin.json')
     const pin = JSON.parse(readFileSync(pinPath, 'utf-8')) as Record<string, unknown>
     delete pin.distTreeHash
+    if (deployedAt === null) delete pin.deployedAt
+    else pin.deployedAt = deployedAt
     writeFileSync(pinPath, JSON.stringify(pin, null, 1))
+  }
 
+  it('a pin from BEFORE the hardening still runs, but REPORTS the skip out loud', () => {
+    // Tolerated so a pin written before this change keeps the live cycle
+    // running. It must never look like a pass.
+    unpinnedArtifact('2026-09-05T06:33:25+02:00')
     const out = runGate(root)
     expect(out.code).toBe(0)
     expect(out.out).toContain('"distCheck":"SKIPPED_PIN_DECLARES_NO_DIST_TREE_HASH"')
     expect(out.out).not.toContain('"distCheck":"verified"')
+  })
+
+  it('a NEW pin with no distTreeHash is REFUSED -- the exception does not follow us forward', () => {
+    // The owner's ruling, 2026-09-06: "A SKIPPED_PIN_DECLARES_NO_DIST_TREE_HASH
+    // csak backward-compatibility. ÚJ release pin distTreeHash nélkül: REFUSE."
+    // A compatibility window that never closes is the old behaviour wearing a
+    // new label, so the tolerance is bounded by the pin's own deployment date.
+    unpinnedArtifact('2026-09-06T12:00:00+02:00')
+    const out = runGate(root)
+    expect(out.code).toBe(90)
+    expect(out.out).toContain('a new release must say which artifact it deploys')
+  })
+
+  it('a pin that cannot say WHEN it was deployed is refused rather than assumed legacy', () => {
+    // Otherwise the exception is reachable by deleting a second field, and a
+    // rule you can opt out of by omission is not a rule.
+    unpinnedArtifact(null)
+    const out = runGate(root)
+    expect(out.code).toBe(90)
+    expect(out.out).toContain('cannot be shown to apply')
   })
 
   it('with no runtime process, freshness is reported as unchecked rather than as verified', () => {

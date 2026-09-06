@@ -138,11 +138,46 @@ FEEDER_SHA="$(cat "$FEEDER_DIR/.release-sha" 2>/dev/null || true)"
 #    silent -- `distCheck` in the OK line says which of the two happened on every
 #    single run. An absent check that reads like a passing one is the exact
 #    defect this whole change exists to remove.
+#    THE EXCEPTION IS FOR OLD PINS ONLY (Istvan, 2026-09-06): "A
+#    SKIPPED_PIN_DECLARES_NO_DIST_TREE_HASH csak backward-compatibility. ÚJ
+#    release pin distTreeHash nélkül: REFUSE." A window that stays open is not a
+#    migration, it is the old behaviour with a new name -- so the tolerance is
+#    bounded by the pin's OWN `deployedAt`. A release cut at or after the
+#    hardening must declare the artifact it deploys; one cut before it may not
+#    have known to. Nothing here can be satisfied by leaving a field out, because
+#    a pin with neither field is a pin that cannot say when it was deployed, and
+#    that is refused too.
 DIST="$REPO/dist"
 DIST_WANT="$(python3 -c "import json;print(json.load(open('$RUNTIME_PIN')).get('distTreeHash',''))" 2>/dev/null || true)"
 DIST_STATE="SKIPPED_PIN_DECLARES_NO_DIST_TREE_HASH"
 DIST_HAVE=""
 DIST_FILES=""
+if [ -z "$DIST_WANT" ]; then
+  PIN_ERA="$(python3 - "$RUNTIME_PIN" <<'PYEOF' 2>/dev/null || true
+import datetime, json, sys
+CUTOFF = datetime.datetime(2026, 9, 6, tzinfo=datetime.timezone.utc)
+try:
+    pin = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    print("UNREADABLE"); raise SystemExit(0)
+raw = pin.get("deployedAt")
+if not raw:
+    print("UNDATED"); raise SystemExit(0)
+try:
+    when = datetime.datetime.fromisoformat(str(raw))
+except ValueError:
+    print("UNPARSEABLE"); raise SystemExit(0)
+if when.tzinfo is None:
+    when = when.replace(tzinfo=datetime.timezone.utc)
+print("LEGACY" if when < CUTOFF else "POST_HARDENING")
+PYEOF
+)"
+  case "$PIN_ERA" in
+    LEGACY) : ;;
+    POST_HARDENING) fail "this pin was deployed at or after the artifact-proof hardening and declares no distTreeHash; a new release must say which artifact it deploys" ;;
+    *) fail "the pin declares no distTreeHash and no usable deployedAt ($PIN_ERA), so the backward-compatibility exception cannot be shown to apply; refusing rather than assuming it does" ;;
+  esac
+fi
 if [ -n "$DIST_WANT" ]; then
   [ -d "$DIST" ] || fail "the pin declares a distTreeHash but there is no $DIST to measure"
   MEASURED="$(python3 "$REPO/scripts/artifact-manifest.py" "$DIST" 2>/dev/null || true)"

@@ -142,8 +142,13 @@ else
 fi
 say "dist -> $(readlink "$REPO/dist")"
 
+# The pin is written AFTER the swap, and that ordering is deliberate. Between
+# the two the deployed artifact and the pin disagree, so the gate REFUSES -- and
+# a refusal during a cutover is the correct answer. The alternative ordering
+# would open a window in which the pin describes an artifact that is not yet
+# there, and the gate would call that window a pass.
 python3 - "$PIN" "$SHA" "$TREE" "$COUNT" "$PREV" <<'PY'
-import json, sys
+import datetime, json, sys
 pin_path, sha, tree, count, prev = sys.argv[1:6]
 pin = json.load(open(pin_path, encoding='utf-8'))
 pin['previousActivationCandidateSha'] = pin.get('activationCandidateSha')
@@ -152,6 +157,10 @@ pin['activationCandidateSha'] = sha
 pin['gateSha'] = sha
 pin['distTreeHash'] = tree
 pin['distFileCount'] = int(count)
+# Stamped, because the gate's backward-compatibility exception for a pin with no
+# distTreeHash is bounded by this field. A new pin that forgot to date itself
+# would be refused, which is the intended direction.
+pin['deployedAt'] = datetime.datetime.now().astimezone().isoformat()
 json.dump(pin, open(pin_path, 'w', encoding='utf-8'), indent=1, ensure_ascii=False)
 print(f"pin now declares {sha[:9]} / {tree[:16]} / {count} files")
 PY
@@ -169,8 +178,18 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
 done
 
 say "readback"
-if bash "$REPO/scripts/cos-cycle-preflight.sh" --verify-only; then
-  say "CUTOVER VERIFIED"
-else
-  die "the gate refuses after the restart; the runtime is NOT verified as $SHORT"
-fi
+bash "$REPO/scripts/cos-cycle-preflight.sh" --verify-only \
+  || die "the gate refuses after the restart; the runtime is NOT verified as $SHORT"
+
+# The effective zone of the PROCESS, not of the host and not of a config file
+# that may or may not have been read. Everything the CoS does with deadlines is
+# wrong by an hour if this drifts, and it is invisible until a date is wrong.
+NEW_PID="$(pgrep -f "node .*$REPO/dist/index.js" 2>/dev/null | head -1 || true)"
+[ -n "$NEW_PID" ] || die "the runtime is not running after the restart"
+PROC_TZ="$(tr '\0' '\n' < "/proc/$NEW_PID/environ" 2>/dev/null | sed -n 's/^TZ=//p' | head -1)"
+[ "$PROC_TZ" = "Europe/Budapest" ] \
+  || die "the runtime's effective TZ is '${PROC_TZ:-<unset>}', not Europe/Budapest; an implicit zone is a wrong date waiting to happen"
+say "effective TZ Europe/Budapest (pid $NEW_PID, read from the process environment)"
+
+say "CUTOVER VERIFIED"
+say "rollback: point $REPO/dist back at $PREV and restore the pin previous fields; the old artifact is kept, never rebuilt"
