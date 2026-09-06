@@ -50,11 +50,15 @@ function zipEntries(buf: Buffer): ZipEntry[] {
     const lExtraLen = buf.readUInt16LE(localOff + 28)
     const start = localOff + 30 + lNameLen + lExtraLen
     const raw = buf.subarray(start, start + compSize)
+    // ONLY stored (0) and deflate (8). Codex review P2-OFFICE-002: treating
+    // every other method as raw deflate means an unsupported compression whose
+    // payload happens to inflate gets read as document text. A member we cannot
+    // decode is skipped explicitly; the others still carry the text.
+    if (method !== 0 && method !== 8) continue
     try {
       out.push({ name, data: method === 0 ? raw : inflateRawSync(raw) })
     } catch {
-      // A member we cannot inflate is skipped rather than faked. The others
-      // still carry the document's text.
+      // Damaged or truncated. Skipped rather than faked.
     }
   }
   return out

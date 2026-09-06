@@ -7,17 +7,26 @@ import { officeText } from '../cos/office-text.js'
 // are synthetic, as with the PDFs -- the real ones are Istvan's contracts and
 // quotes, and a test corpus is a place secrets go to live.
 
-/** A minimal ZIP with a central directory, which is what the reader walks. */
-function zip(files: Array<[string, string]>): Buffer {
+/** A minimal ZIP with a central directory, which is what the reader walks.
+ *  `method` and `corrupt` exist so the failure paths can be exercised for real
+ *  -- Codex review P2-OFFICE-003 caught a "survives a broken member" case whose
+ *  fixture had no broken member in it. */
+function zip(files: Array<[string, string] | [string, string, { method?: number; corrupt?: boolean }]>): Buffer {
   const locals: Buffer[] = []
   const central: Buffer[] = []
   let offset = 0
-  for (const [name, content] of files) {
+  for (const entry of files) {
+    const [name, content] = entry
+    const opts = (entry[2] ?? {}) as { method?: number; corrupt?: boolean }
+    const method = opts.method ?? 8
+    const deflated = deflateRawSync(Buffer.from(content, 'utf8'))
+    // Garbage of the SAME length, so the header stays truthful about sizes and
+    // only the payload is undecodable -- which is what a damaged member is.
+    const data = opts.corrupt ? Buffer.alloc(deflated.length, 0xff) : deflated
     const nameBuf = Buffer.from(name, 'utf8')
-    const data = deflateRawSync(Buffer.from(content, 'utf8'))
     const local = Buffer.alloc(30)
     local.writeUInt32LE(0x04034b50, 0)
-    local.writeUInt16LE(8, 8)               // deflate
+    local.writeUInt16LE(method, 8)
     local.writeUInt32LE(data.length, 18)
     local.writeUInt32LE(Buffer.byteLength(content), 22)
     local.writeUInt16LE(nameBuf.length, 26)
@@ -25,7 +34,7 @@ function zip(files: Array<[string, string]>): Buffer {
 
     const cd = Buffer.alloc(46)
     cd.writeUInt32LE(0x02014b50, 0)
-    cd.writeUInt16LE(8, 10)
+    cd.writeUInt16LE(method, 10)
     cd.writeUInt32LE(data.length, 20)
     cd.writeUInt32LE(Buffer.byteLength(content), 24)
     cd.writeUInt16LE(nameBuf.length, 28)
@@ -120,11 +129,27 @@ describe('officeText', () => {
     expect(r.entries).toBe(1)
   })
 
-  it('survives a member that does not inflate and still reads the others', () => {
-    const good = zip([
+  it('survives a member that genuinely does NOT inflate, and still reads the others', () => {
+    // The fixture now corrupts the payload for real. The earlier version
+    // deflated both members correctly and therefore proved nothing -- a test
+    // whose failure path never runs is a test that passes for the wrong reason.
+    const bytes = zip([
+      ['word/broken.xml', 'this payload gets replaced by garbage', { corrupt: true }],
       ['word/document.xml', '<w:p><w:t>still readable</w:t></w:p>'],
-      ['word/broken.xml', 'x'],
     ])
-    expect(officeText(good).text).toContain('still readable')
+    const r = officeText(bytes)
+    expect(r.entries).toBe(1)   // the broken one is skipped, not faked
+    expect(r.text).toContain('still readable')
+  })
+
+  it('P2-OFFICE-002: an unsupported compression method is skipped, not guessed as deflate', () => {
+    // Method 9 (deflate64) is not deflate. Feeding its payload to inflateRaw
+    // and keeping whatever comes out is how an unreadable member becomes
+    // "document text".
+    const bytes = zip([['word/document.xml', '<w:p><w:t>should not appear</w:t></w:p>', { method: 9 }]])
+    const r = officeText(bytes)
+    expect(r.entries).toBe(0)
+    expect(r.kind).toBe('UNSUPPORTED')
+    expect(r.text).toBe('')
   })
 })

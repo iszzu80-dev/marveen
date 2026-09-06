@@ -55,11 +55,20 @@ for (const r of rows) {
   const mime = String(r.mime_type ?? '')
   if (!TEXTISH(mime) && !IS_PDF(mime) && !IS_OFFICE(mime)) { tally.SKIPPED_NOT_TEXT = (tally.SKIPPED_NOT_TEXT ?? 0) + 1; continue }
   let text: string
+  // A format we cannot read is a fact about US, and it has to survive into the
+  // stored state. Codex review P2-OFFICE-001: dropping officeText().kind meant
+  // an unsupported archive became empty text, classified NOT_ATTEMPTED, and
+  // rewritten with fresh timestamps on EVERY run -- an unbuilt reader wearing
+  // the state of a document nobody has got to yet.
+  let unsupported = false
   try {
     const bytes = readDocumentBytes(db, r.document_id)
-    text = IS_PDF(mime) ? pdfText(bytes).text
-      : IS_OFFICE(mime) ? officeText(bytes).text
-      : bytes.toString('utf8')
+    if (IS_PDF(mime)) text = pdfText(bytes).text
+    else if (IS_OFFICE(mime)) {
+      const office = officeText(bytes)
+      unsupported = office.kind === 'UNSUPPORTED'
+      text = office.text
+    } else text = bytes.toString('utf8')
   } catch (e) {
     tally.EXTRACTION_FAILED = (tally.EXTRACTION_FAILED ?? 0) + 1
     if (APPLY) {
@@ -75,6 +84,17 @@ for (const r of rows) {
     if (APPLY) {
       db.prepare(`UPDATE cos_documents SET extraction_state='EXTRACTION_LOW_QUALITY', extraction_note='utf8 decode produced replacement characters', extraction_attempted_at=? WHERE document_id=?`)
         .run(now, r.document_id)
+    }
+    continue
+  }
+  if (unsupported) {
+    tally.EXTRACTION_UNSUPPORTED = (tally.EXTRACTION_UNSUPPORTED ?? 0) + 1
+    if (APPLY) {
+      db.prepare(
+        `UPDATE cos_documents SET extraction_state='EXTRACTION_UNSUPPORTED', extraction_note=?,
+                extraction_attempted_at=?, updated_at=?
+          WHERE document_id = ? AND extraction_state <> 'EXTRACTION_UNSUPPORTED'`,
+      ).run('no reader for this container (not docx, not xlsx)', now, now, r.document_id)
     }
     continue
   }
