@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
+import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import {
   mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync,
   symlinkSync, linkSync, appendFileSync, utimesSync,
@@ -49,16 +49,15 @@ function treeHash(dir: string): { treeHash: string; fileCount: number } {
 interface GateResult { code: number; out: string }
 
 function runGate(root: string): GateResult {
-  try {
-    const out = execFileSync('bash', [join(root, 'scripts', 'cos-cycle-preflight.sh'), '--verify-only'], {
-      env: { ...process.env, MARVEEN_REPO_ROOT: root },
-      encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    return { code: 0, out }
-  } catch (err) {
-    const e = err as { status?: number; stderr?: string; stdout?: string }
-    return { code: e.status ?? -1, out: String(e.stderr ?? '') + String(e.stdout ?? '') }
-  }
+  // BOTH streams, on BOTH paths. The gate writes its verdict line to stderr,
+  // including when it passes, so reading only stdout on success yields an empty
+  // string -- and an assertion against an empty string fails in a way that looks
+  // like the check is missing rather than unread.
+  const r = spawnSync('bash', [join(root, 'scripts', 'cos-cycle-preflight.sh'), '--verify-only'], {
+    env: { ...process.env, MARVEEN_REPO_ROOT: root },
+    encoding: 'utf-8',
+  })
+  return { code: r.status ?? -1, out: `${r.stdout ?? ''}${r.stderr ?? ''}` }
 }
 
 function git(root: string, ...args: string[]): string {
