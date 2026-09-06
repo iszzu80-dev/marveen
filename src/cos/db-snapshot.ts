@@ -49,14 +49,30 @@ function tableDigest(db: Database.Database, table: string): { rows: number; dige
   let rows = 0
   for (const row of stmt.iterate() as Iterable<Record<string, unknown>>) {
     rows += 1
-    // Typed separators so 1 and '1', and null versus empty string, cannot
-    // collide into the same digest.
-    for (const v of Object.values(row)) {
-      h.update(v === null ? '\u0000N' : typeof v === 'number' ? `\u0000#${v}` : Buffer.isBuffer(v) ? Buffer.concat([Buffer.from('\u0000B'), v]) : `\u0000S${String(v)}`)
-    }
-    h.update('\u0000R')
+    for (const v of Object.values(row)) h.update(frame(v))
+    h.update(Buffer.from('R'))
   }
   return { rows, digest: h.digest('hex') }
+}
+
+/**
+ * One value, framed so no two different values can serialise the same way.
+ *
+ * Codex review DBSNAP-002: separator BYTES are not enough. A prefix like
+ * `\0S` can occur inside a string, so two different rows could line up into an
+ * identical byte stream and collide -- defeating the content equality this
+ * digest exists to provide, quietly, which is the worst way for it to fail.
+ *
+ * Each value therefore carries its TYPE and its BYTE LENGTH before its bytes.
+ * A length-prefixed encoding cannot be re-framed by its own contents.
+ */
+function frame(v: unknown): Buffer {
+  if (v === null) return Buffer.from('N:0:')
+  const [tag, payload] = typeof v === 'number' ? ['#', Buffer.from(String(v), 'utf8')]
+    : typeof v === 'bigint' ? ['I', Buffer.from(v.toString(), 'utf8')]
+    : Buffer.isBuffer(v) ? ['B', v]
+    : ['S', Buffer.from(String(v), 'utf8')] as [string, Buffer]
+  return Buffer.concat([Buffer.from(`${tag}:${(payload as Buffer).length}:`, 'utf8'), payload as Buffer])
 }
 
 export interface SnapshotEvidence {
@@ -121,6 +137,43 @@ export function verifiedSnapshot(
   }
   src.close()
 
+  return proveSnapshot(outPath, sourceSide, tables, problems)
+}
+
+/**
+ * Compare an EXISTING snapshot against a source, without taking a new one.
+ *
+ * Split out for two reasons. An old backup can be re-verified before anyone
+ * relies on it -- the question "is this file still a restore point" is worth
+ * being able to ask. And it makes the FAILURE path reachable in a test: Codex
+ * review DBSNAP-003 pointed out that the previous case only observed two
+ * digests differing and never saw `verified` come back false, which is not the
+ * same claim.
+ */
+export function verifySnapshotAgainst(
+  sourcePath: string, snapshotPath: string, tables: readonly string[],
+): SnapshotEvidence {
+  const problems: string[] = []
+  if (tables.length === 0) problems.push('no tables named to verify: a snapshot checked against nothing proves nothing')
+  const src = new Database(sourcePath, { readonly: true })
+  const sourceSide = new Map<string, { rows: number; digest: string }>()
+  for (const t of tables) {
+    try {
+      sourceSide.set(t, tableDigest(src, t))
+    } catch (e) {
+      problems.push(`source table ${t} unreadable: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }
+  src.close()
+  return proveSnapshot(snapshotPath, sourceSide, tables, problems)
+}
+
+function proveSnapshot(
+  outPath: string,
+  sourceSide: Map<string, { rows: number; digest: string }>,
+  tables: readonly string[],
+  problems: string[],
+): SnapshotEvidence {
   let integrity = 'unchecked'
   let objects = 0
   const rows: SnapshotEvidence['tables'] = []

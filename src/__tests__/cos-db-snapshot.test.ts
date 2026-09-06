@@ -3,7 +3,7 @@ import Database from 'better-sqlite3'
 import { mkdtempSync, rmSync, existsSync, writeFileSync, copyFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { verifiedSnapshot, isPlainCopyOfWalDatabase } from '../cos/db-snapshot.js'
+import { verifiedSnapshot, verifySnapshotAgainst, isPlainCopyOfWalDatabase } from '../cos/db-snapshot.js'
 
 // The lesson these cases hold was paid for on 2026-09-07: a `cp` of the live
 // WAL-mode store was treated as a backup before a mutation, and it was the last
@@ -75,28 +75,50 @@ describe('verified database snapshots', () => {
     expect(ev.bytes).toBeGreaterThan(0)
   })
 
-  it('DBSNAP-001: a snapshot with the SAME row count but different values fails', () => {
-    // Codex review DBSNAP-001. Comparing COUNT(*) is not row-for-row
-    // verification: different values, or different rows adding up to the same
-    // total, would pass and be stamped verified -- the exact failure this
-    // module exists to prevent, reintroduced one level up.
+  it('DBSNAP-001/003: a tampered snapshot FAILS verification, same row count and all', () => {
+    // The earlier version of this case only observed that two digests differed
+    // and never saw `verified` come back false -- not the same claim, as the
+    // review pointed out. This one re-verifies the tampered file against the
+    // untouched source and reads the verdict.
     const out = join(dir, 'tampered.db')
-    const ev = verifiedSnapshot(src, out, ['docs'])
-    expect(ev.verified).toBe(true)
+    expect(verifiedSnapshot(src, out, ['docs']).verified).toBe(true)
 
-    // Same number of rows, one value changed.
     const t = new Database(out)
-    t.prepare("UPDATE docs SET body='after' WHERE body='before'").run()
-    const rowsNow = (t.prepare('SELECT COUNT(*) AS n FROM docs').get() as { n: number }).n
+    t.prepare("UPDATE docs SET body='after' WHERE body='before'").run()  // same count
     t.close()
-    expect(rowsNow).toBe(ev.tables[0].snapshot)
 
-    // Re-verifying the SOURCE against that tampered file is not what the API
-    // does, so prove the property directly: the digest changed even though the
-    // count did not.
-    const again = verifiedSnapshot(out, join(dir, 'of-tampered.db'), ['docs'])
-    expect(again.tables[0].source).toBe(ev.tables[0].source)
-    expect(again.tables[0].sourceDigest).not.toBe(ev.tables[0].sourceDigest)
+    const again = verifySnapshotAgainst(src, out, ['docs'])
+    expect(again.verified).toBe(false)
+    expect(again.tables[0].source).toBe(again.tables[0].snapshot)   // counts agree
+    expect(again.problems.join(' ')).toContain('content digest differs')
+  })
+
+  it('re-verifying an UNTAMPERED snapshot still passes', () => {
+    // The mirror, so the case above cannot pass by the verifier simply always
+    // refusing on the re-verify path.
+    const out = join(dir, 'intact.db')
+    expect(verifiedSnapshot(src, out, ['docs']).verified).toBe(true)
+    expect(verifySnapshotAgainst(src, out, ['docs']).verified).toBe(true)
+  })
+
+  it('DBSNAP-002: framing is unambiguous, so contents cannot collide', () => {
+    // Separator bytes are not enough: a prefix can occur INSIDE a value, and
+    // two different rows could then line up into the same byte stream. Each
+    // value carries its type and byte length, which its own contents cannot
+    // re-frame.
+    const db = new Database(src)
+    db.exec('CREATE TABLE frames (a, b)')
+    db.prepare('INSERT INTO frames (a,b) VALUES (?,?)').run('x', 'yz')
+    db.close()
+    const first = verifiedSnapshot(src, join(dir, 'f1.db'), ['frames'])
+
+    const db2 = new Database(src)
+    db2.prepare("UPDATE frames SET a='xy', b='z'").run()   // same concatenation
+    db2.close()
+    const second = verifiedSnapshot(src, join(dir, 'f2.db'), ['frames'])
+
+    expect(first.tables[0].source).toBe(second.tables[0].source)
+    expect(first.tables[0].sourceDigest).not.toBe(second.tables[0].sourceDigest)
   })
 
   it('distinguishes NULL from an empty string, and 1 from "1"', () => {
