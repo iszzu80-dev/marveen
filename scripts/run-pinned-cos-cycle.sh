@@ -114,8 +114,94 @@ FEEDER_SHA="$(cat "$FEEDER_DIR/.release-sha" 2>/dev/null || true)"
 [ -n "$FEEDER_SHA" ] || fail "the pinned feeder release carries no .release-sha; it cannot say WHICH release it is, and identical bytes are not identical provenance"
 [ "$FEEDER_SHA" = "$RELEASE_SHA" ] || fail "pinned feeder declares release $FEEDER_SHA but the cycle release is $RELEASE_SHA"
 
-printf '{"pinnedCycle":"OK","releaseSha":"%s","runtimeSha":"%s","feederSha256":"%s","feederRelease":"%s","preflightCheck":"%s","storeInode":"%s"}\n' \
-  "$RELEASE_SHA" "$RUNTIME_SHA" "${FEEDER_HAVE:0:16}" "${FEEDER_SHA:0:9}" "$PREFLIGHT_STATE" "$LIVE_INO" >&2
+# 5. THE DEPLOYED ARTIFACT, MEASURED. "PIN DECLARES, ARTIFACT PROVES."
+#
+#    Checks 1-4 compare declarations: the pin says a sha, the release directory
+#    says a sha, and they must agree. Not one of them ever looked at `dist/` --
+#    the code the dashboard actually loads. On 2026-09-06 that gap was walked
+#    straight through: a plain `npx tsc` in the live checkout replaced dist with
+#    a build of a different commit, the pin was untouched, and twenty minutes
+#    later this gate returned exit 0 over a runtime that was no longer the pinned
+#    one. The running process was still fine only by luck -- it had loaded the
+#    old code into memory hours earlier -- so a restart, a crash, or a systemd
+#    reload would have deployed unapproved code silently, with the gate green.
+#
+#    A declaration cannot be wrong about itself. Only a measurement can.
+#
+#    The identity is the sha256 of the sorted `<file-sha256>  <relative-path>`
+#    listing of the whole tree (scripts/artifact-manifest.py). Content and layout
+#    both; mtimes and permissions deliberately not, so that two builds of one
+#    source are one identity.
+#
+#    A pin that predates this hardening carries no `distTreeHash`. That is
+#    tolerated so the live cycle survives the merge, and it is REPORTED, never
+#    silent -- `distCheck` in the OK line says which of the two happened on every
+#    single run. An absent check that reads like a passing one is the exact
+#    defect this whole change exists to remove.
+DIST="$REPO/dist"
+DIST_WANT="$(python3 -c "import json;print(json.load(open('$RUNTIME_PIN')).get('distTreeHash',''))" 2>/dev/null || true)"
+DIST_STATE="SKIPPED_PIN_DECLARES_NO_DIST_TREE_HASH"
+DIST_HAVE=""
+DIST_FILES=""
+if [ -n "$DIST_WANT" ]; then
+  [ -d "$DIST" ] || fail "the pin declares a distTreeHash but there is no $DIST to measure"
+  MEASURED="$(python3 "$REPO/scripts/artifact-manifest.py" "$DIST" 2>/dev/null || true)"
+  DIST_HAVE="$(printf '%s' "$MEASURED" | python3 -c "import json,sys;print(json.load(sys.stdin)['treeHash'])" 2>/dev/null || true)"
+  DIST_FILES="$(printf '%s' "$MEASURED" | python3 -c "import json,sys;print(json.load(sys.stdin)['fileCount'])" 2>/dev/null || true)"
+  [ -n "$DIST_HAVE" ] || fail "could not measure the deployed artifact at $DIST; an unmeasurable runtime is not a verified one"
+  [ "$DIST_WANT" = "$DIST_HAVE" ] || fail "DEPLOYED ARTIFACT IS NOT THE PINNED ONE: dist tree hash ${DIST_HAVE:0:16} but the pin declares ${DIST_WANT:0:16}. The pin was not changed; the build was. Rebuild the pinned candidate or repin, but do not run."
+
+  # 5b. The artifact's own claim about itself, when it makes one. It is checked
+  #     against the RELEASE sha and against the measurement just taken -- never
+  #     trusted on its own, since whatever can rewrite the tree can rewrite this
+  #     file too. Its value is that it makes a stray directory self-describing.
+  MANIFEST="$DIST/.artifact-manifest.json"
+  if [ -f "$MANIFEST" ]; then
+    M_SHA="$(python3 -c "import json;print(json.load(open('$MANIFEST')).get('releaseSha',''))" 2>/dev/null || true)"
+    M_TREE="$(python3 -c "import json;print(json.load(open('$MANIFEST')).get('treeHash',''))" 2>/dev/null || true)"
+    [ "$M_SHA" = "$RELEASE_SHA" ] || fail "the deployed artifact declares release $M_SHA but the release is $RELEASE_SHA"
+    [ "$M_TREE" = "$DIST_HAVE" ] || fail "the deployed artifact's manifest claims tree ${M_TREE:0:16} but it measures ${DIST_HAVE:0:16}"
+    DIST_STATE="verified+self-declared"
+  else
+    DIST_STATE="verified"
+  fi
+fi
+
+# 6. FRESHNESS: is the running process actually running THIS artifact?
+#
+#    A matching hash is not enough on its own. Node reads its modules once, at
+#    boot, and holds them in memory; a dist replaced afterwards leaves a process
+#    running code that no longer exists on disk. On 2026-09-06 the reverse held
+#    -- disk moved, memory did not -- and both directions are the same defect:
+#    what runs and what is measured are two different things.
+#
+#    So: no file that is part of the identity may be newer than the moment the
+#    runtime process started. The manifest is excluded because the cutover writes
+#    it after the build, and its content is already cross-checked above.
+#
+#    If no runtime process is found, that is REPORTED as its own state and not
+#    counted as a pass. The cycle itself does not need the dashboard to be up, so
+#    this does not refuse -- but "we could not check" must never render as "we
+#    checked and it was fine".
+RUNTIME_PID="$(pgrep -f "node .*${REPO}/dist/index.js" 2>/dev/null | head -1 || true)"
+if [ -z "$RUNTIME_PID" ]; then
+  FRESH_STATE="NO_RUNTIME_PROCESS_NOT_CHECKED"
+elif [ -z "$DIST_HAVE" ]; then
+  FRESH_STATE="SKIPPED_NO_DIST_MEASUREMENT"
+else
+  PROC_START="$(stat -c '%Y' "/proc/$RUNTIME_PID" 2>/dev/null || true)"
+  NEWEST="$(find "$DIST" -type f ! -name '.artifact-manifest.json' -printf '%T@\n' 2>/dev/null | sort -rn | head -1 | cut -d. -f1)"
+  if [ -z "$PROC_START" ] || [ -z "$NEWEST" ]; then
+    FRESH_STATE="UNMEASURABLE_NOT_CHECKED"
+  elif [ "$NEWEST" -gt "$PROC_START" ]; then
+    fail "the deployed artifact was modified AFTER the runtime started (newest dist file $NEWEST > process $RUNTIME_PID start $PROC_START); the process is running code that is no longer on disk"
+  else
+    FRESH_STATE="verified"
+  fi
+fi
+
+printf '{"pinnedCycle":"OK","releaseSha":"%s","runtimeSha":"%s","feederSha256":"%s","feederRelease":"%s","preflightCheck":"%s","storeInode":"%s","distCheck":"%s","distTreeHash":"%s","distFileCount":"%s","runtimeFreshness":"%s"}\n' \
+  "$RELEASE_SHA" "$RUNTIME_SHA" "${FEEDER_HAVE:0:16}" "${FEEDER_SHA:0:9}" "$PREFLIGHT_STATE" "$LIVE_INO" "$DIST_STATE" "${DIST_HAVE:0:16}" "$DIST_FILES" "$FRESH_STATE" >&2
 
 # --verify-only exists so the checks can be exercised (and their refusals proven)
 # without paying for a full cycle. A guard nobody can cheaply drive into the red
