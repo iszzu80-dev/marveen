@@ -10,6 +10,7 @@ import type { ReviewAttemptMetadata, ReviewRequest, ReviewResult } from './types
 export interface ProcessOutcome { exitCode: number | null; timedOut: boolean; stdout: string; stderr: string }
 export type ProcessLauncher = (command: string, args: string[], opts: { cwd: string; timeoutMs: number }) => Promise<ProcessOutcome>
 export type CheckoutVerifier = (repoRoot: string, candidateSha: string) => void
+export type AttemptSetup = (paths: ReturnType<ReviewJobStore['attemptPaths']>) => void
 
 export const verifyExactCandidateCheckout: CheckoutVerifier = (repoRoot, candidateSha) => {
   const env = { ...process.env, GIT_OPTIONAL_LOCKS: '0' }
@@ -44,7 +45,7 @@ export function codexExecArgs(repoRoot: string, jobDir: string): string[] {
   return ['exec', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only', '--config', 'approval_policy="never"', '--color', 'never', '--output-schema', join(jobDir, 'result.schema.json'), '--output-last-message', join(jobDir, 'result.json'), '-C', repoRoot, '-']
 }
 
-export async function runReview(input: { request: ReviewRequest; repoRoot: string; store: ReviewJobStore; timeoutMs?: number; launcher?: ProcessLauncher; verifyCheckout?: CheckoutVerifier }): Promise<{ result?: ReviewResult; reused: boolean; metadata: ReviewAttemptMetadata }> {
+export async function runReview(input: { request: ReviewRequest; repoRoot: string; store: ReviewJobStore; timeoutMs?: number; launcher?: ProcessLauncher; verifyCheckout?: CheckoutVerifier; setupAttempt?: AttemptSetup }): Promise<{ result?: ReviewResult; reused: boolean; metadata: ReviewAttemptMetadata }> {
   const prepared = input.store.prepare(input.request)
   const existing = input.store.readReusableResult(prepared.request)
   if (existing) return { result: existing.result, reused: true, metadata: { schema_version: 1, job_id: existing.result.job_id, work_item_id: existing.result.work_item_id, candidate_sha: existing.result.candidate_sha, attempt: existing.completion.attempt, started_at: existing.completion.completed_at, finished_at: existing.completion.completed_at, process_exit_code: 0, timed_out: false, status: 'COMPLETED_VALID', result_path: existing.completion.result_path, result_sha256: existing.completion.result_sha256 } }
@@ -52,13 +53,15 @@ export async function runReview(input: { request: ReviewRequest; repoRoot: strin
   const lease = input.store.acquireLease(prepared.request, (input.timeoutMs ?? 600_000) + 30_000)
   const p = input.store.paths(prepared.request.job_id)
   const attemptPaths = input.store.attemptPaths(prepared.request.job_id, lease.attempt)
-  mkdirSync(attemptPaths.dir, { recursive: true })
-  writeFileSync(attemptPaths.schema, JSON.stringify(REVIEW_RESULT_JSON_SCHEMA, null, 2) + '\n', { mode: 0o600 })
   const started = new Date().toISOString()
   const relativeResult = `attempts/${lease.attempt}/result.json`
   const metadata: ReviewAttemptMetadata = { schema_version: 1, job_id: prepared.request.job_id, work_item_id: prepared.request.work_item_id, candidate_sha: prepared.request.candidate_sha, attempt: lease.attempt, started_at: started, timed_out: false, status: 'STARTED', result_path: relativeResult }
-  input.store.writeAttempt(metadata)
   try {
+    try {
+      if (input.setupAttempt) input.setupAttempt(attemptPaths)
+      else { mkdirSync(attemptPaths.dir, { recursive: true }); writeFileSync(attemptPaths.schema, JSON.stringify(REVIEW_RESULT_JSON_SCHEMA, null, 2) + '\n', { mode: 0o600 }) }
+      input.store.writeAttempt(metadata)
+    } catch (err) { metadata.status = 'LAUNCH_ERROR'; metadata.failure = `attempt setup failed: ${err instanceof Error ? err.message : String(err)}`; throw err }
     let outcome: ProcessOutcome
     try { outcome = await (input.launcher ?? launchProcess)('codex', codexExecArgs(input.repoRoot, attemptPaths.dir), { cwd: p.dir, timeoutMs: input.timeoutMs ?? 600_000 }) }
     catch (err) { metadata.status = 'LAUNCH_ERROR'; metadata.failure = err instanceof Error ? err.message : String(err); throw err }
