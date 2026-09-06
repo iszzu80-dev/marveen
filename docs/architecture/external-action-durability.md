@@ -1,6 +1,6 @@
 # External action durability
 
-**Version 1.0 — 2026-09-06. Status: DESIGN + SURVEY. Nothing in here is deployed.**
+**Version 1.1 — 2026-09-06. Status: DESIGN + SURVEY + LOCAL IMPLEMENTATION. Nothing in here is deployed.**
 
 Owner spec: Istvan, 2026-09-06 (Telegram 10105/10107). This document is the
 written form of that spec plus the producer survey he asked for. It is versioned
@@ -247,12 +247,44 @@ believed: on current `main`, it fails by construction.
 
 ---
 
-## 10. What this document does not yet have
+## 10. Implementation status
+
+**v1.1, same evening.** Local implementation landed on `feat/broker-action-ledger`;
+NOT deployed, and it joins the A-H candidate rather than shipping alone.
+
+- `src/identity/action-ledger.ts` -- the table, the states, `beginAttempt`
+  (committed before the call), `settle`, `staleInFlight`, `classifyRecovery`,
+  `recoverStale`.
+- `brokerExternalAction` writes the IN_FLIGHT row before `await execute()` and
+  settles it after, for MUTATING actions only. Reads are not ledgered: a call
+  that cannot change anything has nothing to recover.
+- 16 acceptance cases in `src/__tests__/broker-action-durability.test.ts`.
+  Seven of them go RED against the previous broker, case 7 included.
+
+### 10.1 The mistake worth recording
+
+The first version derived the operation id from connector + operation + target +
+run when the caller declared no fingerprint. Two different messages to the same
+chat in the same run then collided: the second looked like an already-SUCCEEDED
+repeat and was refused. The broker would have quietly stopped sending real
+traffic -- a worse failure than the one this ledger exists to fix.
+
+So an UNDECLARED request now gets a unique id per call. It still gets the
+durable pre-attempt record, because attributability is what every caller needs;
+it gets no re-entry protection, because nobody has told us what would make two
+calls the same call. Declaring `requestFingerprint` is what buys the protection,
+and there is a test for each direction.
+
+## 11. What this still does not have
 
 Stated so nobody reads the absence as completeness:
 
-- No implementation. No schema migration written. No tests written.
-- The `request_fingerprint` construction is unspecified beyond "no secrets"; it
-  needs a concrete rule per connector before it is implemented.
+- No call site declares its idempotency class yet, so every mutating action is
+  currently ledgered as C_NO_READBACK -- the conservative default. Declaring the
+  real classes at the six brokered producers is the next step.
+- No restart hook calls `recoverStale` yet. The function exists and is tested;
+  nothing runs it on boot. A verifier with no scheduler is a document.
+- The `request_fingerprint` construction is per-caller and unspecified beyond
+  "no secrets"; each connector needs its own rule as it declares one.
 - Section 2.3's two un-brokered producers need an owner decision: bring them
   under the broker, or record why they stay outside it.
