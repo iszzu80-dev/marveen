@@ -6,5 +6,9 @@
   "EXTRACTION_LOW_QUALITY": 3,
   "NOT_ATTEMPTED": 1
  },
+ "contentSelection": {
+  "PAGE_CONTENTS": 36,
+  "TYPE_BLACKLIST": 12
+ },
  "note": "filenames deliberately omitted -- personal documents"
 }

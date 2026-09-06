@@ -1,10 +1,10 @@
 
  RUN  v2.1.9 /home/iszzu/marveen-wt/devctl
 
- ✓ src/__tests__/cos-pdf-text.test.ts (16 tests) 28ms
+ ✓ src/__tests__/cos-pdf-text.test.ts (20 tests) 30ms
 
  Test Files  1 passed (1)
-      Tests  16 passed (16)
-   Start at  23:36:06
-   Duration  545ms (transform 105ms, setup 68ms, collect 52ms, tests 28ms, environment 0ms, prepare 94ms)
+      Tests  20 passed (20)
+   Start at  23:39:51
+   Duration  530ms (transform 111ms, setup 72ms, collect 54ms, tests 30ms, environment 0ms, prepare 92ms)
 

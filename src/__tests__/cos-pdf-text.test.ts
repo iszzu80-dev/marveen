@@ -17,6 +17,15 @@ function pdf(...streamBodies: string[]): Buffer {
   return pdfWithDicts(...streamBodies.map((b) => ['<< /Length 0 >>', b] as [string, string]))
 }
 
+/** One numbered object carrying a deflated stream. */
+function pdfObj(num: number, dict: string, body: string): Buffer {
+  return Buffer.concat([
+    Buffer.from(`${num} 0 obj\n${dict}\nstream\n`, 'latin1'),
+    deflateSync(Buffer.from(body, 'latin1')),
+    Buffer.from('\nendstream\nendobj\n', 'latin1'),
+  ])
+}
+
 /** The same, with each stream's object dictionary spelled out. */
 function pdfWithDicts(...objects: Array<[string, string]>): Buffer {
   const parts: Buffer[] = [Buffer.from('%PDF-1.4\n', 'latin1')]
@@ -70,7 +79,10 @@ describe('pdfText', () => {
     // `(...)` and the remap only ran on hex, so the output stayed `2 # ) '`.
     // A non-empty CMap plus garbled text means the map is applied in the wrong
     // place, not that it is missing.
-    const cmap = 'beginbfchar <0032> <0050> <0023> <0041> <0029> <0047> <0027> <0045> endbfchar'
+    // TWO-digit keys: a simple (non-CID) font addresses glyphs with one byte,
+    // and the CMap says so through its key width. Four-digit keys would declare
+    // a two-byte font, and the literal below carries single bytes.
+    const cmap = 'beginbfchar <32> <0050> <23> <0041> <29> <0047> <27> <0045> endbfchar'
     // The `)` is escaped, as a real PDF must escape it: an unescaped one ENDS
     // the literal, which is exactly what the parser did when this fixture was
     // written wrong -- and being strict there is correct behaviour, not a bug.
@@ -164,6 +176,50 @@ describe('pdfText', () => {
     expect(r.cmapEntries).toBe(0)
     expect(r.codeBytes).toBe(1)
     expect(r.text).toContain('plain ascii')
+  })
+
+  it('PDF-CMAP-002: a two-byte code whose VALUE is small still decodes at two bytes', () => {
+    // `<0001> <0041>` is an ordinary two-byte mapping. Testing the numeric
+    // value instead of the key's hex length left it decoding at one byte and
+    // producing nothing. Four hex digits IS the declaration.
+    const cmap = 'beginbfchar <0001> <0041> <0002> <0042> endbfchar'
+    const r = pdfText(pdf(cmap, 'BT (\\000\\001\\000\\002) Tj ET'))
+    expect(r.codeBytes).toBe(2)
+    expect(r.text).toContain('AB')
+  })
+
+  it('PDF-STREAM-003: only the streams a /Type /Page NAMES are read', () => {
+    // Positive identification, not a blacklist. An untyped stream that no page
+    // references is not page content, and "not on my list" was never the same
+    // claim as "this is page content".
+    const bytes = Buffer.concat([
+      Buffer.from('%PDF-1.4\n4 0 obj\n<< /Type /Page /Contents 5 0 R >>\nendobj\n', 'latin1'),
+      pdfObj(5, '<< /Length 0 >>', 'BT (real page text) Tj ET'),
+      pdfObj(6, '<< /Length 0 >>', 'BT (orphan stream nobody references) Tj ET'),
+    ])
+    const r = pdfText(bytes)
+    expect(r.contentSelection).toBe('PAGE_CONTENTS')
+    expect(r.text).toContain('real page text')
+    expect(r.text).not.toContain('orphan')
+  })
+
+  it('...and a /Contents ARRAY names several streams, all of which are read', () => {
+    const bytes = Buffer.concat([
+      Buffer.from('%PDF-1.4\n4 0 obj\n<< /Type /Page /Contents [5 0 R 6 0 R] >>\nendobj\n', 'latin1'),
+      pdfObj(5, '<< /Length 0 >>', 'BT (first half) Tj ET'),
+      pdfObj(6, '<< /Length 0 >>', 'BT (second half) Tj ET'),
+    ])
+    const r = pdfText(bytes)
+    expect(r.text).toContain('first half')
+    expect(r.text).toContain('second half')
+  })
+
+  it('says out loud when it had to fall back to the weaker rule', () => {
+    // No page object could be resolved, so the type blacklist applied. The two
+    // paths carry different guarantees and the result must not blur them.
+    const r = pdfText(pdf('BT (no page object anywhere) Tj ET'))
+    expect(r.contentSelection).toBe('TYPE_BLACKLIST')
+    expect(r.text).toContain('no page object anywhere')
   })
 
   it('is not a PDF at all: no streams, no text, no throw', () => {

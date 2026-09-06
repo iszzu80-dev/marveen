@@ -23,7 +23,7 @@
 // than an empty one.
 import { inflateSync } from 'node:zlib'
 
-interface PdfStream { dict: string; body: Buffer }
+interface PdfStream { dict: string; body: Buffer; objNum: number | null }
 
 /**
  * Streams that could plausibly BE page content, each with the dictionary that
@@ -71,6 +71,11 @@ function streams(pdf: Buffer): PdfStream[] {
     // else's declaration.
     const objStart = hay.lastIndexOf(' obj', m.index)
     const dict = objStart >= 0 && m.index - objStart < 4096 ? hay.slice(objStart, m.index) : ''
+    // The object NUMBER, so a page's /Contents reference can be resolved to a
+    // stream instead of guessed at.
+    const header = objStart >= 0 ? hay.slice(Math.max(0, objStart - 24), objStart) : ''
+    const num = /(\d+)\s+\d+\s*$/.exec(header)
+    const objNum = num ? Number(num[1]) : null
     const raw = pdf.subarray(start, end)
     let body: Buffer
     try {
@@ -81,7 +86,7 @@ function streams(pdf: Buffer): PdfStream[] {
       // a fact for the classifier, not a reason to lose the others.
       body = raw
     }
-    out.push({ dict, body })
+    out.push({ dict, body, objNum })
   }
   return out
 }
@@ -89,6 +94,31 @@ function streams(pdf: Buffer): PdfStream[] {
 /** Streams whose own dictionary says they are not page content. */
 function isPageContentCandidate(s: PdfStream): boolean {
   return !NOT_PAGE_CONTENT.test(s.dict)
+}
+
+/**
+ * The object numbers a `/Type /Page` names in its `/Contents`.
+ *
+ * POSITIVE IDENTIFICATION, which is what Codex review PDF-STREAM-003 asked for:
+ * a blacklist of known-bad dictionary types renders everything it has not been
+ * told about -- untyped streams, object streams, anything a future producer
+ * invents -- and "not on my list" is not the same claim as "this is page
+ * content". When the pages can be resolved, ONLY they are read.
+ *
+ * The blacklist survives as the fallback for files where no page object is
+ * found at all (a linearised or object-stream PDF this regex cannot walk), and
+ * the result says which path was taken, so a caller is never left guessing
+ * whether the strict rule applied.
+ */
+function pageContentObjects(pdf: string): Set<number> {
+  const wanted = new Set<number>()
+  for (const m of pdf.matchAll(/\/Type\s*\/Page[^s]([\s\S]{0,2000}?)(?:endobj|>>\s*stream)/g)) {
+    const contents = /\/Contents\s*(?:(\d+)\s+\d+\s*R|\[([^\]]*)\])/.exec(m[1])
+    if (!contents) continue
+    if (contents[1]) { wanted.add(Number(contents[1])); continue }
+    for (const ref of (contents[2] ?? '').matchAll(/(\d+)\s+\d+\s*R/g)) wanted.add(Number(ref[1]))
+  }
+  return wanted
 }
 
 /**
@@ -121,12 +151,17 @@ function toUnicodeMap(chunks: PdfStream[]): CMap {
       for (const pair of block.matchAll(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g)) {
         const code = parseInt(pair[1], 16)
         if (!map.has(code)) map.set(code, hexChar(pair[2]))
+        // Width is the KEY'S HEX LENGTH, not its numeric value. Codex review
+        // PDF-CMAP-002: `<0001> <0041>` is a perfectly ordinary two-byte
+        // mapping whose value happens to be small, and testing `code > 0xff`
+        // left it decoding at one byte. Four hex digits IS the declaration.
+        //
         // Width is claimed only by an entry that was actually KEPT. A rejected
         // one must not widen the decoder: measured on a real quote PDF, a
         // discarded wide range still flipped the width to two bytes, and every
         // literal then decoded through an EMPTY map to nothing at all --
         // 994 characters became zero.
-        if (pair[1].length >= 4 && code > 0xff) codeBytes = 2
+        if (pair[1].length >= 4) codeBytes = 2
       }
     }
     for (const block of t.match(/beginbfrange([\s\S]*?)endbfrange/g) ?? []) {
@@ -138,7 +173,7 @@ function toUnicodeMap(chunks: PdfStream[]): CMap {
         // ratio. A map that claims everything explains nothing.
         if (hi < lo || hi - lo > 4096) continue
         for (let i = lo; i <= hi; i++) if (!map.has(i)) map.set(i, String.fromCharCode(dst + (i - lo)))
-        if (r[1].length >= 4 && hi > 0xff) codeBytes = 2
+        if (r[1].length >= 4) codeBytes = 2
       }
     }
   }
@@ -176,10 +211,12 @@ function literalBytes(src: string): number[] {
  * specific and worth keeping: a NON-EMPTY CMap and still-garbled output means
  * the map is being applied in the wrong place, not that it is missing.
  */
-function renderText(chunks: PdfStream[], cmap: CMap): string {
+function renderText(chunks: PdfStream[], cmap: CMap, pages: Set<number>): string {
   const parts: string[] = []
   for (const c of chunks) {
-    if (!isPageContentCandidate(c)) continue
+    if (pages.size > 0) {
+      if (c.objNum === null || !pages.has(c.objNum)) continue
+    } else if (!isPageContentCandidate(c)) continue
     const t = c.body.toString('latin1')
     // ONLY inside text objects, and only strings that are OPERANDS of a
     // show-text operator. The first version took every `(...)` in every
@@ -268,6 +305,11 @@ export interface PdfTextResult {
   streamsSkipped: number
   /** Source-code width the CMap declares, 1 or 2 bytes. */
   codeBytes: 1 | 2
+  /** How page content was identified. `PAGE_CONTENTS` means only the streams a
+   *  /Type /Page names were read. `TYPE_BLACKLIST` means no page object could
+   *  be resolved and the weaker rule applied -- stated rather than hidden,
+   *  because the two carry different guarantees. */
+  contentSelection: 'PAGE_CONTENTS' | 'TYPE_BLACKLIST'
 }
 
 /**
@@ -281,7 +323,8 @@ export function pdfText(bytes: Buffer): PdfTextResult {
   // and is filtered out of rendering on purpose, so it must be read before that
   // filter applies.
   const cmap = toUnicodeMap(chunks)
-  const raw = renderText(chunks, cmap)
+  const pages = pageContentObjects(bytes.toString('latin1'))
+  const raw = renderText(chunks, cmap, pages)
   // Collapse the whitespace PDFs scatter between glyph runs, without joining
   // words that were genuinely separate.
   const text = raw.replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim()
@@ -289,7 +332,10 @@ export function pdfText(bytes: Buffer): PdfTextResult {
     text,
     streams: chunks.length,
     cmapEntries: cmap.map.size,
-    streamsSkipped: chunks.filter((c) => !isPageContentCandidate(c)).length,
+    streamsSkipped: pages.size > 0
+      ? chunks.filter((c) => c.objNum === null || !pages.has(c.objNum)).length
+      : chunks.filter((c) => !isPageContentCandidate(c)).length,
     codeBytes: cmap.codeBytes,
+    contentSelection: pages.size > 0 ? 'PAGE_CONTENTS' : 'TYPE_BLACKLIST',
   }
 }
