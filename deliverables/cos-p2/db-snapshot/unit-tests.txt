@@ -1,10 +1,17 @@
 
  RUN  v2.1.9 /home/iszzu/marveen-wt/devctl
 
- ✓ src/__tests__/cos-db-snapshot.test.ts (14 tests) 79ms
+ ✓ src/__tests__/cos-db-snapshot.test.ts (14 tests) 109ms
 
  Test Files  1 passed (1)
       Tests  14 passed (14)
-   Start at  00:34:52
-   Duration  592ms (transform 103ms, setup 69ms, collect 64ms, tests 79ms, environment 0ms, prepare 89ms)
+   Start at  00:37:12
+   Duration  608ms (transform 106ms, setup 66ms, collect 64ms, tests 109ms, environment 0ms, prepare 84ms)
 
+
+--- MUTATION CHECK (both repaired tests driven RED against a deliberately broken module) ---
+removed `stmt.safeIntegers(true)` and dropped the declared type from the digest:
+   x  ...and a declared type change is a content change too -- SAME name, SAME stored value
+   x  DBSNAP-005/008: two integers that ROUND TO THE SAME DOUBLE still digest differently
+   Tests  2 failed | 12 passed (14)
+Each mutation fails exactly its own test and nothing else.

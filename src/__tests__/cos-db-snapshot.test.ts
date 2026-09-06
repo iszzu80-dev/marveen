@@ -158,36 +158,42 @@ describe('verified database snapshots', () => {
     expect(before.tables[0].sourceDigest).not.toBe(after.tables[0].sourceDigest)
   })
 
-  it('...and a declared type change is a content change too -- SAME table name', () => {
-    // Codex review DBSNAP-006: the first version of this case compared tables
-    // called typed2 and typed3, and the digest also hashes the table NAME. It
-    // would have passed with declared types removed entirely. Same name, two
-    // databases, only the type differs.
+  it('...and a declared type change is a content change too -- SAME name, SAME stored value', () => {
+    // Two confounds removed, one per review round. DBSNAP-006: the table NAME
+    // is hashed, so the tables must share it. DBSNAP-007: inserting '1' into an
+    // INTEGER-affinity column makes SQLite STORE the integer 1, so the values
+    // differed and the test passed for that reason instead. 'x' is not a
+    // well-formed number, so affinity leaves it as text in both -- identical
+    // stored values, and only the declared type differs.
     const mk = (decl: string, file: string): string => {
       const path = join(dir, file)
       const db = new Database(path)
       db.exec(`CREATE TABLE same_name (a ${decl})`)
-      db.prepare("INSERT INTO same_name (a) VALUES ('1')").run()
+      db.prepare("INSERT INTO same_name (a) VALUES ('x')").run()
+      const stored = db.prepare('SELECT typeof(a) AS t FROM same_name').get() as { t: string }
+      expect(stored.t).toBe('text')      // proves the confound is gone
       db.close()
       return verifiedSnapshot(path, join(dir, `snap-${file}`), ['same_name']).tables[0].sourceDigest
     }
     expect(mk('TEXT', 'ty-text.db')).not.toBe(mk('INTEGER', 'ty-int.db'))
   })
 
-  it('DBSNAP-005: big integers do not round into each other', () => {
-    // SQLite INTEGERs above JavaScript's safe range come back as doubles by
-    // default. Two distinct ids -- exactly what a store uses as a key -- would
-    // lose precision and digest identically.
-    const a = join(dir, 'big-a.db'); const b = join(dir, 'big-b.db')
-    for (const [path, v] of [[a, '9007199254740993'], [b, '9007199254740995']] as const) {
+  it('DBSNAP-005/008: two integers that ROUND TO THE SAME DOUBLE still digest differently', () => {
+    // The first version used 9007199254740993 and ...95, which round to
+    // DIFFERENT doubles -- so it would have passed with safe integers turned
+    // off, proving nothing. 2^53 and 2^53+1 both round to 9007199254740992,
+    // which is the actual collision.
+    expect(Number('9007199254740992')).toBe(Number('9007199254740993'))
+
+    const digest = (v: string, file: string): string => {
+      const path = join(dir, file)
       const db = new Database(path)
       db.exec('CREATE TABLE big (id INTEGER)')
       db.exec(`INSERT INTO big (id) VALUES (${v})`)
       db.close()
+      return verifiedSnapshot(path, join(dir, `snap-${file}`), ['big']).tables[0].sourceDigest
     }
-    const da = verifiedSnapshot(a, join(dir, 'sa.db'), ['big']).tables[0].sourceDigest
-    const db2 = verifiedSnapshot(b, join(dir, 'sb.db'), ['big']).tables[0].sourceDigest
-    expect(da).not.toBe(db2)
+    expect(digest('9007199254740992', 'big-a.db')).not.toBe(digest('9007199254740993', 'big-b.db'))
   })
 
   it('refuses to verify against nothing', () => {
