@@ -16,6 +16,20 @@
 # itself pinned.
 #
 # Usage:  cos-pinned-cutover.sh <candidateSha> [--gate-sha <sha>] [--dry-run]
+#           (--ci-evidence "<text>" | --ci-not-evaluated "<reason>")
+#
+# CI EVIDENCE IS REQUIRED, one way or the other (owner, 2026-09-06):
+#   "ciEvidence ne maradjon 'FILL IN' placeholder. A következő release pin valós
+#    exact-SHA CI evidence-et tartalmazzon. Ne nevezzen bizonyítéknak
+#    placeholdert."
+# Until now this script wrote the literal string "FILL IN: workflow, both events,
+# run ids, at this exact sha" into the pin's `ciEvidence` and moved on. A field
+# named evidence, holding a note to self, in the file that is the single
+# statement of what the release IS. Nobody was lied to on purpose and that is the
+# problem: it reads as evidence at a glance.
+# So one of the two flags must be given. `--ci-not-evaluated` is an honest
+# answer -- it records that CI was not consulted and why -- and it is deliberately
+# more effort to type than the truth would have been.
 #         The gate defaults to the candidate. It is a SEPARATE argument because
 #         the gate is versioned independently of the payload: a gate can only
 #         REFUSE, so carrying a stricter gate across a rollback can block a bad
@@ -24,12 +38,14 @@
 set -uo pipefail
 
 REPO="${MARVEEN_REPO_ROOT:-$HOME/marveen}"
-DRY=0; GATE=""
+DRY=0; GATE=""; CI_EVIDENCE=""; CI_NOT_EVAL=""
 SHA="${1:-}"; shift || true
 while [ $# -gt 0 ]; do
   case "$1" in
     --gate-sha) GATE="${2:-}"; shift 2 ;;
     --dry-run)  DRY=1; shift ;;
+    --ci-evidence)      CI_EVIDENCE="${2:-}"; shift 2 ;;
+    --ci-not-evaluated) CI_NOT_EVAL="${2:-}"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -41,6 +57,19 @@ say() { printf '  %s\n' "$1"; }
 SHA="$(git -C "$REPO" rev-parse --verify "$SHA^{commit}" 2>/dev/null)" || die "not a commit: $SHA"
 GATE="${GATE:-$SHA}"
 GATE="$(git -C "$REPO" rev-parse --verify "$GATE^{commit}" 2>/dev/null)" || die "gate sha is not a commit"
+
+# Checked HERE, before anything is written: a cutover that gets all the way to
+# the pin and then refuses for a missing argument has already moved the pointers.
+if [ -n "$CI_EVIDENCE" ] && [ -n "$CI_NOT_EVAL" ]; then
+  die "give either --ci-evidence or --ci-not-evaluated, not both: the pin records one claim about CI, not two"
+fi
+if [ -z "$CI_EVIDENCE" ] && [ -z "$CI_NOT_EVAL" ]; then
+  die "no CI evidence given. Pass --ci-evidence \"workflow, event, run id, at this exact sha\" -- or, if CI genuinely was not consulted, --ci-not-evaluated \"<why>\". A placeholder in a field called evidence is worse than an empty one, because it reads as proof."
+fi
+case "$CI_EVIDENCE" in
+  *FILL\ IN*|*TODO*|*fixme*|*FIXME*) die "that is a placeholder, not evidence: $CI_EVIDENCE" ;;
+esac
+CI_FIELD="${CI_EVIDENCE:-NOT_EVALUATED: $CI_NOT_EVAL}"
 SHORT="${SHA:0:9}"; GSHORT="${GATE:0:9}"
 
 # The release is built with `git archive`, which reads the OBJECT, not the
@@ -215,9 +244,9 @@ say "pointers moved together (after the artifact proved itself)"
 # 6. The pin: the single statement of what the gate IS. Both digests, computed
 #    from the files just written -- neither script can verify itself.
 if [ $DRY = 0 ]; then
-  python3 - "$REPO" "$SHA" "$GATE" "$GSHORT" "$PREV_SHA" "$*" <<'PY'
+  python3 - "$REPO" "$SHA" "$GATE" "$GSHORT" "$PREV_SHA" "$CI_FIELD" <<'PY'
 import hashlib, json, os, subprocess, sys
-repo, sha, gate, gshort, prev, note = sys.argv[1:7]
+repo, sha, gate, gshort, prev, ci = sys.argv[1:7]
 pinp = os.path.join(repo, 'releases', 'dashboard-runtime-pin.json')
 old = json.load(open(pinp))
 h = lambda p: hashlib.sha256(open(p,'rb').read()).hexdigest()
@@ -238,7 +267,7 @@ pin = {
  'preflightSha256': h(os.path.join(repo,'scripts','cos-cycle-preflight.sh')),
  'distTreeHash': man['treeHash'],
  'distFileCount': man['fileCount'],
- 'ciEvidence': 'FILL IN: workflow, both events, run ids, at this exact sha',
+ 'ciEvidence': ci,
  'rollbackProvenance': old.get('rollbackProvenance'),
 }
 json.dump(pin, open(pinp,'w'), indent=1)
