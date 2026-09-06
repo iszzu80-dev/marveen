@@ -45,6 +45,12 @@ function tableDigest(db: Database.Database, table: string): { rows: number; dige
     // WITHOUT ROWID: order by the whole row instead.
     stmt = db.prepare(`SELECT * FROM "${table}" ORDER BY ${cols.join(', ')}`)
   }
+  // BIG INTEGERS MUST NOT ROUND. Codex review DBSNAP-005: SQLite INTEGERs above
+  // JavaScript's safe range come back as doubles by default, so two distinct
+  // ids -- exactly the kind a store uses as a key -- lose precision and digest
+  // the same. Per-statement rather than per-connection, so nothing else in this
+  // module starts seeing BigInt where it expects a number.
+  stmt.safeIntegers(true)
   const h = createHash('sha256')
   // THE SCHEMA IS PART OF THE CONTENT. Codex review DBSNAP-004: hashing only
   // the ordered VALUES lets a table whose columns were renamed or reordered

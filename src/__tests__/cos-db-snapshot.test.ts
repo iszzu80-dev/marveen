@@ -158,20 +158,36 @@ describe('verified database snapshots', () => {
     expect(before.tables[0].sourceDigest).not.toBe(after.tables[0].sourceDigest)
   })
 
-  it('...and a declared type change is a content change too', () => {
-    const db = new Database(src)
-    db.exec('CREATE TABLE typed2 (a TEXT)')
-    db.prepare('INSERT INTO typed2 (a) VALUES (?)').run('1')
-    db.close()
-    const asText = verifiedSnapshot(src, join(dir, 't1.db'), ['typed2'])
+  it('...and a declared type change is a content change too -- SAME table name', () => {
+    // Codex review DBSNAP-006: the first version of this case compared tables
+    // called typed2 and typed3, and the digest also hashes the table NAME. It
+    // would have passed with declared types removed entirely. Same name, two
+    // databases, only the type differs.
+    const mk = (decl: string, file: string): string => {
+      const path = join(dir, file)
+      const db = new Database(path)
+      db.exec(`CREATE TABLE same_name (a ${decl})`)
+      db.prepare("INSERT INTO same_name (a) VALUES ('1')").run()
+      db.close()
+      return verifiedSnapshot(path, join(dir, `snap-${file}`), ['same_name']).tables[0].sourceDigest
+    }
+    expect(mk('TEXT', 'ty-text.db')).not.toBe(mk('INTEGER', 'ty-int.db'))
+  })
 
-    const db2 = new Database(src)
-    db2.exec('CREATE TABLE typed3 (a INTEGER)')
-    db2.prepare("INSERT INTO typed3 (a) VALUES ('1')").run()
-    db2.close()
-    const asInt = verifiedSnapshot(src, join(dir, 't2.db'), ['typed3'])
-
-    expect(asText.tables[0].sourceDigest).not.toBe(asInt.tables[0].sourceDigest)
+  it('DBSNAP-005: big integers do not round into each other', () => {
+    // SQLite INTEGERs above JavaScript's safe range come back as doubles by
+    // default. Two distinct ids -- exactly what a store uses as a key -- would
+    // lose precision and digest identically.
+    const a = join(dir, 'big-a.db'); const b = join(dir, 'big-b.db')
+    for (const [path, v] of [[a, '9007199254740993'], [b, '9007199254740995']] as const) {
+      const db = new Database(path)
+      db.exec('CREATE TABLE big (id INTEGER)')
+      db.exec(`INSERT INTO big (id) VALUES (${v})`)
+      db.close()
+    }
+    const da = verifiedSnapshot(a, join(dir, 'sa.db'), ['big']).tables[0].sourceDigest
+    const db2 = verifiedSnapshot(b, join(dir, 'sb.db'), ['big']).tables[0].sourceDigest
+    expect(da).not.toBe(db2)
   })
 
   it('refuses to verify against nothing', () => {
