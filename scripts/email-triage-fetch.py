@@ -25,7 +25,7 @@ SERVERS = {
 NOISE_SENDERS = [
     "no-reply@accounts.google.com", "noreply-accounts@google.com",
     "marketing@", "newsletter", "no-reply@", "noreply@", "donotreply@",
-    "notifications@github.com", "posthog.com", "hellonancy.com",
+    "posthog.com", "hellonancy.com",
     "ft.com", "otpbank", "globalmarkets", "ikea", "ecipo", "biggeorge",
     "lindy.ai", "telekom", "mailchimp", "sendgrid", "substack",
     # bulk/marketing sender shapes (HU newsletters use these heavily)
@@ -134,6 +134,125 @@ def call_mcp(server_path, query, max_results=25):
     return (msgs if isinstance(msgs, list) else []), None
 
 
+# ── GitHub notifications: SENDER != RELEVANCE ────────────────────────────────
+#
+# `notifications@github.com` sat in NOISE_SENDERS until 2026-09-06, so every
+# GitHub mail was dropped before anything read it: maintainer comments, merge
+# conflicts, failing required checks and secret-scanning alerts on our OWN pull
+# requests, for weeks. Istvan named the invariant when it surfaced: SENDER !=
+# RELEVANCE. He also ruled out the obvious replacement rule -- "human vs bot" is
+# the same mistake wearing a different dimension, because the mail that matters
+# most here is machine-sent BY DEFINITION. A failing required check has no human
+# author and is the single most actionable thing GitHub sends us.
+#
+# So the decision is made on the EVENT and its ACTIONABILITY, never on who sent
+# it. Two classes are unconditional keeps: a failing check and a security alert.
+GITHUB_SENDERS = ["notifications@github.com", "noreply@github.com", "@github.com"]
+
+# Live verifications per run. A heartbeat that woke up to forty notifications
+# must not answer with forty API calls; beyond the cap the candidate still
+# surfaces, saying plainly that it was not verified.
+GH_VERIFY_MAX = 12
+
+# Unconditional keeps. These outrank everything, including a promo-looking
+# subject, because a bot is supposed to be the one saying them.
+GITHUB_MUST_SURFACE = [
+    "some checks were not successful", "all checks have failed",
+    "check failure", "checks have failed", "workflow run failed",
+    "run failed", "build failed", "failing after",
+    "secret scanning", "secret detected", "exposed secret",
+    "security alert", "security advisory", "dependabot alert",
+    "vulnerability", "code scanning alert",
+    "required status check", "required check",
+]
+
+# Actionable, but ordinary: something happened that a person may need to answer.
+GITHUB_ACTIONABLE = [
+    "requested your review", "review requested", "requested changes",
+    "approved these changes", "commented on", "left a comment",
+    "mentioned you", "assigned you", "asked you",
+    "has conflicts", "merge conflict", "cannot be merged",
+    "reopened", "closed this", "merged", "ready for review",
+    "new comment", "replied", "pushed", "force-pushed",
+]
+
+# Genuinely nothing to do. Kept SHORT on purpose: an unrecognised GitHub event
+# is surfaced, not dropped. Absence of evidence that it matters is not evidence
+# that it does not.
+GITHUB_NOISE = [
+    "starred your repository", "started following you",
+    "is now following", "your weekly digest", "trending repositories",
+    "newsletter", "github explore",
+]
+
+_GH_REPO = re.compile(r"\[([\w.-]+/[\w.-]+)\]")
+# ONLY the parenthesised form identifies a pull request or issue. A bare "#4" in
+# a GitHub subject is very often something else entirely -- "Secret scanning
+# alert #4" is alert four, not PR four -- and verifying it as a PR would fetch
+# an UNRELATED pull request and attach its state to this mail. That is not a
+# missing check, it is a wrong answer wearing a check's clothes, which is worse.
+_GH_PR = re.compile(r"\((?:PR|Pull Request) #(\d+)\)", re.I)
+_GH_ISSUE = re.compile(r"\((?:Issue) #(\d+)\)", re.I)
+
+
+def github_event(m):
+    """Classify a GitHub notification. Returns None when it is not one.
+
+    The verdict is (kind, actionable) and NEVER depends on the sender being a
+    bot. `unknown` is actionable: a GitHub event we do not recognise is more
+    likely to be something new than something worthless.
+    """
+    frm = _norm(m.get("from"))
+    if not any(g in frm for g in GITHUB_SENDERS):
+        return None
+    text = _norm(m.get("subject")) + " " + _norm(m.get("snippet"))
+    subject_raw = m.get("subject") or ""
+    repo_hit = _GH_REPO.search(subject_raw)
+    repo = repo_hit.group(1) if repo_hit else None
+    pr_hit = _GH_PR.search(subject_raw)
+    issue_hit = _GH_ISSUE.search(subject_raw)
+    number = pr_hit.group(1) if pr_hit else (issue_hit.group(1) if issue_hit else None)
+    number_kind = "pull" if pr_hit else ("issue" if issue_hit else None)
+    if any(k in text for k in GITHUB_MUST_SURFACE):
+        return {"kind": "check_or_security_failure", "actionable": True,
+                "repo": repo, "number": number, "numberKind": number_kind, "mustSurface": True}
+    if any(k in text for k in GITHUB_ACTIONABLE):
+        return {"kind": "activity", "actionable": True,
+                "repo": repo, "number": number, "numberKind": number_kind, "mustSurface": False}
+    if any(k in text for k in GITHUB_NOISE):
+        return {"kind": "social", "actionable": False,
+                "repo": repo, "number": number, "numberKind": number_kind, "mustSurface": False}
+    return {"kind": "unknown", "actionable": True,
+            "repo": repo, "number": number, "numberKind": number_kind, "mustSurface": False}
+
+
+def github_current_state(repo, number, timeout=20):
+    """What the PR looks like NOW, not what the mail said when it was sent.
+
+    An email is a snapshot of a moment that has usually passed: a conflict may
+    be resolved, a red check may be green, a PR may be merged. Acting on the
+    mail alone is how a stale message becomes a wrong action -- which has cost
+    us real work before. Read-only, and FAIL-SOFT: no `gh`, no network, no auth
+    and the candidate still surfaces, carrying the reason the check could not be
+    made. A verification we could not perform must never read as "verified".
+    """
+    if not repo or not number:
+        return {"checked": False, "why": "the mail names no repo/number to verify"}
+    try:
+        p = subprocess.run(
+            ["gh", "api", "repos/%s/pulls/%s" % (repo, number),
+             "--jq", '{state,draft,mergeable,mergeable_state,merged,head:.head.sha}'],
+            capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"checked": False, "why": "gh unavailable or timed out (%s)" % type(e).__name__}
+    if p.returncode != 0:
+        return {"checked": False, "why": "gh exit %d" % p.returncode}
+    try:
+        return {"checked": True, "pr": json.loads(p.stdout.strip() or "{}")}
+    except ValueError:
+        return {"checked": False, "why": "gh returned unparseable JSON"}
+
+
 def is_noise(m):
     frm = _norm(m.get("from"))
     subj = _norm(m.get("subject"))
@@ -143,6 +262,13 @@ def is_noise(m):
     # rescue a test invoice for looking like an invoice.
     if any(x in frm for x in OWN_TRAFFIC_SENDERS) or any(x in subj for x in OWN_TRAFFIC_SUBJECTS):
         return True
+    # GitHub is decided on the EVENT, before any sender or subject rule can
+    # touch it. Note the ordering: this sits ABOVE the NOISE_SUBJECTS check, so
+    # a failing check cannot be dropped for a subject word, and above
+    # ALWAYS_KEEP, so the two lists cannot silently disagree about it.
+    gh = github_event(m)
+    if gh is not None:
+        return not gh["actionable"]
     if any(k in frm + " " + subj + " " + snip for k in ALWAYS_KEEP):
         return False
     # Marketing shapes in the SUBJECT still drop, whoever sent them.
@@ -188,6 +314,42 @@ SELFTEST = [
     # hirlevelet. A promo-jelolo ("last minute", "felaron") most letiltja ezt.
     (True, {"from": "napi@ajanlo.ma", "subject": "Hetfo Augusztus 10. Dumaszinhaz",
             "snippet": "Ma este Szinhaz! Last minute jegyek, felaron 2026.08.10"}),
+    # ── SENDER != RELEVANCE (2026-09-06) ─────────────────────────────────────
+    # notifications@github.com was a hard drop, so none of these ever reached
+    # triage. Every keep below is machine-sent, which is the point: the rule is
+    # about the EVENT, not about whether a human typed it.
+    (False, {"from": "notifications@github.com",
+             "subject": "Re: [Szotasz/marveen] feat(monitor): memory-pressure monitor (PR #775)",
+             "snippet": "Some checks were not successful: secret-gate / scan failed."}),
+    (False, {"from": "notifications@github.com",
+             "subject": "[Szotasz/marveen] Secret scanning alert #4",
+             "snippet": "A secret was detected in a commit on this repository."}),
+    (False, {"from": "notifications@github.com",
+             "subject": "Re: [Szotasz/marveen] feat(costops): provider collectors (PR #628)",
+             "snippet": "Szotasz commented on this pull request: kerlek rebase-eld a develop-ra."}),
+    (False, {"from": "notifications@github.com",
+             "subject": "Re: [Szotasz/marveen] CostOps monitoring (PR #660)",
+             "snippet": "This branch has conflicts that must be resolved."}),
+    (False, {"from": "notifications@github.com",
+             "subject": "[Szotasz/marveen] Run failed: test - develop (32651890365)",
+             "snippet": "The workflow run failed."}),
+    # An unrecognised GitHub event is SURFACED, not dropped: absence of a known
+    # keyword is not evidence that nothing happened.
+    (False, {"from": "notifications@github.com",
+             "subject": "[Szotasz/marveen] Something new we have not seen before (#900)",
+             "snippet": "No keyword in here matches any list."}),
+    # ...and the genuinely empty social traffic still goes.
+    (True, {"from": "notifications@github.com",
+            "subject": "[GitHub] someone starred your repository",
+            "snippet": "somebody starred your repository marveen."}),
+    (True, {"from": "notifications@github.com",
+            "subject": "Your weekly digest",
+            "snippet": "Trending repositories you might like."}),
+    # A promo-shaped SUBJECT must not be able to bury a failing check: the
+    # GitHub rule is consulted before NOISE_SUBJECTS.
+    (False, {"from": "notifications@github.com",
+             "subject": "[Szotasz/marveen] Sale of the week (PR #775)",
+             "snippet": "Some checks were not successful."}),
 ]
 
 
@@ -219,6 +381,36 @@ def _selftest_trim():
     return fails
 
 
+# What a GitHub subject actually REFERS to. Written after the first version of
+# this classifier read "Secret scanning alert #4" as pull request four and would
+# have fetched an unrelated PR's state to attach to a security alert. A wrong
+# answer wearing a verified badge is worse than no answer.
+GH_REF_SELFTEST = [
+    ("Re: [Szotasz/marveen] feat(monitor): the monitor (PR #775)", "Szotasz/marveen", "775", "pull"),
+    ("Re: [Szotasz/marveen] a bug report (Issue #900)", "Szotasz/marveen", "900", "issue"),
+    ("[Szotasz/marveen] Secret scanning alert #4", "Szotasz/marveen", None, None),
+    ("[Szotasz/marveen] Run failed: test - develop (32651890365)", "Szotasz/marveen", None, None),
+    ("Your weekly digest", None, None, None),
+]
+
+
+def _selftest_github_refs():
+    fails = []
+    for subj, repo, num, kind in GH_REF_SELFTEST:
+        got = github_event({"from": "notifications@github.com", "subject": subj, "snippet": ""})
+        if got is None:
+            fails.append("no event for %r" % subj)
+            continue
+        if (got["repo"], got["number"], got["numberKind"]) != (repo, num, kind):
+            fails.append("%r -> repo=%s number=%s kind=%s (want %s/%s/%s)"
+                         % (subj, got["repo"], got["number"], got["numberKind"], repo, num, kind))
+    # An unverifiable reference must say so rather than claim a check.
+    st = github_current_state(None, None)
+    if st.get("checked") is not False:
+        fails.append("a missing repo/number must report checked=False")
+    return fails
+
+
 def selftest():
     bad = [(want, m) for want, m in SELFTEST if is_noise(m) != want]
     for want, m in bad:
@@ -226,9 +418,13 @@ def selftest():
     trim_fails = _selftest_trim()
     for f in trim_fails:
         print("FAIL trim :: %s" % f)
-    print(json.dumps({"selftest": "FAIL" if (bad or trim_fails) else "PASS",
-                      "cases": len(SELFTEST) + 1, "failed": len(bad) + len(trim_fails)}))
-    sys.exit(1 if bad else 0)
+    gh_fails = _selftest_github_refs()
+    for f in gh_fails:
+        print("FAIL github-ref :: %s" % f)
+    failed = len(bad) + len(trim_fails) + len(gh_fails)
+    print(json.dumps({"selftest": "FAIL" if failed else "PASS",
+                      "cases": len(SELFTEST) + 1 + len(GH_REF_SELFTEST), "failed": failed}))
+    sys.exit(1 if failed else 0)
 
 
 def load_state():
@@ -484,6 +680,9 @@ def main():
     seen, prev = load_state()
     first_run = not seen and not prev
     out = {"first_run": first_run, "accounts": {}, "candidates": [], "errors": []}
+    # One live lookup per PR per run, capped: the triage runs on a heartbeat and
+    # must not turn a mailbox full of notifications into a burst of API calls.
+    gh_state_cache = {}
 
     for name, path in SERVERS.items():
         if not os.path.exists(path):
@@ -537,6 +736,20 @@ def main():
                 # triaging agent will see. Not a corpus-wide digest and not the
                 # raw mailbox: the fields below ARE the decision's input, so the
                 # receipt can later prove what was judged, not merely when.
+                # GitHub: attach the event class AND what the PR looks like
+                # NOW. The mail is a snapshot of a moment that has usually
+                # passed -- a conflict may be resolved, a red check green, the
+                # PR merged. Reading the mail alone is how a stale message
+                # becomes a wrong action.
+                gh = github_event(m) if direction == "INBOUND" else None
+                if gh:
+                    cand["github"] = gh
+                    if gh["actionable"] and gh.get("repo") and gh.get("numberKind") == "pull":
+                        key = "%s#%s" % (gh["repo"], gh["number"])
+                        if key not in gh_state_cache and len(gh_state_cache) < GH_VERIFY_MAX:
+                            gh_state_cache[key] = github_current_state(gh["repo"], gh["number"])
+                        cand["githubState"] = gh_state_cache.get(
+                            key, {"checked": False, "why": "per-run verification cap reached"})
                 cand["sourceManifestHash"] = _source_manifest_hash(cand)
                 out["candidates"].append(cand)
         if not errored:
