@@ -19,7 +19,45 @@
 // named "backup" is worse than no backup, because it stops anyone looking for
 // a real one.
 import Database from 'better-sqlite3'
+import { createHash } from 'node:crypto'
 import { existsSync, statSync, unlinkSync } from 'node:fs'
+
+/**
+ * A content digest of one table: sha256 over every row, in a deterministic
+ * order.
+ *
+ * Codex review DBSNAP-001: comparing COUNT(*) is not row-for-row verification.
+ * A snapshot with different VALUES, or with different rows that happen to add
+ * up to the same total, would pass a count check and be stamped "verified" --
+ * which is the failure this module exists to make impossible, reintroduced one
+ * level up.
+ *
+ * Ordering is by rowid where the table has one, and by every column otherwise,
+ * because a digest over an undefined order is a digest of nothing.
+ */
+function tableDigest(db: Database.Database, table: string): { rows: number; digest: string } {
+  const cols = (db.prepare(`PRAGMA table_info("${table}")`).all() as Array<{ name: string }>)
+    .map((c) => `"${c.name}"`)
+  let stmt
+  try {
+    stmt = db.prepare(`SELECT * FROM "${table}" ORDER BY rowid`)
+  } catch {
+    // WITHOUT ROWID: order by the whole row instead.
+    stmt = db.prepare(`SELECT * FROM "${table}" ORDER BY ${cols.join(', ')}`)
+  }
+  const h = createHash('sha256')
+  let rows = 0
+  for (const row of stmt.iterate() as Iterable<Record<string, unknown>>) {
+    rows += 1
+    // Typed separators so 1 and '1', and null versus empty string, cannot
+    // collide into the same digest.
+    for (const v of Object.values(row)) {
+      h.update(v === null ? '\u0000N' : typeof v === 'number' ? `\u0000#${v}` : Buffer.isBuffer(v) ? Buffer.concat([Buffer.from('\u0000B'), v]) : `\u0000S${String(v)}`)
+    }
+    h.update('\u0000R')
+  }
+  return { rows, digest: h.digest('hex') }
+}
 
 export interface SnapshotEvidence {
   /** Where the image was written. */
@@ -30,8 +68,14 @@ export interface SnapshotEvidence {
   integrity: string
   /** Objects visible in sqlite_master -- proves the image opens and is readable. */
   objects: number
-  /** Row counts the caller asked to be compared, source vs snapshot. */
-  tables: Array<{ table: string; source: number; snapshot: number; equal: boolean }>
+  /** The caller's required tables, compared by CONTENT and not merely by count.
+   *  `digest` is a sha256 over every row in a deterministic order, so a
+   *  snapshot holding different values -- or different rows adding up to the
+   *  same total -- cannot pass. */
+  tables: Array<{
+    table: string; source: number; snapshot: number
+    sourceDigest: string; snapshotDigest: string; equal: boolean
+  }>
   /** True only when every check above passed. The ONLY field that licenses the
    *  word "backup"; everything else is measurement. */
   verified: boolean
@@ -57,10 +101,10 @@ export function verifiedSnapshot(
   if (existsSync(outPath)) unlinkSync(outPath)
 
   const src = new Database(sourcePath, { readonly: true })
-  const sourceCounts = new Map<string, number>()
+  const sourceSide = new Map<string, { rows: number; digest: string }>()
   for (const t of tables) {
     try {
-      sourceCounts.set(t, (src.prepare(`SELECT COUNT(*) AS n FROM "${t}"`).get() as { n: number }).n)
+      sourceSide.set(t, tableDigest(src, t))
     } catch (e) {
       problems.push(`source table ${t} unreadable: ${e instanceof Error ? e.message : String(e)}`)
     }
@@ -87,17 +131,25 @@ export function verifiedSnapshot(
     objects = (snap.prepare('SELECT COUNT(*) AS n FROM sqlite_master').get() as { n: number }).n
     if (objects === 0) problems.push('the snapshot opens but holds no schema objects')
     for (const t of tables) {
-      const source = sourceCounts.get(t)
-      if (source === undefined) continue
-      let snapshot = -1
+      const from = sourceSide.get(t)
+      if (from === undefined) continue
+      let to = { rows: -1, digest: '' }
       try {
-        snapshot = (snap.prepare(`SELECT COUNT(*) AS n FROM "${t}"`).get() as { n: number }).n
+        to = tableDigest(snap, t)
       } catch (e) {
         problems.push(`snapshot table ${t} unreadable: ${e instanceof Error ? e.message : String(e)}`)
       }
-      const equal = snapshot === source
-      if (!equal) problems.push(`${t}: source has ${source} rows, snapshot has ${snapshot}`)
-      rows.push({ table: t, source, snapshot, equal })
+      // CONTENT equality, not count equality.
+      const equal = to.digest === from.digest && to.rows === from.rows
+      if (!equal) {
+        problems.push(to.rows !== from.rows
+          ? `${t}: source has ${from.rows} rows, snapshot has ${to.rows}`
+          : `${t}: same row count (${from.rows}) but the content digest differs`)
+      }
+      rows.push({
+        table: t, source: from.rows, snapshot: to.rows,
+        sourceDigest: from.digest, snapshotDigest: to.digest, equal,
+      })
     }
     snap.close()
   } catch (e) {

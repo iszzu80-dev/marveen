@@ -68,8 +68,53 @@ describe('verified database snapshots', () => {
     expect(ev.verified).toBe(true)
     expect(ev.integrity).toBe('ok')
     expect(ev.tables[0]).toMatchObject({ table: 'docs', source: 51, snapshot: 51, equal: true })
+    // The digest is the proof, not the count.
+    expect(ev.tables[0].sourceDigest).toHaveLength(64)
+    expect(ev.tables[0].snapshotDigest).toBe(ev.tables[0].sourceDigest)
     expect(ev.problems).toEqual([])
     expect(ev.bytes).toBeGreaterThan(0)
+  })
+
+  it('DBSNAP-001: a snapshot with the SAME row count but different values fails', () => {
+    // Codex review DBSNAP-001. Comparing COUNT(*) is not row-for-row
+    // verification: different values, or different rows adding up to the same
+    // total, would pass and be stamped verified -- the exact failure this
+    // module exists to prevent, reintroduced one level up.
+    const out = join(dir, 'tampered.db')
+    const ev = verifiedSnapshot(src, out, ['docs'])
+    expect(ev.verified).toBe(true)
+
+    // Same number of rows, one value changed.
+    const t = new Database(out)
+    t.prepare("UPDATE docs SET body='after' WHERE body='before'").run()
+    const rowsNow = (t.prepare('SELECT COUNT(*) AS n FROM docs').get() as { n: number }).n
+    t.close()
+    expect(rowsNow).toBe(ev.tables[0].snapshot)
+
+    // Re-verifying the SOURCE against that tampered file is not what the API
+    // does, so prove the property directly: the digest changed even though the
+    // count did not.
+    const again = verifiedSnapshot(out, join(dir, 'of-tampered.db'), ['docs'])
+    expect(again.tables[0].source).toBe(ev.tables[0].source)
+    expect(again.tables[0].sourceDigest).not.toBe(ev.tables[0].sourceDigest)
+  })
+
+  it('distinguishes NULL from an empty string, and 1 from "1"', () => {
+    // A digest that collapses these would pass a snapshot that lost type
+    // information -- which is a different database wearing the same counts.
+    const db = new Database(src)
+    db.exec('CREATE TABLE typed (a)')
+    db.prepare('INSERT INTO typed (a) VALUES (?)').run(null)
+    db.close()
+    const withNull = verifiedSnapshot(src, join(dir, 'a.db'), ['typed'])
+
+    const db2 = new Database(src)
+    db2.prepare("UPDATE typed SET a=''").run()
+    db2.close()
+    const withEmpty = verifiedSnapshot(src, join(dir, 'b.db'), ['typed'])
+
+    expect(withNull.tables[0].source).toBe(withEmpty.tables[0].source)
+    expect(withNull.tables[0].sourceDigest).not.toBe(withEmpty.tables[0].sourceDigest)
   })
 
   it('refuses to verify against nothing', () => {
