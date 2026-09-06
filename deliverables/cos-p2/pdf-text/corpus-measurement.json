@@ -1,0 +1,10 @@
+{
+ "corpus": "live cos_documents, mime application/pdf, content not purged",
+ "pdfs": 48,
+ "tally": {
+  "EXTRACTED_VALID": 44,
+  "EXTRACTION_LOW_QUALITY": 3,
+  "NOT_ATTEMPTED": 1
+ },
+ "note": "filenames deliberately omitted -- personal documents"
+}

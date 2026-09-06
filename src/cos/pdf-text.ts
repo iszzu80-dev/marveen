@@ -23,27 +23,72 @@
 // than an empty one.
 import { inflateSync } from 'node:zlib'
 
-/** Every `stream ... endstream` body, inflated where it inflates. */
-function streams(pdf: Buffer): Buffer[] {
-  const out: Buffer[] = []
-  const re = /stream\r?\n/g
+interface PdfStream { dict: string; body: Buffer }
+
+/**
+ * Streams that could plausibly BE page content, each with the dictionary that
+ * introduced it.
+ *
+ * The dictionary is the point. Scanning every stream in the file lets a font
+ * program, a form, an embedded file or a metadata blob contribute "text" if its
+ * bytes happen to contain BT..ET show-text syntax -- so a SCANNED page could
+ * come back with apparent text, which is precisely the fabrication this module
+ * promises not to do. Codex review PDF-STREAM-002 raised it, and it is right:
+ * the previous version took all of them.
+ *
+ * A conforming answer resolves each page's /Contents. This is narrower than
+ * that and says so: it refuses the object types that are known NOT to be page
+ * content. What that buys is a real reduction in the fabrication surface
+ * without a PDF object parser; what it does not buy is a guarantee, and a
+ * stream with no dictionary at all is still read.
+ */
+const NOT_PAGE_CONTENT = /\/(Subtype\s*\/Image|Type\s*\/(Font|FontDescriptor|Metadata|XRef|EmbeddedFile|Filespec)|FontFile[23]?\b)/
+
+// `/ToUnicode` is deliberately NOT in that list, and the reason cost a real
+// document. A PAGE's /Resources references its fonts' ToUnicode CMaps by
+// indirect reference, so excluding on that token threw away the page itself:
+// measured, one quote PDF went from 994 characters to zero. The token appears
+// on both sides, so it cannot separate them.
+
+function streams(pdf: Buffer): PdfStream[] {
+  const out: PdfStream[] = []
+  // `(?<![a-zA-Z])` because `endstream\n` ENDS WITH `stream\n`. Without it every
+  // stream produced a phantom second one starting at its own terminator, whose
+  // "body" was whatever followed in the file. Harmless-looking -- those bytes
+  // rarely inflate and rarely contain BT..ET -- but it is a route for text to
+  // appear from outside any content stream, which is the fabrication this
+  // module must not commit. Found by a test written for a different finding.
+  const re = /(?<![a-zA-Z])stream\r?\n/g
   let m: RegExpExecArray | null
   const hay = pdf.toString('latin1')
   while ((m = re.exec(hay)) !== null) {
     const start = m.index + m[0].length
     const end = hay.indexOf('endstream', start)
     if (end < 0) continue
+    // The WHOLE object header, from `obj` to `stream` -- not the nearest `<<`.
+    // Taking the nearest one lands inside a nested dictionary (a /Resources or
+    // a /Font entry) and then judges the stream by a fragment of something
+    // else's declaration.
+    const objStart = hay.lastIndexOf(' obj', m.index)
+    const dict = objStart >= 0 && m.index - objStart < 4096 ? hay.slice(objStart, m.index) : ''
     const raw = pdf.subarray(start, end)
+    let body: Buffer
     try {
-      out.push(inflateSync(raw))
+      body = inflateSync(raw)
     } catch {
       // Not deflated (or damaged). The bytes may still be readable text
       // operators, so it is kept rather than dropped -- an unreadable stream is
       // a fact for the classifier, not a reason to lose the others.
-      out.push(raw)
+      body = raw
     }
+    out.push({ dict, body })
   }
   return out
+}
+
+/** Streams whose own dictionary says they are not page content. */
+function isPageContentCandidate(s: PdfStream): boolean {
+  return !NOT_PAGE_CONTENT.test(s.dict)
 }
 
 /**
@@ -55,8 +100,15 @@ function streams(pdf: Buffer): Buffer[] {
  * a letter ratio the classifier will accept, not typographic fidelity. Where
  * two fonts disagree on a code the first wins, which is stable across runs.
  */
-function toUnicodeMap(chunks: Buffer[]): Map<number, string> {
+export interface CMap { map: Map<number, string>; codeBytes: 1 | 2 }
+
+function toUnicodeMap(chunks: PdfStream[]): CMap {
   const map = new Map<number, string>()
+  // How wide the SOURCE codes are, read off the CMap's own keys rather than
+  // guessed per string. Codex review PDF-CMAP-001: a subset font's literals
+  // carry two-byte codes, and decoding them one byte at a time turns real text
+  // into noise. Four hex digits means two bytes.
+  let codeBytes: 1 | 2 = 1
   const hexChar = (h: string): string => {
     // A destination can be several UTF-16 code units; take them all.
     let s = ''
@@ -64,11 +116,17 @@ function toUnicodeMap(chunks: Buffer[]): Map<number, string> {
     return s || String.fromCharCode(parseInt(h.slice(0, 4).padEnd(4, '0'), 16))
   }
   for (const c of chunks) {
-    const t = c.toString('latin1')
+    const t = c.body.toString('latin1')
     for (const block of t.match(/beginbfchar([\s\S]*?)endbfchar/g) ?? []) {
       for (const pair of block.matchAll(/<([0-9A-Fa-f]+)>\s*<([0-9A-Fa-f]+)>/g)) {
         const code = parseInt(pair[1], 16)
         if (!map.has(code)) map.set(code, hexChar(pair[2]))
+        // Width is claimed only by an entry that was actually KEPT. A rejected
+        // one must not widen the decoder: measured on a real quote PDF, a
+        // discarded wide range still flipped the width to two bytes, and every
+        // literal then decoded through an EMPTY map to nothing at all --
+        // 994 characters became zero.
+        if (pair[1].length >= 4 && code > 0xff) codeBytes = 2
       }
     }
     for (const block of t.match(/beginbfrange([\s\S]*?)endbfrange/g) ?? []) {
@@ -80,10 +138,13 @@ function toUnicodeMap(chunks: Buffer[]): Map<number, string> {
         // ratio. A map that claims everything explains nothing.
         if (hi < lo || hi - lo > 4096) continue
         for (let i = lo; i <= hi; i++) if (!map.has(i)) map.set(i, String.fromCharCode(dst + (i - lo)))
+        if (r[1].length >= 4 && hi > 0xff) codeBytes = 2
       }
     }
   }
-  return map
+  // An empty table cannot declare a width: two-byte decoding through no map at
+  // all returns nothing for every string, which is worse than not remapping.
+  return { map, codeBytes: map.size === 0 ? 1 : codeBytes }
 }
 
 /** Decode one `(...)` literal's bytes, honouring PDF escapes. */
@@ -115,10 +176,11 @@ function literalBytes(src: string): number[] {
  * specific and worth keeping: a NON-EMPTY CMap and still-garbled output means
  * the map is being applied in the wrong place, not that it is missing.
  */
-function renderText(chunks: Buffer[], cmap: Map<number, string>): string {
+function renderText(chunks: PdfStream[], cmap: CMap): string {
   const parts: string[] = []
   for (const c of chunks) {
-    const t = c.toString('latin1')
+    if (!isPageContentCandidate(c)) continue
+    const t = c.body.toString('latin1')
     // ONLY inside text objects, and only strings that are OPERANDS of a
     // show-text operator. The first version took every `(...)` in every
     // stream, which swept up operator arguments, font names and binary noise:
@@ -139,7 +201,7 @@ function renderText(chunks: Buffer[], cmap: Map<number, string>): string {
 }
 
 /** One show-text operand: an array, a hex string, or a literal. */
-function showText(operand: string, cmap: Map<number, string>): string {
+function showText(operand: string, cmap: CMap): string {
   if (operand.startsWith('[')) {
     // A TJ array interleaves strings with kerning numbers. A large negative
     // kern is a word gap; keeping that is the difference between readable text
@@ -156,14 +218,16 @@ function showText(operand: string, cmap: Map<number, string>): string {
   return literalString(operand.slice(1, -1), cmap)
 }
 
-function hexString(hex: string, cmap: Map<number, string>): string {
+function hexString(hex: string, cmap: CMap): string {
   const h = hex.replace(/\s+/g, '')
   if (!h) return ''
-  const width = h.length % 4 === 0 && cmap.size > 0 ? 4 : 2
+  // The width comes from the CMap's own keys, not from whether the string
+  // happens to divide by four.
+  const width = cmap.codeBytes === 2 && h.length % 4 === 0 ? 4 : 2
   let s = ''
   for (let i = 0; i + width <= h.length; i += width) {
     const code = parseInt(h.slice(i, i + width), 16)
-    s += cmap.get(code) ?? (code >= 32 && code < 127 ? String.fromCharCode(code) : '')
+    s += cmap.map.get(code) ?? (code >= 32 && code < 127 ? String.fromCharCode(code) : '')
   }
   return s
 }
@@ -173,9 +237,21 @@ function hexString(hex: string, cmap: Map<number, string>): string {
  *  all of its content sat in `(...)` and the remap only ran on hex. The tell is
  *  specific: a NON-EMPTY CMap and still-garbled output means the map is being
  *  applied in the wrong place, not that it is missing. */
-function literalString(src: string, cmap: Map<number, string>): string {
-  return literalBytes(src)
-    .map((b) => cmap.get(b) ?? (b >= 32 && b < 127 ? String.fromCharCode(b) : ''))
+function literalString(src: string, cmap: CMap): string {
+  const bytes = literalBytes(src)
+  // MULTIBYTE CODES. Codex review PDF-CMAP-001: a subset font addresses glyphs
+  // with two-byte codes, and a literal carrying them decoded one byte at a time
+  // is noise, not text. The width is the CMap's, read from its keys.
+  if (cmap.codeBytes === 2) {
+    let s = ''
+    for (let i = 0; i + 1 < bytes.length; i += 2) {
+      const code = (bytes[i] << 8) | bytes[i + 1]
+      s += cmap.map.get(code) ?? ''
+    }
+    return s
+  }
+  return bytes
+    .map((b) => cmap.map.get(b) ?? (b >= 32 && b < 127 ? String.fromCharCode(b) : ''))
     .join('')
 }
 
@@ -187,6 +263,11 @@ export interface PdfTextResult {
    *  of a remap applied in the wrong place -- kept in the result so a caller
    *  can tell that case from "the PDF has no text layer". */
   cmapEntries: number
+  /** Streams the dictionary filter refused as not-page-content. Reported so a
+   *  surprising empty result can be told apart from a file with no text. */
+  streamsSkipped: number
+  /** Source-code width the CMap declares, 1 or 2 bytes. */
+  codeBytes: 1 | 2
 }
 
 /**
@@ -196,10 +277,19 @@ export interface PdfTextResult {
  */
 export function pdfText(bytes: Buffer): PdfTextResult {
   const chunks = streams(bytes)
+  // The CMap is gathered from EVERY stream -- ToUnicode lives in its own object
+  // and is filtered out of rendering on purpose, so it must be read before that
+  // filter applies.
   const cmap = toUnicodeMap(chunks)
   const raw = renderText(chunks, cmap)
   // Collapse the whitespace PDFs scatter between glyph runs, without joining
   // words that were genuinely separate.
   const text = raw.replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim()
-  return { text, streams: chunks.length, cmapEntries: cmap.size }
+  return {
+    text,
+    streams: chunks.length,
+    cmapEntries: cmap.map.size,
+    streamsSkipped: chunks.filter((c) => !isPageContentCandidate(c)).length,
+    codeBytes: cmap.codeBytes,
+  }
 }

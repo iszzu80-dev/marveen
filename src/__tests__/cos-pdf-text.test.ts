@@ -12,14 +12,19 @@ import { pdfText } from '../cos/pdf-text.js'
 // implementation got WRONG against the real 48, since a measurement that
 // improved from 10 to 44 is worth keeping from regressing.
 
-/** A minimal PDF carrying one deflated content stream. */
+/** A minimal PDF carrying one deflated content stream per body. */
 function pdf(...streamBodies: string[]): Buffer {
+  return pdfWithDicts(...streamBodies.map((b) => ['<< /Length 0 >>', b] as [string, string]))
+}
+
+/** The same, with each stream's object dictionary spelled out. */
+function pdfWithDicts(...objects: Array<[string, string]>): Buffer {
   const parts: Buffer[] = [Buffer.from('%PDF-1.4\n', 'latin1')]
-  for (const body of streamBodies) {
-    parts.push(Buffer.from('1 0 obj\n<< /Length 0 >>\nstream\n', 'latin1'))
+  objects.forEach(([dict, body], i) => {
+    parts.push(Buffer.from(`${i + 1} 0 obj\n${dict}\nstream\n`, 'latin1'))
     parts.push(deflateSync(Buffer.from(body, 'latin1')))
     parts.push(Buffer.from('\nendstream\nendobj\n', 'latin1'))
-  }
+  })
   return Buffer.concat(parts)
 }
 
@@ -113,6 +118,52 @@ describe('pdfText', () => {
       Buffer.from('\nendstream\n', 'latin1'),
     ])
     expect(pdfText(broken).text).toContain('still here')
+  })
+
+  // ── Codex review findings, 2026-09-06 ──────────────────────────────────────
+
+  it('PDF-CMAP-001: decodes MULTIBYTE literal codes, not one byte at a time', () => {
+    // A subset font addresses glyphs with two-byte codes. Decoding a literal
+    // that carries them byte-wise turns real text into noise, and the first
+    // implementation did exactly that.
+    const cmap = 'beginbfchar <0101> <0056> <0102> <00E1> <0103> <0063> endbfchar'
+    const body = 'BT (\\001\\001\\001\\002\\001\\003) Tj ET'
+    const r = pdfText(pdf(cmap, body))
+    expect(r.codeBytes).toBe(2)
+    expect(r.text).toContain('Vác')
+  })
+
+  it('PDF-STREAM-002: a non-page stream carrying show-text syntax contributes NOTHING', () => {
+    // A font program or an image can contain bytes that look like BT..ET. If
+    // those reach the output, a SCANNED page can come back with apparent text
+    // -- the exact fabrication this module promises not to commit.
+    const r = pdfWithDicts(
+      ['<< /Type /Font /Subtype /Type1 /Length 0 >>', 'BT (ghost text from a font) Tj ET'],
+      ['<< /Subtype /Image /Width 8 /Length 0 >>', 'BT (ghost text from an image) Tj ET'],
+    )
+    const out = pdfText(r)
+    expect(out.text).toBe('')
+    expect(out.streamsSkipped).toBe(2)
+  })
+
+  it('...and a real page stream alongside them is still read', () => {
+    const out = pdfText(pdfWithDicts(
+      ['<< /Type /Font /Length 0 >>', 'BT (ghost) Tj ET'],
+      ['<< /Filter /FlateDecode /Length 99 >>', 'BT (Fizetendo 31138 Ft) Tj ET'],
+    ))
+    expect(out.text).toContain('Fizetendo 31138 Ft')
+    expect(out.text).not.toContain('ghost')
+  })
+
+  it('a REJECTED wide range must not widen the decoder', () => {
+    // The regression the fix for PDF-CMAP-001 introduced, caught by re-running
+    // the 48 real PDFs: a discarded 0000-FFFF range still flipped the width to
+    // two bytes, every literal then decoded through an empty map, and one
+    // document went from 994 characters to zero.
+    const r = pdfText(pdf('beginbfrange <0000> <FFFF> <0000> endbfrange', 'BT (plain ascii) Tj ET'))
+    expect(r.cmapEntries).toBe(0)
+    expect(r.codeBytes).toBe(1)
+    expect(r.text).toContain('plain ascii')
   })
 
   it('is not a PDF at all: no streams, no text, no throw', () => {
