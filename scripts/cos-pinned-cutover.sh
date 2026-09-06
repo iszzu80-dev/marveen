@@ -113,8 +113,22 @@ run "ln -s '$REPO/store' '$CYCLE/store'"
 [ -e "$CYCLE/node_modules" ] || run "ln -s '$REPO/node_modules' '$CYCLE/node_modules'"
 
 # 3. The gate, from the gate sha, as an artifact.
+# THE GUARD RELEASE IS THE GUARD PLUS WHAT IT MEASURES WITH.
+#
+# Until 2026-09-06 this built a guard directory holding one file, and the guard
+# was happy with that because it had nothing to measure. Once check 5 started
+# hashing the deployed dist, the guard needed `artifact-manifest.py` beside it --
+# resolved from its own directory, never from the shared checkout, since a gate
+# whose instrument any merge can move is not pinned.
+#
+# Caught by the deb7a9ee cutover REFUSING itself: the pointers had moved, the
+# guard release carried no tool, and the guard declined to fall back to the
+# checkout copy that was sitting right there. The refusal was the control working
+# -- but the cutover had to be finished by hand, and that is the part this fixes.
 run "mkdir -p '$GUARD'"
 run "git -C '$REPO' show '$GATE:scripts/run-pinned-cos-cycle.sh' > '$GUARD/run-pinned-cos-cycle.sh'"
+run "git -C '$REPO' show '$GATE:scripts/artifact-manifest.py' > '$GUARD/artifact-manifest.py'"
+run "printf '%s\\n' '$GATE' > '$GUARD/.release-sha'"
 run "chmod +x '$GUARD/run-pinned-cos-cycle.sh'"
 
 # 5. The runtime build, with a backup NAMED AFTER WHAT IT ACTUALLY IS -- read from
