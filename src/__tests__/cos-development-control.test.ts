@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  codexExecArgs, ContractError, evaluateObservation, MAX_TECHNICAL_ATTEMPTS,
+  codexExecArgs, ContractError, evaluateObservation, MAX_TECHNICAL_ATTEMPTS, REVIEW_RESULT_JSON_SCHEMA,
   parseProgramWorkstream, parseResultText, ReviewJobStore, runReview,
   validateObservationRequirement, validateReviewRequest, validateReviewResult,
   type ObservationRequirement, type ProcessLauncher, type ReviewRequest, type ReviewResult,
@@ -73,6 +73,7 @@ describe('Codex security and ownership boundary', () => {
   it('32 Codex cannot express owner approval', () => expect(() => validateReviewResult({ ...result(), owner_approved: true }, request())).toThrow())
   it('33 Codex cannot express release GO', () => expect(() => validateReviewResult({ ...result(), go_live_approved: true }, request())).toThrow())
   it('33b installed exec syntax uses config approval policy, not rejected post-subcommand flag', () => { const a = args(); expect(a).toEqual(expect.arrayContaining(['--config', 'approval_policy="never"'])); expect(a).not.toContain('--ask-for-approval') })
+  it('33c structured-output schema types every constant for installed Codex compatibility', () => expect(REVIEW_RESULT_JSON_SCHEMA.properties.schema_version).toEqual({ type: 'integer', const: 1 }))
 })
 
 describe('rejected-candidate regressions', () => {

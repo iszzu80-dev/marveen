@@ -110,7 +110,7 @@ export const REVIEW_RESULT_JSON_SCHEMA = {
   type: 'object', additionalProperties: false,
   required: ['schema_version', 'job_id', 'work_item_id', 'candidate_sha', 'verdict', 'findings', 'evidence_refs', 'requested_authority', 'summary'],
   properties: {
-    schema_version: { const: 1 }, job_id: { type: 'string' }, work_item_id: { type: 'string' },
+    schema_version: { type: 'integer', const: 1 }, job_id: { type: 'string' }, work_item_id: { type: 'string' },
     candidate_sha: { type: 'string', pattern: '^[0-9a-f]{40}$' }, verdict: { enum: [...REVIEW_VERDICTS] },
     findings: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['id', 'severity', 'summary', 'evidence_refs', 'proposed_fix'], properties: { id: { type: 'string' }, severity: { enum: ['BLOCKER', 'HIGH', 'MEDIUM', 'LOW'] }, summary: { type: 'string' }, evidence_refs: { type: 'array', items: { type: 'string' } }, proposed_fix: { anyOf: [{ type: 'string' }, { type: 'null' }] } } } },
     evidence_refs: { type: 'array', items: { type: 'string' } }, requested_authority: { anyOf: [{ enum: [...AUTHORITY_CATEGORIES] }, { type: 'null' }] }, summary: { type: 'string', minLength: 1 },
