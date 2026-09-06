@@ -1,0 +1,10 @@
+
+ RUN  v2.1.9 /home/iszzu/marveen-wt/devctl
+
+ ✓ src/__tests__/cos-db-snapshot.test.ts (11 tests) 66ms
+
+ Test Files  1 passed (1)
+      Tests  11 passed (11)
+   Start at  00:29:54
+   Duration  595ms (transform 107ms, setup 69ms, collect 68ms, tests 66ms, environment 1ms, prepare 90ms)
+
