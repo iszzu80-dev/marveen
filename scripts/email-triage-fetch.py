@@ -213,6 +213,12 @@ def github_event(m):
     issue_hit = _GH_ISSUE.search(subject_raw)
     number = pr_hit.group(1) if pr_hit else (issue_hit.group(1) if issue_hit else None)
     number_kind = "pull" if pr_hit else ("issue" if issue_hit else None)
+    if any(k in text for k in GITHUB_ACCOUNT_SECURITY):
+        # Account-level security, not repository activity. Always surfaced,
+        # never grouped, and NOT classified as routine: whether these were
+        # initiated by Istvan is a question for Istvan, not for a keyword list.
+        return {"kind": "account_security", "actionable": True,
+                "repo": repo, "number": number, "numberKind": number_kind, "mustSurface": True}
     if any(k in text for k in GITHUB_MUST_SURFACE):
         return {"kind": "check_or_security_failure", "actionable": True,
                 "repo": repo, "number": number, "numberKind": number_kind, "mustSurface": True}
@@ -226,39 +232,61 @@ def github_event(m):
             "repo": repo, "number": number, "numberKind": number_kind, "mustSurface": False}
 
 
-_GH_RUN = re.compile(r"(?:PR )?run failed:\s*(.+?)(?:\s+-\s+|$)", re.I)
+# `Run failed: <workflow> - <ref> (<sha>)` and its `PR run failed:` sibling.
+# The trailing short sha is stripped: it is the only part that changes when the
+# SAME workflow fails again on the SAME branch, and that is exactly the repeat
+# worth collapsing.
+_GH_RUN = re.compile(r"(?P<pr>PR )?run failed:\s*(?P<workflow>.+?)\s+-\s+(?P<ref>.+)$", re.I)
+_GH_SHA_SUFFIX = re.compile(r"\s*\([0-9a-f]{6,40}\)\s*$", re.I)
+
+# GitHub ACCOUNT-level security mail: device verification, one-time codes,
+# sign-in and credential changes. Not repository activity, and never grouped --
+# see github_group_key for why.
+GITHUB_ACCOUNT_SECURITY = [
+    "verify your device", "device verification", "sudo email verification",
+    "verification code", "new sign-in", "sign-in from", "two-factor",
+    "password was changed", "password reset", "recovery code",
+    "personal access token", "a new ssh key", "new public key",
+]
 
 
 def github_group_key(m, ev):
-    """Which RECURRING FAILURE this notification is an instance of.
+    """Which RECURRING FAILURE this notification is an instance of, or None.
 
     Measured 2026-09-06, the first time these mails were visible at all: 25
-    notifications in four days came from about eight distinct workflows. One
-    QuickQuote invoicing gate sent six. Surfacing each as its own item would
-    turn a fixed blindness into six cases for one problem, which is a different
-    way of not being able to see.
+    notifications in four days. One QuickQuote invoicing gate sent six, all for
+    the same workflow on the same branch, differing only in the commit. Six
+    items for one problem is a different way of not being able to see.
 
-    Grouping is by repo + workflow NAME, deliberately not by run id or commit:
-    the same workflow failing on six commits in an hour is one problem, and the
-    newest instance is the one worth reading. Anything that is not a run
-    failure gets no key and is never collapsed -- a comment and a security
-    alert are each their own event.
+    THE KEY IS repo + workflow + REF, and the ref matters as much as the
+    workflow. Grouping on repo+workflow alone would merge a failure on `main`
+    with one on a qa branch, and a PR's CI with the branch build -- three
+    different problems wearing one name. `AWS SES staging provision` and
+    `AWS SES OIDC readiness check` run on the SAME branch and stay separate for
+    the same reason: the workflow is the failure class.
+
+    ONLY run failures are grouped. Everything else returns None and surfaces
+    individually:
+      * `activity` -- two different comments on one PR share a subject to the
+        byte, and collapsing them hides half a conversation.
+      * `account_security` -- five device-verification mails are five events at
+        five times, and how many there were is the signal. Owner instruction,
+        2026-09-06: these are not to be treated as routine until Istvan
+        confirms he initiated them.
+      * `unknown` -- an unrecognised event must not be suppressed by looking
+        like another unrecognised event.
     """
-    # `activity` is DELIBERATELY never grouped. Two different comments on the
-    # same pull request share a subject to the byte, and collapsing them would
-    # hide the second half of a conversation -- the exact loss this triage was
-    # blind to for weeks. Repetition is only noise when the event is the same
-    # event, and a new comment never is.
-    if not ev or ev.get("kind") not in ("check_or_security_failure", "unknown"):
+    if not ev or ev.get("kind") != "check_or_security_failure":
         return None
     subject = m.get("subject") or ""
     body = subject.split("] ", 1)[-1]
     hit = _GH_RUN.search(body)
-    if hit:
-        return "%s::%s" % (ev.get("repo") or "?", _norm(hit.group(1)).strip())
-    # Fallback: the SAME subject repeating. Six "Please verify your device"
-    # mails in two days are one thing to look at, not six.
-    return "%s::subject::%s" % (ev.get("repo") or "?", _norm(body).strip())
+    if not hit:
+        return None
+    ref = _GH_SHA_SUFFIX.sub("", hit.group("ref")).strip()
+    scope = "pr" if hit.group("pr") else "branch"
+    return "%s::%s::%s::%s" % (
+        ev.get("repo") or "?", _norm(hit.group("workflow")).strip(), scope, _norm(ref))
 
 
 def github_current_state(repo, number, timeout=20):
@@ -429,26 +457,42 @@ GH_REF_SELFTEST = [
 ]
 
 
-# One recurring workflow failure is ONE problem, whatever the commit.
+# WHAT MAY COLLAPSE AND WHAT MAY NOT. Every line here is a claim about one of
+# the two ways this can go wrong: merging two different problems into one item,
+# or leaving one problem as six.
 GH_GROUP_SELFTEST = [
-    ("[iszzu80-dev/quickquote-v2-prod] Run failed: Invoicing real-provider sandbox gates - qa/x (abc1234)",
-     "iszzu80-dev/quickquote-v2-prod::invoicing real-provider sandbox gates"),
-    ("[iszzu80-dev/quickquote-v2-prod] Run failed: Invoicing real-provider sandbox gates - qa/y (def5678)",
-     "iszzu80-dev/quickquote-v2-prod::invoicing real-provider sandbox gates"),
-    ("[iszzu80-dev/quickquote-v2-prod] Run failed: Stripe test-mode hosted Checkout - qa/z (0159abc)",
-     "iszzu80-dev/quickquote-v2-prod::stripe test-mode hosted checkout"),
-    ("[iszzu80-dev/quickquote-v2-prod] PR run failed: CI - feat: integrate Synthetic World",
-     "iszzu80-dev/quickquote-v2-prod::ci"),
-    # A security alert keys on its own subject, so alert #4 and #5 never merge.
-    ("[Szotasz/marveen] Secret scanning alert #4",
-     "Szotasz/marveen::subject::secret scanning alert #4"),
-    ("[Szotasz/marveen] Secret scanning alert #5",
-     "Szotasz/marveen::subject::secret scanning alert #5"),
-    # Repeated one-time-code mail is one thing to look at, not six.
-    ("[GitHub] Please verify your device", "?::subject::please verify your device"),
-    # ...and a COMMENT is never grouped, because two different comments on the
-    # same PR share a subject to the byte.
+    # Same workflow, same branch, different commit -> ONE problem.
+    ("[iszzu80-dev/quickquote-v2-prod] Run failed: Invoicing real-provider sandbox gates - qa/invoicing-providers (24fd26d)",
+     "iszzu80-dev/quickquote-v2-prod::invoicing real-provider sandbox gates::branch::qa/invoicing-providers"),
+    ("[iszzu80-dev/quickquote-v2-prod] Run failed: Invoicing real-provider sandbox gates - qa/invoicing-providers (6fdda37)",
+     "iszzu80-dev/quickquote-v2-prod::invoicing real-provider sandbox gates::branch::qa/invoicing-providers"),
+    # Same workflow, DIFFERENT branch -> two problems. main is not a qa branch.
+    ("[iszzu80-dev/quickquote-v2-prod] Run failed: Invoicing real-provider sandbox gates - main (aaaaaaa)",
+     "iszzu80-dev/quickquote-v2-prod::invoicing real-provider sandbox gates::branch::main"),
+    # DIFFERENT workflow, same branch -> two problems. These two really do run
+    # on the same branch and really are separate failures.
+    ("[iszzu80-dev/quickquote-v2-prod] Run failed: AWS SES staging provision and smoke - qa/aws-ses-oidc-check (e9e8032)",
+     "iszzu80-dev/quickquote-v2-prod::aws ses staging provision and smoke::branch::qa/aws-ses-oidc-check"),
+    ("[iszzu80-dev/quickquote-v2-prod] Run failed: AWS SES OIDC readiness check - qa/aws-ses-oidc-check (7718f01)",
+     "iszzu80-dev/quickquote-v2-prod::aws ses oidc readiness check::branch::qa/aws-ses-oidc-check"),
+    # A PR's CI is scoped to the PR, never merged with a branch build of the
+    # same workflow name.
+    ("[iszzu80-dev/quickquote-v2-prod] PR run failed: CI - feat: integrate Synthetic World v1.4 (0588528)",
+     "iszzu80-dev/quickquote-v2-prod::ci::pr::feat: integrate synthetic world v1.4"),
+    ("[iszzu80-dev/quickquote-v2-prod] Run failed: CI - main (0588528)",
+     "iszzu80-dev/quickquote-v2-prod::ci::branch::main"),
+    # Two DIFFERENT pull requests never merge.
+    ("[iszzu80-dev/quickquote-v2-prod] PR run failed: CI - fix: something else (1111111)",
+     "iszzu80-dev/quickquote-v2-prod::ci::pr::fix: something else"),
+    # Same repo name in two owners is two repos.
+    ("[someone-else/quickquote-v2-prod] Run failed: CI - main (0588528)",
+     "someone-else/quickquote-v2-prod::ci::branch::main"),
+    # NEVER GROUPED, each for its own reason (see github_group_key):
+    ("[Szotasz/marveen] Secret scanning alert #4", None),
+    ("[GitHub] Please verify your device", None),
+    ("[GitHub] Sudo email verification code", None),
     ("Re: [Szotasz/marveen] feat(costops): collectors (PR #628)", None),
+    ("[Szotasz/marveen] Something nobody has seen before (#900)", None),
 ]
 
 
@@ -461,13 +505,37 @@ def _selftest_github_groups():
         got = github_group_key(m, github_event(m))
         if got != want:
             fails.append("%r -> %r (want %r)" % (subj, got, want))
-    # The same workflow on two different commits must share one key, and two
-    # different workflows must not.
-    keys = [github_group_key({"from": "notifications@github.com", "subject": s, "snippet": "run failed"},
-                             github_event({"from": "notifications@github.com", "subject": s, "snippet": "run failed"}))
-            for s, _ in GH_GROUP_SELFTEST[:3]]
-    if not (keys[0] == keys[1] and keys[0] != keys[2]):
-        fails.append("grouping collapsed the wrong set: %r" % (keys,))
+
+    # The two directions, asserted rather than implied by the table above.
+    def key(subj, snippet="Some checks were not successful."):
+        m = {"from": "notifications@github.com", "subject": subj, "snippet": snippet}
+        return github_group_key(m, github_event(m))
+
+    same = key(GH_GROUP_SELFTEST[0][0]) == key(GH_GROUP_SELFTEST[1][0])
+    if not same:
+        fails.append("same workflow+branch on two commits must be ONE key")
+    for a, b, why in (
+        (0, 2, "different branch"),
+        (3, 4, "different workflow on the same branch"),
+        (5, 6, "a PR run vs a branch run"),
+        (5, 7, "two different pull requests"),
+        (6, 8, "the same repo name under a different owner"),
+    ):
+        if key(GH_GROUP_SELFTEST[a][0]) == key(GH_GROUP_SELFTEST[b][0]):
+            fails.append("must NOT collapse: %s" % why)
+
+    # An account-security mail must be actionable AND ungrouped AND not routine.
+    ev = github_event({"from": "noreply@github.com",
+                       "subject": "[GitHub] Please verify your device", "snippet": ""})
+    if ev.get("kind") != "account_security" or not ev.get("actionable") or not ev.get("mustSurface"):
+        fails.append("account-security mail must surface as its own kind: %r" % (ev,))
+
+    # Routine social noise stays suppressed -- the rule is not an off switch.
+    noise = github_event({"from": "notifications@github.com",
+                          "subject": "[GitHub] someone starred your repository",
+                          "snippet": "somebody starred your repository."})
+    if noise.get("actionable"):
+        fails.append("starred-repository mail must stay suppressed")
     return fails
 
 
