@@ -90,8 +90,24 @@ export interface ReviewAttemptMetadata {
   finished_at?: string
   process_exit_code?: number | null
   timed_out: boolean
-  result_validation: 'PENDING' | 'VALID' | 'INVALID'
+  status: 'STARTED' | 'PROCESS_COMPLETED' | 'RESULT_VALIDATED' | 'COMPLETED_VALID' | 'FAILED' | 'TIMED_OUT' | 'INVALID_RESULT' | 'LAUNCH_ERROR'
+  result_path: string
+  result_sha256?: string
   failure?: string
+}
+
+export interface CompletedReviewMetadata {
+  schema_version: 1
+  status: 'COMPLETED_VALID'
+  job_id: string
+  work_item_id: string
+  candidate_sha: string
+  attempt: number
+  process_exit_code: 0
+  timed_out: false
+  result_path: string
+  result_sha256: string
+  completed_at: string
 }
 
 export interface ObservationRequirement {

@@ -48,19 +48,19 @@ Marveen prepares the packet before invocation, then launches one bounded process
 
 ```text
 codex exec --ephemeral --ignore-user-config --sandbox read-only \
-  --ask-for-approval never --color never \
-  --output-schema <job>/result.schema.json \
-  --output-last-message <job>/result.json \
+  --config 'approval_policy="never"' --color never \
+  --output-schema <job>/attempts/<n>/result.schema.json \
+  --output-last-message <job>/attempts/<n>/result.json \
   -C <exact-worktree> -
 ```
 
 This is the locally inspected Codex 0.144.4 interface. No `--search`, MCP, remote-control, resume, or persistent session is used. `--ignore-user-config` removes configured external MCP dependencies; read-only sandbox plus approval policy `never` fails closed on writes/escalations. One request causes at most one normal invocation. Codex exits after its last message and never polls any store. Between explicit review triggers it consumes zero tokens.
 
-Exit zero is insufficient. Completion requires: no timeout, exit zero, present/non-empty/parseable/schema-valid result, exact correlation, allowed scope/verdict/authority, and no prohibited claim. Crash, timeout, missing/empty/malformed result, mismatch, or forbidden authority is never PASS.
+Exit zero is insufficient. Completion requires: no timeout, exit zero, present/non-empty/parseable/schema-valid result, exact correlation, allowed scope/verdict/authority, no prohibited claim, an attempt-scoped result hash, a durable `COMPLETED_VALID` attempt, and an atomic matching completion record. Crash, timeout, missing/empty/malformed result, mismatch, or forbidden authority is never PASS.
 
 ## Lease, idempotency, and recovery
 
-Identity is `job_id + work_item_id + candidate_sha`. A validated completed identity is reused without another invocation. Reusing a job ID for another work item or SHA fails closed. A filesystem `wx` lease permits one holder. Expired leases permit bounded technical retry, with attempt metadata; V0.1 caps attempts at three. Active concurrent leases fail. Time alone never causes a rerun. Technical failures stay local until normal bounded recovery is exhausted.
+Identity is `job_id + work_item_id + candidate_sha`. Each attempt owns a separate `attempts/<n>/result.json`; failed output is never promoted or read by another attempt. Lifecycle is `STARTED -> PROCESS_COMPLETED -> RESULT_VALIDATED -> COMPLETED_VALID`; terminal technical states are `FAILED`, `TIMED_OUT`, `INVALID_RESULT`, and `LAUNCH_ERROR`. Reuse requires a matching atomic `completed.json`, a `COMPLETED_VALID` attempt record, exit zero, no timeout, and a matching result hash. Reusing a job ID for another work item or SHA fails closed. A filesystem `wx` lease permits one holder. Every post-lease path records a terminal status and releases the lease in `finally`; expired leases permit bounded technical retry. V0.1 caps attempts at three. Active concurrent leases fail. Time alone never causes a rerun. Technical failures stay local until normal bounded recovery is exhausted.
 
 ## Engineering and release state machine
 

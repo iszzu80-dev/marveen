@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process'
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
 import { REVIEW_RESULT_JSON_SCHEMA, parseResultText } from './contract.js'
 import { ReviewJobStore } from './job-store.js'
 import type { ReviewAttemptMetadata, ReviewRequest, ReviewResult } from './types.js'
@@ -40,32 +41,46 @@ function buildCodexPrompt(jobDir: string): string {
 }
 
 export function codexExecArgs(repoRoot: string, jobDir: string): string[] {
-  return ['exec', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only', '--ask-for-approval', 'never', '--color', 'never', '--output-schema', join(jobDir, 'result.schema.json'), '--output-last-message', join(jobDir, 'result.json'), '-C', repoRoot, '-']
+  return ['exec', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only', '--config', 'approval_policy="never"', '--color', 'never', '--output-schema', join(jobDir, 'result.schema.json'), '--output-last-message', join(jobDir, 'result.json'), '-C', repoRoot, '-']
 }
 
 export async function runReview(input: { request: ReviewRequest; repoRoot: string; store: ReviewJobStore; timeoutMs?: number; launcher?: ProcessLauncher; verifyCheckout?: CheckoutVerifier }): Promise<{ result?: ReviewResult; reused: boolean; metadata: ReviewAttemptMetadata }> {
   const prepared = input.store.prepare(input.request)
-  const existing = input.store.readValidatedResult(prepared.request)
-  if (existing) return { result: existing, reused: true, metadata: { schema_version: 1, job_id: existing.job_id, work_item_id: existing.work_item_id, candidate_sha: existing.candidate_sha, attempt: 0, started_at: new Date().toISOString(), finished_at: new Date().toISOString(), process_exit_code: 0, timed_out: false, result_validation: 'VALID' } }
+  const existing = input.store.readReusableResult(prepared.request)
+  if (existing) return { result: existing.result, reused: true, metadata: { schema_version: 1, job_id: existing.result.job_id, work_item_id: existing.result.work_item_id, candidate_sha: existing.result.candidate_sha, attempt: existing.completion.attempt, started_at: existing.completion.completed_at, finished_at: existing.completion.completed_at, process_exit_code: 0, timed_out: false, status: 'COMPLETED_VALID', result_path: existing.completion.result_path, result_sha256: existing.completion.result_sha256 } }
   ;(input.verifyCheckout ?? verifyExactCandidateCheckout)(input.repoRoot, prepared.request.candidate_sha)
   const lease = input.store.acquireLease(prepared.request, (input.timeoutMs ?? 600_000) + 30_000)
   const p = input.store.paths(prepared.request.job_id)
-  writeFileSync(p.schema, JSON.stringify(REVIEW_RESULT_JSON_SCHEMA, null, 2) + '\n', { mode: 0o600 })
+  const attemptPaths = input.store.attemptPaths(prepared.request.job_id, lease.attempt)
+  mkdirSync(attemptPaths.dir, { recursive: true })
+  writeFileSync(attemptPaths.schema, JSON.stringify(REVIEW_RESULT_JSON_SCHEMA, null, 2) + '\n', { mode: 0o600 })
   const started = new Date().toISOString()
-  input.store.writeAttempt({ schema_version: 1, job_id: prepared.request.job_id, work_item_id: prepared.request.work_item_id, candidate_sha: prepared.request.candidate_sha, attempt: lease.attempt, started_at: started, timed_out: false, result_validation: 'PENDING' })
-  const outcome = await (input.launcher ?? launchProcess)('codex', codexExecArgs(input.repoRoot, p.dir), { cwd: p.dir, timeoutMs: input.timeoutMs ?? 600_000 })
-  writeFileSync(join(p.dir, `attempt-${lease.attempt}.stdout`), outcome.stdout, { mode: 0o600 })
-  writeFileSync(join(p.dir, `attempt-${lease.attempt}.stderr`), outcome.stderr, { mode: 0o600 })
-  const metadata: ReviewAttemptMetadata = { schema_version: 1, job_id: prepared.request.job_id, work_item_id: prepared.request.work_item_id, candidate_sha: prepared.request.candidate_sha, attempt: lease.attempt, started_at: started, finished_at: new Date().toISOString(), process_exit_code: outcome.exitCode, timed_out: outcome.timedOut, result_validation: 'INVALID' }
+  const relativeResult = `attempts/${lease.attempt}/result.json`
+  const metadata: ReviewAttemptMetadata = { schema_version: 1, job_id: prepared.request.job_id, work_item_id: prepared.request.work_item_id, candidate_sha: prepared.request.candidate_sha, attempt: lease.attempt, started_at: started, timed_out: false, status: 'STARTED', result_path: relativeResult }
+  input.store.writeAttempt(metadata)
   try {
-    if (outcome.timedOut) throw new Error('Codex invocation timed out')
-    if (outcome.exitCode !== 0) throw new Error(`Codex invocation failed with exit ${String(outcome.exitCode)}`)
-    if (!existsSync(p.result)) throw new Error('Codex result is missing')
-    const result = parseResultText(readFileSync(p.result, 'utf8'), prepared.request)
-    metadata.result_validation = 'VALID'; input.store.writeAttempt(metadata); input.store.releaseLease(lease)
+    let outcome: ProcessOutcome
+    try { outcome = await (input.launcher ?? launchProcess)('codex', codexExecArgs(input.repoRoot, attemptPaths.dir), { cwd: p.dir, timeoutMs: input.timeoutMs ?? 600_000 }) }
+    catch (err) { metadata.status = 'LAUNCH_ERROR'; metadata.failure = err instanceof Error ? err.message : String(err); throw err }
+    writeFileSync(attemptPaths.stdout, outcome.stdout, { mode: 0o600 }); writeFileSync(attemptPaths.stderr, outcome.stderr, { mode: 0o600 })
+    metadata.finished_at = new Date().toISOString(); metadata.process_exit_code = outcome.exitCode; metadata.timed_out = outcome.timedOut
+    if (outcome.timedOut) { metadata.status = 'TIMED_OUT'; metadata.failure = 'Codex invocation timed out'; throw new Error(metadata.failure) }
+    if (outcome.exitCode !== 0) { metadata.status = 'FAILED'; metadata.failure = `Codex invocation failed with exit ${String(outcome.exitCode)}`; throw new Error(metadata.failure) }
+    metadata.status = 'PROCESS_COMPLETED'; input.store.writeAttempt(metadata)
+    if (!existsSync(attemptPaths.result)) { metadata.status = 'INVALID_RESULT'; metadata.failure = 'Codex result is missing'; throw new Error(metadata.failure) }
+    const body = readFileSync(attemptPaths.result, 'utf8')
+    let result: ReviewResult
+    try { result = parseResultText(body, prepared.request) } catch (err) { metadata.status = 'INVALID_RESULT'; metadata.failure = err instanceof Error ? err.message : String(err); throw err }
+    metadata.status = 'RESULT_VALIDATED'; metadata.result_sha256 = createHash('sha256').update(body).digest('hex'); input.store.writeAttempt(metadata)
+    input.store.commitCompleted(metadata)
+    metadata.status = 'COMPLETED_VALID'
     return { result, reused: false, metadata }
   } catch (err) {
-    metadata.failure = err instanceof Error ? err.message : String(err); input.store.writeAttempt(metadata); input.store.releaseLease(lease)
+    if (!metadata.failure) metadata.failure = err instanceof Error ? err.message : String(err)
+    if (metadata.status === 'STARTED') metadata.status = 'LAUNCH_ERROR'
+    metadata.finished_at ??= new Date().toISOString(); input.store.writeAttempt(metadata)
     return { reused: false, metadata }
+  } finally {
+    input.store.releaseLease(lease)
   }
 }
