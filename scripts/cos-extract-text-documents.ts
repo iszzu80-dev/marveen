@@ -24,6 +24,7 @@ import { initDatabase, getDb } from '../src/db.js'
 import { readDocumentBytes } from '../src/cos/cos-documents.js'
 import { classifyExtraction } from '../src/cos/document-extraction.js'
 import { pdfText } from '../src/cos/pdf-text.js'
+import { officeText } from '../src/cos/office-text.js'
 
 const APPLY = process.argv.includes('--apply')
 initDatabase('store/claudeclaw.db')
@@ -32,7 +33,16 @@ const now = Math.floor(Date.now() / 1000)
 
 const TEXTISH = (m: string): boolean =>
   m.startsWith('text/') || m === 'message/rfc822' || m === 'application/json'
+  // An .ics is BEGIN:VCALENDAR in plain text; only its declared mime type made
+  // it look binary. Verified by reading the stored bytes, not by assuming.
+  || m === 'application/ics' || m === 'text/calendar'
 const IS_PDF = (m: string): boolean => m === 'application/pdf'
+// .docx and .xlsx are ZIP archives of XML. The legacy .doc is an OLE compound
+// file -- a different format wearing a similar extension -- and is deliberately
+// NOT claimed here.
+const IS_OFFICE = (m: string): boolean =>
+  m === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+  || m === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
 const rows = db.prepare(
   `SELECT document_id, mime_type, filename FROM cos_documents
@@ -43,11 +53,13 @@ const tally: Record<string, number> = {}
 const samples: string[] = []
 for (const r of rows) {
   const mime = String(r.mime_type ?? '')
-  if (!TEXTISH(mime) && !IS_PDF(mime)) { tally.SKIPPED_NOT_TEXT = (tally.SKIPPED_NOT_TEXT ?? 0) + 1; continue }
+  if (!TEXTISH(mime) && !IS_PDF(mime) && !IS_OFFICE(mime)) { tally.SKIPPED_NOT_TEXT = (tally.SKIPPED_NOT_TEXT ?? 0) + 1; continue }
   let text: string
   try {
     const bytes = readDocumentBytes(db, r.document_id)
-    text = IS_PDF(mime) ? pdfText(bytes).text : bytes.toString('utf8')
+    text = IS_PDF(mime) ? pdfText(bytes).text
+      : IS_OFFICE(mime) ? officeText(bytes).text
+      : bytes.toString('utf8')
   } catch (e) {
     tally.EXTRACTION_FAILED = (tally.EXTRACTION_FAILED ?? 0) + 1
     if (APPLY) {
@@ -58,7 +70,7 @@ for (const r of rows) {
   }
   // A decode that produced replacement characters is not text, whatever the
   // mime type claimed.
-  if (!IS_PDF(mime) && text.includes('�')) {
+  if (!IS_PDF(mime) && !IS_OFFICE(mime) && text.includes('�')) {
     tally.EXTRACTION_LOW_QUALITY = (tally.EXTRACTION_LOW_QUALITY ?? 0) + 1
     if (APPLY) {
       db.prepare(`UPDATE cos_documents SET extraction_state='EXTRACTION_LOW_QUALITY', extraction_note='utf8 decode produced replacement characters', extraction_attempted_at=? WHERE document_id=?`)
