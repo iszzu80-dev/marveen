@@ -220,8 +220,21 @@ else
   #
   # The tool comes from the CANDIDATE release, not from the shared checkout: the
   # thing that measures a release must ship with it.
+  # THE MANIFEST GOES BESIDE THE ARTIFACT, NEVER INSIDE IT.
+  #
+  # It used to be written into `$REPO/dist`. That broke the OTHER provenance
+  # system: build-release-dist.ts records a hash over everything it built, and a
+  # manifest dropped in afterwards is a file it did not build -- so
+  # verify-runtime-provenance reported TAMPERED and the c08f7703 cutover refused
+  # at its own step 7, with the pointers already moved. Two provenance systems,
+  # one mutating the artifact the other had sealed.
+  #
+  # Written to the release directory instead, the identity is still recorded and
+  # nothing inside the artifact moves. The pin remains the declaration and the
+  # fresh measurement remains the proof; this file is the human-readable copy.
   run "python3 '$CYCLE/scripts/artifact-manifest.py' '$REPO/dist' --write '$SHA'"
-  say "artifact manifest written into the deployed dist"
+  run "mv '$REPO/dist/.artifact-manifest.json' '$CYCLE/.artifact-manifest.json'"
+  say "artifact manifest written BESIDE the release ($CYCLE/.artifact-manifest.json), not inside dist"
 fi
 
 # 5b. ONLY NOW do the pointers move.
@@ -253,7 +266,7 @@ h = lambda p: hashlib.sha256(open(p,'rb').read()).hexdigest()
 # The DEPLOYED artifact, measured -- not the release directory it was copied
 # from, and not a value carried over from the previous pin. "PIN DECLARES,
 # ARTIFACT PROVES" is only true if the thing measured is the thing running.
-man = json.load(open(os.path.join(repo, 'dist', '.artifact-manifest.json')))
+man = json.load(open(os.path.join(repo, 'releases', 'cos-cycle-current', '.artifact-manifest.json')))
 if man['releaseSha'] != sha:
     raise SystemExit(f"deployed manifest declares {man['releaseSha']} but the cutover is for {sha}")
 pin = {
