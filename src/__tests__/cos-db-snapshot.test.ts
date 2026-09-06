@@ -139,6 +139,41 @@ describe('verified database snapshots', () => {
     expect(withNull.tables[0].sourceDigest).not.toBe(withEmpty.tables[0].sourceDigest)
   })
 
+  it('DBSNAP-004: the digest covers COLUMN IDENTITY, not just ordered values', () => {
+    // A table whose columns were renamed or reordered holds the same bytes
+    // meaning something different. Hashing only the values would mark that
+    // equal -- the schema is part of the content.
+    const db = new Database(src)
+    db.exec('CREATE TABLE named (alpha, beta)')
+    db.prepare('INSERT INTO named (alpha,beta) VALUES (?,?)').run('x', 'y')
+    db.close()
+    const before = verifiedSnapshot(src, join(dir, 'n1.db'), ['named'])
+
+    const db2 = new Database(src)
+    db2.exec('ALTER TABLE named RENAME COLUMN beta TO gamma')
+    db2.close()
+    const after = verifiedSnapshot(src, join(dir, 'n2.db'), ['named'])
+
+    expect(before.tables[0].source).toBe(after.tables[0].source)      // same rows
+    expect(before.tables[0].sourceDigest).not.toBe(after.tables[0].sourceDigest)
+  })
+
+  it('...and a declared type change is a content change too', () => {
+    const db = new Database(src)
+    db.exec('CREATE TABLE typed2 (a TEXT)')
+    db.prepare('INSERT INTO typed2 (a) VALUES (?)').run('1')
+    db.close()
+    const asText = verifiedSnapshot(src, join(dir, 't1.db'), ['typed2'])
+
+    const db2 = new Database(src)
+    db2.exec('CREATE TABLE typed3 (a INTEGER)')
+    db2.prepare("INSERT INTO typed3 (a) VALUES ('1')").run()
+    db2.close()
+    const asInt = verifiedSnapshot(src, join(dir, 't2.db'), ['typed3'])
+
+    expect(asText.tables[0].sourceDigest).not.toBe(asInt.tables[0].sourceDigest)
+  })
+
   it('refuses to verify against nothing', () => {
     // "Which rows must survive" is the caller's question to answer. A snapshot
     // checked against no table is checked against nothing.

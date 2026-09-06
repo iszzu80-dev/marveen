@@ -36,8 +36,8 @@ import { existsSync, statSync, unlinkSync } from 'node:fs'
  * because a digest over an undefined order is a digest of nothing.
  */
 function tableDigest(db: Database.Database, table: string): { rows: number; digest: string } {
-  const cols = (db.prepare(`PRAGMA table_info("${table}")`).all() as Array<{ name: string }>)
-    .map((c) => `"${c.name}"`)
+  const info = db.prepare(`PRAGMA table_info("${table}")`).all() as Array<{ name: string; type: string }>
+  const cols = info.map((c) => `"${c.name}"`)
   let stmt
   try {
     stmt = db.prepare(`SELECT * FROM "${table}" ORDER BY rowid`)
@@ -46,6 +46,14 @@ function tableDigest(db: Database.Database, table: string): { rows: number; dige
     stmt = db.prepare(`SELECT * FROM "${table}" ORDER BY ${cols.join(', ')}`)
   }
   const h = createHash('sha256')
+  // THE SCHEMA IS PART OF THE CONTENT. Codex review DBSNAP-004: hashing only
+  // the ordered VALUES lets a table whose columns were renamed or reordered
+  // digest identically to the original -- the same bytes meaning something
+  // different, marked equal. The column names and declared types go in first,
+  // framed like everything else.
+  h.update(frame(`schema:${table}`))
+  for (const c of info) { h.update(frame(c.name)); h.update(frame(c.type ?? '')) }
+  h.update(Buffer.from('H'))
   let rows = 0
   for (const row of stmt.iterate() as Iterable<Record<string, unknown>>) {
     rows += 1
