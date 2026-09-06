@@ -226,6 +226,41 @@ def github_event(m):
             "repo": repo, "number": number, "numberKind": number_kind, "mustSurface": False}
 
 
+_GH_RUN = re.compile(r"(?:PR )?run failed:\s*(.+?)(?:\s+-\s+|$)", re.I)
+
+
+def github_group_key(m, ev):
+    """Which RECURRING FAILURE this notification is an instance of.
+
+    Measured 2026-09-06, the first time these mails were visible at all: 25
+    notifications in four days came from about eight distinct workflows. One
+    QuickQuote invoicing gate sent six. Surfacing each as its own item would
+    turn a fixed blindness into six cases for one problem, which is a different
+    way of not being able to see.
+
+    Grouping is by repo + workflow NAME, deliberately not by run id or commit:
+    the same workflow failing on six commits in an hour is one problem, and the
+    newest instance is the one worth reading. Anything that is not a run
+    failure gets no key and is never collapsed -- a comment and a security
+    alert are each their own event.
+    """
+    # `activity` is DELIBERATELY never grouped. Two different comments on the
+    # same pull request share a subject to the byte, and collapsing them would
+    # hide the second half of a conversation -- the exact loss this triage was
+    # blind to for weeks. Repetition is only noise when the event is the same
+    # event, and a new comment never is.
+    if not ev or ev.get("kind") not in ("check_or_security_failure", "unknown"):
+        return None
+    subject = m.get("subject") or ""
+    body = subject.split("] ", 1)[-1]
+    hit = _GH_RUN.search(body)
+    if hit:
+        return "%s::%s" % (ev.get("repo") or "?", _norm(hit.group(1)).strip())
+    # Fallback: the SAME subject repeating. Six "Please verify your device"
+    # mails in two days are one thing to look at, not six.
+    return "%s::subject::%s" % (ev.get("repo") or "?", _norm(body).strip())
+
+
 def github_current_state(repo, number, timeout=20):
     """What the PR looks like NOW, not what the mail said when it was sent.
 
@@ -394,6 +429,48 @@ GH_REF_SELFTEST = [
 ]
 
 
+# One recurring workflow failure is ONE problem, whatever the commit.
+GH_GROUP_SELFTEST = [
+    ("[iszzu80-dev/quickquote-v2-prod] Run failed: Invoicing real-provider sandbox gates - qa/x (abc1234)",
+     "iszzu80-dev/quickquote-v2-prod::invoicing real-provider sandbox gates"),
+    ("[iszzu80-dev/quickquote-v2-prod] Run failed: Invoicing real-provider sandbox gates - qa/y (def5678)",
+     "iszzu80-dev/quickquote-v2-prod::invoicing real-provider sandbox gates"),
+    ("[iszzu80-dev/quickquote-v2-prod] Run failed: Stripe test-mode hosted Checkout - qa/z (0159abc)",
+     "iszzu80-dev/quickquote-v2-prod::stripe test-mode hosted checkout"),
+    ("[iszzu80-dev/quickquote-v2-prod] PR run failed: CI - feat: integrate Synthetic World",
+     "iszzu80-dev/quickquote-v2-prod::ci"),
+    # A security alert keys on its own subject, so alert #4 and #5 never merge.
+    ("[Szotasz/marveen] Secret scanning alert #4",
+     "Szotasz/marveen::subject::secret scanning alert #4"),
+    ("[Szotasz/marveen] Secret scanning alert #5",
+     "Szotasz/marveen::subject::secret scanning alert #5"),
+    # Repeated one-time-code mail is one thing to look at, not six.
+    ("[GitHub] Please verify your device", "?::subject::please verify your device"),
+    # ...and a COMMENT is never grouped, because two different comments on the
+    # same PR share a subject to the byte.
+    ("Re: [Szotasz/marveen] feat(costops): collectors (PR #628)", None),
+]
+
+
+def _selftest_github_groups():
+    fails = []
+    for subj, want in GH_GROUP_SELFTEST:
+        snippet = ("Szotasz commented on this pull request." if "(PR #" in subj
+                   else "Some checks were not successful.")
+        m = {"from": "notifications@github.com", "subject": subj, "snippet": snippet}
+        got = github_group_key(m, github_event(m))
+        if got != want:
+            fails.append("%r -> %r (want %r)" % (subj, got, want))
+    # The same workflow on two different commits must share one key, and two
+    # different workflows must not.
+    keys = [github_group_key({"from": "notifications@github.com", "subject": s, "snippet": "run failed"},
+                             github_event({"from": "notifications@github.com", "subject": s, "snippet": "run failed"}))
+            for s, _ in GH_GROUP_SELFTEST[:3]]
+    if not (keys[0] == keys[1] and keys[0] != keys[2]):
+        fails.append("grouping collapsed the wrong set: %r" % (keys,))
+    return fails
+
+
 def _selftest_github_refs():
     fails = []
     for subj, repo, num, kind in GH_REF_SELFTEST:
@@ -421,9 +498,13 @@ def selftest():
     gh_fails = _selftest_github_refs()
     for f in gh_fails:
         print("FAIL github-ref :: %s" % f)
-    failed = len(bad) + len(trim_fails) + len(gh_fails)
+    grp_fails = _selftest_github_groups()
+    for f in grp_fails:
+        print("FAIL github-group :: %s" % f)
+    failed = len(bad) + len(trim_fails) + len(gh_fails) + len(grp_fails)
     print(json.dumps({"selftest": "FAIL" if failed else "PASS",
-                      "cases": len(SELFTEST) + 1 + len(GH_REF_SELFTEST), "failed": failed}))
+                      "cases": len(SELFTEST) + 1 + len(GH_REF_SELFTEST) + len(GH_GROUP_SELFTEST),
+                      "failed": failed}))
     sys.exit(1 if failed else 0)
 
 
@@ -683,6 +764,9 @@ def main():
     # One live lookup per PR per run, capped: the triage runs on a heartbeat and
     # must not turn a mailbox full of notifications into a burst of API calls.
     gh_state_cache = {}
+    # First (newest, because Gmail returns newest first) notification seen for
+    # each recurring workflow failure.
+    gh_group_first = {}
 
     for name, path in SERVERS.items():
         if not os.path.exists(path):
@@ -744,7 +828,22 @@ def main():
                 gh = github_event(m) if direction == "INBOUND" else None
                 if gh:
                     cand["github"] = gh
-                    if gh["actionable"] and gh.get("repo") and gh.get("numberKind") == "pull":
+                    # Repeats are LABELLED, never dropped. Dropping them would
+                    # leave them unmarked, so the next run would judge them all
+                    # over again; and a collapsed item nobody can see is the
+                    # same failure mode as a dropped one.
+                    key = github_group_key(m, gh)
+                    if key:
+                        first = gh_group_first.get(key)
+                        if first is None:
+                            gh_group_first[key] = mid
+                        else:
+                            cand["supersededBy"] = first
+                            cand["supersedeReason"] = (
+                                "same workflow, same repo, an earlier instance of one recurring "
+                                "failure -- read the newest, mark this one, do not open a second case")
+                    if (gh["actionable"] and gh.get("repo") and gh.get("numberKind") == "pull"
+                            and "supersededBy" not in cand):
                         key = "%s#%s" % (gh["repo"], gh["number"])
                         if key not in gh_state_cache and len(gh_state_cache) < GH_VERIFY_MAX:
                             gh_state_cache[key] = github_current_state(gh["repo"], gh["number"])
