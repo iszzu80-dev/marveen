@@ -21,13 +21,25 @@
 // reject -- and the same classifier still decides, so a scanned PDF that yields
 // nothing readable is recorded as low quality rather than stored as text.
 import { initDatabase, getDb } from '../src/db.js'
+import { mayMutate, EXIT_LIVE_MUTATION_REFUSED } from '../src/cos/live-store-guard.js'
 import { readDocumentBytes } from '../src/cos/cos-documents.js'
 import { classifyExtraction } from '../src/cos/document-extraction.js'
 import { pdfText } from '../src/cos/pdf-text.js'
 import { officeText } from '../src/cos/office-text.js'
 
 const APPLY = process.argv.includes('--apply')
-initDatabase('store/claudeclaw.db')
+// WHICH DATABASE. `MARVEEN_DB` is the seam (the spelling w11-staging-migration-proof
+// and w14-restore-drill already use); the default is still the live store, so
+// nothing about an ordinary invocation changes. Before this the path was
+// hardcoded, so a dry run against a clone was not possible -- which is how the
+// 2026-09-06 live mutation happened with nowhere else to point it.
+const DB_PATH = process.env.MARVEEN_DB ?? 'store/claudeclaw.db'
+const verdict = mayMutate(DB_PATH, process.argv, APPLY)
+if (!verdict.allowed) {
+  console.error(JSON.stringify({ refused: true, ...verdict }, null, 1))
+  process.exit(EXIT_LIVE_MUTATION_REFUSED)
+}
+initDatabase(DB_PATH)
 const db = getDb()
 const now = Math.floor(Date.now() / 1000)
 
@@ -118,4 +130,4 @@ for (const r of rows) {
     )
   }
 }
-console.log(JSON.stringify({ candidates: rows.length, apply: APPLY, tally, samples }, null, 1))
+console.log(JSON.stringify({ db: verdict.target, live: verdict.live, candidates: rows.length, apply: APPLY, tally, samples }, null, 1))

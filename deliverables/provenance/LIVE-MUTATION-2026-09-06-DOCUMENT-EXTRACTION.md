@@ -52,7 +52,23 @@ from the state transition below rather than from a timestamp.
 
 - before: 236 documents, **58** carrying usable text
 - after: 236 documents, **168** carrying usable text
-- changed: **137** rows (no inserts, no deletes — 236 before and after)
+- changed: **138** rows (no inserts, no deletes — 236 before and after)
+
+**A second correction, 2026-09-07.** This line said 137. Re-measured against the
+two reference databases, it is 138. The number 137 counts the rows whose
+`extraction_state` changed; one more row was written without its state moving:
+
+    doc-614a8cf05237207d  NaBi_Solo2_datasheet_EN_2026.pdf  application/pdf
+    state  NOT_ATTEMPTED -> NOT_ATTEMPTED   (unchanged)
+    note   "no text (letterRatio 0.000, 0 words, 0 chars)"
+        -> "no text (letterRatio 0.000, 0 chars)"
+    extraction_attempted_at  NULL -> 1788731747
+
+It is one of the image-only PDFs that still need OCR. The classifier reworded
+its note, so the row was rewritten while its verdict stayed the same. Counting
+state transitions and calling the result "rows changed" is the kind of shortcut
+that makes a provenance record quietly wrong, which is why it is corrected here
+with the row named rather than adjusted in place.
 
 State transitions measured against the pre-run reference:
 
@@ -71,9 +87,35 @@ State transitions measured against the pre-run reference:
 | `PRE_RUN_REFERENCE` | `claudeclaw.pre-extract.db` | `d298916e3c89543613aee251` | plain `cp` of a WAL database. `integrity_check` ok, readable, 432 schema objects, all six relevant tables match. **NOT a verified backup** — it is the last checkpoint, which is precisely its defect. |
 | `RESTORE_REFERENCE` | `claudeclaw.post-extract.snapshot.db` | `52be734cacf4a448e4962f39` | `VACUUM INTO`. `integrity_check` ok, 433 objects, all six tables match live. This is the consistent restore point. |
 
-Both live under the session scratchpad, which is not durable storage. Promoting
-them to a durable location is a follow-up, and until that happens this record's
-reference column names artifacts that may not outlive the session.
+**Promoted to durable storage, 2026-09-07 02:07.** Both had been sitting in the
+session scratchpad under `/tmp`, which is tmpfs here -- so they were not merely
+impermanent, they were holding ~390 MB of fleet RAM. They now live at:
+
+    ~/marveen-provenance/2026-09-06-document-extraction/
+
+outside the repository on purpose. The root `deliverables/` directory is
+untracked but *not* gitignored (`git check-ignore` says so), so a stray
+`git add -A` would stage a 200 MB copy of Istvan's personal store. Beside the
+files is `SHA256SUMS.txt`.
+
+The move was verified rather than assumed:
+
+| check | pre-extract | post-extract snapshot |
+|---|---|---|
+| sha256 unchanged by the move | yes | yes |
+| `integrity_check` | ok | ok |
+| `sqlite_master` objects | 432 | 433 |
+| `cos_documents` rows | 236 | 236 |
+| rows carrying usable text | **58** | **168** |
+
+Those two text counts are the before/after this record claims, read back out of
+the artifacts themselves. The state histogram reconciles exactly against the
+transition table above: NULL 83 = 60+21+2, NOT_ATTEMPTED 94 = 50+4+40, and
+40+21 = 61 remaining, 58+60+50 = 168 valid, 1+4+2 = 7 low-quality.
+
+The pre-extract reference is load-bearing for closure 3, not just history: it is
+the only image of the pre-mutation column values, so it is what a release-time
+reconciliation has to re-derive from.
 
 ## Downstream containment audit
 
@@ -127,4 +169,3 @@ canonical state.
   That is the release-time reconciliation the owner required before
   `READY_FOR_RELEASE`, and it has not been done.
 - It does not make apply 3 attributable to a commit. It was uncommitted.
-- It does not promote either reference artifact to durable storage.
