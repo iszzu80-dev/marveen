@@ -1,0 +1,35 @@
+cutover: payload afaf354a9, gate afaf354a9
+  built cos-cycle-afaf354a9
+  built scheduled-scripts-afaf354a9
+  runtime backup: dist.pre-a8c229552-20260831T223635 (named from the pin it replaces)
+source verified against git afaf354a9: 19378d015a9ad737
+built 1075 files, dist f0ff8359f099ac43, provenance written
+SELF-VERIFIED: artifact proves afaf354a95e472b6d6b62804b98caaff97129875 (1075 files, dist f0ff8359f099ac43)
+  installed dist from /home/iszzu/marveen/releases/cos-cycle-afaf354a9/dist (provenance-verified)
+  deployed dist re-verified in place
+  pointers moved together (after the artifact proved itself)
+  pin rewritten: guardSha256 bb1c086f61cb | preflightSha256 0839cd3504f8
+{"preflight":"OK","guardSha256":"bb1c086f61cbeffe"}
+{"pinnedCycle":"OK","releaseSha":"afaf354a95e472b6d6b62804b98caaff97129875","runtimeSha":"afaf354a95e472b6d6b62804b98caaff97129875","feederSha256":"bfda505b91257d1b","feederRelease":"afaf354a9","preflightCheck":"verified","storeInode":"36036"}
+pin DECLARES: afaf354a95e472b6d6b62804b98caaff97129875
+{
+  "dist": "/home/iszzu/marveen/dist",
+  "ok": true,
+  "hashCheck": {
+    "ok": true,
+    "failure": null,
+    "detail": "artifact proves afaf354a95e472b6d6b62804b98caaff97129875 (1075 files, dist f0ff8359f099ac43)"
+  },
+  "gitCrossCheck": {
+    "ok": true,
+    "detail": "sourceSha afaf354a9 confirmed against git"
+  },
+  "measured": {
+    "sourceSha": "afaf354a95e472b6d6b62804b98caaff97129875",
+    "distHash": "f0ff8359f099ac43a41049ca9622771b92e207c3b4d8d46011f02f852f20781f",
+    "distFileCount": 1075,
+    "releaseId": "cos-cycle-afaf354a9"
+  },
+  "expected": "afaf354a95e472b6d6b62804b98caaff97129875"
+}
+cutover staged and gate-verified. Restart the runtime, then read the pin back.

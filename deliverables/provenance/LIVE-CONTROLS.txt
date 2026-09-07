@@ -1,0 +1,34 @@
+PROVENANCE CONTROLS ON REAL INFRASTRUCTURE  2026-08-31T22:14:34+02:00
+
+NC-a: a candidate that ships NO build tooling must be refused BY NAME.
+      a8c229552 is the current runtime and predates this work.
+cutover: payload a8c229552, gate a8c229552
+CUTOVER REFUSED: candidate a8c229552 ships no scripts/build-release-dist.ts -- it predates build provenance and cannot be deployed by this cutover
+      exit=92  (92 = refused)
+
+NC-a (rerun after the ordering fix): a candidate with no build tooling
+   cutover: payload a8c229552, gate a8c229552
+   CUTOVER REFUSED: candidate a8c229552 ships no scripts/build-release-dist.ts -- it predates build provenance and cannot be deployed by this cutover
+
+NC-b/c/d and the POSITIVE control, on a REAL artifact built from git (not deployed)
+   artifact extracted at afaf354a95e472b6d6b62804b98caaff97129875
+
+   POSITIVE: build from the artifact, then measure it
+     source verified against git afaf354a9: 19378d015a9ad737
+     built 1075 files, dist f0ff8359f099ac43, provenance written
+     SELF-VERIFIED: artifact proves afaf354a95e472b6d6b62804b98caaff97129875 (1075 files, dist f0ff8359f099ac43)
+     ok=True  hashCheck=True  gitCrossCheck=True
+     measured sourceSha: afaf354a95e472b6d6b62804b98caaff97129875
+
+   NC-b: expect a DIFFERENT sha (pin A + dist B)
+     ok=False failure=SOURCE_MISMATCH
+
+   NC-c: modify one built file AFTER the build
+     ok=False failure=TAMPERED
+
+   NC-d: forge the manifest -- claim a different commit, leave the bytes
+     hashCheck ok=True (the bytes did not change, so it passes)
+     gitCrossCheck=MANIFEST_FORGED  -> overall ok=False
+
+   NC-e: an edited RELEASE DIR is caught before anything is compiled
+     BUILD REFUSED: the release dir's source does NOT match git afaf354a9:

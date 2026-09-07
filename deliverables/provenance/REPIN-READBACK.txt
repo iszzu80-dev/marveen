@@ -1,0 +1,68 @@
+PROVENANCE REPIN -- LIVE READBACK  2026-08-31T22:37:46+02:00
+
+1. runtime identity MEASURED FROM THE DEPLOYED ARTIFACT (not from the pin)
+   pin DECLARES: afaf354a95e472b6d6b62804b98caaff97129875
+   {
+     "dist": "/home/iszzu/marveen/dist",
+     "ok": true,
+     "hashCheck": {
+       "ok": true,
+       "failure": null,
+       "detail": "artifact proves afaf354a95e472b6d6b62804b98caaff97129875 (1075 files, dist f0ff8359f099ac43)"
+     },
+     "gitCrossCheck": {
+       "ok": true,
+       "detail": "sourceSha afaf354a9 confirmed against git"
+     },
+     "measured": {
+       "sourceSha": "afaf354a95e472b6d6b62804b98caaff97129875",
+       "distHash": "f0ff8359f099ac43a41049ca9622771b92e207c3b4d8d46011f02f852f20781f",
+       "distFileCount": 1075,
+       "releaseId": "cos-cycle-afaf354a9"
+     },
+     "expected": "afaf354a95e472b6d6b62804b98caaff97129875"
+   }
+   exit=0 (0 = the deployed bytes prove the sha the pin declares)
+
+2. the gate, and a real pinned cycle on the new runtime
+   preflight exit=0
+   gate: {"pinnedCycle": "OK", "releaseSha": "afaf354a95e472b6d6b62804b98caaff97129875", "runtimeSha": "afaf354a95e472b6d6b62804b98caaff97129875", "feederSha256": "bfda505b91257d1b", "feede
+   problems: []
+   steps not SUCCESS: none
+
+3. pipeline / bundle / claims
+   batches OPEN/PROCESSING : 0
+   LOCAL_APPLIED >24h      : 0
+   probes EXCLUDED         : 2
+   claims live             : 0
+
+4. monitor
+   CRITICAL: ['output_floor_breached']
+   WARNING : ['checkpoint_not_a_position', 'scope_flagged_awaiting_human_bridge', 'radar_check_overdue', 'awaiting_owner_decision_too_long']
+   connectors: emag=OK, gmail=OK, gmail-zst=OK, rental=OK
+
+5. rollback readiness -- from a PRESERVED artifact, no rebuild
+   rollback target a8c229552 (DRY RUN)
+     preserved artifacts found: 4
+     unproven: /home/iszzu/marveen/releases/cos-cycle-a8c229552/dist -- MISSING
+     unproven: /home/iszzu/marveen/dist.pre-a8c229552-20260831T223635 -- MISSING
+     unproven: /home/iszzu/marveen/dist.pre-a8c229552-20260831T221555 -- MISSING
+     unproven: /home/iszzu/marveen/dist.pre-a8c229552-20260831T221434 -- MISSING
+   ROLLBACK REFUSED: no artifact PROVES a8c229552. Every candidate failed:
+       /home/iszzu/marveen/releases/cos-cycle-a8c229552/dist
+         MISSING: no .build-provenance.json in /home/iszzu/marveen/releases/cos-cycle-a8c229552/dist: this artifact cannot say which commit it was built from
+       /home/iszzu/marveen/dist.pre-a8c229552-20260831T223635
+         MISSING: no .build-provenance.json in /home/iszzu/marveen/dist.pre-a8c229552-20260831T223635: this artifact cannot say which commit it was built from
+       /home/iszzu/marveen/dist.pre-a8c229552-20260831T221555
+
+   the legacy escape, proven usable (still a DRY RUN -- nothing installed):
+       unproven: /home/iszzu/marveen/dist.pre-a8c229552-20260831T223635 -- MISSING
+       unproven: /home/iszzu/marveen/dist.pre-a8c229552-20260831T221555 -- MISSING
+       unproven: /home/iszzu/marveen/dist.pre-a8c229552-20260831T221434 -- MISSING
+       LEGACY EXCEPTION accepted for /home/iszzu/marveen/releases/cos-cycle-a8c229552/dist
+       reason: a8c229552 predates build provenance; its dist was installed by hand on 2026-08-31 and verified by four candidate-only markers, recorded in the pin's runtimeBuildProvenance at the time
+     dry run: would install /home/iszzu/marveen/releases/cos-cycle-a8c229552/dist as /home/iszzu/marveen/dist and repin to a8c229552
+
+   NOTE: there is currently NO provably-rollback-able target. Every preserved
+   artifact predates provenance. The first PROVEN rollback target will be
+   afaf354a9 itself, once a later candidate replaces it.

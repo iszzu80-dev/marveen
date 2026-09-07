@@ -34,6 +34,12 @@ the run, live was checked against the post-extract snapshot and still matched it
 exactly (236/236), so nothing had drifted in those columns since 23:58 and the
 stronger comparison was available.
 
+The run's own outputs are kept beside the clone:
+
+    ~/marveen-provenance/2026-09-06-document-extraction/reconcile-f2a1af74/
+      step1-classify.json  step2-extract.json
+      compare-vs-live.json  compare-vs-snapshot.json  clone.db
+
 ## Why the comparison can be believed
 
 A comparator that always says "reproduced" would produce this same page. It was

@@ -1,0 +1,16 @@
+ROLLBACK TARGET PROOF for afaf354a9  2026-08-31T22:47:16+02:00
+
+1. the artifact is PRESERVED (not the live dist -- a separate copy)
+   /home/iszzu/marveen/releases/cos-cycle-afaf354a9/dist
+   files: 1075
+   manifest: /home/iszzu/marveen/releases/cos-cycle-afaf354a9/dist/.build-provenance.json
+
+2. its provenance is VALID, measured from those files
+   ok=True  hashCheck=True  gitCrossCheck=True
+   measured: afaf354a95e472b6d6b62804b98caaff97129875 1075 files
+
+3. the rollback mechanism can RESTORE it, with no rebuild
+   rollback target afaf354a9 (DRY RUN)
+     preserved artifacts found: 1
+     PROVEN: /home/iszzu/marveen/releases/cos-cycle-afaf354a9/dist -- artifact proves afaf354a95e472b6d6b62804b98caaff97129875 (1075 files, dist f0ff8359f099ac43)
+   dry run: would install /home/iszzu/marveen/releases/cos-cycle-afaf354a9/dist as /home/iszzu/marveen/dist and repin to afaf354a9

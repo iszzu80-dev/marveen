@@ -1,0 +1,23 @@
+RUNTIME BUILD PROVENANCE -- MUTATION PROOF  2026-08-31T22:01:26+02:00
+BASELINE:       Tests  18 passed (18)
+
+P1 the dist hash is not recomputed -- the manifest's own number is trusted
+        Tests  3 failed | 15 passed (18)
+
+P2 a missing manifest is treated as 'nothing to check' instead of a refusal
+        Tests  1 failed | 17 passed (18)
+
+P3 the expected-sha comparison is dropped (pin A + dist B passes)
+        Tests  3 failed | 15 passed (18)
+
+P4 the git cross-check accepts a mismatch (a forged manifest passes)
+        Tests  1 failed | 17 passed (18)
+
+P5 an unresolvable commit is treated as OK instead of a refusal
+        Tests  1 failed | 17 passed (18)
+
+P6 the tree hash ignores the PATH (a moved file stops mattering)
+        Tests  1 failed | 17 passed (18)
+
+RESTORED:       Tests  18 passed (18)
+modified files: 1

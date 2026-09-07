@@ -117,6 +117,13 @@ The pre-extract reference is load-bearing for closure 3, not just history: it is
 the only image of the pre-mutation column values, so it is what a release-time
 reconciliation has to re-derive from.
 
+Both files are now mode `400` — read-only, owner only. Reading a WAL-mode
+database leaves a `-shm` beside it and can replay a `-wal` into the main file,
+which is not a thing an evidence artifact should permit; the empty sidecars left
+by this session's own verification runs were removed and the digests re-checked
+after (`sha256sum -c SHA256SUMS.txt`, both OK). Anyone who needs to open one
+should copy it first, which is the right discipline for evidence anyway.
+
 ## Downstream containment audit
 
 **Readers of the mutated columns in the pinned live release** (`releases/cos-cycle-current`):
