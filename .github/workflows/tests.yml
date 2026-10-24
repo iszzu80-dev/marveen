@@ -18,13 +18,13 @@
 #   4. Every dev push to a scratch branch ran the whole heavy suite.
 #
 # TRIGGERS, 2026-10-24: the workflow no longer runs on push or tags. It runs
-# when the `ci` label is added to a pull request, or from workflow_dispatch.
+# when the `ci:run` label is added to a pull request, or from workflow_dispatch.
 # The push-only `release-gate` job was removed with the push trigger.
 
 name: tests
 
 on:
-  # Runs only when the `ci` label is added to a pull request (remove and re-add
+  # Runs only when the `ci:run` label is added to a pull request (remove and re-add
   # the label to run it again), or manually from the Actions tab.
   pull_request:
     types: [labeled]
@@ -45,7 +45,7 @@ jobs:
   # have left required checks permanently pending on a docs-only PR -- a gate
   # that never reports is indistinguishable from one that never passes.
   triage:
-    if: github.event_name != 'pull_request' || github.event.label.name == 'ci'
+    if: github.event_name != 'pull_request' || github.event.label.name == 'ci:run'
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.decide.outputs.code }}
